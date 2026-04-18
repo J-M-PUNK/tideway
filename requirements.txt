@@ -1,0 +1,6 @@
+customtkinter>=5.2.0
+tidalapi>=0.7.0
+mutagen>=1.47.0
+requests>=2.31.0
+pillow>=10.0.0
+# ffmpeg is a system dependency — install separately and ensure it's on PATH
