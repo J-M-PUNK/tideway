@@ -209,3 +209,13 @@ settings.json
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# Web frontend
+web/node_modules/
+web/dist/
+web/.vite/
+
+# App data
+tidal_session.json
+settings.json
+

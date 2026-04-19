@@ -277,3 +277,56 @@ class TidalClient:
             return list(album.tracks())
         except Exception:
             return []
+
+    # ------------------------------------------------------------------
+    # Writes (favorites + playlists)
+    # ------------------------------------------------------------------
+
+    @property
+    def user_id(self) -> Optional[str]:
+        try:
+            uid = getattr(self.session.user, "id", None)
+            return str(uid) if uid is not None else None
+        except Exception:
+            return None
+
+    def favorite(self, kind: str, obj_id: str, add: bool) -> None:
+        """Add or remove a favorite. `kind` in {track, album, artist, playlist}."""
+        favs = self.session.user.favorites
+        method_name = ("add_" if add else "remove_") + kind
+        method = getattr(favs, method_name, None)
+        if method is None:
+            raise ValueError(f"Unsupported favorite kind: {kind}")
+        # tidalapi: playlist uses uuid (str), others use int.
+        arg: object = obj_id if kind == "playlist" else int(obj_id)
+        method(arg)
+
+    def favorites_snapshot(self) -> dict:
+        """Return sets of favorite IDs the UI needs to render heart states."""
+        result = {"tracks": [], "albums": [], "artists": [], "playlists": []}
+        for kind, attr in (
+            ("tracks", "get_favorite_tracks"),
+            ("albums", "get_favorite_albums"),
+            ("artists", "get_favorite_artists"),
+            ("playlists", "get_favorite_playlists"),
+        ):
+            try:
+                items = getattr(self, attr)()
+                result[kind] = [
+                    str(getattr(i, "id", "") or getattr(i, "uuid", "")) for i in items
+                ]
+            except Exception:
+                continue
+        return result
+
+    def create_playlist(self, title: str, description: str = ""):
+        return self.session.user.create_playlist(title, description)
+
+    def owns_playlist(self, playlist) -> bool:
+        try:
+            creator = getattr(playlist, "creator", None)
+            if creator is None:
+                return False
+            return str(getattr(creator, "id", "")) == (self.user_id or "")
+        except Exception:
+            return False
