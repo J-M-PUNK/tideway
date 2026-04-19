@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
 import { Loader2, Pencil, Trash2 } from "lucide-react";
 import { api } from "@/api/client";
@@ -41,9 +41,19 @@ export function PlaylistDetail({ onDownload }: { onDownload: OnDownload }) {
 
   const tracks = localTracks ?? playlist?.tracks ?? [];
 
+  // Serialize reorder/remove mutations. Every operation sends a
+  // 0-based index that refers to the server's live list — firing two in
+  // parallel makes the second one's index reference a list state that no
+  // longer exists, causing the wrong track to be deleted or moved. Also
+  // protects against the local-tracks state tearing across awaits when
+  // the user drags/removes rapidly.
+  const mutatingRef = useRef(false);
+
   const onRemove = useCallback(
     async (index: number) => {
       if (!playlist) return;
+      if (mutatingRef.current) return;
+      mutatingRef.current = true;
       const prev = tracks;
       const next = [...prev];
       const [removed] = next.splice(index, 1);
@@ -62,6 +72,8 @@ export function PlaylistDetail({ onDownload }: { onDownload: OnDownload }) {
           title: "Couldn't remove",
           description: err instanceof Error ? err.message : String(err),
         });
+      } finally {
+        mutatingRef.current = false;
       }
     },
     [playlist, tracks, toast],
@@ -70,6 +82,8 @@ export function PlaylistDetail({ onDownload }: { onDownload: OnDownload }) {
   const onReorder = useCallback(
     async (mediaId: string, fromIndex: number, toIndex: number) => {
       if (!playlist) return;
+      if (mutatingRef.current) return;
+      mutatingRef.current = true;
       const prev = tracks;
       // Optimistic: reorder locally so the row visibly snaps into place.
       const next = [...prev];
@@ -85,6 +99,8 @@ export function PlaylistDetail({ onDownload }: { onDownload: OnDownload }) {
           title: "Couldn't reorder",
           description: err instanceof Error ? err.message : String(err),
         });
+      } finally {
+        mutatingRef.current = false;
       }
     },
     [playlist, tracks, toast],

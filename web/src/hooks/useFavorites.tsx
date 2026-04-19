@@ -49,12 +49,29 @@ export function FavoritesProvider({ children }: { children: ReactNode }) {
     setsRef.current = sets;
   }, [sets]);
 
+  // `mutatedBeforeSnapshot` guards against a late snapshot clobbering an
+  // optimistic toggle that the user fired before the initial fetch
+  // resolved. Without this, a user who hearts a track within the first
+  // 200ms of page load sees the heart revert when the snapshot lands.
+  const mutatedBeforeSnapshot = useRef(false);
   useEffect(() => {
     let cancelled = false;
     api.favorites
       .snapshot()
       .then((snap) => {
         if (cancelled) return;
+        if (mutatedBeforeSnapshot.current) {
+          // User already interacted; merge the snapshot without dropping
+          // their optimistic changes. Server is authoritative for
+          // entries the user didn't touch.
+          setSets((prev) => ({
+            track: mergeSets(new Set(snap.tracks), prev.track),
+            album: mergeSets(new Set(snap.albums), prev.album),
+            artist: mergeSets(new Set(snap.artists), prev.artist),
+            playlist: mergeSets(new Set(snap.playlists), prev.playlist),
+          }));
+          return;
+        }
         setSets({
           track: new Set(snap.tracks),
           album: new Set(snap.albums),
@@ -80,6 +97,7 @@ export function FavoritesProvider({ children }: { children: ReactNode }) {
 
   const toggle = useCallback(
     async (kind: FavoriteKind, id: string) => {
+      mutatedBeforeSnapshot.current = true;
       const already = setsRef.current[kind].has(id);
       const apply = (add: boolean) =>
         setSets((prev) => {
@@ -117,4 +135,14 @@ export function FavoritesProvider({ children }: { children: ReactNode }) {
 
 export function useFavorites() {
   return useContext(Ctx);
+}
+
+// Union the two sets — used when a late-arriving snapshot must not drop
+// the user's optimistic additions. Removals during the pre-snapshot
+// window are lost, which is acceptable: re-firing a remove is cheaper
+// than silently re-adding a track the user just explicitly unhearted.
+function mergeSets(server: Set<string>, optimistic: Set<string>): Set<string> {
+  const out = new Set(server);
+  optimistic.forEach((id) => out.add(id));
+  return out;
 }

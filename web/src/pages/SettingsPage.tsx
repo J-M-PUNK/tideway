@@ -3,15 +3,18 @@ import { LogOut, Save, Settings as SettingsIcon } from "lucide-react";
 import { api } from "@/api/client";
 import type { QualityOption, Settings } from "@/api/types";
 import { Button } from "@/components/ui/button";
+import { publishDefaultQuality } from "@/components/DownloadButton";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/components/toast";
+import { useUiPreferences } from "@/hooks/useUiPreferences";
 
 export function SettingsPage({ onLogout }: { onLogout: () => void }) {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [qualities, setQualities] = useState<QualityOption[]>([]);
   const [saving, setSaving] = useState(false);
   const toast = useToast();
+  const ui = useUiPreferences();
 
   const [loadError, setLoadError] = useState<Error | null>(null);
 
@@ -46,8 +49,21 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
     try {
       const s = await api.settings.put(settings);
       setSettings(s);
+      // Notify open DownloadButtons so their "Use default" checkmark
+      // moves to the new quality immediately — without this they show
+      // the old default until a hard reload.
+      publishDefaultQuality(s.quality);
       toast.show({ kind: "success", title: "Settings saved" });
     } catch (err) {
+      // Re-pull server truth so the form doesn't stay on an invalid
+      // output_dir the user just typed — otherwise repeated Saves
+      // retry the same rejected payload.
+      try {
+        const s = await api.settings.get();
+        setSettings(s);
+      } catch {
+        /* best-effort */
+      }
       toast.show({
         kind: "error",
         title: "Save failed",
@@ -115,6 +131,32 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
           checked={settings.skip_existing}
           onChange={(v) => patch({ skip_existing: v })}
           label="Skip downloads that already exist on disk"
+        />
+        <Field
+          label={`Concurrent downloads — ${settings.concurrent_downloads}`}
+          hint="How many tracks download in parallel. Higher = faster, but risks Tidal rate-limiting."
+        >
+          <input
+            type="range"
+            min={1}
+            max={10}
+            step={1}
+            value={settings.concurrent_downloads}
+            onChange={(e) => patch({ concurrent_downloads: Number(e.target.value) })}
+            className="h-2 w-full cursor-pointer appearance-none rounded-full bg-secondary accent-primary"
+            aria-label="Concurrent downloads"
+          />
+        </Field>
+      </Section>
+
+      <Section
+        title="Display"
+        description="Local-only preferences — stored on this device, not synced to Tidal."
+      >
+        <Toggle
+          checked={ui.offlineOnly}
+          onChange={(v) => ui.set({ offlineOnly: v })}
+          label="Show only downloaded tracks in lists"
         />
       </Section>
 

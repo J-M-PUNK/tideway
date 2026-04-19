@@ -73,15 +73,29 @@ export function CommandPalette({
       setLoading(false);
       return;
     }
+    // `cancelled` stops an older in-flight search from overwriting newer
+    // results. Without it, "foo" can resolve AFTER "foobar" and clobber
+    // the correct list. The debounce only deduplicates the SEND side.
+    let cancelled = false;
     setLoading(true);
     debounceRef.current = window.setTimeout(() => {
       api
         .search(q, 6)
-        .then(setTidalResults)
-        .catch(() => setTidalResults(null))
-        .finally(() => setLoading(false));
+        .then((r) => {
+          if (cancelled) return;
+          setTidalResults(r);
+        })
+        .catch(() => {
+          if (cancelled) return;
+          setTidalResults(null);
+        })
+        .finally(() => {
+          if (cancelled) return;
+          setLoading(false);
+        });
     }, 220);
     return () => {
+      cancelled = true;
       if (debounceRef.current) window.clearTimeout(debounceRef.current);
     };
   }, [query, open]);

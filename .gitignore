@@ -175,9 +175,10 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
-# Tidal Downloader secrets
+# Tidal Downloader secrets + user data
 tidal_session.json
 settings.json
+watchlist.json
 
 # Abstra
 # Abstra is an AI-powered process automation framework.
@@ -218,4 +219,5 @@ web/.vite/
 # App data
 tidal_session.json
 settings.json
+watchlist.json
 

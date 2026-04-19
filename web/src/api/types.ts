@@ -63,13 +63,17 @@ export interface SearchResponse {
 export interface AlbumDetail extends Album {
   tracks: Track[];
   similar: Album[];
+  review: string | null;
 }
 
 export interface ArtistDetail extends Artist {
   top_tracks: Track[];
   albums: Album[];
+  ep_singles: Album[];
+  appears_on: Album[];
   bio: string | null;
   similar: Artist[];
+  share_url: string;
 }
 
 export interface MixDetail {
@@ -84,6 +88,11 @@ export interface MixDetail {
 export interface Lyrics {
   synced: { time: number; text: string }[] | null;
   text: string | null;
+}
+
+export interface CreditEntry {
+  role: string;
+  contributors: { name: string; id: string | null }[];
 }
 
 export interface PlaylistDetail extends Playlist {
@@ -116,11 +125,13 @@ export interface Settings {
   filename_template: string;
   create_album_folders: boolean;
   skip_existing: boolean;
+  concurrent_downloads: number;
 }
 
 export interface AuthStatus {
   logged_in: boolean;
   username: string | null;
+  avatar: string | null;
 }
 
 export interface QualityOption {
@@ -160,6 +171,10 @@ export type PageItem = Track | Album | Artist | Playlist | MixItem | PageLinkIte
 export interface PageCategory {
   type: string; // HorizontalList, TrackList, PageLinks, ShortcutList, etc.
   title: string;
+  /** Secondary label from Tidal — e.g. the track/artist name following
+   *  "Because you liked" or "Because you listened to". Only present when
+   *  it adds information beyond `title`. */
+  subtitle?: string;
   items: PageItem[];
 }
 

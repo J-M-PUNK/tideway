@@ -10,14 +10,17 @@ import json
 import subprocess
 import sys
 import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import asdict
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, AsyncIterator, Optional
 from urllib.parse import urlparse
 
 import tidalapi
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse, Response
 from pydantic import BaseModel
@@ -36,6 +39,15 @@ settings: Settings = load_settings()
 # see a torn state (new global, old downloader field or vice versa).
 _settings_lock = threading.Lock()
 tidal.load_session()
+
+# Shared single-worker pool for bulk endpoints. Keeping it at max_workers=1
+# serializes Tidal RPCs across all bulk requests — tidalapi isn't
+# documented thread-safe for concurrent token refresh, and sequentially
+# running a batch is what the UI expects anyway. Using a pool (rather
+# than spawning a fresh thread per request) also bounds the total
+# concurrent work a client can trigger: a second bulk call is queued
+# behind the first instead of racing it.
+_BULK_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="bulk")
 
 _oauth_lock = threading.Lock()
 _oauth_state: dict[str, Any] = {"url": None, "user_code": None, "future": None}
@@ -58,7 +70,7 @@ _auth_cache_lock = threading.Lock()
 # resolved preview URL per track so browser seek/reload doesn't re-hit the
 # API on every range request.
 _PREVIEW_CACHE_TTL = 120.0
-_preview_cache: dict[int, tuple[float, str]] = {}
+_preview_cache: dict[tuple[int, str], tuple[float, str]] = {}
 _preview_cache_lock = threading.Lock()
 
 
@@ -126,6 +138,15 @@ def _drop_one_item_event(q: asyncio.Queue) -> bool:
     return dropped
 
 
+def _drain(q: asyncio.Queue) -> None:
+    """Remove all pending events from `q` without blocking."""
+    while True:
+        try:
+            q.get_nowait()
+        except Exception:
+            break
+
+
 class DownloadBroker:
     def __init__(self) -> None:
         self._items: dict[str, DownloadItem] = {}
@@ -147,10 +168,15 @@ class DownloadBroker:
     async def subscribe(self) -> asyncio.Queue:
         # Build the snapshot BEFORE registering the queue so a concurrent
         # publish can't interleave a live delta between snapshot events.
+        # Deliver the whole snapshot as a SINGLE reset event so a client
+        # reconnecting after a backend restart or network blip wipes any
+        # ghost items left over from the previous session — replaying
+        # individual `item` events would leave stale rows intact.
         q: asyncio.Queue = asyncio.Queue(maxsize=_SUBSCRIBER_QUEUE_MAXSIZE)
         snapshot = self.snapshot()
-        for item in snapshot:
-            await q.put({"type": "item", "item": item_to_dict(item)})
+        await q.put(
+            {"type": "reset", "items": [item_to_dict(i) for i in snapshot]}
+        )
         self._subs.add(q)
         return q
 
@@ -176,9 +202,15 @@ class DownloadBroker:
                     # drop the NEW item event than lose state.
                     if not _drop_one_item_event(q):
                         if not idempotent:
-                            # Best effort: try once more, may still fail.
+                            # Still can't fit a state-changing event. Rather
+                            # than silently drop (which leaves the client
+                            # permanently out of sync), drain the queue and
+                            # push a desync marker — event_gen breaks on
+                            # that marker, EventSource reconnects, and
+                            # subscribe() re-sends a fresh reset snapshot.
+                            _drain(q)
                             try:
-                                q.put_nowait(payload)
+                                q.put_nowait({"type": "__desync__"})
                             except Exception:
                                 pass
                         # Else: new event is also just an item; swallow.
@@ -255,10 +287,34 @@ def _apply_settings_quality(s: Settings) -> None:
 _apply_settings_quality(settings)
 
 
+def _cleanup_part_files(root: Path) -> None:
+    """Remove orphaned *.part files left behind by a crashed process.
+
+    The downloader writes atomically via `<name>.part` → rename. If the
+    process is killed mid-download (OOM, SIGKILL, reboot), the `.part`
+    never gets cleaned. `_find_existing` only matches completed extensions
+    so these files accumulate invisibly over time.
+    """
+    if not root.exists():
+        return
+    try:
+        for p in root.rglob("*.part"):
+            try:
+                p.unlink()
+            except OSError:
+                # Not fatal — another process may hold it, or the user may
+                # have tightened permissions. Skip and move on.
+                continue
+    except OSError:
+        pass
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     broker.bind_loop(asyncio.get_running_loop())
-    local_index.start_scan(Path(settings.output_dir).expanduser())
+    output_root = Path(settings.output_dir).expanduser()
+    _cleanup_part_files(output_root)
+    local_index.start_scan(output_root)
     try:
         yield
     finally:
@@ -416,6 +472,7 @@ def auth_status() -> dict:
     return {
         "logged_in": logged_in,
         "username": tidal.get_user_info() if logged_in else None,
+        "avatar": tidal.get_user_avatar_url() if logged_in else None,
     }
 
 
@@ -472,6 +529,45 @@ def auth_login_poll() -> dict:
         _apply_settings_quality(settings)
         return {"status": "ok", "username": tidal.get_user_info()}
     return {"status": "failed"}
+
+
+@app.get("/api/auth/pkce/url")
+def auth_pkce_url() -> dict:
+    """Return the browser URL for PKCE login.
+
+    PKCE is the only login flow tidalapi supports that can stream hi-res
+    (Max) audio — the device-code flow uses a `client_id` that Tidal
+    caps at Lossless regardless of subscription. Tidal has no redirect
+    handler for third-party apps, so after the user logs in they'll
+    land on an 'Oops' page; they copy that URL back to us and we
+    exchange the code in `/api/auth/pkce/complete`.
+    """
+    return {"url": tidal.pkce_login_url()}
+
+
+class PkceCompleteRequest(BaseModel):
+    redirect_url: str
+
+
+@app.post("/api/auth/pkce/complete")
+def auth_pkce_complete(req: PkceCompleteRequest) -> dict:
+    """Exchange the pasted 'Oops' redirect URL for hi-res-entitled
+    tokens and persist the session."""
+    if not req.redirect_url or "code=" not in req.redirect_url:
+        raise HTTPException(
+            status_code=400,
+            detail="Paste the full URL from the Oops page (must contain a ?code=… query param).",
+        )
+    ok = tidal.complete_pkce_login(req.redirect_url.strip())
+    if not ok:
+        raise HTTPException(
+            status_code=401,
+            detail="PKCE login failed. Double-check that you pasted the URL from the Oops page immediately after logging in.",
+        )
+    _invalidate_auth_cache()
+    _invalidate_preview_cache()
+    _apply_settings_quality(settings)
+    return {"status": "ok", "username": tidal.get_user_info()}
 
 
 @app.post("/api/auth/logout")
@@ -557,16 +653,22 @@ def album_detail(album_id: int) -> dict:
         album = tidal.session.album(album_id)
     except Exception as exc:
         raise HTTPException(status_code=404, detail=str(exc))
-    # Similar is best-effort; fails for some albums and we don't want that
-    # to 500 the whole page.
+    # Similar and review are both best-effort — Tidal returns 404 for many
+    # albums (user-only content, non-editorial releases, region locks).
+    # We'd rather render the page without them than 500 the whole request.
     try:
         similar = [album_to_dict(a) for a in album.similar()][:12]
     except Exception:
         similar = []
+    try:
+        review = album.review() or None
+    except Exception:
+        review = None
     return {
         **album_to_dict(album),
         "tracks": [track_to_dict(t) for t in tidal.get_album_tracks(album)],
         "similar": similar,
+        "review": review,
     }
 
 
@@ -587,13 +689,80 @@ def artist_detail(artist_id: int) -> dict:
         similar = [artist_to_dict(a) for a in artist.get_similar()][:12]
     except Exception:
         similar = []
+    # tidalapi doesn't expose the EP/single-only lists as part of the
+    # default get_albums query — tidal's own client shows those on the
+    # artist page (below the full-length discography), so include them.
+    try:
+        ep_singles = [album_to_dict(a) for a in artist.get_ep_singles(limit=40)]
+    except Exception:
+        ep_singles = []
+    try:
+        appears_on = [album_to_dict(a) for a in artist.get_other(limit=40)]
+    except Exception:
+        appears_on = []
     return {
         **artist_to_dict(artist),
         "top_tracks": [track_to_dict(t) for t in tidal.get_artist_top_tracks(artist)],
         "albums": [album_to_dict(a) for a in tidal.get_artist_albums(artist)],
+        "ep_singles": ep_singles,
+        "appears_on": appears_on,
         "bio": bio,
         "similar": similar,
+        # Stable share URL for the copy/open-in-Tidal actions in the UI.
+        "share_url": getattr(artist, "share_url", None)
+        or f"https://tidal.com/browse/artist/{artist.id}",
     }
+
+
+@app.get("/api/artist/{artist_id}/radio")
+def artist_radio(artist_id: int) -> list[dict]:
+    """Tidal's 'Artist Radio' mix — a long list of tracks similar to the
+    artist, mixed across their catalog. Used by the Artist page's radio
+    button to seed a listening session."""
+    _require_auth()
+    try:
+        artist = tidal.session.artist(artist_id)
+        tracks = artist.get_radio(limit=100)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    return [track_to_dict(t) for t in tracks]
+
+
+@app.get("/api/track/{track_id}/credits")
+def track_credits(track_id: int) -> list[dict]:
+    """List songwriter / producer / engineer / etc. credits for a track.
+
+    tidalapi doesn't expose credits directly, but the underlying REST API
+    has a /tracks/{id}/credits endpoint that returns a list of role groups.
+    Each group has a `type` (e.g. "Producer") and `contributors` (list of
+    {name, id?}). We pass through that shape — it's already clean JSON.
+    """
+    _require_auth()
+    try:
+        resp = tidal.session.request.request(
+            "GET", f"tracks/{track_id}/credits", params={"limit": 50}
+        )
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    # Normalize to a small shape the frontend can render without guessing.
+    result: list[dict] = []
+    for row in data if isinstance(data, list) else []:
+        contributors = row.get("contributors") or []
+        result.append(
+            {
+                "role": row.get("type") or "",
+                "contributors": [
+                    {
+                        "name": c.get("name") or "",
+                        "id": str(c["id"]) if c.get("id") is not None else None,
+                    }
+                    for c in contributors
+                ],
+            }
+        )
+    return result
 
 
 @app.get("/api/track/{track_id}/lyrics")
@@ -633,7 +802,14 @@ def _parse_lrc(raw: str) -> list[dict]:
         if not m:
             continue
         minutes, seconds, text = m.groups()
-        t = int(minutes) * 60 + float(seconds)
+        secs = float(seconds)
+        # Reject malformed cues. A well-formed LRC line has seconds in
+        # [0, 60); anything else is either a metadata tag ([ar:…]) that
+        # didn't match our regex, or a corrupted line — silently skipping
+        # is safer than mis-seeking the user five minutes into a track.
+        if secs >= 60:
+            continue
+        t = int(minutes) * 60 + secs
         stripped = text.strip()
         if stripped:
             out.append({"time": t, "text": stripped})
@@ -736,6 +912,7 @@ def _is_within(child: Path, parent: Path) -> bool:
 
 @app.post("/api/reveal")
 def reveal_in_finder(req: RevealRequest) -> dict:
+    _require_auth()
     try:
         target = Path(req.path).expanduser().resolve(strict=True)
     except FileNotFoundError:
@@ -749,13 +926,24 @@ def reveal_in_finder(req: RevealRequest) -> dict:
     if not _is_within(target, output_root):
         raise HTTPException(status_code=403, detail="Path is outside the downloads folder")
 
+    # Detach the reveal process so it doesn't leave zombies each time a
+    # user clicks "Show in Finder". `open`/`xdg-open`/`explorer` all return
+    # near-instantly, and without start_new_session + DEVNULL the parent
+    # keeps defunct children around until it reaps SIGCHLD. Redirecting
+    # stdio also keeps GUI error spam out of the server log.
+    _popen_kwargs: dict = {
+        "stdin": subprocess.DEVNULL,
+        "stdout": subprocess.DEVNULL,
+        "stderr": subprocess.DEVNULL,
+        "start_new_session": True,
+    }
     try:
         if sys.platform == "darwin":
-            subprocess.Popen(["open", "-R", str(target)])
+            subprocess.Popen(["open", "-R", str(target)], **_popen_kwargs)
         elif sys.platform.startswith("linux"):
-            subprocess.Popen(["xdg-open", str(target.parent)])
+            subprocess.Popen(["xdg-open", str(target.parent)], **_popen_kwargs)
         elif sys.platform.startswith("win"):
-            subprocess.Popen(["explorer", "/select,", str(target)])
+            subprocess.Popen(["explorer", "/select,", str(target)], **_popen_kwargs)
         else:
             raise HTTPException(status_code=501, detail=f"Unsupported platform: {sys.platform}")
     except HTTPException:
@@ -765,13 +953,25 @@ def reveal_in_finder(req: RevealRequest) -> dict:
     return {"ok": True}
 
 
-def _resolve_preview_url(track_id: int) -> str:
-    """Return a signed Tidal AAC-320 stream URL for `track_id`, cached."""
+_STREAMABLE_QUALITIES = {"low_96k", "low_320k", "high_lossless"}
+
+
+def _resolve_stream_url(track_id: int, quality: str) -> str:
+    """Return a signed Tidal stream URL for `track_id` at the requested
+    quality. Cached per (track, quality).
+
+    Works for both device-code and PKCE sessions. PKCE's `track.get_url()`
+    raises URLNotAvailable — we fall back to `track.get_stream()` and
+    pull the URL out of the manifest. Only single-URL (BTS) manifests are
+    served; multi-segment DASH manifests (typically hi-res) aren't
+    playable in the browser's native `<audio>` so we reject those.
+    """
     import time
 
+    key = (track_id, quality)
     now = time.monotonic()
     with _preview_cache_lock:
-        cached = _preview_cache.get(track_id)
+        cached = _preview_cache.get(key)
         if cached and (now - cached[0]) < _PREVIEW_CACHE_TTL:
             return cached[1]
 
@@ -783,8 +983,37 @@ def _resolve_preview_url(track_id: int) -> str:
     with downloader.quality_lock:
         original = tidal.session.config.quality
         try:
-            tidal.session.config.quality = tidalapi.Quality.low_320k
-            url = track.get_url()
+            tidal.session.config.quality = tidalapi.Quality[quality]
+            if getattr(tidal.session, "is_pkce", False):
+                # PKCE path — no direct URL, use manifest.
+                stream = track.get_stream()
+                manifest = stream.get_stream_manifest()
+                if getattr(manifest, "is_encrypted", False):
+                    raise HTTPException(
+                        status_code=415,
+                        detail="Encrypted stream — not playable in the browser.",
+                    )
+                urls = list(manifest.urls or [])
+                if len(urls) == 0:
+                    raise HTTPException(
+                        status_code=502, detail="Tidal returned no stream URL"
+                    )
+                if len(urls) > 1:
+                    # Multi-segment DASH (usually hi-res) can't be fed to
+                    # <audio> without MSE. Tell the caller to pick a
+                    # lower quality or download the track instead.
+                    raise HTTPException(
+                        status_code=415,
+                        detail=(
+                            "This quality isn't streamable in the browser. "
+                            "Download the track for full-quality playback."
+                        ),
+                    )
+                url = urls[0]
+            else:
+                url = track.get_url()
+        except HTTPException:
+            raise
         except Exception as exc:
             raise HTTPException(status_code=502, detail=str(exc))
         finally:
@@ -794,29 +1023,56 @@ def _resolve_preview_url(track_id: int) -> str:
         raise HTTPException(status_code=502, detail="Tidal returned no stream URL")
 
     with _preview_cache_lock:
-        _preview_cache[track_id] = (now, url)
+        _preview_cache[key] = (now, url)
     return url
 
 
+def _pick_stream_quality(requested: Optional[str]) -> str:
+    """Resolve the effective streaming quality. Only low/high/lossless are
+    streamable in-browser; anything higher clamps to lossless. None falls
+    back to AAC 320 which every browser can play without question."""
+    if not requested:
+        return "low_320k"
+    q = requested.lower()
+    if q not in _STREAMABLE_QUALITIES:
+        # Silently downgrade instead of erroring — caller might have
+        # a hi-res default saved.
+        return "high_lossless"
+    return q
+
+
 @app.get("/api/preview/{track_id}")
-def preview_stream(track_id: int) -> RedirectResponse:
-    """Redirect to a Tidal preview stream (AAC 320) — low-enough bitrate
-    for universal browser playback and ignores local files."""
+def preview_stream(track_id: int, quality: Optional[str] = None) -> RedirectResponse:
+    """Redirect to a Tidal stream URL at the requested quality. Defaults
+    to AAC 320 if no quality is supplied (every browser plays it). The
+    URL is signed and short-lived, so we send no-store to keep proxies
+    from caching the redirect past the signed URL's TTL."""
     _require_auth()
-    return RedirectResponse(_resolve_preview_url(track_id), status_code=307)
+    q = _pick_stream_quality(quality)
+    return RedirectResponse(
+        _resolve_stream_url(track_id, q),
+        status_code=307,
+        headers={"Cache-Control": "no-store, private"},
+    )
 
 
 @app.get("/api/play/{track_id}")
-def play_track(track_id: int):
+def play_track(track_id: int, quality: Optional[str] = None):
     """Unified playback endpoint: serves the local file at full quality if
     we have one for this Tidal track, otherwise falls back to the Tidal
-    preview stream. FileResponse emits Range-capable headers so the browser
-    can seek without buffering the whole file."""
+    stream. FileResponse emits Range-capable headers so the browser can
+    seek without buffering the whole file. Accepts an optional `quality`
+    for the streaming path."""
     _require_auth()
     local = local_index.get(str(track_id))
     if local is not None:
         return FileResponse(str(local))
-    return RedirectResponse(_resolve_preview_url(track_id), status_code=307)
+    q = _pick_stream_quality(quality)
+    return RedirectResponse(
+        _resolve_stream_url(track_id, q),
+        status_code=307,
+        headers={"Cache-Control": "no-store, private"},
+    )
 
 
 @app.get("/api/downloaded")
@@ -826,7 +1082,45 @@ def downloaded_ids() -> dict:
     Frontend calls this once on boot and then updates live via the
     `downloaded` SSE event type.
     """
+    _require_auth()
     return {"ids": sorted(local_index.ids())}
+
+
+_QUALITY_ORDER_SERVER = [
+    "low_96k",
+    "low_320k",
+    "high_lossless",
+    "hi_res_lossless",
+]
+
+
+def _clamp_quality_to_subscription(requested: Optional[str]) -> Optional[str]:
+    """Downgrade `requested` to the highest tier the account actually
+    supports. Without this, a user whose UI offers 'Max' (e.g. a stale
+    cached list from before the subscription filter shipped) would hit
+    an inevitable 401 from Tidal's /urlpostpaywall endpoint. Silent
+    downgrade is much better than a cryptic auth error the user can't
+    do anything about.
+    """
+    if not requested:
+        return requested
+    max_quality = tidal.get_max_quality()
+    if not max_quality:
+        return requested
+    try:
+        req_idx = _QUALITY_ORDER_SERVER.index(requested)
+        max_idx = _QUALITY_ORDER_SERVER.index(max_quality)
+    except ValueError:
+        return requested
+    if req_idx <= max_idx:
+        return requested
+    print(
+        f"[quality] clamping {requested!r} -> {max_quality!r} "
+        "(subscription ceiling)",
+        file=sys.stderr,
+        flush=True,
+    )
+    return max_quality
 
 
 def _resolve_quality(req_quality: Optional[str]) -> Optional[str]:
@@ -835,57 +1129,178 @@ def _resolve_quality(req_quality: Optional[str]) -> Optional[str]:
     Explicit request wins. Otherwise fall back to settings.quality, so the
     user's Settings choice actually matters when they pick "Use default".
     Returning None means "use whatever the session has" (safety net).
+
+    Final step clamps to the account's subscription tier.
     """
     if req_quality:
-        return req_quality
+        return _clamp_quality_to_subscription(req_quality)
     fallback = getattr(settings, "quality", None)
     if fallback and fallback in tidalapi.Quality.__members__:
-        return fallback
+        return _clamp_quality_to_subscription(fallback)
     return None
+
+
+def _looks_like_401(exc: Exception) -> bool:
+    """Best-effort detection of a Tidal auth error. tidalapi wraps these
+    as requests.HTTPError with .response.status_code == 401, or sometimes
+    surfaces them as RuntimeError whose str() contains '401'."""
+    resp = getattr(exc, "response", None)
+    if resp is not None and getattr(resp, "status_code", None) in (401, 403):
+        return True
+    msg = str(exc)
+    return "401" in msg or "Unauthorized" in msg
+
+
+def _fetch_tidal_object(kind: str, obj_id: str):
+    """Fetch a track/album/playlist, retrying once on auth failure.
+
+    tidalapi only auto-refreshes when the 401 body contains the exact
+    string 'The token has expired.' — Tidal's real responses don't
+    always match, so a stale access token surfaces as a raw 401 to the
+    user. We explicitly force a refresh and retry once before giving up.
+    """
+    def _call():
+        if kind == "track":
+            return tidal.session.track(int(obj_id))
+        if kind == "album":
+            return tidal.session.album(int(obj_id))
+        if kind == "playlist":
+            return tidal.session.playlist(obj_id)
+        raise HTTPException(status_code=400, detail=f"Unsupported kind: {kind}")
+
+    try:
+        return _call()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        print(
+            f"[download] {kind}/{obj_id} initial fetch failed: {exc!r}",
+            file=sys.stderr,
+            flush=True,
+        )
+        if _looks_like_401(exc):
+            if tidal.force_refresh():
+                _invalidate_auth_cache()
+                return _call()
+            # Refresh didn't work — the refresh token itself is dead.
+            # Invalidate the cached auth state so the next /auth/status
+            # call returns logged_in=false and the frontend bounces to
+            # the Login screen automatically.
+            _invalidate_auth_cache()
+            raise HTTPException(
+                status_code=401,
+                detail="Tidal session expired. Please log out and log back in.",
+            )
+        raise
 
 
 @app.post("/api/downloads")
 def enqueue_download(req: DownloadRequest) -> dict:
     _require_auth()
+    resolved_quality = _resolve_quality(req.quality)
+    print(
+        f"[api/downloads] enqueue kind={req.kind} id={req.id} "
+        f"req_quality={req.quality!r} resolved={resolved_quality!r}",
+        file=sys.stderr,
+        flush=True,
+    )
     try:
-        if req.kind == "track":
-            obj = tidal.session.track(int(req.id))
-        elif req.kind == "album":
-            obj = tidal.session.album(int(req.id))
-        elif req.kind == "playlist":
-            obj = tidal.session.playlist(req.id)
-        else:
-            raise HTTPException(status_code=400, detail=f"Unsupported kind: {req.kind}")
+        obj = _fetch_tidal_object(req.kind, req.id)
     except HTTPException:
         raise
     except Exception as exc:
+        print(
+            f"[api/downloads] _fetch_tidal_object FAILED kind={req.kind} "
+            f"id={req.id} exc={exc!r}",
+            file=sys.stderr,
+            flush=True,
+        )
         raise HTTPException(status_code=404, detail=str(exc))
-    downloader.submit_object(obj, req.kind, quality=_resolve_quality(req.quality))
+    downloader.submit_object(obj, req.kind, quality=resolved_quality)
     return {"ok": True}
+
+
+class BulkDownloadItem(BaseModel):
+    kind: str  # track | album | playlist
+    id: str
+
+
+class BulkDownloadRequest(BaseModel):
+    items: list[BulkDownloadItem]
+    quality: Optional[str] = None
+
+
+@app.post("/api/downloads/bulk")
+def enqueue_bulk(req: BulkDownloadRequest) -> dict:
+    """Enqueue many items without blocking the request thread.
+
+    Each item requires a Tidal lookup (e.g. `session.track(id)`), which is
+    a synchronous HTTP round-trip. For a 1000-track "download all liked
+    songs" batch, doing those lookups serially in the request handler
+    would hold the HTTP connection open for minutes and pin a FastAPI
+    worker thread. Instead we hand the list to a background thread that
+    submits items as each lookup completes; the downloader is already
+    async-friendly via the SSE broker so the UI sees items appear live.
+    """
+    _require_auth()
+    if not req.items:
+        return {"submitted": 0}
+    quality = _resolve_quality(req.quality)
+    items_snapshot = list(req.items)  # copy before leaving the request scope
+
+    def _enqueue_batch() -> None:
+        for item in items_snapshot:
+            try:
+                obj = _fetch_tidal_object(item.kind, item.id)
+                downloader.submit_object(obj, item.kind, quality=quality)
+            except Exception:
+                # Individual failures don't abort the batch. The download
+                # never materializes, so the user simply sees fewer items
+                # in the queue than they asked for.
+                continue
+
+    _BULK_EXECUTOR.submit(_enqueue_batch)
+    return {"submitted": len(items_snapshot)}
 
 
 @app.get("/api/downloads")
 def list_downloads() -> list[dict]:
+    _require_auth()
     return [item_to_dict(i) for i in broker.snapshot()]
 
 
+class RetryRequest(BaseModel):
+    quality: Optional[str] = None
+
+
 @app.post("/api/downloads/{item_id}/retry")
-def retry_download(item_id: str) -> dict:
+def retry_download(
+    item_id: str,
+    req: RetryRequest = Body(default_factory=RetryRequest),
+) -> dict:
+    """Retry a failed item. `quality` in the body optionally overrides the
+    original item's quality — useful when a hi-res download failed because
+    of a subscription tier and the user wants to step down. Body itself is
+    optional: `Body(default_factory=...)` accepts an empty POST as well as
+    `{"quality": "high_lossless"}`."""
+    _require_auth()
     item = broker.get(item_id)
     if item is None:
         raise HTTPException(status_code=404, detail="Item not found")
-    downloader.retry(item)
+    downloader.retry(item, quality=_resolve_quality(req.quality))
     return {"ok": True}
 
 
 @app.delete("/api/downloads/completed")
 def clear_completed() -> dict:
+    _require_auth()
     broker.clear_completed()
     return {"ok": True}
 
 
 @app.get("/api/downloads/stream")
 async def downloads_stream(request: Request) -> EventSourceResponse:
+    _require_auth()
     q = await broker.subscribe()
 
     async def event_gen():
@@ -895,9 +1310,16 @@ async def downloads_stream(request: Request) -> EventSourceResponse:
                     break
                 try:
                     payload = await asyncio.wait_for(q.get(), timeout=15)
-                    yield {"event": "download", "data": json.dumps(payload)}
                 except asyncio.TimeoutError:
                     yield {"event": "ping", "data": "1"}
+                    continue
+                # Slow-consumer fallback: if the broker couldn't fit a
+                # state-changing event, it drained the queue and pushed
+                # this marker. Close the stream so EventSource reconnects
+                # and gets a fresh reset snapshot via subscribe().
+                if isinstance(payload, dict) and payload.get("type") == "__desync__":
+                    break
+                yield {"event": "download", "data": json.dumps(payload)}
         finally:
             broker.unsubscribe(q)
 
@@ -941,9 +1363,80 @@ QUALITIES = [
 ]
 
 
+def _clamp_settings_to_subscription(max_quality: Optional[str]) -> None:
+    """If the saved default quality exceeds what the account can stream,
+    downgrade it to the ceiling and persist. Called whenever we freshly
+    learn the subscription tier (on /api/qualities or after login) so a
+    user who had 'Max' selected before their trial ended — or who
+    defaults to hi_res_lossless but is on the Lossless tier — doesn't
+    keep seeing 'Use default (Max)' when Max is unreachable.
+    """
+    global settings
+    if not max_quality:
+        return
+    try:
+        ceiling_idx = _QUALITY_ORDER_SERVER.index(max_quality)
+    except ValueError:
+        return
+    current = getattr(settings, "quality", None)
+    if current not in _QUALITY_ORDER_SERVER:
+        return
+    if _QUALITY_ORDER_SERVER.index(current) <= ceiling_idx:
+        return
+    with _settings_lock:
+        data = asdict(settings)
+        data["quality"] = max_quality
+        new_settings = Settings(**data)
+        save_settings(new_settings)
+        settings = new_settings
+        downloader.settings = new_settings
+    _apply_settings_quality(new_settings)
+    print(
+        f"[settings] clamped default quality {current!r} -> {max_quality!r} "
+        "(was above subscription ceiling)",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
 @app.get("/api/qualities")
 def list_qualities() -> list[dict]:
-    return QUALITIES
+    _require_auth()
+    # Filter to the qualities the account can actually stream. Without
+    # this, the UI offers e.g. "Max (hi-res)" to HiFi-tier users and
+    # every download at that quality 401s. If the subscription lookup
+    # fails (network, stale token), fall back to the full list rather
+    # than hide options the user might actually have.
+    max_quality = tidal.get_max_quality()
+    if not max_quality:
+        print(
+            "[api/qualities] max_quality unknown — returning full list",
+            file=sys.stderr,
+            flush=True,
+        )
+        return QUALITIES
+    # Auto-downgrade the saved default so the UI's "Use default" label
+    # always reflects something the user can actually stream.
+    _clamp_settings_to_subscription(max_quality)
+    try:
+        ceiling = _QUALITY_ORDER_SERVER.index(max_quality)
+    except ValueError:
+        print(
+            f"[api/qualities] unrecognized max_quality {max_quality!r} — "
+            "returning full list",
+            file=sys.stderr,
+            flush=True,
+        )
+        return QUALITIES
+    allowed = set(_QUALITY_ORDER_SERVER[: ceiling + 1])
+    filtered = [q for q in QUALITIES if q["value"] in allowed]
+    print(
+        f"[api/qualities] max={max_quality} allowed={sorted(allowed)} "
+        f"returned={[q['value'] for q in filtered]}",
+        file=sys.stderr,
+        flush=True,
+    )
+    return filtered
 
 
 # ---------------------------------------------------------------------------
@@ -957,15 +1450,18 @@ class SettingsPayload(BaseModel):
     filename_template: Optional[str] = None
     create_album_folders: Optional[bool] = None
     skip_existing: Optional[bool] = None
+    concurrent_downloads: Optional[int] = None
 
 
 @app.get("/api/settings")
 def get_settings() -> dict:
+    _require_auth()
     return asdict(settings)
 
 
 @app.put("/api/settings")
 def update_settings(payload: SettingsPayload) -> dict:
+    _require_auth()
     global settings
     patch = payload.model_dump(exclude_unset=True)
 
@@ -973,6 +1469,48 @@ def update_settings(payload: SettingsPayload) -> dict:
     # disable per-item quality resolution later.
     if "quality" in patch and patch["quality"] not in tidalapi.Quality.__members__:
         raise HTTPException(status_code=400, detail=f"Unknown quality: {patch['quality']}")
+    # Validate output_dir: must be an existing writable directory. Without
+    # this, a PUT with `{"output_dir": "/"}` would quietly persist and all
+    # future downloads would either fail or escape the intended sandbox.
+    if "output_dir" in patch:
+        raw = patch["output_dir"]
+        if not isinstance(raw, str) or not raw.strip():
+            raise HTTPException(status_code=400, detail="output_dir must be a non-empty string")
+        resolved = Path(raw).expanduser()
+        try:
+            resolved = resolved.resolve(strict=True)
+        except (FileNotFoundError, RuntimeError):
+            raise HTTPException(status_code=400, detail=f"output_dir does not exist: {raw}")
+        if not resolved.is_dir():
+            raise HTTPException(status_code=400, detail=f"output_dir is not a directory: {raw}")
+        # Guard against obviously-dangerous paths. Writing album folders
+        # into root or system bin dirs is never what the user wants.
+        forbidden = {Path("/"), Path("/etc"), Path("/bin"), Path("/usr"), Path("/sbin"), Path("/var")}
+        if resolved in forbidden:
+            raise HTTPException(status_code=400, detail=f"output_dir not allowed: {resolved}")
+        # Writability check. A read-only path would silently persist and
+        # every future download would fail with an ambiguous OS error —
+        # better to reject at Save time.
+        import os as _os
+        if not _os.access(str(resolved), _os.W_OK):
+            raise HTTPException(
+                status_code=400, detail=f"output_dir is not writable: {resolved}"
+            )
+        patch["output_dir"] = str(resolved)
+    # Clamp concurrent_downloads to [1, MAX_WORKER_THREADS] so the UI
+    # can't push past the worker-pool ceiling.
+    if "concurrent_downloads" in patch:
+        try:
+            n = int(patch["concurrent_downloads"])
+        except (TypeError, ValueError):
+            raise HTTPException(status_code=400, detail="concurrent_downloads must be an integer")
+        from app.downloader import MAX_WORKER_THREADS as _MAX
+        if n < 1 or n > _MAX:
+            raise HTTPException(
+                status_code=400,
+                detail=f"concurrent_downloads must be between 1 and {_MAX}",
+            )
+        patch["concurrent_downloads"] = n
 
     with _settings_lock:
         data = asdict(settings)
@@ -985,6 +1523,7 @@ def update_settings(payload: SettingsPayload) -> dict:
     # takes the downloader.quality_lock, which a worker may currently hold.
     # Holding both in a different order than workers would risk deadlock.
     _apply_settings_quality(new_settings)
+    downloader.gate.set_limit(new_settings.concurrent_downloads)
     return asdict(new_settings)
 
 
@@ -1045,11 +1584,28 @@ def _serialize_page(page) -> dict:
             # Editorial copy — not useful to render in our UI.
             continue
         title = getattr(cat, "title", None) or ""
+        # Tidal attaches the related entity name ("Daft Punk - Get Lucky"
+        # for "Because you liked", an artist name for "Because you
+        # listened to", etc.) in either `subtitle` (V2 categories) or
+        # `description` (some V1 categories). tidalapi's V2 _parse_base
+        # defaults description to title, so only keep it when it's
+        # distinct and non-empty — otherwise the UI would show the same
+        # string twice.
+        subtitle_raw = getattr(cat, "subtitle", None) or ""
+        description_raw = getattr(cat, "description", None) or ""
+        subtitle = ""
+        for candidate in (subtitle_raw, description_raw):
+            if candidate and candidate != title:
+                subtitle = candidate
+                break
         raw_items = list(getattr(cat, "items", []) or [])
         items = [d for d in (_serialize_page_item(i) for i in raw_items) if d]
         if not items:
             continue
-        categories.append({"type": cat_type, "title": title, "items": items})
+        entry: dict = {"type": cat_type, "title": title, "items": items}
+        if subtitle:
+            entry["subtitle"] = subtitle
+        categories.append(entry)
     return {"categories": categories}
 
 
@@ -1133,6 +1689,37 @@ def favorite_remove(kind: str, obj_id: str) -> dict:
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc))
     return {"ok": True}
+
+
+class BulkFavoriteRequest(BaseModel):
+    kind: str
+    ids: list[str]
+    add: bool = True
+
+
+@app.post("/api/favorites/bulk")
+def favorites_bulk(req: BulkFavoriteRequest) -> dict:
+    """Add or remove many favorites in one call.
+
+    Runs sequentially on a background thread so the client isn't blocked
+    AND we don't fan out N parallel requests to Tidal (rate-limit risk).
+    Returns immediately with the submitted count — success/failure is
+    best-effort for the batch.
+    """
+    _require_auth()
+    if req.kind not in FAVORITE_KINDS:
+        raise HTTPException(status_code=400, detail=f"Unknown kind: {req.kind}")
+    ids = list(req.ids)
+
+    def _run() -> None:
+        for obj_id in ids:
+            try:
+                tidal.favorite(req.kind, obj_id, add=req.add)
+            except Exception:
+                continue
+
+    _BULK_EXECUTOR.submit(_run)
+    return {"submitted": len(ids)}
 
 
 # ---------------------------------------------------------------------------
@@ -1250,6 +1837,207 @@ class MoveTrackRequest(BaseModel):
     position: int
 
 
+# ---------------------------------------------------------------------------
+# Feed — aggregated new releases from the user's favorite artists, combined
+# with Tidal's editorial For You page. The goal is to mirror the useful
+# subset of Tidal's feed surface for a download-focused client.
+# ---------------------------------------------------------------------------
+
+
+_FEED_WINDOW_DAYS = 90
+_FEED_TTL_SEC = 900.0  # 15 minutes — releases don't come out that often.
+_FEED_MAX_ITEMS = 300
+_feed_cache: dict[str, Any] = {"at": 0.0, "value": None}
+_feed_lock = threading.Lock()
+
+
+def _album_release_at(album) -> Optional[datetime]:
+    """Return the most meaningful release timestamp for an album —
+    `streamStartDate` takes precedence over the original `releaseDate`
+    so that a late-added catalog release surfaces in the feed when it
+    actually landed on Tidal."""
+    for attr in ("tidal_release_date", "release_date"):
+        value = getattr(album, attr, None)
+        if value is not None:
+            return value
+    return None
+
+
+def _build_feed() -> list[dict]:
+    """Fan-out to every favorite + watched artist, collect recent albums,
+    dedupe, and return newest-first. Runs on a short-lived thread pool
+    so a 50-favorite library doesn't serialize 50 network calls."""
+    cutoff = datetime.now() - timedelta(days=_FEED_WINDOW_DAYS)
+
+    artist_ids: set[str] = set()
+    try:
+        for a in tidal.get_favorite_artists():
+            aid = getattr(a, "id", None)
+            if aid:
+                artist_ids.add(str(aid))
+    except Exception:
+        pass
+    if not artist_ids:
+        return []
+
+    def _fetch(aid: str) -> list:
+        try:
+            artist = tidal.session.artist(int(aid))
+            # get_artist_releases includes albums + EPs + singles. The
+            # full Tidal client shows all three on its new-releases
+            # surface; using get_albums alone silently drops singles.
+            return tidal.get_artist_releases(artist, limit=30)
+        except Exception:
+            return []
+
+    # Cap fan-out: tidalapi isn't documented thread-safe so keep it modest.
+    seen_album_ids: set[str] = set()
+    items: list[dict] = []
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        for albums in pool.map(_fetch, artist_ids):
+            for album in albums:
+                aid = str(getattr(album, "id", "") or "")
+                if not aid or aid in seen_album_ids:
+                    continue
+                seen_album_ids.add(aid)
+                released = _album_release_at(album)
+                if released is None:
+                    continue
+                # Normalize to naive for comparison with our naive cutoff.
+                released_cmp = released.replace(tzinfo=None) if released.tzinfo else released
+                if released_cmp < cutoff:
+                    continue
+                entry = {
+                    **album_to_dict(album),
+                    "released_at": released_cmp.isoformat(),
+                }
+                items.append(entry)
+
+    items.sort(key=lambda it: it.get("released_at") or "", reverse=True)
+    return items[:_FEED_MAX_ITEMS]
+
+
+def _build_feed_editorial() -> Optional[dict]:
+    """Fetch Tidal's personalized 'For You' page and serialize it.
+
+    The real Tidal client's feed surface is a mix of (a) new releases from
+    artists you follow (our curated items above) and (b) Tidal's editorial
+    recommendations. Exposing the For You page here lets the UI render
+    Tidal's own sections below the curated ones so the user sees the
+    same content they'd see in the official app.
+    """
+    try:
+        page = tidal.session.for_you()
+        return _serialize_page(page)
+    except Exception as exc:
+        print(
+            f"[feed] for_you fetch failed: {exc!r}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return None
+
+
+@app.get("/api/feed")
+def feed() -> dict:
+    """Recent releases from the user's favorite + watched artists, plus
+    Tidal's editorial For You page below."""
+    _require_auth()
+    with _feed_lock:
+        cached = _feed_cache["value"]
+        if cached is not None and (time.monotonic() - _feed_cache["at"]) < _FEED_TTL_SEC:
+            return cached
+    items = _build_feed()
+    editorial = _build_feed_editorial()
+    payload = {"items": items, "editorial": editorial}
+    with _feed_lock:
+        _feed_cache["at"] = time.monotonic()
+        _feed_cache["value"] = payload
+    return payload
+
+
+# ---------------------------------------------------------------------------
+# Playlist folders — minimal CRUD. tidalapi exposes create_folder + Folder
+# methods but doesn't have a clean "list all folders" surface, so the
+# sidebar doesn't render them yet. These endpoints let the UI create/rename/
+# delete folders once that listing gap is closed (probably via a raw API
+# call when we have a live account to test against).
+# ---------------------------------------------------------------------------
+
+
+class CreateFolderRequest(BaseModel):
+    title: str
+    parent_id: str = "root"
+
+
+@app.post("/api/folders")
+def create_folder(req: CreateFolderRequest) -> dict:
+    _require_auth()
+    title = req.title.strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="Title required")
+    try:
+        folder = tidal.session.user.create_folder(title, req.parent_id or "root")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    return {"id": folder.id, "name": folder.name}
+
+
+def _get_folder(folder_id: str):
+    try:
+        # `user.folder` is the ROOT folder; for any other id we reach into
+        # tidalapi's Folder constructor via the public factory.
+        if folder_id == "root":
+            return tidal.session.user.folder
+        return tidalapi.playlist.Folder(tidal.session, folder_id)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+class RenameFolderRequest(BaseModel):
+    title: str
+
+
+@app.put("/api/folders/{folder_id}")
+def rename_folder(folder_id: str, req: RenameFolderRequest) -> dict:
+    _require_auth()
+    folder = _get_folder(folder_id)
+    title = req.title.strip()
+    if not title:
+        raise HTTPException(status_code=400, detail="Title required")
+    try:
+        folder.rename(title)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    return {"ok": True}
+
+
+@app.delete("/api/folders/{folder_id}")
+def delete_folder(folder_id: str) -> dict:
+    _require_auth()
+    folder = _get_folder(folder_id)
+    try:
+        folder.remove()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    return {"ok": True}
+
+
+class AddPlaylistsToFolderRequest(BaseModel):
+    playlist_ids: list[str]
+
+
+@app.post("/api/folders/{folder_id}/playlists")
+def add_playlists_to_folder(folder_id: str, req: AddPlaylistsToFolderRequest) -> dict:
+    _require_auth()
+    folder = _get_folder(folder_id)
+    try:
+        folder.add_items(req.playlist_ids)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    return {"ok": True, "added": len(req.playlist_ids)}
+
+
 @app.post("/api/playlists/{playlist_id}/tracks/move")
 def move_track_in_playlist(playlist_id: str, req: MoveTrackRequest) -> dict:
     """Reorder a track within a user-owned playlist.
@@ -1278,13 +2066,25 @@ MAX_IMAGE_BYTES = 5 * 1024 * 1024  # 5 MB — covers even oversized Tidal covers
 
 @app.get("/api/image")
 def image_proxy(url: str) -> Response:
+    _require_auth()
     parsed = urlparse(url)
     if parsed.scheme != "https":
         raise HTTPException(status_code=400, detail="Only https URLs allowed")
+    if parsed.username or parsed.password:
+        # URLs with embedded credentials are a classic SSRF bypass — the
+        # allowlist check against parsed.hostname can be sidestepped by some
+        # parsers. We reject them outright; Tidal never includes userinfo.
+        raise HTTPException(status_code=400, detail="URL must not contain userinfo")
     if parsed.hostname not in ALLOWED_IMAGE_HOSTS:
         raise HTTPException(status_code=403, detail=f"Host not allowed: {parsed.hostname}")
     try:
-        with SESSION.get(url, timeout=10, stream=True) as resp:
+        # allow_redirects=False — a redirect from a Tidal CDN to an internal
+        # host would otherwise be followed by requests and turn this into an
+        # SSRF probe. Tidal covers are direct URLs so this should never fire
+        # on legitimate traffic.
+        with SESSION.get(url, timeout=10, stream=True, allow_redirects=False) as resp:
+            if resp.status_code in (301, 302, 303, 307, 308):
+                raise HTTPException(status_code=502, detail="Upstream redirect refused")
             resp.raise_for_status()
             # Stop if the server advertises an oversized payload.
             declared = int(resp.headers.get("Content-Length") or 0)

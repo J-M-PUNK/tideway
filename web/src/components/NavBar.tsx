@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
-import { useLocation, useNavigate } from "react-router-dom";
+import { useLocation, useNavigate, useNavigationType } from "react-router-dom";
 import { ChevronLeft, ChevronRight } from "lucide-react";
+import { UserMenu } from "@/components/UserMenu";
 import { cn } from "@/lib/utils";
 
 /**
@@ -16,9 +17,16 @@ function readIdx(): number {
   return state?.idx ?? 0;
 }
 
-export function NavBar() {
+interface NavBarProps {
+  username: string | null;
+  avatar: string | null;
+  onLogout: () => void;
+}
+
+export function NavBar({ username, avatar, onLogout }: NavBarProps) {
   const navigate = useNavigate();
   const location = useLocation();
+  const navigationType = useNavigationType();
   // Seed from the browser history on mount so a mid-session reload doesn't
   // zero the counter.
   const [depth, setDepth] = useState<number>(() => readIdx());
@@ -30,14 +38,22 @@ export function NavBar() {
     lastKeyRef.current = location.key;
     const idx = readIdx();
     setDepth(idx);
-    setMaxDepth((m) => Math.max(m, idx));
-  }, [location.key]);
+    // A PUSH after Back truncates the browser's forward stack — the old
+    // forward chain is gone. Reset maxDepth to the new idx so the forward
+    // button doesn't stay enabled pointing at entries that no longer
+    // exist. POP (back/forward buttons themselves) preserves maxDepth.
+    if (navigationType === "PUSH" || navigationType === "REPLACE") {
+      setMaxDepth(idx);
+    } else {
+      setMaxDepth((m) => Math.max(m, idx));
+    }
+  }, [location.key, navigationType]);
 
   const canBack = depth > 0;
   const canForward = depth < maxDepth;
 
   return (
-    <div className="sticky top-0 z-10 -mx-8 -mt-6 flex items-center gap-2 bg-background/50 px-8 py-3 backdrop-blur-sm">
+    <div className="sticky top-0 z-10 flex items-center gap-2 bg-background/50 px-8 py-3 backdrop-blur-sm">
       <button
         onClick={() => canBack && navigate(-1)}
         disabled={!canBack}
@@ -58,6 +74,9 @@ export function NavBar() {
       >
         <ChevronRight className="h-4 w-4" />
       </button>
+      <div className="ml-auto">
+        <UserMenu username={username} avatar={avatar} onLogout={onLogout} />
+      </div>
     </div>
   );
 }

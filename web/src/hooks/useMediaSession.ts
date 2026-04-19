@@ -30,6 +30,16 @@ export function useMediaSession() {
   useEffect(() => {
     currentTimeRef.current = currentTime;
   }, [currentTime]);
+  // playingRef lets the OS play/pause action handlers make the correct
+  // decision without toggling. The OS sends "play" expecting resume and
+  // "pause" expecting pause — binding both to toggle() means the actions
+  // can fight the true player state if they ever drift (e.g. track ended,
+  // OS still thinks we're playing, user hits the Bluetooth pause button
+  // and we accidentally start playing again).
+  const playingRef = useRef(playing);
+  useEffect(() => {
+    playingRef.current = playing;
+  }, [playing]);
 
   useEffect(() => {
     if (!("mediaSession" in navigator)) return;
@@ -63,8 +73,14 @@ export function useMediaSession() {
       }
     };
 
-    set("play", () => trackRef.current && actionsRef.current.toggle());
-    set("pause", () => trackRef.current && actionsRef.current.toggle());
+    set("play", () => {
+      if (!trackRef.current || playingRef.current) return;
+      actionsRef.current.toggle();
+    });
+    set("pause", () => {
+      if (!trackRef.current || !playingRef.current) return;
+      actionsRef.current.toggle();
+    });
     set("nexttrack", () => actionsRef.current.next());
     set("previoustrack", () => actionsRef.current.prev());
     set("seekto", (details) => {

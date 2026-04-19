@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { Disc3, Heart, Library as LibraryIcon, List, ListMusic, User } from "lucide-react";
-import { useParams } from "react-router-dom";
+import { Disc3, Download, Heart, Library as LibraryIcon, List, ListMusic, Loader2, User } from "lucide-react";
+import { Navigate, useParams } from "react-router-dom";
 import { api } from "@/api/client";
 import type { Album, Artist, Playlist, Track } from "@/api/types";
 import type { OnDownload } from "@/api/download";
@@ -11,6 +11,7 @@ import { MediaCard } from "@/components/MediaCard";
 import { TrackList } from "@/components/TrackList";
 import { EmptyState } from "@/components/EmptyState";
 import { GridSkeleton, TrackListSkeleton } from "@/components/Skeletons";
+import { useToast } from "@/components/toast";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -50,7 +51,13 @@ const META: Record<Section, { title: string; icon: typeof Disc3; emptyHint: stri
 type LibraryItem = Album | Artist | Playlist | Track;
 
 export function Library({ onDownload }: { onDownload: OnDownload }) {
-  const { section = "albums" } = useParams<{ section: Section }>();
+  const { section = "albums" } = useParams<{ section: string }>();
+  // Guard against stale bookmarks like /library/typo — without this the
+  // destructure of META[type] throws a TypeError that crashes the Shell
+  // with no error boundary in its path.
+  if (!(section in META)) {
+    return <Navigate to="/library/albums" replace />;
+  }
   const type = section as Section;
   const { title, icon: Icon, emptyHint } = META[type];
 
@@ -112,6 +119,9 @@ export function Library({ onDownload }: { onDownload: OnDownload }) {
           <Icon className="h-7 w-7" /> {title}
         </h1>
         <div className="flex items-center gap-2">
+          {type === "tracks" && data && data.length > 0 && (
+            <DownloadAllTracks tracks={data as Track[]} />
+          )}
           <Input
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
@@ -150,6 +160,39 @@ export function Library({ onDownload }: { onDownload: OnDownload }) {
         </Grid>
       )}
     </div>
+  );
+}
+
+function DownloadAllTracks({ tracks }: { tracks: Track[] }) {
+  const toast = useToast();
+  const [busy, setBusy] = useState(false);
+  const run = async () => {
+    if (busy || tracks.length === 0) return;
+    setBusy(true);
+    try {
+      const res = await api.downloads.enqueueBulk(
+        tracks.map((t) => ({ kind: "track" as const, id: t.id })),
+      );
+      toast.show({
+        kind: "success",
+        title: `Queueing ${res.submitted} tracks`,
+        description: "Running in the background.",
+      });
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: "Couldn't download all",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Button size="sm" variant="outline" onClick={run} disabled={busy}>
+      {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+      Download all
+    </Button>
   );
 }
 

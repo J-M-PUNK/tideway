@@ -1,6 +1,10 @@
 import json
+import os
 import re
+import stat
+import tempfile
 import threading
+import time
 import webbrowser
 from concurrent.futures import Future
 from datetime import datetime
@@ -36,6 +40,7 @@ def _fetch_all_pages(method) -> list:
 
     # 2) Manual pagination in chunks of 50
     collected: list = []
+    seen_ids: set = set()
     offset = 0
     page_size = 50
     while True:
@@ -51,7 +56,29 @@ def _fetch_all_pages(method) -> list:
                 continue
         if not page:
             break
-        collected.extend(page)
+        # Duplicate-detection safety: if the endpoint misbehaves and keeps
+        # returning the same page regardless of offset (happens on some
+        # tidalapi versions / under transient 5xx retries), `len(page)
+        # == page_size` would loop until the 20k cap with a completely
+        # duplicated `collected` list. Break as soon as a page contributes
+        # zero new items.
+        added = 0
+        for obj in page:
+            key = getattr(obj, "id", None)
+            if key is None:
+                key = getattr(obj, "uuid", None)
+            if key is None:
+                # Item without a stable identifier — append unconditionally
+                # but don't count it as "new" for the progress check.
+                collected.append(obj)
+                continue
+            if key in seen_ids:
+                continue
+            seen_ids.add(key)
+            collected.append(obj)
+            added += 1
+        if added == 0:
+            break
         if len(page) < page_size:
             break
         offset += page_size
@@ -99,11 +126,48 @@ def _sort_by_date_added(items: list) -> list:
     return [o for _, _, o in keyed]
 
 
+# Tidal returns a `highestSoundQuality` code on the subscription endpoint.
+# Map those codes to the tidalapi.Quality member names we use everywhere
+# else in the app, and keep them in ascending order so "everything at or
+# below X" is a simple slice.
+_SUB_TTL_SEC = 300.0  # 5 minutes; subscriptions change rarely.
+
+_SUB_QUALITY_ORDER = ["low_96k", "low_320k", "high_lossless", "hi_res_lossless"]
+_SUB_QUALITY_MAP = {
+    "LOW": "low_96k",
+    "HIGH": "low_320k",
+    "LOSSLESS": "high_lossless",
+    "HI_RES_LOSSLESS": "hi_res_lossless",
+    # Tidal's current single-tier subscription reports `HI_RES` as the
+    # `highestSoundQuality`, which DOES include hi-res FLAC (Max). The
+    # catch: only a PKCE-authenticated session's access_token is
+    # entitled to stream it — device-code sessions 401 at Max even
+    # though the subscription allows it. We therefore translate HI_RES
+    # to hi_res_lossless ONLY when the session is PKCE; for device-code
+    # sessions we fall back to high_lossless so the UI doesn't offer
+    # an unreachable option. See get_max_quality() below.
+    "HI_RES": "hi_res_lossless",
+    "MASTER": "hi_res_lossless",
+    "HIFI": "high_lossless",
+    "HIFI_PLUS": "hi_res_lossless",
+}
+
+# Client-level ceiling: even if the subscription says Max, the device-code
+# OAuth client_id is capped at Lossless. Only the PKCE client is entitled
+# for hi-res.
+_DEVICE_CODE_MAX = "high_lossless"
+
+
 class TidalClient:
     def __init__(self):
         config = tidalapi.Config(quality=tidalapi.Quality.high_lossless)
         self.session = tidalapi.Session(config)
         self._login_future: Optional[Future] = None
+        # Cached subscription-tier result. Populated on first call and
+        # refreshed every _SUB_TTL_SEC. Subscription almost never changes
+        # within a session, so a long TTL is fine.
+        self._sub_cache: tuple[float, Optional[str]] = (0.0, None)
+        self._sub_lock = threading.Lock()
 
     # ------------------------------------------------------------------
     # Session persistence
@@ -120,32 +184,232 @@ class TidalClient:
                 if data.get("expiry_time")
                 else None
             )
+            refresh_token = data.get("refresh_token")
+            is_pkce = bool(data.get("is_pkce", False))
+            # For PKCE sessions, swap the client_id to the hi-res-entitled
+            # one BEFORE any Tidal call. Otherwise the /sessions call
+            # inside load_oauth_session (and the proactive refresh below)
+            # would run under the device-code client_id and the resulting
+            # tokens/session wouldn't be entitled for Max quality.
+            if is_pkce:
+                self.session.is_pkce = True
+                self.session.client_enable_hires()
+            # Proactive refresh: tidalapi only refreshes on 401 when the
+            # response's userMessage starts with the exact string
+            # "The token has expired." — Tidal has changed that message
+            # format in the past, and when it doesn't match we get raw
+            # 401s propagating to the caller (e.g. download endpoints).
+            # If the stored expiry is in the past, skip trying the stale
+            # token and refresh up front.
+            now = datetime.now(expiry.tzinfo) if expiry and expiry.tzinfo else datetime.now()
+            if expiry and refresh_token and expiry <= now:
+                try:
+                    if self.session.token_refresh(refresh_token):
+                        self.save_session()
+                except Exception:
+                    pass
             self.session.load_oauth_session(
                 data["token_type"],
-                data["access_token"],
-                data.get("refresh_token"),
-                expiry,
+                self.session.access_token or data["access_token"],
+                refresh_token,
+                self.session.expiry_time or expiry,
+                is_pkce=is_pkce,
             )
             return self.session.check_login()
         except Exception:
             return False
 
+    def force_refresh(self) -> bool:
+        """Explicitly refresh the access token using the stored refresh
+        token. Called by the download path when it hits a 401 — tidalapi's
+        built-in refresh only triggers on a specific error message we
+        can't rely on. Returns True on success.
+
+        Logs to stderr on failure so the caller (and whoever is tailing
+        the server log) can see whether the refresh actually ran and
+        why it failed. If the refresh token is itself expired, wipes the
+        persisted session file so the user is bounced to the login flow
+        on next auth check instead of being stuck in a retry loop.
+        """
+        import sys as _sys
+
+        refresh_token = getattr(self.session, "refresh_token", None)
+        if not refresh_token:
+            print(
+                "[tidal] force_refresh: no refresh_token on session",
+                file=_sys.stderr,
+                flush=True,
+            )
+            return False
+        try:
+            ok = self.session.token_refresh(refresh_token)
+        except Exception as exc:
+            print(
+                f"[tidal] force_refresh: token_refresh raised: {exc!r}",
+                file=_sys.stderr,
+                flush=True,
+            )
+            # AuthenticationError means the refresh token itself is dead.
+            # Blow the session away so the user is prompted to log in
+            # again rather than chasing 401s forever.
+            if type(exc).__name__ == "AuthenticationError":
+                try:
+                    self.logout()
+                except Exception:
+                    pass
+            return False
+        if not ok:
+            print(
+                "[tidal] force_refresh: token_refresh returned False",
+                file=_sys.stderr,
+                flush=True,
+            )
+            return False
+        self.save_session()
+        print("[tidal] force_refresh: success", file=_sys.stderr, flush=True)
+        return True
+
+    def get_max_quality(self) -> Optional[str]:
+        """Return the highest audio quality the logged-in account is
+        allowed to stream, as a tidalapi Quality member name (e.g.
+        'high_lossless'). None means the check failed or the user isn't
+        logged in yet — caller should assume no filtering in that case.
+
+        The subscription endpoint is the only source of truth for this;
+        tidalapi itself doesn't surface the tier. Cached for _SUB_TTL_SEC
+        so the frontend hitting /api/qualities on every mount doesn't
+        fan out to a network call each time.
+        """
+        import sys as _sys
+
+        now = time.monotonic()
+        with self._sub_lock:
+            cached_at, cached_val = self._sub_cache
+            if now - cached_at < _SUB_TTL_SEC and cached_val is not None:
+                return cached_val
+        try:
+            user = getattr(self.session, "user", None)
+            uid = getattr(user, "id", None) if user else None
+            if not uid:
+                print(
+                    "[tidal] get_max_quality: no user.id yet",
+                    file=_sys.stderr,
+                    flush=True,
+                )
+                return None
+            resp = self.session.request.basic_request(
+                "GET", f"users/{uid}/subscription"
+            )
+            if not resp.ok:
+                print(
+                    f"[tidal] get_max_quality: subscription fetch returned "
+                    f"{resp.status_code}",
+                    file=_sys.stderr,
+                    flush=True,
+                )
+                return None
+            data = resp.json()
+        except Exception as exc:
+            print(
+                f"[tidal] get_max_quality: subscription fetch raised: {exc!r}",
+                file=_sys.stderr,
+                flush=True,
+            )
+            return None
+        # Tidal exposes the ceiling under `highestSoundQuality`. Some
+        # older/newer responses nest it under `subscription.type` —
+        # check both and map to our internal code.
+        hsq = (
+            data.get("highestSoundQuality")
+            or (data.get("subscription") or {}).get("highestSoundQuality")
+            or (data.get("subscription") or {}).get("type")
+            or ""
+        )
+        mapped = _SUB_QUALITY_MAP.get(str(hsq).upper())
+        # Cap at the client's ceiling. A device-code session with a Max
+        # subscription still can't stream hi-res — the client_id is the
+        # gate, not the subscription. Clamp to _DEVICE_CODE_MAX in that
+        # case so the UI never offers Max to a session that can't
+        # deliver it.
+        is_pkce = bool(getattr(self.session, "is_pkce", False))
+        capped = mapped
+        if mapped and not is_pkce:
+            try:
+                if (
+                    _SUB_QUALITY_ORDER.index(mapped)
+                    > _SUB_QUALITY_ORDER.index(_DEVICE_CODE_MAX)
+                ):
+                    capped = _DEVICE_CODE_MAX
+            except ValueError:
+                pass
+        print(
+            f"[tidal] get_max_quality: raw={hsq!r} mapped={mapped!r} "
+            f"is_pkce={is_pkce} capped={capped!r} "
+            f"response_keys={sorted(data.keys())}",
+            file=_sys.stderr,
+            flush=True,
+        )
+        mapped = capped
+        if not mapped:
+            return None
+        with self._sub_lock:
+            self._sub_cache = (now, mapped)
+        return mapped
+
     def save_session(self):
+        """Persist the session atomically and with 0600 perms.
+
+        A crash between truncating the file and json.dump finishing would
+        otherwise leave a zero-byte `tidal_session.json` and silently log
+        the user out. We also chmod the file to user-only (the access +
+        refresh tokens sit in plaintext) — otherwise on a shared Unix box
+        every other user can read them.
+        """
         expiry = self.session.expiry_time
         data = {
             "token_type": self.session.token_type,
             "access_token": self.session.access_token,
             "refresh_token": self.session.refresh_token,
             "expiry_time": expiry.isoformat() if expiry else None,
+            # Track PKCE sessions separately — their client_id/secret
+            # need to be re-swapped to the hi-res-entitled pair after
+            # load_oauth_session, otherwise subsequent stream requests
+            # silently drop back to Lossless even if the tokens are
+            # valid.
+            "is_pkce": bool(getattr(self.session, "is_pkce", False)),
         }
-        with open(SESSION_FILE, "w") as f:
-            json.dump(data, f)
+        target = SESSION_FILE
+        # Write to a sibling tempfile in the same dir so os.replace stays
+        # atomic (rename across filesystems isn't). dir="." places it next
+        # to SESSION_FILE since SESSION_FILE is a relative path.
+        tmp_fd, tmp_path = tempfile.mkstemp(
+            prefix=".tidal_session.", suffix=".tmp", dir=str(target.parent) or "."
+        )
+        try:
+            with os.fdopen(tmp_fd, "w") as f:
+                json.dump(data, f)
+            try:
+                os.chmod(tmp_path, stat.S_IRUSR | stat.S_IWUSR)
+            except OSError:
+                # chmod is best-effort on Windows / exotic filesystems.
+                pass
+            os.replace(tmp_path, target)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
     def logout(self):
         if SESSION_FILE.exists():
             SESSION_FILE.unlink()
         config = tidalapi.Config(quality=tidalapi.Quality.high_lossless)
         self.session = tidalapi.Session(config)
+        # The subscription-tier cache belongs to the previous session.
+        # Bust it so the next login re-detects under the new client_id.
+        with self._sub_lock:
+            self._sub_cache = (0.0, None)
 
     # ------------------------------------------------------------------
     # OAuth login
@@ -171,6 +435,52 @@ class TidalClient:
         return False
 
     # ------------------------------------------------------------------
+    # PKCE login — required for hi-res (Max) downloads.
+    #
+    # Tidal caps the device-code OAuth `client_id` at Lossless regardless
+    # of subscription. Only the PKCE flow (which uses a different
+    # `client_id_pkce` baked into Tidal's own mobile app) is entitled to
+    # stream hi-res FLAC. The tradeoff is UX: there's no device-code
+    # handoff — the user logs in in a browser, gets redirected to an
+    # "Oops" page (Tidal has no handler for our redirect), copies the
+    # URL, and pastes it back to us.
+    # ------------------------------------------------------------------
+
+    def pkce_login_url(self) -> str:
+        """URL the user should open in a browser to begin PKCE login."""
+        return self.session.pkce_login_url()
+
+    def complete_pkce_login(self, redirect_url: str) -> bool:
+        """Exchange the pasted 'Oops' redirect URL for access tokens,
+        enable the hi-res client_id, and persist the session. Returns
+        True on success.
+        """
+        try:
+            token = self.session.pkce_get_auth_token(redirect_url)
+            self.session.process_auth_token(token, is_pkce_token=True)
+            # Swap the active client_id/secret to the hi-res-entitled
+            # PKCE pair so subsequent API calls use the credentials that
+            # actually unlock Max quality streams.
+            self.session.client_enable_hires()
+            if self.session.check_login():
+                self.save_session()
+                # Bust the subscription cache — it may have been
+                # populated earlier under a device-code session that
+                # reported a Lossless ceiling; the PKCE session
+                # should re-detect at Max.
+                with self._sub_lock:
+                    self._sub_cache = (0.0, None)
+                return True
+        except Exception as exc:
+            import sys as _sys
+            print(
+                f"[tidal] complete_pkce_login failed: {exc!r}",
+                file=_sys.stderr,
+                flush=True,
+            )
+        return False
+
+    # ------------------------------------------------------------------
     # User info
     # ------------------------------------------------------------------
 
@@ -184,6 +494,20 @@ class TidalClient:
             return "Tidal User"
         except Exception:
             return None
+
+    def get_user_avatar_url(self) -> Optional[str]:
+        """Tidal exposes a per-user `picture_id` on FetchedUser; most
+        accounts don't set one. Returns a CDN URL (210×210) if available,
+        or None — callers should fall back to initials.
+        """
+        try:
+            user = self.session.user
+            img = getattr(user, "image", None)
+            if callable(img):
+                return img(210)
+        except Exception:
+            pass
+        return None
 
     # ------------------------------------------------------------------
     # URL parsing and content fetching
@@ -265,6 +589,28 @@ class TidalClient:
             return list(artist.get_albums())
         except Exception:
             return []
+
+    def get_artist_releases(self, artist, limit: int = 30) -> list:
+        """Albums + EPs + singles for an artist, combined. `get_albums()`
+        alone excludes singles, which is exactly the content the feed
+        page needs (singles drop more frequently than albums). Results
+        are deduped by id, sorted nothing — the caller sorts by date."""
+        out: list = []
+        seen: set = set()
+        for fn in (
+            lambda: artist.get_albums(limit=limit),
+            lambda: artist.get_ep_singles(limit=limit),
+        ):
+            try:
+                for item in fn():
+                    key = str(getattr(item, "id", "") or "")
+                    if not key or key in seen:
+                        continue
+                    seen.add(key)
+                    out.append(item)
+            except Exception:
+                continue
+        return out
 
     def get_artist_top_tracks(self, artist) -> list:
         try:

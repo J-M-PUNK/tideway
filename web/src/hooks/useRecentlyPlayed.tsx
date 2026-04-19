@@ -71,19 +71,19 @@ export function useRecentlyPlayed() {
 
 /**
  * Record a track into the recently-played list once it's been listened to
- * for ~10 seconds. Single effect keyed on (trackId, currentTime) with a
- * ref guarding "did I already log this instance of this track?" — prevents
- * the double-effect race where a reset effect fires after a record effect.
+ * for ~10 seconds. The effect depends on a coarsened `reached10s` boolean
+ * rather than raw `currentTime` so it doesn't churn four times per second
+ * — two re-renders per track is enough (track change + threshold crossing).
  */
 export function useRecordPlays(track: Track | null, currentTime: number): void {
   const { record } = useRecentlyPlayed();
   const lastRecordedId = useRef<string | null>(null);
+  const reached10s = currentTime >= 10;
 
   useEffect(() => {
-    if (!track) return;
+    if (!track || !reached10s) return;
     if (lastRecordedId.current === track.id) return;
-    if (currentTime < 10) return;
     record(track);
     lastRecordedId.current = track.id;
-  }, [track, currentTime, record]);
+  }, [track, reached10s, record]);
 }

@@ -1,5 +1,9 @@
+import os
+import shutil
+import tempfile
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlparse
 
 from app.http import SESSION
 
@@ -7,13 +11,44 @@ from app.http import SESSION
 TIDAL_ID_TAG = "TIDAL_TRACK_ID"
 M4A_TIDAL_ID_KEY = "----:com.tidaldownloader:track_id"
 
+# Only pull cover art from known Tidal CDN hosts. If tidalapi were ever
+# to return a URL from elsewhere (compromise, DNS rebinding, a bug), we
+# don't want the downloader process to start fetching arbitrary URLs and
+# embedding the bytes into the user's files.
+_ALLOWED_COVER_HOSTS = {"resources.tidal.com", "images.tidal.com"}
+_MAX_COVER_BYTES = 5 * 1024 * 1024  # 5 MB — larger than any real Tidal cover
+
 
 def tag_file(file_path: Path, track, cover_data: Optional[bytes] = None):
+    """Tag a downloaded audio file atomically.
+
+    mutagen's in-place save rewrites the file, which means a crash between
+    open-for-write and finish leaves the audio corrupted or truncated. We
+    work on a sibling temp copy and os.replace() it over the original so
+    the user always has either the original untagged file or a fully
+    tagged one — never a half-written hybrid.
+    """
     ext = file_path.suffix.lower()
-    if ext == ".flac":
-        _tag_flac(file_path, track, cover_data)
-    elif ext in (".m4a", ".mp4"):
-        _tag_m4a(file_path, track, cover_data)
+    if ext not in (".flac", ".m4a", ".mp4"):
+        return
+    tmp_fd, tmp_name = tempfile.mkstemp(
+        prefix=f".{file_path.name}.", suffix=".tag.tmp", dir=str(file_path.parent)
+    )
+    os.close(tmp_fd)
+    tmp_path = Path(tmp_name)
+    try:
+        shutil.copy2(file_path, tmp_path)
+        if ext == ".flac":
+            _tag_flac(tmp_path, track, cover_data)
+        else:
+            _tag_m4a(tmp_path, track, cover_data)
+        os.replace(tmp_path, file_path)
+    except Exception:
+        try:
+            tmp_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
 
 
 def read_track_id(file_path: Path) -> Optional[str]:
@@ -51,12 +86,30 @@ def fetch_cover_art(album_obj) -> Optional[bytes]:
         return None
     try:
         url = album_obj.image(640)
-        resp = SESSION.get(url, timeout=10)
-        if resp.ok:
-            return resp.content
+        parsed = urlparse(url)
+        # Reject non-HTTPS or non-Tidal hosts before touching the network.
+        if parsed.scheme != "https" or parsed.hostname not in _ALLOWED_COVER_HOSTS:
+            return None
+        if parsed.username or parsed.password:
+            return None
+        # Stream + cap size so a misbehaving server can't exhaust memory
+        # by advertising (or actually sending) a giant image.
+        with SESSION.get(url, timeout=10, stream=True, allow_redirects=False) as resp:
+            if not resp.ok:
+                return None
+            declared = int(resp.headers.get("Content-Length") or 0)
+            if declared and declared > _MAX_COVER_BYTES:
+                return None
+            buf = bytearray()
+            for chunk in resp.iter_content(chunk_size=65536):
+                if not chunk:
+                    continue
+                buf.extend(chunk)
+                if len(buf) > _MAX_COVER_BYTES:
+                    return None
+            return bytes(buf)
     except Exception:
-        pass
-    return None
+        return None
 
 
 def _tag_flac(path: Path, track, cover_data: Optional[bytes]):

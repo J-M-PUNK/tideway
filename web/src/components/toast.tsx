@@ -31,6 +31,10 @@ const ToastContext = createContext<ToastContextValue | null>(null);
 export function ToastProvider({ children }: { children: ReactNode }) {
   const [toasts, setToasts] = useState<Toast[]>([]);
   const nextId = useRef(1);
+  // Track active dismissal timers so provider unmount (e.g. HMR,
+  // user logout) doesn't leak queued setTimeout handles that would
+  // later try to update unmounted state.
+  const timersRef = useRef<Set<number>>(new Set());
 
   const dismiss = useCallback((id: number) => {
     setToasts((prev) => prev.filter((t) => t.id !== id));
@@ -40,11 +44,25 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     (t) => {
       const id = nextId.current++;
       const durationMs = t.durationMs ?? (t.kind === "error" ? 6000 : 3000);
-      setToasts((prev) => [...prev, { id, durationMs, ...t }]);
-      window.setTimeout(() => dismiss(id), durationMs);
+      // Spread the caller payload BEFORE id/durationMs so a caller passing
+      // `durationMs: undefined` explicitly can't wipe the resolved value
+      // (and so the resolved id always wins).
+      setToasts((prev) => [...prev, { ...t, id, durationMs }]);
+      const handle = window.setTimeout(() => {
+        timersRef.current.delete(handle);
+        dismiss(id);
+      }, durationMs);
+      timersRef.current.add(handle);
     },
     [dismiss],
   );
+
+  useEffect(() => {
+    return () => {
+      timersRef.current.forEach((h) => window.clearTimeout(h));
+      timersRef.current.clear();
+    };
+  }, []);
 
   const value = useMemo(() => ({ show, dismiss }), [show, dismiss]);
 

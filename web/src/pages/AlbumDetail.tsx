@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api } from "@/api/client";
 import type { OnDownload } from "@/api/download";
@@ -71,6 +72,13 @@ export function AlbumDetail({ onDownload }: { onDownload: OnDownload }) {
         <TrackList tracks={album.tracks} onDownload={onDownload} showAlbum={false} />
       </div>
 
+      {album.review && (
+        <>
+          <SectionHeader title="About this album" />
+          <AlbumReview review={album.review} />
+        </>
+      )}
+
       {album.similar.length > 0 && (
         <>
           <SectionHeader title="Similar albums" />
@@ -81,6 +89,22 @@ export function AlbumDetail({ onDownload }: { onDownload: OnDownload }) {
           </Grid>
         </>
       )}
+    </div>
+  );
+}
+
+function AlbumReview({ review }: { review: string }) {
+  // Strip Tidal's inline `[wimpLink]` anchors. Memoized so rerenders of the
+  // parent don't re-regex the same string.
+  const cleaned = useMemo(
+    () => review.replace(/\[wimpLink[^\]]*\]/g, "").replace(/\[\/wimpLink\]/g, ""),
+    [review],
+  );
+  return (
+    <div className="max-w-3xl rounded-lg border border-border/50 bg-card/40 p-6">
+      <p className="whitespace-pre-line text-sm leading-relaxed text-muted-foreground">
+        {cleaned}
+      </p>
     </div>
   );
 }
