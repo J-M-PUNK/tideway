@@ -1,12 +1,21 @@
 import { useMemo } from "react";
-import { CheckCircle2, Download, FolderOpen, Loader2, RefreshCw, Trash2, XCircle } from "lucide-react";
+import { CheckCircle2, ChevronDown, Download, FolderOpen, Loader2, RefreshCw, Trash2, XCircle } from "lucide-react";
 import type { DownloadItem } from "@/api/types";
 import { api } from "@/api/client";
 import { Button } from "@/components/ui/button";
 import { Progress } from "@/components/ui/progress";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { AddUrlDialog } from "@/components/AddUrlDialog";
 import { EmptyState } from "@/components/EmptyState";
 import { useToast } from "@/components/toast";
+import { useQualities } from "@/hooks/useQualities";
 import { cn } from "@/lib/utils";
 
 export function Downloads({ items }: { items: DownloadItem[] }) {
@@ -25,13 +34,46 @@ export function Downloads({ items }: { items: DownloadItem[] }) {
   }, [items]);
 
   const retryAll = async () => {
-    await Promise.allSettled(failed.map((i) => api.downloads.retry(i.id)));
-    toast.show({ kind: "info", title: `Re-queued ${failed.length} downloads` });
+    // Sequential, not parallel — retries trigger stream-URL lookups on
+    // Tidal, and firing N simultaneous requests trips their rate limit.
+    let succeeded = 0;
+    let lastError: unknown = null;
+    for (const item of failed) {
+      try {
+        await api.downloads.retry(item.id);
+        succeeded += 1;
+      } catch (err) {
+        lastError = err;
+      }
+    }
+    if (succeeded === 0 && failed.length > 0) {
+      toast.show({
+        kind: "error",
+        title: "Retries failed",
+        description:
+          lastError instanceof Error ? lastError.message : "Couldn't re-queue any items.",
+      });
+      return;
+    }
+    const failedCount = failed.length - succeeded;
+    toast.show({
+      kind: failedCount > 0 ? "info" : "success",
+      title: `Re-queued ${succeeded} download${succeeded === 1 ? "" : "s"}`,
+      description: failedCount > 0 ? `${failedCount} couldn't be re-queued.` : undefined,
+    });
   };
 
   const clearDone = async () => {
-    await api.downloads.clearCompleted();
-    toast.show({ kind: "info", title: "Cleared finished downloads" });
+    try {
+      await api.downloads.clearCompleted();
+      toast.show({ kind: "info", title: "Cleared finished downloads" });
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: "Couldn't clear downloads",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    }
   };
 
   const reveal = async (item: DownloadItem) => {
@@ -47,10 +89,14 @@ export function Downloads({ items }: { items: DownloadItem[] }) {
     }
   };
 
-  const retry = async (item: DownloadItem) => {
+  const retry = async (item: DownloadItem, quality?: string) => {
     try {
-      await api.downloads.retry(item.id);
-      toast.show({ kind: "info", title: "Retrying download" });
+      await api.downloads.retry(item.id, quality);
+      toast.show({
+        kind: "info",
+        title: "Retrying download",
+        description: quality ? `At ${quality}` : undefined,
+      });
     } catch (err) {
       toast.show({
         kind: "error",
@@ -125,7 +171,7 @@ function Row({
   onReveal,
 }: {
   item: DownloadItem;
-  onRetry: (i: DownloadItem) => void;
+  onRetry: (i: DownloadItem, quality?: string) => void;
   onReveal: (i: DownloadItem) => void;
 }) {
   const failed = item.status === "Failed";
@@ -164,11 +210,7 @@ function Row({
         )}
       </div>
       <div className="flex items-center justify-end gap-2">
-        {failed && (
-          <Button size="sm" variant="secondary" onClick={() => onRetry(item)}>
-            Retry
-          </Button>
-        )}
+        {failed && <RetryButton onRetry={(q) => onRetry(item, q)} />}
         {done && item.file_path && (
           <Button
             size="sm"
@@ -180,6 +222,57 @@ function Row({
           </Button>
         )}
       </div>
+    </div>
+  );
+}
+
+/**
+ * Retry button with an optional quality picker. A plain click retries at
+ * the same quality the item was originally queued at; the dropdown lets
+ * the user step down (or up) a tier — useful when a hi-res download
+ * failed because the account doesn't support it.
+ */
+function RetryButton({ onRetry }: { onRetry: (quality?: string) => void }) {
+  // Shared across DownloadButton + every RetryButton on the page — one
+  // request even with 20 failed rows in view.
+  const qualities = useQualities() ?? [];
+
+  return (
+    <div className="flex">
+      <Button
+        size="sm"
+        variant="secondary"
+        onClick={() => onRetry()}
+        className="rounded-r-none"
+      >
+        Retry
+      </Button>
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button
+            size="sm"
+            variant="secondary"
+            className="rounded-l-none border-l border-border/50 px-2"
+            aria-label="Retry at different quality"
+          >
+            <ChevronDown className="h-3 w-3" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="end">
+          <DropdownMenuLabel>Retry at quality</DropdownMenuLabel>
+          <DropdownMenuSeparator />
+          {qualities.map((q) => (
+            <DropdownMenuItem key={q.value} onSelect={() => onRetry(q.value)}>
+              <div className="flex flex-col">
+                <span className="font-semibold">
+                  {q.label} — {q.codec}
+                </span>
+                <span className="text-[11px] text-muted-foreground">{q.bitrate}</span>
+              </div>
+            </DropdownMenuItem>
+          ))}
+        </DropdownMenuContent>
+      </DropdownMenu>
     </div>
   );
 }

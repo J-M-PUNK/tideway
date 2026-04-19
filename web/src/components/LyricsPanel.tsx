@@ -115,10 +115,53 @@ function SyncedLyrics({
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const activeRef = useRef<HTMLButtonElement | null>(null);
+  // Tracks whether the user has scrolled the lyrics panel themselves.
+  // While true, we stop auto-scrolling so the user can read ahead
+  // without every new line yanking them back.
+  const userScrolledRef = useRef(false);
+  const lastAutoScrollRef = useRef(0);
 
+  // Scroll within the lyrics container only — not the whole page. The
+  // previous scrollIntoView(block:"center") also scrolled outer scroll
+  // ancestors, hijacking the app's main content area every time a lyric
+  // line changed.
   useEffect(() => {
-    activeRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    if (userScrolledRef.current) return;
+    const scrollContainer = activeRef.current?.closest(
+      ".scrollbar-thin",
+    ) as HTMLElement | null;
+    if (!scrollContainer || !activeRef.current) return;
+    const containerRect = scrollContainer.getBoundingClientRect();
+    const lineRect = activeRef.current.getBoundingClientRect();
+    const target =
+      scrollContainer.scrollTop +
+      (lineRect.top - containerRect.top) -
+      containerRect.height / 2 +
+      lineRect.height / 2;
+    lastAutoScrollRef.current = Date.now();
+    scrollContainer.scrollTo({ top: target, behavior: "smooth" });
   }, [active]);
+
+  // If the user scrolls the panel, pause auto-scroll for a few seconds.
+  // An auto-scroll we just triggered also fires this event — the
+  // timestamp check distinguishes human vs programmatic scrolls.
+  useEffect(() => {
+    const el = containerRef.current?.closest(".scrollbar-thin") as HTMLElement | null;
+    if (!el) return;
+    const onScroll = () => {
+      if (Date.now() - lastAutoScrollRef.current < 400) return;
+      userScrolledRef.current = true;
+      window.clearTimeout((onScroll as any)._t);
+      (onScroll as any)._t = window.setTimeout(() => {
+        userScrolledRef.current = false;
+      }, 4000);
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => {
+      el.removeEventListener("scroll", onScroll);
+      window.clearTimeout((onScroll as any)._t);
+    };
+  }, []);
 
   return (
     <div ref={containerRef} className="flex flex-col gap-3">

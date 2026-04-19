@@ -14,6 +14,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/components/toast";
+import { qualityLabel } from "@/lib/utils";
 
 export function AddUrlDialog({ trigger }: { trigger?: React.ReactNode }) {
   const [open, setOpen] = useState(false);
@@ -27,14 +28,25 @@ export function AddUrlDialog({ trigger }: { trigger?: React.ReactNode }) {
 
   useEffect(() => {
     if (!open) return;
+    let cancelled = false;
     (async () => {
-      const [qs, s] = await Promise.all([
-        qualities.length ? Promise.resolve(qualities) : api.qualities(),
-        defaultQuality ? Promise.resolve<Settings | null>(null) : api.settings.get(),
-      ]);
-      if (qs !== qualities) setQualities(qs);
-      if (s) setDefaultQuality(s.quality);
+      try {
+        const [qs, s] = await Promise.all([
+          qualities.length ? Promise.resolve(qualities) : api.qualities(),
+          defaultQuality ? Promise.resolve<Settings | null>(null) : api.settings.get(),
+        ]);
+        if (cancelled) return;
+        if (qs !== qualities) setQualities(qs);
+        if (s) setDefaultQuality(s.quality);
+      } catch {
+        // Fetch failures shouldn't break the dialog — the user can still
+        // paste a URL and leave "Use default" selected. Surface nothing;
+        // the dropdown just stays empty.
+      }
     })();
+    return () => {
+      cancelled = true;
+    };
   }, [open, qualities, defaultQuality]);
 
   const submit = async () => {
@@ -102,7 +114,7 @@ export function AddUrlDialog({ trigger }: { trigger?: React.ReactNode }) {
               <option value="">
                 Use default
                 {defaultQuality
-                  ? ` (${qualities.find((q) => q.value === defaultQuality)?.label ?? defaultQuality})`
+                  ? ` (${qualities.find((q) => q.value === defaultQuality)?.label ?? qualityLabel(defaultQuality)})`
                   : ""}
               </option>
               {qualities.map((q) => (

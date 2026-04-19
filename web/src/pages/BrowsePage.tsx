@@ -13,7 +13,15 @@ import { GridSkeleton } from "@/components/Skeletons";
  */
 export function BrowsePage({ onDownload }: { onDownload: OnDownload }) {
   const { path = "" } = useParams();
-  const decoded = decodeURIComponent(path);
+  // decodeURIComponent throws URIError on malformed % escapes (e.g. a
+  // stale bookmark or hand-crafted URL). Without this guard the whole
+  // Shell above us would crash with no error boundary in its path.
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(path);
+  } catch {
+    decoded = path;
+  }
   const { data, loading, error } = useApi(() => api.pagePath(decoded), [decoded]);
 
   const title = deriveTitle(decoded);

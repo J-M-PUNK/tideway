@@ -4,6 +4,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
   type ReactNode,
 } from "react";
@@ -37,13 +38,21 @@ export function MyPlaylistsProvider({ children }: { children: ReactNode }) {
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
   const [loading, setLoading] = useState(true);
 
+  // Monotonic token used to discard stale refresh responses. Two nearly-
+  // simultaneous refresh() calls (e.g. Create + Edit dialogs firing in
+  // the same tick) would otherwise race: whichever response lands LAST
+  // wins, regardless of which request is actually the newer one.
+  const refreshToken = useRef(0);
+
   const refresh = useCallback(async () => {
+    const token = ++refreshToken.current;
     setLoading(true);
     try {
       const list = await api.playlists.mine();
+      if (token !== refreshToken.current) return;
       setPlaylists(list);
     } finally {
-      setLoading(false);
+      if (token === refreshToken.current) setLoading(false);
     }
   }, []);
 

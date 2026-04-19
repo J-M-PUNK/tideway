@@ -4,9 +4,13 @@ import { useDownloadStream } from "./useDownloadStream";
 
 interface DownloadedContextValue {
   has: (trackId: string) => boolean;
+  /** Raw id set. Exposed for the rare case where a caller needs to
+   *  filter a list of tracks (filter() can't call a hook per element). */
+  ids: Set<string>;
 }
 
-const Ctx = createContext<DownloadedContextValue>({ has: () => false });
+const EMPTY_SET = new Set<string>();
+const Ctx = createContext<DownloadedContextValue>({ has: () => false, ids: EMPTY_SET });
 
 /**
  * Tracks which Tidal track IDs we have as local files. Hydrated once from
@@ -50,7 +54,7 @@ export function DownloadedProvider({ children }: { children: ReactNode }) {
   }, [stream]);
 
   const value = useMemo<DownloadedContextValue>(
-    () => ({ has: (trackId: string) => ids.has(String(trackId)) }),
+    () => ({ has: (trackId: string) => ids.has(String(trackId)), ids }),
     [ids],
   );
 
@@ -59,4 +63,8 @@ export function DownloadedProvider({ children }: { children: ReactNode }) {
 
 export function useIsDownloaded(trackId: string): boolean {
   return useContext(Ctx).has(trackId);
+}
+
+export function useDownloadedIds(): Set<string> {
+  return useContext(Ctx).ids;
 }

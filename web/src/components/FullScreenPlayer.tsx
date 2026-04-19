@@ -45,11 +45,17 @@ export function FullScreenPlayer({
 
   useEffect(() => {
     if (!open) return;
+    // Capture phase + stopImmediatePropagation so Esc closes the
+    // full-screen player and nothing else — otherwise AppInner's
+    // shared Esc handler would ALSO close any open lyrics/queue panel
+    // underneath, which the user can't see and didn't ask to close.
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Escape") onClose();
+      if (e.key !== "Escape") return;
+      e.stopImmediatePropagation();
+      onClose();
     };
-    window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
   }, [open, onClose]);
 
   const isLocal = useIsDownloaded(track?.id ?? "");

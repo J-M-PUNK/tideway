@@ -3,11 +3,9 @@ import { useParams } from "react-router-dom";
 import { api } from "@/api/client";
 import type { OnDownload } from "@/api/download";
 import { useApi } from "@/hooks/useApi";
-import { DetailHero } from "@/components/DetailHero";
+import { ArtistHero } from "@/components/ArtistHero";
 import { Grid, SectionHeader } from "@/components/Grid";
-import { HeartButton } from "@/components/HeartButton";
 import { MediaCard } from "@/components/MediaCard";
-import { PlayAllButton } from "@/components/PlayAllButton";
 import { TrackList } from "@/components/TrackList";
 import { ErrorView } from "@/components/ErrorView";
 import { GridSkeleton, HeroSkeleton, TrackListSkeleton } from "@/components/Skeletons";
@@ -29,21 +27,21 @@ export function ArtistDetail({ onDownload }: { onDownload: OnDownload }) {
   }
   if (error || !artist) return <ErrorView error={error ?? "Artist not found"} />;
 
+  // "Download full discography" needs a single merged list of everything
+  // the artist has released (albums + EPs + singles; skip appears-on
+  // since those are someone else's records).
+  const fullCatalog = [...artist.albums, ...artist.ep_singles];
+
   return (
     <div>
-      <DetailHero
-        eyebrow="Artist"
-        title={artist.name}
-        cover={artist.picture}
-        round
-        actions={
-          <>
-            {artist.top_tracks.length > 0 && (
-              <PlayAllButton tracks={artist.top_tracks} />
-            )}
-            <HeartButton kind="artist" id={artist.id} />
-          </>
-        }
+      <ArtistHero
+        artistId={artist.id}
+        artistName={artist.name}
+        picture={artist.picture}
+        topTracks={artist.top_tracks}
+        allAlbums={fullCatalog}
+        shareUrl={artist.share_url}
+        onDownload={onDownload}
       />
 
       {artist.top_tracks.length > 0 && (
@@ -55,9 +53,31 @@ export function ArtistDetail({ onDownload }: { onDownload: OnDownload }) {
 
       {artist.albums.length > 0 && (
         <>
-          <SectionHeader title="Discography" />
+          <SectionHeader title="Albums" />
           <Grid>
             {artist.albums.map((a) => (
+              <MediaCard key={a.id} item={a} onDownload={onDownload} />
+            ))}
+          </Grid>
+        </>
+      )}
+
+      {artist.ep_singles.length > 0 && (
+        <>
+          <SectionHeader title="EPs & Singles" />
+          <Grid>
+            {artist.ep_singles.map((a) => (
+              <MediaCard key={a.id} item={a} onDownload={onDownload} />
+            ))}
+          </Grid>
+        </>
+      )}
+
+      {artist.appears_on.length > 0 && (
+        <>
+          <SectionHeader title="Appears on" />
+          <Grid>
+            {artist.appears_on.map((a) => (
               <MediaCard key={a.id} item={a} onDownload={onDownload} />
             ))}
           </Grid>

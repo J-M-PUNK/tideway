@@ -1,5 +1,6 @@
 import { Link } from "react-router-dom";
 import {
+  AudioLines,
   ListMusic,
   Loader2,
   Mic2,
@@ -13,17 +14,28 @@ import {
   SkipForward,
   Volume2,
   VolumeX,
-  X,
 } from "lucide-react";
 import type { OnDownload } from "@/api/download";
 import { formatDuration, imageProxy } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { DownloadButton } from "@/components/DownloadButton";
 import { HeartButton } from "@/components/HeartButton";
 import { SleepTimerButton } from "@/components/SleepTimerButton";
 import { useIsDownloaded } from "@/hooks/useDownloadedSet";
 import { useRecordPlays } from "@/hooks/useRecentlyPlayed";
 import { usePlayerActions, usePlayerMeta, usePlayerTime } from "@/hooks/PlayerContext";
+import {
+  useUiPreferences,
+  type StreamingQuality,
+} from "@/hooks/useUiPreferences";
 import { cn } from "@/lib/utils";
 
 export function NowPlaying({
@@ -212,23 +224,93 @@ export function NowPlaying({
           >
             <ListMusic className="h-4 w-4" />
           </Button>
+          <StreamingQualityPicker isLocal={isLocal} />
           <SleepTimerButton />
           <VolumeControl value={volume} onChange={actions.setVolume} />
-          <Button
-            variant="ghost"
-            size="icon"
-            className="h-8 w-8"
-            onClick={actions.stop}
-            title="Close player"
-          >
-            <X className="h-4 w-4" />
-          </Button>
         </div>
       </div>
       {error && (
         <div className="mt-1 text-center text-[11px] text-destructive">{error}</div>
       )}
     </div>
+  );
+}
+
+const QUALITY_OPTIONS: {
+  value: StreamingQuality;
+  label: string;
+  sublabel: string;
+}[] = [
+  { value: "low_96k", label: "Low", sublabel: "~96 kbps AAC" },
+  { value: "low_320k", label: "High", sublabel: "~320 kbps AAC" },
+  { value: "high_lossless", label: "Lossless", sublabel: "16-bit FLAC" },
+];
+
+/**
+ * Quality picker pill on the Now Playing bar. When the current track is
+ * a downloaded local file, this is a no-op badge (playback is already at
+ * the file's native quality) — only the streaming path actually switches.
+ */
+function StreamingQualityPicker({ isLocal }: { isLocal: boolean }) {
+  const { streamingQuality, set } = useUiPreferences();
+  const current = QUALITY_OPTIONS.find((q) => q.value === streamingQuality);
+  const label = isLocal ? "Downloaded" : current?.label ?? "Streaming";
+
+  if (isLocal) {
+    return (
+      <div
+        className="flex items-center gap-1.5 rounded-full bg-primary/15 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-primary"
+        title="Playing from a local lossless file"
+      >
+        <AudioLines className="h-3 w-3" /> {label}
+      </div>
+    );
+  }
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          className="flex items-center gap-1.5 rounded-full bg-secondary px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-foreground transition-colors hover:bg-accent"
+          title="Streaming quality"
+        >
+          <AudioLines className="h-3 w-3" /> {label}
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-56">
+        <DropdownMenuLabel>Streaming quality</DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        {QUALITY_OPTIONS.map((q) => (
+          <DropdownMenuItem
+            key={q.value}
+            onSelect={() => set({ streamingQuality: q.value })}
+          >
+            <div className="flex min-w-0 flex-1 flex-col">
+              <div className="flex items-center gap-2">
+                <span
+                  className={cn(
+                    "font-semibold",
+                    q.value === streamingQuality && "text-primary",
+                  )}
+                >
+                  {q.label}
+                </span>
+                {q.value === streamingQuality && (
+                  <span className="text-[10px] font-medium uppercase tracking-wider text-primary">
+                    Current
+                  </span>
+                )}
+              </div>
+              <div className="text-xs text-muted-foreground">{q.sublabel}</div>
+            </div>
+          </DropdownMenuItem>
+        ))}
+        <DropdownMenuSeparator />
+        <div className="px-2 py-1.5 text-[11px] text-muted-foreground">
+          Max quality (hi-res) isn't streamable in-browser — download the
+          track for full quality.
+        </div>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 

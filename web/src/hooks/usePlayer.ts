@@ -1,5 +1,14 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { Track } from "@/api/types";
+import { useUiPreferences, type StreamingQuality } from "./useUiPreferences";
+
+/** Build the audio element's `src` for a track, honoring the current
+ *  streaming-quality preference. The backend serves local files straight
+ *  from disk regardless of `quality`, so this parameter only matters for
+ *  non-downloaded tracks. */
+function buildTrackSrc(track: Track, quality: StreamingQuality): string {
+  return `/api/play/${track.id}?quality=${quality}`;
+}
 
 const PERSIST_KEY = "tidal-downloader:player";
 // How often we flush the player state snapshot to localStorage. The queue,
@@ -68,8 +77,14 @@ const INITIAL: PlayerState = {
 function pickNextIndex(state: PlayerState, onEnded = false): number | null {
   if (state.queue.length === 0) return null;
   if (onEnded && state.repeat === "one") return state.queueIndex;
+  // Single-track queue gets its own branch: a natural end shouldn't loop
+  // the only track unless the user asked for repeat. Manual Next still
+  // replays it (matches what Spotify does).
+  if (state.queue.length === 1) {
+    if (onEnded && state.repeat !== "all") return null;
+    return 0;
+  }
   if (state.shuffle) {
-    if (state.queue.length === 1) return 0;
     let next = state.queueIndex;
     while (next === state.queueIndex) {
       next = Math.floor(Math.random() * state.queue.length);
@@ -112,6 +127,15 @@ export function usePlayer() {
   const [activeIdx, setActiveIdx] = useState<0 | 1>(0);
   const audio = slots[activeIdx];
   const preload = slots[activeIdx === 0 ? 1 : 0];
+
+  // Streaming-quality preference. Read through a ref inside callbacks
+  // so the rest of the hook's memoized actions don't churn when the
+  // user picks a new quality — only the reload effect below cares.
+  const { streamingQuality } = useUiPreferences();
+  const qualityRef = useRef<StreamingQuality>(streamingQuality);
+  useEffect(() => {
+    qualityRef.current = streamingQuality;
+  }, [streamingQuality]);
 
   useEffect(() => {
     if (typeof Audio === "undefined") return;
@@ -216,11 +240,12 @@ export function usePlayer() {
         setSleepRemaining(null);
       }
 
-      const expectedSrc = `/api/play/${track.id}`;
+      const expectedSrc = buildTrackSrc(track, qualityRef.current);
       const preloadEl = activeIdx === 0 ? b : a;
       const activeEl = activeIdx === 0 ? a : b;
 
-      // Gapless swap path: preload already holds this track and is ready.
+      // Gapless swap path: preload already holds this track at the
+      // current quality and is ready.
       if (
         preloadEl.src &&
         preloadEl.src.endsWith(expectedSrc) &&
@@ -354,7 +379,7 @@ export function usePlayer() {
     if (next === null) return;
     const nextTrack = s.queue[next];
     if (!nextTrack) return;
-    const expected = `/api/play/${nextTrack.id}`;
+    const expected = buildTrackSrc(nextTrack, qualityRef.current);
     if (preload.src && preload.src.endsWith(expected)) return;
     preload.src = expected;
     // Starts buffering without autoplay.
@@ -371,6 +396,35 @@ export function usePlayer() {
     state.shuffle,
     state.repeat,
   ]);
+
+  // When the user changes streaming quality mid-playback, reload the
+  // current track at the new quality and resume from where they were.
+  // Device-code sessions in particular play at ~320k AAC by default; a
+  // user flipping to Lossless should hear the change on the track
+  // they're listening to, not only on the next one.
+  useEffect(() => {
+    if (!audio || !state.track) return;
+    const expected = buildTrackSrc(state.track, streamingQuality);
+    if (audio.src.endsWith(expected)) return;
+    const wasPlaying = !audio.paused;
+    const resumeAt = audio.currentTime;
+    audio.src = expected;
+    audio.currentTime = resumeAt;
+    // Drop the preload too — it was buffered at the old quality.
+    if (preload) {
+      preload.pause();
+      preload.removeAttribute("src");
+    }
+    if (wasPlaying) {
+      audio.play().catch(() => {
+        /* user can hit play again if the browser blocks it */
+      });
+    }
+    // Only the quality should trigger this effect. `audio` / `state.track`
+    // changes are handled by playAtIndex; we don't want to re-fire here
+    // and stomp on their state transitions.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [streamingQuality]);
 
   /**
    * Start playback. If `contextTracks` is provided, it becomes the queue
@@ -526,8 +580,16 @@ export function usePlayer() {
 
   const playNext = useCallback((track: Track) => {
     setState((s) => {
+      // queueIndex < 0 means the queue is *staged* — e.g. resumed from
+      // localStorage on boot with nothing playing yet. Don't replace it
+      // with just `[track]`; append so the user's prior queue survives.
+      // They can still reach the new track by starting playback and
+      // skipping to it, and the staged queue isn't wiped just because
+      // they used the Play-Next context menu before pressing play.
       if (s.queueIndex < 0) {
-        return { ...s, queue: [track], queueIndex: -1 };
+        const already = s.queue.some((t) => t.id === track.id);
+        if (already) return s;
+        return { ...s, queue: [...s.queue, track] };
       }
       const nextQueue = [...s.queue];
       nextQueue.splice(s.queueIndex + 1, 0, track);

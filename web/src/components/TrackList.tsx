@@ -1,9 +1,11 @@
 import { Link } from "react-router-dom";
 import {
   Check,
+  CheckSquare,
   Clock,
   Copy,
   Disc3,
+  FileText,
   ListPlus,
   Loader2,
   Music,
@@ -20,11 +22,14 @@ import { formatDuration, imageProxy } from "@/lib/utils";
 import { DownloadButton } from "@/components/DownloadButton";
 import { EmptyState } from "@/components/EmptyState";
 import { usePlayerActions, usePlayerMeta } from "@/hooks/PlayerContext";
-import { useIsDownloaded } from "@/hooks/useDownloadedSet";
+import { useDownloadedIds, useIsDownloaded } from "@/hooks/useDownloadedSet";
 import { useMyPlaylists } from "@/hooks/useMyPlaylists";
 import { useFavorites } from "@/hooks/useFavorites";
+import { useTrackSelection } from "@/hooks/useTrackSelection";
+import { useUiPreferences } from "@/hooks/useUiPreferences";
 import { HeartButton } from "@/components/HeartButton";
 import { CreatePlaylistDialog } from "@/components/CreatePlaylistDialog";
+import { CreditsDialog } from "@/components/CreditsDialog";
 import { useToast } from "@/components/toast";
 import { cn } from "@/lib/utils";
 import {
@@ -37,7 +42,7 @@ import {
   ContextMenuSubTrigger,
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   DndContext,
   closestCenter,
@@ -47,6 +52,7 @@ import {
   useSensors,
   type DragEndEvent,
 } from "@dnd-kit/core";
+import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   arrayMove,
   SortableContext,
@@ -85,8 +91,26 @@ export function TrackList({
   onRemove,
   onReorder,
 }: Props) {
-  if (tracks.length === 0) {
-    return <EmptyState icon={Music} title="No tracks" />;
+  const { offlineOnly } = useUiPreferences();
+  // Optional offline-only filter — hides tracks Tidal knows about but that
+  // aren't on disk yet. Applied at the list level so row indexes still line
+  // up with the visible set for drag-reorder / selection logic.
+  const downloadedIds = useDownloadedIds();
+  const visibleTracks = offlineOnly
+    ? tracks.filter((t) => downloadedIds.has(t.id))
+    : tracks;
+  if (visibleTracks.length === 0) {
+    return (
+      <EmptyState
+        icon={Music}
+        title={offlineOnly ? "Nothing downloaded yet" : "No tracks"}
+        description={
+          offlineOnly
+            ? "Turn off offline-only in Settings to see streamable tracks."
+            : undefined
+        }
+      />
+    );
   }
   const header = (
     <div className="grid grid-cols-[24px_4fr_3fr_48px_40px_40px] items-center gap-4 border-b border-border px-4 py-2 text-xs uppercase tracking-wider text-muted-foreground">
@@ -109,23 +133,23 @@ export function TrackList({
   // those, we append a per-occurrence count so the n-th duplicate still
   // gets its own sortable id — accepting that reordering across occurrences
   // isn't perfectly animated in that edge case.
-  const rowIds = (() => {
+  const rowIds = useMemo(() => {
     const seen = new Map<string, number>();
-    return tracks.map((t) => {
+    return visibleTracks.map((t) => {
       const n = seen.get(t.id) ?? 0;
       seen.set(t.id, n + 1);
       return n === 0 ? t.id : `${t.id}#${n}`;
     });
-  })();
+  }, [visibleTracks]);
 
-  const body = tracks.map((t, idx) => (
+  const body = visibleTracks.map((t, idx) => (
     <TrackRow
       key={rowIds[idx]}
       sortableId={rowIds[idx]}
       sortable={!!onReorder}
       track={t}
       index={idx}
-      context={tracks}
+      context={visibleTracks}
       numbered={numbered}
       showAlbum={showAlbum}
       onDownload={onDownload}
@@ -134,6 +158,20 @@ export function TrackList({
   ));
 
   if (!onReorder) {
+    // Gate virtualization on list length — rendering 10 items in full
+    // flow is cheaper than setting up virtualizer machinery, and the
+    // virtualized path loses some subtle CSS niceties (e.g. natural hover
+    // height cross-row). Threshold chosen empirically.
+    if (visibleTracks.length > VIRTUALIZE_AT) {
+      return (
+        <div className="flex flex-col">
+          {header}
+          <VirtualRows tracks={visibleTracks} rowIds={rowIds}>
+            {(idx) => body[idx]}
+          </VirtualRows>
+        </div>
+      );
+    }
     return (
       <div className="flex flex-col">
         {header}
@@ -145,12 +183,82 @@ export function TrackList({
   return (
     <div className="flex flex-col">
       {header}
-      <SortableTracks ids={rowIds} tracks={tracks} onReorder={onReorder}>
+      <SortableTracks ids={rowIds} tracks={visibleTracks} onReorder={onReorder}>
         {body}
       </SortableTracks>
     </div>
   );
 }
+
+// Threshold above which we switch to virtualization. A 100-track album
+// renders fine in full flow; a 1000-track Liked Songs list benefits from
+// only rendering the ~20 visible rows.
+const VIRTUALIZE_AT = 80;
+const ROW_HEIGHT_PX = 56; // approximates py-2 + contents
+
+/**
+ * Virtualized row renderer. Finds the nearest `data-scroll-container` —
+ * the main element set up in App.tsx — and only mounts the rows
+ * intersecting its viewport (plus overscan). For a 2000-track Liked Songs
+ * list this drops from ~20k rendered components to ~20.
+ */
+function VirtualRows({
+  tracks,
+  rowIds,
+  children,
+}: {
+  tracks: Track[];
+  rowIds: string[];
+  children: (index: number) => React.ReactNode;
+}) {
+  const anchorRef = useRef<HTMLDivElement | null>(null);
+  const [scrollEl, setScrollEl] = useState<HTMLElement | null>(null);
+
+  // useLayoutEffect — the scroll-container lookup + state set must happen
+  // before the browser paints, otherwise there's a visible flash where the
+  // virtualizer renders nothing (first pass) then rows (second pass).
+  useLayoutEffect(() => {
+    const el = anchorRef.current?.closest(
+      "[data-scroll-container]",
+    ) as HTMLElement | null;
+    setScrollEl(el);
+  }, []);
+
+  const virtualizer = useVirtualizer({
+    count: tracks.length,
+    getScrollElement: () => scrollEl,
+    estimateSize: () => ROW_HEIGHT_PX,
+    overscan: 10,
+  });
+
+  // Until we've latched onto the scroll element, render nothing —
+  // getScrollElement would otherwise return null and the virtualizer
+  // logs a warning. The pages already show their own skeleton/loading
+  // state while data fetches.
+  if (!scrollEl) {
+    return <div ref={anchorRef} />;
+  }
+
+  const items = virtualizer.getVirtualItems();
+  const totalHeight = virtualizer.getTotalSize();
+
+  return (
+    <div ref={anchorRef} className="relative" style={{ height: totalHeight }}>
+      {items.map((vi) => (
+        <div
+          key={rowIds[vi.index]}
+          data-index={vi.index}
+          ref={virtualizer.measureElement}
+          className="absolute inset-x-0"
+          style={{ transform: `translateY(${vi.start}px)` }}
+        >
+          {children(vi.index)}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 
 function SortableTracks({
   ids,
@@ -224,6 +332,10 @@ function TrackRow({
   const isLoading = isCurrent && meta.loading;
   const isDownloaded = useIsDownloaded(track.id);
   const liked = favs.has("track", track.id);
+  const [creditsOpen, setCreditsOpen] = useState(false);
+  const selection = useTrackSelection();
+  const isSelected = selection.has(track.id);
+  const anySelected = selection.selected.size > 0;
 
   // useSortable is safe to call unconditionally — outside a SortableContext
   // it returns inert defaults so non-sortable callers render normally.
@@ -291,39 +403,36 @@ function TrackRow({
           className={cn(
             "group grid grid-cols-[24px_4fr_3fr_48px_40px_40px] items-center gap-4 rounded-md px-4 py-2 text-sm hover:bg-accent",
             isCurrent && "bg-accent/60",
+            isSelected && "bg-primary/10",
             sortable && "cursor-grab touch-none active:cursor-grabbing",
             sort.isDragging && "bg-accent shadow-lg",
           )}
           onDoubleClick={() => actions.play(track, context)}
         >
-          <button
-            onClick={onPlayToggle}
-            className="flex h-6 w-6 items-center justify-center text-muted-foreground hover:text-foreground"
-            title={isPlaying ? "Pause preview" : "Play preview"}
-          >
-            <span
-              className={cn(
-                "text-xs",
-                isCurrent ? "hidden" : "inline group-hover:hidden",
-              )}
-            >
-              {numbered ? index + 1 : ""}
-            </span>
-            <span
-              className={cn(
-                "items-center justify-center",
-                isCurrent ? "flex" : "hidden group-hover:flex",
-              )}
-            >
-              {isLoading ? (
-                <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
-              ) : isPlaying ? (
-                <Pause className="h-3.5 w-3.5 text-primary" fill="currentColor" />
-              ) : (
-                <Play className="h-3.5 w-3.5" fill="currentColor" />
-              )}
-            </span>
-          </button>
+          <RowLeadCell
+            index={index}
+            numbered={numbered}
+            isCurrent={isCurrent}
+            isPlaying={isPlaying}
+            isLoading={isLoading}
+            isSelected={isSelected}
+            anySelected={anySelected}
+            onPlayToggle={onPlayToggle}
+            onToggleSelect={(shiftKey) => {
+              if (shiftKey && selection.selected.size > 0) {
+                // Anchor on the first selected track that exists in this
+                // list. If none is in the list, fall back to a plain toggle.
+                const firstAnchorId = Array.from(selection.selected.keys()).find(
+                  (id) => context.some((t) => t.id === id),
+                );
+                if (firstAnchorId) {
+                  selection.toggleRange(context, firstAnchorId, track.id);
+                  return;
+                }
+              }
+              selection.toggle(track);
+            }}
+          />
           <div className="flex min-w-0 items-center gap-3">
             {showAlbum && track.album?.cover && (
               <img
@@ -396,6 +505,13 @@ function TrackRow({
           <Radio className="h-3.5 w-3.5" /> Start radio
         </ContextMenuItem>
         <ContextMenuSeparator />
+        <ContextMenuItem onSelect={() => selection.toggle(track)}>
+          <CheckSquare
+            className={cn("h-3.5 w-3.5", isSelected && "text-primary")}
+          />
+          {isSelected ? "Deselect" : "Select"}
+        </ContextMenuItem>
+        <ContextMenuSeparator />
         <ContextMenuItem onSelect={() => favs.toggle("track", track.id)}>
           <Check
             className={cn("h-3.5 w-3.5", liked ? "text-primary" : "opacity-0")}
@@ -423,6 +539,9 @@ function TrackRow({
           </ContextMenuItem>
         )}
         <ContextMenuSeparator />
+        <ContextMenuItem onSelect={() => setCreditsOpen(true)}>
+          <FileText className="h-3.5 w-3.5" /> Credits…
+        </ContextMenuItem>
         <ContextMenuItem onSelect={copyTidalLink}>
           <Copy className="h-3.5 w-3.5" /> Copy Tidal link
         </ContextMenuItem>
@@ -435,7 +554,110 @@ function TrackRow({
           </>
         )}
       </ContextMenuContent>
+      <CreditsDialog
+        trackId={track.id}
+        trackName={track.name}
+        open={creditsOpen}
+        onOpenChange={setCreditsOpen}
+      />
     </ContextMenu>
+  );
+}
+
+/**
+ * The leftmost column of a track row — shows the track number, play/pause
+ * indicator, or a selection checkbox depending on context.
+ *
+ * Rules:
+ *  - Always checkbox if the row is selected OR anything else is selected
+ *    (checkbox mode is "sticky" once engaged so the user can multi-select
+ *    by ticking consecutively without losing state on hover out).
+ *  - Hover with nothing selected: play/pause icon.
+ *  - Otherwise: track number (or empty if numbered=false).
+ */
+function RowLeadCell({
+  index,
+  numbered,
+  isCurrent,
+  isPlaying,
+  isLoading,
+  isSelected,
+  anySelected,
+  onPlayToggle,
+  onToggleSelect,
+}: {
+  index: number;
+  numbered: boolean;
+  isCurrent: boolean;
+  isPlaying: boolean;
+  isLoading: boolean;
+  isSelected: boolean;
+  anySelected: boolean;
+  onPlayToggle: () => void;
+  onToggleSelect: (shiftKey: boolean) => void;
+}) {
+  // Stop pointer events from bubbling to the row — otherwise the drag
+  // sensor on sortable rows would interpret a click-and-drag over these
+  // buttons as a drag start after 6px of movement, stealing the click.
+  const stopPointerDown = (e: React.PointerEvent) => e.stopPropagation();
+
+  if (anySelected) {
+    return (
+      <button
+        onPointerDown={stopPointerDown}
+        onClick={(e) => {
+          e.stopPropagation();
+          onToggleSelect(e.shiftKey);
+        }}
+        className="flex h-6 w-6 items-center justify-center"
+        aria-label={isSelected ? "Deselect track" : "Select track"}
+        aria-pressed={isSelected}
+      >
+        <span
+          className={cn(
+            "flex h-4 w-4 items-center justify-center rounded border text-primary-foreground transition-colors",
+            isSelected
+              ? "border-primary bg-primary"
+              : "border-muted-foreground/50 bg-transparent hover:border-foreground",
+          )}
+        >
+          {isSelected && <Check className="h-3 w-3" />}
+        </span>
+      </button>
+    );
+  }
+
+  // Default: play/pause on hover, number/empty otherwise.
+  return (
+    <button
+      onPointerDown={stopPointerDown}
+      onClick={onPlayToggle}
+      className="group/play relative flex h-6 w-6 items-center justify-center text-muted-foreground hover:text-foreground"
+      title={isPlaying ? "Pause preview" : "Play preview"}
+    >
+      <span
+        className={cn(
+          "text-xs",
+          isCurrent ? "hidden" : "inline group-hover:hidden",
+        )}
+      >
+        {numbered ? index + 1 : ""}
+      </span>
+      <span
+        className={cn(
+          "items-center justify-center",
+          isCurrent ? "flex" : "hidden group-hover:flex",
+        )}
+      >
+        {isLoading ? (
+          <Loader2 className="h-3.5 w-3.5 animate-spin text-primary" />
+        ) : isPlaying ? (
+          <Pause className="h-3.5 w-3.5 text-primary" fill="currentColor" />
+        ) : (
+          <Play className="h-3.5 w-3.5" fill="currentColor" />
+        )}
+      </span>
+    </button>
   );
 }
 

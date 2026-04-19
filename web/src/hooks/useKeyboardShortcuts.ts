@@ -44,7 +44,9 @@ export function useKeyboardShortcuts({ onOpenPalette }: { onOpenPalette: () => v
       } else if (e.shiftKey && e.key === "ArrowLeft") {
         e.preventDefault();
         actions.prev();
-      } else if (e.key.toLowerCase() === "m") {
+      } else if (e.key.toLowerCase() === "m" && !e.metaKey && !e.ctrlKey && !e.altKey) {
+        // Guard against Cmd/Ctrl+M collisions — on macOS Cmd+M minimizes
+        // the window and triggering mute at the same time is surprising.
         actions.setVolume(volume === 0 ? 1 : 0);
       }
     };

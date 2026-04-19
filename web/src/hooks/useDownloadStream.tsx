@@ -32,7 +32,15 @@ export function DownloadStreamProvider({ children }: { children: ReactNode }) {
   const listenersRef = useRef<Set<Listener>>(new Set());
 
   useEffect(() => {
-    const es = new EventSource("/api/downloads/stream");
+    let closed = false;
+    let es: EventSource | null = null;
+    let retryTimer: number | null = null;
+    // Exponential backoff capped at 30s. EventSource auto-reconnects on
+    // transport failure, but only while the server keeps replying 200 —
+    // a 401 (session expired) or a long outage pushes the browser into
+    // `readyState === CLOSED` and we have to rebuild the socket ourselves.
+    let backoffMs = 1000;
+
     const handle = (evt: MessageEvent) => {
       let payload: DownloadEvent;
       try {
@@ -51,10 +59,37 @@ export function DownloadStreamProvider({ children }: { children: ReactNode }) {
         }
       }
     };
-    es.addEventListener("download", handle as EventListener);
+
+    const connect = () => {
+      if (closed) return;
+      es = new EventSource("/api/downloads/stream");
+      es.addEventListener("download", handle as EventListener);
+      es.onopen = () => {
+        // Successful handshake — reset the backoff so the next failure
+        // starts from 1s again.
+        backoffMs = 1000;
+      };
+      es.onerror = () => {
+        if (closed) return;
+        // CLOSED means the browser gave up reconnecting. Tear down and
+        // schedule our own reconnect with backoff.
+        if (es && es.readyState === EventSource.CLOSED) {
+          es.close();
+          es = null;
+          retryTimer = window.setTimeout(connect, backoffMs);
+          backoffMs = Math.min(backoffMs * 2, 30000);
+        }
+      };
+    };
+    connect();
+
     return () => {
-      es.removeEventListener("download", handle as EventListener);
-      es.close();
+      closed = true;
+      if (retryTimer) window.clearTimeout(retryTimer);
+      if (es) {
+        es.removeEventListener("download", handle as EventListener);
+        es.close();
+      }
     };
   }, []);
 

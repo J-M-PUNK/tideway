@@ -78,6 +78,11 @@ export function useLyrics(trackId: string | null | undefined): {
   }, [trackId]);
 
   const lyrics = trackId ? cache.get(trackId) ?? null : null;
-  const loading = !!trackId && !cache.has(trackId) && inflight.has(trackId);
+  // Treat as loading whenever we have a trackId and no cache entry yet,
+  // regardless of whether the in-flight request has been registered by
+  // our effect. Otherwise the very first render (before the effect
+  // fires) flashes the "No lyrics available" empty state between the
+  // track change and the fetch kicking off.
+  const loading = !!trackId && !cache.has(trackId);
   return { lyrics, loading };
 }

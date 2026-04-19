@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Check, ChevronDown, Download } from "lucide-react";
 import { api } from "@/api/client";
-import type { ContentKind, Settings } from "@/api/types";
+import type { ContentKind } from "@/api/types";
 import { Button, type ButtonProps } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -11,23 +11,49 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { cn } from "@/lib/utils";
+import { useQualities } from "@/hooks/useQualities";
+import { cn, qualityLabel } from "@/lib/utils";
 
-export interface QualityOption {
-  value: string;
-  label: string;
-  codec: string;
-  bitrate: string;
-  description: string;
+// The user's default quality comes from server settings; we cache it at
+// module level so every DownloadButton mount doesn't re-fetch. A
+// subscriber list lets SettingsPage push a fresh value after Save so
+// open DropdownMenus reflect the new default immediately.
+let _cachedDefaultQuality: string | null = null;
+// In-flight dedup: without this, 20 DownloadButtons rendering in
+// parallel each fire their own api.settings.get() the instant they
+// mount (the cache check returns `null` until the first response lands).
+let _inflight: Promise<void> | null = null;
+type Sub = (q: string | null) => void;
+const _subs = new Set<Sub>();
+
+export function publishDefaultQuality(quality: string | null): void {
+  _cachedDefaultQuality = quality;
+  _subs.forEach((s) => s(quality));
 }
 
-let _cachedQualities: QualityOption[] | null = null;
-let _cachedSettings: Settings | null = null;
+/** Reset the cached default quality so the next DownloadButton mount
+ * re-pulls it from the server. Used when auth state changes (e.g. PKCE
+ * login) — the server may have clamped or unclamped the saved default
+ * after the tier was re-detected under the new client_id. */
+export function resetDefaultQualityCache(): void {
+  _cachedDefaultQuality = null;
+  _inflight = null;
+  _subs.forEach((s) => s(null));
+}
 
-async function loadCatalog() {
-  if (!_cachedQualities) _cachedQualities = await api.qualities();
-  if (!_cachedSettings) _cachedSettings = await api.settings.get();
-  return { qualities: _cachedQualities, settings: _cachedSettings };
+function ensureDefaultQuality(): void {
+  if (_cachedDefaultQuality || _inflight) return;
+  _inflight = api.settings
+    .get()
+    .then((s) => {
+      publishDefaultQuality(s.quality);
+    })
+    .catch(() => {
+      /* Non-critical — falls back to "Use default (session)" */
+    })
+    .finally(() => {
+      _inflight = null;
+    });
 }
 
 interface Props {
@@ -53,17 +79,18 @@ export function DownloadButton({
   className,
   onOpenChange,
 }: Props) {
-  const [qualities, setQualities] = useState<QualityOption[]>(_cachedQualities ?? []);
-  const [defaultQuality, setDefaultQuality] = useState<string | null>(
-    _cachedSettings?.quality ?? null,
-  );
+  const qualities = useQualities() ?? [];
+  const [defaultQuality, setDefaultQuality] = useState<string | null>(_cachedDefaultQuality);
 
   useEffect(() => {
-    if (_cachedQualities && _cachedSettings) return;
-    loadCatalog().then(({ qualities, settings }) => {
-      setQualities(qualities);
-      setDefaultQuality(settings.quality);
-    });
+    _subs.add(setDefaultQuality);
+    return () => {
+      _subs.delete(setDefaultQuality);
+    };
+  }, []);
+
+  useEffect(() => {
+    ensureDefaultQuality();
   }, []);
 
   const stop = (e: React.SyntheticEvent) => {
@@ -126,7 +153,8 @@ export function DownloadButton({
             <span className="text-sm font-semibold">Use default</span>
             <span className="text-xs text-muted-foreground">
               {defaultQuality
-                ? qualities.find((q) => q.value === defaultQuality)?.label ?? defaultQuality
+                ? qualities.find((q) => q.value === defaultQuality)?.label ??
+                  qualityLabel(defaultQuality)
                 : "From Settings"}
             </span>
           </div>

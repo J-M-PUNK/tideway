@@ -48,16 +48,16 @@ function Section({
   category: PageCategory;
   onDownload: OnDownload;
 }) {
-  const { type, title, items } = category;
+  const { type, title, subtitle, items } = category;
 
   if (type === "TrackList") {
     return (
       <div>
-        {title && <SectionHeader title={title} />}
+        {title && <SectionHeader title={title} subtitle={subtitle} />}
         <TrackList
           tracks={items.filter((i): i is Track => i.kind === "track")}
           onDownload={onDownload}
-         
+
         />
       </div>
     );
@@ -68,7 +68,7 @@ function Section({
     if (links.length === 0) return null;
     return (
       <div>
-        {title && <SectionHeader title={title} />}
+        {title && <SectionHeader title={title} subtitle={subtitle} />}
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
           {links.map((l) => (
             <PageLinkTile key={l.path} link={l} />
@@ -82,7 +82,7 @@ function Section({
   // ShortcutList, FeaturedItems, ItemList, HorizontalListWithContext, etc.)
   return (
     <div>
-      {title && <SectionHeader title={title} />}
+      {title && <SectionHeader title={title} subtitle={subtitle} />}
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6">
         {items.map((it, idx) => (
           <PageItemCard key={`${it.kind}-${itemKey(it)}-${idx}`} item={it} onDownload={onDownload} />
@@ -96,8 +96,15 @@ function itemKey(i: PageItem): string {
   return "id" in i ? i.id : i.kind === "pagelink" ? i.path : "";
 }
 
-function SectionHeader({ title }: { title: string }) {
-  return <h2 className="mb-4 text-xl font-bold tracking-tight">{title}</h2>;
+function SectionHeader({ title, subtitle }: { title: string; subtitle?: string }) {
+  return (
+    <div className="mb-4">
+      <h2 className="text-xl font-bold tracking-tight">{title}</h2>
+      {subtitle && (
+        <p className="mt-0.5 text-sm text-muted-foreground">{subtitle}</p>
+      )}
+    </div>
+  );
 }
 
 function PageItemCard({ item, onDownload }: { item: PageItem; onDownload: OnDownload }) {

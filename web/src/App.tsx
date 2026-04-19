@@ -1,8 +1,7 @@
-import { useCallback, useEffect, useState } from "react";
-import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { BrowserRouter, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { Loader2 } from "lucide-react";
 import { Sidebar } from "@/components/Sidebar";
-import { DownloadDock } from "@/components/DownloadDock";
 import { NavBar } from "@/components/NavBar";
 import { NowPlaying } from "@/components/NowPlaying";
 import { QueuePanel } from "@/components/QueuePanel";
@@ -10,13 +9,17 @@ import { LyricsPanel } from "@/components/LyricsPanel";
 import { FullScreenPlayer } from "@/components/FullScreenPlayer";
 import { CommandPalette } from "@/components/CommandPalette";
 import { CreatePlaylistDialog } from "@/components/CreatePlaylistDialog";
+import { UrlDropTarget } from "@/components/UrlDropTarget";
 import { ToastProvider, useToast } from "@/components/toast";
 import { DownloadedProvider } from "@/hooks/useDownloadedSet";
 import { DownloadStreamProvider } from "@/hooks/useDownloadStream";
 import { FavoritesProvider } from "@/hooks/useFavorites";
 import { MyPlaylistsProvider } from "@/hooks/useMyPlaylists";
 import { RecentsProvider } from "@/hooks/useRecentlyPlayed";
+import { TrackSelectionProvider } from "@/hooks/useTrackSelection";
+import { UiPreferencesProvider } from "@/hooks/useUiPreferences";
 import { PlayerProvider } from "@/hooks/PlayerContext";
+import { SelectionBar } from "@/components/SelectionBar";
 import { useAuth } from "@/hooks/useAuth";
 import { useDownloads } from "@/hooks/useDownloads";
 import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
@@ -29,6 +32,9 @@ import { Search } from "@/pages/Search";
 import { Library } from "@/pages/Library";
 import { Explore } from "@/pages/Explore";
 import { BrowsePage } from "@/pages/BrowsePage";
+import { ChartsPage } from "@/pages/ChartsPage";
+import { FeedPage } from "@/pages/FeedPage";
+import { HistoryPage } from "@/pages/HistoryPage";
 import { AlbumDetail } from "@/pages/AlbumDetail";
 import { ArtistDetail } from "@/pages/ArtistDetail";
 import { MixDetail } from "@/pages/MixDetail";
@@ -39,17 +45,19 @@ import { SettingsPage } from "@/pages/SettingsPage";
 export default function App() {
   return (
     <ToastProvider>
-      <DownloadStreamProvider>
-        <DownloadedProvider>
-          <FavoritesProvider>
-            <MyPlaylistsProvider>
-              <RecentsProvider>
-                <AppInner />
-              </RecentsProvider>
-            </MyPlaylistsProvider>
-          </FavoritesProvider>
-        </DownloadedProvider>
-      </DownloadStreamProvider>
+      <UiPreferencesProvider>
+        <DownloadStreamProvider>
+          <DownloadedProvider>
+            <FavoritesProvider>
+              <MyPlaylistsProvider>
+                <RecentsProvider>
+                  <AppInner />
+                </RecentsProvider>
+              </MyPlaylistsProvider>
+            </FavoritesProvider>
+          </DownloadedProvider>
+        </DownloadStreamProvider>
+      </UiPreferencesProvider>
     </ToastProvider>
   );
 }
@@ -71,19 +79,35 @@ function AppInner() {
 
   return (
     <BrowserRouter>
-      {/* PlayerProvider is mounted BELOW BrowserRouter so nav inside the
-          player UI works, and ABOVE Shell so everything that uses the
-          player can pull from context instead of prop drilling. */}
+      {/* PlayerProvider and TrackSelectionProvider both mount BELOW
+          BrowserRouter — PlayerProvider doesn't strictly need it, but
+          TrackSelectionProvider uses useLocation() to clear selection on
+          route change. Keeping them colocated here for clarity. */}
       <PlayerProvider>
-        <Shell username={auth.username} onLogout={auth.logout} />
+        <TrackSelectionProvider>
+          <Shell
+            username={auth.username}
+            avatar={auth.avatar}
+            onLogout={auth.logout}
+          />
+        </TrackSelectionProvider>
       </PlayerProvider>
     </BrowserRouter>
   );
 }
 
-function Shell({ username, onLogout }: { username: string | null; onLogout: () => void }) {
+function Shell({
+  username,
+  avatar,
+  onLogout,
+}: {
+  username: string | null;
+  avatar: string | null;
+  onLogout: () => void;
+}) {
   const downloads = useDownloads();
   const toast = useToast();
+  const location = useLocation();
   const [queueOpen, setQueueOpen] = useState(false);
   const [lyricsOpen, setLyricsOpen] = useState(false);
   const [fullOpen, setFullOpen] = useState(false);
@@ -92,6 +116,51 @@ function Shell({ username, onLogout }: { username: string | null; onLogout: () =
 
   useKeyboardShortcuts({ onOpenPalette: () => setPaletteOpen(true) });
   useMediaSession();
+
+  // Track unseen completed downloads so the sidebar can badge "X new
+  // finished" when the user hasn't looked at /downloads yet. When the
+  // user lands on /downloads, mark everything currently finished as
+  // seen. Persisted so a reload doesn't re-surface old downloads.
+  const [seenCompletedIds, setSeenCompletedIds] = useState<Set<string>>(() => {
+    try {
+      const raw = localStorage.getItem("tidal-downloader:seen-downloads");
+      return raw ? new Set(JSON.parse(raw) as string[]) : new Set();
+    } catch {
+      return new Set();
+    }
+  });
+  useEffect(() => {
+    if (location.pathname !== "/downloads") return;
+    const ids = new Set(downloads.completed.map((c) => c.id));
+    setSeenCompletedIds(ids);
+    try {
+      localStorage.setItem(
+        "tidal-downloader:seen-downloads",
+        JSON.stringify(Array.from(ids)),
+      );
+    } catch {
+      /* ignore */
+    }
+  }, [location.pathname, downloads.completed]);
+  const newCompletedCount = useMemo(
+    () => downloads.completed.filter((c) => !seenCompletedIds.has(c.id)).length,
+    [downloads.completed, seenCompletedIds],
+  );
+
+  // Replay the route-fade animation on navigation without remounting the
+  // routed view. Keying on location.pathname would throw away in-page
+  // state (scroll position, fetch cache, expanded dropdowns) whenever a
+  // route param changed (e.g. /album/1 → /album/2), which is a real
+  // regression. Instead, remove + re-add the animation class on a stable
+  // wrapper so the CSS keyframes restart cleanly.
+  const fadeRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const el = fadeRef.current;
+    if (!el) return;
+    el.classList.remove("animate-route");
+    void el.offsetWidth;
+    el.classList.add("animate-route");
+  }, [location.pathname]);
 
   // Esc closes any open side panel. Lyrics wins over queue so the user can
   // stack them without ambiguity.
@@ -134,13 +203,27 @@ function Shell({ username, onLogout }: { username: string | null; onLogout: () =
   return (
     <div className="flex h-screen flex-col bg-black">
       <div className="flex min-h-0 flex-1 gap-2 p-2 pb-0">
-        <Sidebar username={username} activeDownloads={downloads.active.length} />
-        <main className="min-w-0 flex-1 overflow-y-auto rounded-lg bg-gradient-to-b from-[#1a1a1a] to-background px-8 py-6 scrollbar-thin">
-          <NavBar />
+        <Sidebar
+          activeDownloads={downloads.active.length}
+          newDownloads={newCompletedCount}
+        />
+        <main
+          data-scroll-container
+          className="min-w-0 flex-1 overflow-y-auto rounded-lg bg-gradient-to-b from-[#1a1a1a] to-background scrollbar-thin"
+        >
+          {/* The scroll container itself carries no padding — otherwise
+              `sticky top-0` on NavBar would anchor at the padding edge
+              and the NavBar would visually drop 24px when the user
+              scrolls. Padding lives on the route wrapper below NavBar;
+              DetailHero still uses `-mx-8 -mt-6` to bleed against it. */}
+          <NavBar username={username} avatar={avatar} onLogout={onLogout} />
+          <div ref={fadeRef} className="animate-route px-8 py-6">
           <Routes>
             <Route path="/" element={<Home onDownload={enqueue} />} />
             <Route path="/search" element={<Search onDownload={enqueue} />} />
             <Route path="/explore" element={<Explore onDownload={enqueue} />} />
+            <Route path="/charts" element={<Navigate to="/charts/new" replace />} />
+            <Route path="/charts/:chart" element={<ChartsPage onDownload={enqueue} />} />
             <Route path="/browse/:path" element={<BrowsePage onDownload={enqueue} />} />
             <Route path="/library" element={<Navigate to="/library/albums" replace />} />
             <Route path="/library/:section" element={<Library onDownload={enqueue} />} />
@@ -148,12 +231,16 @@ function Shell({ username, onLogout }: { username: string | null; onLogout: () =
             <Route path="/artist/:id" element={<ArtistDetail onDownload={enqueue} />} />
             <Route path="/playlist/:id" element={<PlaylistDetail onDownload={enqueue} />} />
             <Route path="/mix/:id" element={<MixDetail onDownload={enqueue} />} />
+            <Route path="/feed" element={<FeedPage onDownload={enqueue} />} />
+            <Route path="/history" element={<HistoryPage onDownload={enqueue} />} />
             <Route path="/downloads" element={<Downloads items={downloads.items} />} />
             <Route path="/settings" element={<SettingsPage onLogout={onLogout} />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
+          </div>
         </main>
       </div>
+      <SelectionBar />
       <NowPlaying
         onDownload={enqueue}
         onExpand={() => setFullOpen(true)}
@@ -166,7 +253,6 @@ function Shell({ username, onLogout }: { username: string | null; onLogout: () =
           setLyricsOpen((v) => !v);
         }}
       />
-      <DownloadDock items={downloads.items} activeCount={downloads.active.length} />
       <QueuePanel open={queueOpen} onClose={() => setQueueOpen(false)} />
       <LyricsPanel open={lyricsOpen} onClose={() => setLyricsOpen(false)} />
       <FullScreenPlayer
@@ -183,6 +269,7 @@ function Shell({ username, onLogout }: { username: string | null; onLogout: () =
         open={createPlaylistOpen}
         onOpenChange={setCreatePlaylistOpen}
       />
+      <UrlDropTarget />
     </div>
   );
 }

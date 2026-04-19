@@ -46,4 +46,17 @@
   .scrollbar-thin::-webkit-scrollbar-thumb { background: hsl(0 0% 22%); border-radius: 999px; }
   .scrollbar-thin::-webkit-scrollbar-thumb:hover { background: hsl(0 0% 30%); }
   .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
+
+  /* Subtle fade-in applied to the routed view on every navigation.
+     Keyed on location.pathname in App.tsx so the animation replays. */
+  @keyframes route-fade {
+    from { opacity: 0; transform: translateY(4px); }
+    to   { opacity: 1; transform: translateY(0); }
+  }
+  .animate-route { animation: route-fade 120ms ease-out; }
+
+  /* Users who prefer reduced motion get no animations. */
+  @media (prefers-reduced-motion: reduce) {
+    .animate-route { animation: none; }
+  }
 }
