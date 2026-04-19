@@ -3,4 +3,7 @@ tidalapi>=0.7.0
 mutagen>=1.47.0
 requests>=2.31.0
 pillow>=10.0.0
+fastapi>=0.110.0
+uvicorn[standard]>=0.27.0
+sse-starlette>=2.0.0
 # ffmpeg is a system dependency — install separately and ensure it's on PATH
