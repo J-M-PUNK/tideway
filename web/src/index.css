@@ -3,27 +3,69 @@
 @tailwind utilities;
 
 @layer base {
+  /* Default (dark) palette — lives on :root so components work without
+   *  a theme class. The `.light` override below flips the same variables
+   *  for light mode; Tailwind classes that reference `bg-background`,
+   *  `text-foreground`, etc. pick up whichever set is active. */
   :root {
-    --background: 0 0% 5%;
+    --background: 0 0% 2%;
     --foreground: 0 0% 98%;
-    --card: 0 0% 8%;
+    --card: 0 0% 4%;
     --card-foreground: 0 0% 98%;
-    --popover: 0 0% 8%;
+    --popover: 0 0% 4%;
     --popover-foreground: 0 0% 98%;
     --primary: 166 100% 41%;
-    --primary-foreground: 0 0% 5%;
-    --secondary: 0 0% 14%;
+    --primary-foreground: 0 0% 2%;
+    --secondary: 0 0% 9%;
     --secondary-foreground: 0 0% 98%;
-    --muted: 0 0% 14%;
-    --muted-foreground: 0 0% 63%;
-    --accent: 0 0% 14%;
+    --muted: 0 0% 9%;
+    --muted-foreground: 0 0% 60%;
+    --accent: 0 0% 9%;
     --accent-foreground: 0 0% 98%;
-    --destructive: 0 72% 51%;
+    --destructive: 0 72% 44%;
     --destructive-foreground: 0 0% 98%;
-    --border: 0 0% 18%;
-    --input: 0 0% 18%;
+    --border: 0 0% 13%;
+    --input: 0 0% 13%;
     --ring: 166 100% 41%;
     --radius: 0.5rem;
+    /* Theme-specific chrome colors (scrollbar track/thumb, hardcoded
+     *  now-playing bar, hero gradient fallback). Defined here as
+     *  variables so the `.light` block can override them too. */
+    --now-playing-bg: 0 0% 4%;
+    --scrollbar-thumb: 0 0% 16%;
+    --scrollbar-thumb-hover: 0 0% 24%;
+  }
+
+  .light {
+    /* Off-white base with a cool tint so `bg-card` (pure white) reads
+     *  as elevated against it — the old palette had background at 100%
+     *  and card at 98%, which left surfaces indistinguishable. The
+     *  cool tint (220° hue) also keeps the whole UI from looking
+     *  sterile / Windows-95-y under bright daylight displays. */
+    --background: 220 16% 96%;
+    --foreground: 220 20% 14%;
+    --card: 0 0% 100%;
+    --card-foreground: 220 20% 14%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 220 20% 14%;
+    /* Teal tuned for contrast on white (≈4.6:1). 100% saturation
+     *  vibrates against a light background, so drop it a bit. */
+    --primary: 166 82% 33%;
+    --primary-foreground: 0 0% 100%;
+    --secondary: 220 14% 92%;
+    --secondary-foreground: 220 20% 14%;
+    --muted: 220 14% 92%;
+    --muted-foreground: 220 9% 42%;
+    --accent: 220 14% 88%;
+    --accent-foreground: 220 20% 14%;
+    --destructive: 0 72% 46%;
+    --destructive-foreground: 0 0% 100%;
+    --border: 220 13% 86%;
+    --input: 220 13% 86%;
+    --ring: 166 82% 33%;
+    --now-playing-bg: 0 0% 100%;
+    --scrollbar-thumb: 220 12% 78%;
+    --scrollbar-thumb-hover: 220 12% 62%;
   }
 
   * {
@@ -43,8 +85,8 @@
 
 @layer utilities {
   .scrollbar-thin::-webkit-scrollbar { width: 10px; height: 10px; }
-  .scrollbar-thin::-webkit-scrollbar-thumb { background: hsl(0 0% 22%); border-radius: 999px; }
-  .scrollbar-thin::-webkit-scrollbar-thumb:hover { background: hsl(0 0% 30%); }
+  .scrollbar-thin::-webkit-scrollbar-thumb { background: hsl(var(--scrollbar-thumb)); border-radius: 999px; }
+  .scrollbar-thin::-webkit-scrollbar-thumb:hover { background: hsl(var(--scrollbar-thumb-hover)); }
   .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
 
   /* Subtle fade-in applied to the routed view on every navigation.

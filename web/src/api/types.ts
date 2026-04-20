@@ -126,6 +126,8 @@ export interface Settings {
   create_album_folders: boolean;
   skip_existing: boolean;
   concurrent_downloads: number;
+  offline_mode: boolean;
+  notify_on_complete: boolean;
 }
 
 export interface AuthStatus {
@@ -168,6 +170,16 @@ export interface PageLinkItem {
 
 export type PageItem = Track | Album | Artist | Playlist | MixItem | PageLinkItem;
 
+/** Clickable entity reference for category headers like
+ *  "Because you liked X" — lets the UI show a thumbnail next to the
+ *  section title that navigates to the referenced album/artist/etc. */
+export interface PageContext {
+  kind: "album" | "artist" | "playlist" | "mix" | "track";
+  id: string;
+  title: string;
+  cover: string | null;
+}
+
 export interface PageCategory {
   type: string; // HorizontalList, TrackList, PageLinks, ShortcutList, etc.
   title: string;
@@ -175,9 +187,28 @@ export interface PageCategory {
    *  "Because you liked" or "Because you listened to". Only present when
    *  it adds information beyond `title`. */
   subtitle?: string;
+  /** Present on HORIZONTAL_LIST_WITH_CONTEXT rows — the related entity
+   *  that motivated the recommendation. */
+  context?: PageContext;
+  /** Present when Tidal offers a dedicated "view all" page for this row. */
+  viewAllPath?: string;
   items: PageItem[];
 }
 
 export interface TidalPage {
+  title?: string;
   categories: PageCategory[];
+}
+
+export interface LocalFile {
+  path: string;
+  relative_path: string;
+  title: string;
+  artist: string;
+  album: string;
+  track_num: number;
+  tidal_id: string | null;
+  duration: number;
+  size_bytes: number;
+  ext: string;
 }

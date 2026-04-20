@@ -4,6 +4,7 @@ import {
   Disc3,
   Download,
   Flame,
+  HardDrive,
   Heart,
   History,
   Home,
@@ -38,75 +39,89 @@ const library = [
   { to: "/library/albums", label: "Albums", icon: Disc3 },
   { to: "/library/artists", label: "Artists", icon: User },
   { to: "/library/tracks", label: "Liked Songs", icon: Heart },
+  { to: "/library/local", label: "On this device", icon: HardDrive },
   { to: "/history", label: "History", icon: History },
 ];
+
+// In offline mode the only link we keep in the "Your Library" section
+// is the local file list — everything else is Tidal-session-dependent.
+const offlineLibrary = [{ to: "/library/local", label: "On this device", icon: HardDrive }];
 
 export function Sidebar({
   activeDownloads,
   newDownloads,
+  offline = false,
 }: {
   activeDownloads: number;
   /** Count of completed downloads the user hasn't looked at yet. Shown
    *  only when no downloads are currently active — otherwise the active
    *  count takes precedence. */
   newDownloads: number;
+  /** When true, hide everything that needs a live Tidal session — the
+   *  user is signed out but has offline mode enabled. */
+  offline?: boolean;
 }) {
+  const libraryLinks = offline ? offlineLibrary : library;
   return (
-    <aside className="flex h-full w-64 flex-col gap-2 bg-black p-2 text-sm">
-      <nav className="rounded-lg bg-card p-2">
-        {primary.map(({ to, label, icon: Icon, end }) => (
-          <NavLink
-            key={to}
-            to={to}
-            end={end}
-            className={({ isActive }) =>
-              cn(
-                "flex items-center gap-4 rounded-md px-3 py-2 font-semibold text-muted-foreground transition-colors hover:text-foreground",
-                isActive && "text-foreground",
-              )
-            }
-          >
-            <Icon className="h-5 w-5" />
-            {label}
-          </NavLink>
-        ))}
-        <div className="mt-1 border-t border-border/50 pt-1">
-          {discover.map(({ to, label, icon: Icon }) => (
+    <aside className="flex h-full w-64 flex-col gap-2 bg-background p-2 text-sm">
+      {!offline && (
+        <nav className="rounded-lg bg-card p-2">
+          {primary.map(({ to, label, icon: Icon, end }) => (
             <NavLink
               key={to}
               to={to}
+              end={end}
               className={({ isActive }) =>
                 cn(
-                  "flex items-center gap-4 rounded-md px-3 py-1.5 text-[13px] font-medium text-muted-foreground transition-colors hover:text-foreground",
+                  "flex items-center gap-4 rounded-md px-3 py-2 font-semibold text-muted-foreground transition-colors hover:text-foreground",
                   isActive && "text-foreground",
                 )
               }
             >
-              <Icon className="h-4 w-4" />
+              <Icon className="h-5 w-5" />
               {label}
             </NavLink>
           ))}
-        </div>
-      </nav>
+          <div className="mt-1 border-t border-border/50 pt-1">
+            {discover.map(({ to, label, icon: Icon }) => (
+              <NavLink
+                key={to}
+                to={to}
+                className={({ isActive }) =>
+                  cn(
+                    "flex items-center gap-4 rounded-md px-3 py-1.5 text-[13px] font-medium text-muted-foreground transition-colors hover:text-foreground",
+                    isActive && "text-foreground",
+                  )
+                }
+              >
+                <Icon className="h-4 w-4" />
+                {label}
+              </NavLink>
+            ))}
+          </div>
+        </nav>
+      )}
 
       <div className="flex min-h-0 flex-1 flex-col rounded-lg bg-card p-2">
         <div className="flex items-center justify-between px-3 py-2 text-muted-foreground">
           <span className="flex items-center gap-3 font-semibold">
             <Library className="h-5 w-5" /> Your Library
           </span>
-          <CreatePlaylistDialog
-            trigger={
-              <button
-                className="rounded-full p-1.5 hover:bg-accent hover:text-foreground"
-                title="Create playlist"
-              >
-                <Plus className="h-4 w-4" />
-              </button>
-            }
-          />
+          {!offline && (
+            <CreatePlaylistDialog
+              trigger={
+                <button
+                  className="rounded-full p-1.5 hover:bg-accent hover:text-foreground"
+                  title="Create playlist"
+                >
+                  <Plus className="h-4 w-4" />
+                </button>
+              }
+            />
+          )}
         </div>
         <div className="mt-1 flex flex-col gap-px overflow-y-auto scrollbar-thin">
-          {library.map(({ to, label, icon: Icon }) => (
+          {libraryLinks.map(({ to, label, icon: Icon }) => (
             <NavLink
               key={to}
               to={to}

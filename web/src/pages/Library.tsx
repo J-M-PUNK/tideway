@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
-import { Disc3, Download, Heart, Library as LibraryIcon, List, ListMusic, Loader2, User } from "lucide-react";
-import { Navigate, useParams } from "react-router-dom";
+import { Compass, Disc3, Download, Heart, Library as LibraryIcon, List, ListMusic, Loader2, User } from "lucide-react";
+import { Link, Navigate, useParams } from "react-router-dom";
 import { api } from "@/api/client";
 import type { Album, Artist, Playlist, Track } from "@/api/types";
 import type { OnDownload } from "@/api/download";
@@ -141,7 +141,16 @@ export function Library({ onDownload }: { onDownload: OnDownload }) {
       {!data && !loadError && (type === "tracks" ? <TrackListSkeleton /> : <GridSkeleton />)}
 
       {data && data.length === 0 && (
-        <EmptyState icon={LibraryIcon} title={`No ${title.toLowerCase()} yet`} description={emptyHint} />
+        <EmptyState
+          icon={LibraryIcon}
+          title={`No ${title.toLowerCase()} yet`}
+          description={emptyHint}
+          action={
+            <Button asChild variant="secondary" size="sm">
+              <Link to="/explore"><Compass className="h-4 w-4" /> Explore Tidal</Link>
+            </Button>
+          }
+        />
       )}
 
       {data && data.length > 0 && filtered.length === 0 && (

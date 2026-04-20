@@ -1,5 +1,5 @@
-import { useEffect, useState } from "react";
-import { LogOut, Save, Settings as SettingsIcon } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { Check, Loader2, LogOut, Moon, Settings as SettingsIcon, Sun } from "lucide-react";
 import { api } from "@/api/client";
 import type { QualityOption, Settings } from "@/api/types";
 import { Button } from "@/components/ui/button";
@@ -7,16 +7,33 @@ import { publishDefaultQuality } from "@/components/DownloadButton";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/components/toast";
-import { useUiPreferences } from "@/hooks/useUiPreferences";
+import { useOfflineMode } from "@/hooks/useOfflineMode";
+import { useUiPreferences, type ThemeMode } from "@/hooks/useUiPreferences";
+import { Skeleton } from "@/components/Skeletons";
+import { cn } from "@/lib/utils";
+
+type SaveStatus = "idle" | "saving" | "saved" | "error";
 
 export function SettingsPage({ onLogout }: { onLogout: () => void }) {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [qualities, setQualities] = useState<QualityOption[]>([]);
-  const [saving, setSaving] = useState(false);
+  const [status, setStatus] = useState<SaveStatus>("idle");
   const toast = useToast();
   const ui = useUiPreferences();
+  // Pull out the setter rather than the whole context object: the
+  // autosave effect below depends on it, and the setter is a stable
+  // useState reference while the context object identity changes
+  // every time `offline` flips, which would otherwise spuriously
+  // re-run the effect and re-save.
+  const { set: setOfflineCtx } = useOfflineMode();
 
   const [loadError, setLoadError] = useState<Error | null>(null);
+  // null until the initial server load completes — that way the
+  // autosave effect below can tell "user edited something" apart from
+  // "server just handed us the initial snapshot".
+  const lastSavedRef = useRef<Settings | null>(null);
+  const saveTimerRef = useRef<number | null>(null);
+  const savedIndicatorRef = useRef<number | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -25,6 +42,7 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
         const [s, qs] = await Promise.all([api.settings.get(), api.qualities()]);
         if (cancelled) return;
         setSettings(s);
+        lastSavedRef.current = s;
         setQualities(qs);
       } catch (err) {
         if (!cancelled)
@@ -36,43 +54,91 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
     };
   }, []);
 
+  // Autosave. Debounced so text inputs (output_dir, filename_template)
+  // don't fire a request per keystroke. Toggles/selects feel instant
+  // anyway because the UI reflects the change immediately — the 600ms
+  // delay only shows up as a brief "Saving…" blip.
+  useEffect(() => {
+    if (!settings || !lastSavedRef.current) return;
+    if (settings === lastSavedRef.current) return;
+    if (saveTimerRef.current !== null) window.clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = window.setTimeout(async () => {
+      saveTimerRef.current = null;
+      setStatus("saving");
+      try {
+        const saved = await api.settings.put(settings);
+        lastSavedRef.current = saved;
+        // Server may normalize (e.g. resolve ~ in output_dir). Reflect
+        // the normalized value — unless the user has already typed more
+        // since we sent the request, in which case their in-flight text
+        // wins and we'll converge on the next debounce cycle.
+        setSettings((cur) =>
+          cur && JSON.stringify(cur) === JSON.stringify(settings) ? saved : cur,
+        );
+        publishDefaultQuality(saved.quality);
+        // Sync the offline-mode context so the app's shell reacts
+        // immediately when the user toggles it here — otherwise the
+        // sidebar and routes stay out of step until the next reload.
+        setOfflineCtx(saved.offline_mode);
+        // Broadcast the notification preference so the shell's
+        // useDownloadNotifications hook picks up the new value without
+        // waiting for a reload. Details payload is untyped on purpose
+        // so future settings can piggyback on the same event.
+        window.dispatchEvent(
+          new CustomEvent("tidal-settings-updated", { detail: saved }),
+        );
+        setStatus("saved");
+        if (savedIndicatorRef.current !== null)
+          window.clearTimeout(savedIndicatorRef.current);
+        savedIndicatorRef.current = window.setTimeout(() => {
+          setStatus((st) => (st === "saved" ? "idle" : st));
+          savedIndicatorRef.current = null;
+        }, 1500);
+      } catch (err) {
+        setStatus("error");
+        toast.show({
+          kind: "error",
+          title: "Save failed",
+          description: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }, 600);
+    // Deliberately NOT returning a cleanup that cancels the timer —
+    // doing so would cancel the only in-flight save whenever the
+    // component re-renders for unrelated reasons. The next edit
+    // clears + reschedules via the ref at the top of the effect.
+  }, [settings, toast]);
+
+  useEffect(() => {
+    return () => {
+      if (saveTimerRef.current !== null) window.clearTimeout(saveTimerRef.current);
+      if (savedIndicatorRef.current !== null) window.clearTimeout(savedIndicatorRef.current);
+    };
+  }, []);
+
   if (loadError)
     return (
       <div className="text-sm text-destructive">Couldn't load settings: {loadError.message}</div>
     );
-  if (!settings) return <div className="text-sm text-muted-foreground">Loading…</div>;
+  if (!settings) {
+    return (
+      <div className="max-w-2xl">
+        <Skeleton className="mb-8 h-9 w-48" />
+        {Array.from({ length: 3 }, (_, i) => (
+          <section
+            key={i}
+            className="mb-10 flex flex-col gap-5 rounded-lg border border-border/50 bg-card/40 p-6"
+          >
+            <Skeleton className="h-5 w-32" />
+            <Skeleton className="h-10 w-full" />
+            <Skeleton className="h-10 w-3/4" />
+          </section>
+        ))}
+      </div>
+    );
+  }
 
   const patch = (p: Partial<Settings>) => setSettings({ ...settings, ...p });
-
-  const save = async () => {
-    setSaving(true);
-    try {
-      const s = await api.settings.put(settings);
-      setSettings(s);
-      // Notify open DownloadButtons so their "Use default" checkmark
-      // moves to the new quality immediately — without this they show
-      // the old default until a hard reload.
-      publishDefaultQuality(s.quality);
-      toast.show({ kind: "success", title: "Settings saved" });
-    } catch (err) {
-      // Re-pull server truth so the form doesn't stay on an invalid
-      // output_dir the user just typed — otherwise repeated Saves
-      // retry the same rejected payload.
-      try {
-        const s = await api.settings.get();
-        setSettings(s);
-      } catch {
-        /* best-effort */
-      }
-      toast.show({
-        kind: "error",
-        title: "Save failed",
-        description: err instanceof Error ? err.message : String(err),
-      });
-    } finally {
-      setSaving(false);
-    }
-  };
 
   return (
     <div className="max-w-2xl">
@@ -153,10 +219,35 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
         title="Display"
         description="Local-only preferences — stored on this device, not synced to Tidal."
       >
+        <Field label="Theme">
+          <ThemePicker value={ui.theme} onChange={(t) => ui.set({ theme: t })} />
+        </Field>
         <Toggle
           checked={ui.offlineOnly}
           onChange={(v) => ui.set({ offlineOnly: v })}
           label="Show only downloaded tracks in lists"
+        />
+      </Section>
+
+      <Section
+        title="Offline mode"
+        description="Browse and play music already on this device without signing in to Tidal. Search, explore, and anything that needs a live session are hidden while offline mode is on."
+      >
+        <Toggle
+          checked={settings.offline_mode}
+          onChange={(v) => patch({ offline_mode: v })}
+          label="Work offline"
+        />
+      </Section>
+
+      <Section
+        title="Notifications"
+        description="Show a desktop notification when a batch of downloads finishes. Your browser will prompt for permission the first time a download completes after this is on."
+      >
+        <Toggle
+          checked={settings.notify_on_complete}
+          onChange={(v) => patch({ notify_on_complete: v })}
+          label="Notify me when downloads finish"
         />
       </Section>
 
@@ -169,15 +260,30 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
       </Section>
 
       <div className="mt-8 flex items-center gap-3">
-        <Button onClick={save} disabled={saving}>
-          <Save className="h-4 w-4" /> {saving ? "Saving…" : "Save"}
-        </Button>
         <Button variant="outline" onClick={onLogout}>
           <LogOut className="h-4 w-4" /> Log out
         </Button>
+        <SaveStatus status={status} />
       </div>
     </div>
   );
+}
+
+function SaveStatus({ status }: { status: SaveStatus }) {
+  if (status === "idle") return null;
+  if (status === "saving")
+    return (
+      <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+        <Loader2 className="h-3.5 w-3.5 animate-spin" /> Saving…
+      </span>
+    );
+  if (status === "saved")
+    return (
+      <span className="flex items-center gap-1.5 text-xs text-primary">
+        <Check className="h-3.5 w-3.5" /> Saved
+      </span>
+    );
+  return <span className="text-xs text-destructive">Save failed</span>;
 }
 
 function Section({
@@ -237,6 +343,43 @@ function Toggle({
       />
       {label}
     </label>
+  );
+}
+
+function ThemePicker({
+  value,
+  onChange,
+}: {
+  value: ThemeMode;
+  onChange: (v: ThemeMode) => void;
+}) {
+  const options: { value: ThemeMode; label: string; icon: typeof Moon }[] = [
+    { value: "dark", label: "Dark", icon: Moon },
+    { value: "light", label: "Light", icon: Sun },
+  ];
+  return (
+    <div className="inline-flex w-fit rounded-md border border-border bg-secondary p-1">
+      {options.map((opt) => {
+        const Icon = opt.icon;
+        const active = value === opt.value;
+        return (
+          <button
+            key={opt.value}
+            type="button"
+            onClick={() => onChange(opt.value)}
+            className={cn(
+              "flex items-center gap-2 rounded px-3 py-1.5 text-sm font-medium transition-colors",
+              active
+                ? "bg-background text-foreground shadow-sm"
+                : "text-muted-foreground hover:text-foreground",
+            )}
+          >
+            <Icon className="h-4 w-4" />
+            {opt.label}
+          </button>
+        );
+      })}
+    </div>
   );
 }
 

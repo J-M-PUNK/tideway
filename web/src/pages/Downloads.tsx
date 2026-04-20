@@ -1,5 +1,5 @@
-import { useMemo } from "react";
-import { CheckCircle2, ChevronDown, Download, FolderOpen, Loader2, RefreshCw, Trash2, XCircle } from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
+import { CheckCircle2, ChevronDown, Download, FolderOpen, HardDrive, Loader2, Pause, Play, RefreshCw, Trash2, X, XCircle } from "lucide-react";
 import type { DownloadItem } from "@/api/types";
 import { api } from "@/api/client";
 import { Button } from "@/components/ui/button";
@@ -18,7 +18,15 @@ import { useToast } from "@/components/toast";
 import { useQualities } from "@/hooks/useQualities";
 import { cn } from "@/lib/utils";
 
-export function Downloads({ items }: { items: DownloadItem[] }) {
+export function Downloads({
+  items,
+  offline = false,
+}: {
+  items: DownloadItem[];
+  /** True when the app is running without a live Tidal session. Retry
+   *  would inevitably 401, so we hide it to avoid false affordances. */
+  offline?: boolean;
+}) {
   const toast = useToast();
   // Single pass over the list instead of three filters per render.
   const { active, terminal, failed } = useMemo(() => {
@@ -76,6 +84,36 @@ export function Downloads({ items }: { items: DownloadItem[] }) {
     }
   };
 
+  const cancel = async (item: DownloadItem) => {
+    try {
+      await api.downloads.cancel(item.id);
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: "Couldn't cancel",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+
+  const cancelAll = async () => {
+    try {
+      const res = await api.downloads.cancelAll();
+      if (res.cancelled > 0) {
+        toast.show({
+          kind: "info",
+          title: `Cancelled ${res.cancelled} download${res.cancelled === 1 ? "" : "s"}`,
+        });
+      }
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: "Couldn't cancel downloads",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+
   const reveal = async (item: DownloadItem) => {
     if (!item.file_path) return;
     try {
@@ -109,12 +147,21 @@ export function Downloads({ items }: { items: DownloadItem[] }) {
   return (
     <div>
       <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
-        <h1 className="flex items-center gap-3 text-3xl font-bold tracking-tight">
-          <Download className="h-7 w-7" /> Downloads
-        </h1>
+        <div>
+          <h1 className="flex items-center gap-3 text-3xl font-bold tracking-tight">
+            <Download className="h-7 w-7" /> Downloads
+          </h1>
+          <DiskUsage terminalCount={terminal.length} />
+        </div>
         <div className="flex items-center gap-2">
           <AddUrlDialog />
-          {failed.length > 0 && (
+          <PauseToggle activeCount={active.length} />
+          {active.length > 0 && (
+            <Button variant="secondary" onClick={cancelAll}>
+              <X className="h-4 w-4" /> Cancel all
+            </Button>
+          )}
+          {failed.length > 0 && !offline && (
             <Button variant="secondary" onClick={retryAll}>
               <RefreshCw className="h-4 w-4" /> Retry failed
             </Button>
@@ -143,7 +190,7 @@ export function Downloads({ items }: { items: DownloadItem[] }) {
           </h2>
           <div className="flex flex-col gap-2">
             {active.map((item) => (
-              <Row key={item.id} item={item} onRetry={retry} onReveal={reveal} />
+              <Row key={item.id} item={item} onRetry={retry} onReveal={reveal} onCancel={cancel} offline={offline} />
             ))}
           </div>
         </>
@@ -156,7 +203,7 @@ export function Downloads({ items }: { items: DownloadItem[] }) {
           </h2>
           <div className="flex flex-col gap-2">
             {terminal.map((item) => (
-              <Row key={item.id} item={item} onRetry={retry} onReveal={reveal} />
+              <Row key={item.id} item={item} onRetry={retry} onReveal={reveal} onCancel={cancel} offline={offline} />
             ))}
           </div>
         </>
@@ -169,13 +216,18 @@ function Row({
   item,
   onRetry,
   onReveal,
+  onCancel,
+  offline = false,
 }: {
   item: DownloadItem;
   onRetry: (i: DownloadItem, quality?: string) => void;
   onReveal: (i: DownloadItem) => void;
+  onCancel: (i: DownloadItem) => void;
+  offline?: boolean;
 }) {
   const failed = item.status === "Failed";
   const done = item.status === "Complete";
+  const active = !failed && !done;
   const pct = Math.round(item.progress * 100);
 
   return (
@@ -210,7 +262,7 @@ function Row({
         )}
       </div>
       <div className="flex items-center justify-end gap-2">
-        {failed && <RetryButton onRetry={(q) => onRetry(item, q)} />}
+        {failed && !offline && <RetryButton onRetry={(q) => onRetry(item, q)} />}
         {done && item.file_path && (
           <Button
             size="sm"
@@ -221,8 +273,128 @@ function Row({
             <FolderOpen className="h-4 w-4" /> Show
           </Button>
         )}
+        {active && (
+          <Button
+            size="sm"
+            variant="ghost"
+            onClick={() => onCancel(item)}
+            title="Cancel download"
+            aria-label="Cancel download"
+          >
+            <X className="h-4 w-4" />
+          </Button>
+        )}
       </div>
     </div>
+  );
+}
+
+/**
+ * Inline disk-usage summary under the Downloads heading. Walks the
+ * output directory server-side (scandir; fast even for large libraries)
+ * and refreshes whenever a new item reaches a terminal state — so the
+ * number grows visibly as the queue drains.
+ */
+function DiskUsage({ terminalCount }: { terminalCount: number }) {
+  const [stats, setStats] = useState<{ total_bytes: number; file_count: number } | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.downloads
+      .stats()
+      .then((s) => {
+        if (!cancelled) setStats(s);
+      })
+      .catch(() => {
+        /* best-effort — if the folder doesn't exist yet just hide the widget */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [terminalCount]);
+
+  if (!stats || stats.file_count === 0) return null;
+  return (
+    <p className="mt-1 flex items-center gap-1.5 text-sm text-muted-foreground">
+      <HardDrive className="h-3.5 w-3.5" />
+      {formatBytes(stats.total_bytes)} · {stats.file_count.toLocaleString()} file
+      {stats.file_count === 1 ? "" : "s"}
+    </p>
+  );
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = n / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
+}
+
+/**
+ * Global pause/resume for the worker pool. Hidden when there's nothing
+ * in flight — pausing an empty queue just causes confusion. State is
+ * pulled from the server on mount so a reload doesn't reset the button
+ * to the wrong icon while the backend is still paused.
+ */
+function PauseToggle({ activeCount }: { activeCount: number }) {
+  const toast = useToast();
+  const [paused, setPaused] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.downloads
+      .state()
+      .then((s) => {
+        if (!cancelled) setPaused(s.paused);
+      })
+      .catch(() => {
+        /* best-effort */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (paused === null) return null;
+  if (!paused && activeCount === 0) return null;
+
+  const toggle = async () => {
+    try {
+      if (paused) {
+        await api.downloads.resume();
+        setPaused(false);
+        toast.show({ kind: "info", title: "Downloads resumed" });
+      } else {
+        await api.downloads.pause();
+        setPaused(true);
+        toast.show({ kind: "info", title: "Downloads paused" });
+      }
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: paused ? "Couldn't resume" : "Couldn't pause",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+
+  return (
+    <Button variant="secondary" onClick={toggle}>
+      {paused ? (
+        <>
+          <Play className="h-4 w-4" /> Resume
+        </>
+      ) : (
+        <>
+          <Pause className="h-4 w-4" /> Pause
+        </>
+      )}
+    </Button>
   );
 }
 
