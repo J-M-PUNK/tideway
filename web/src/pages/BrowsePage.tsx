@@ -24,12 +24,15 @@ export function BrowsePage({ onDownload }: { onDownload: OnDownload }) {
   }
   const { data, loading, error } = useApi(() => api.pagePath(decoded), [decoded]);
 
-  const title = deriveTitle(decoded);
+  // Prefer the title Tidal gives us in the response; fall back to a
+  // title derived from the path only when the backend didn't include
+  // one (older V1 pages).
+  const title = data?.title || deriveTitle(decoded);
 
   if (loading) {
     return (
       <div>
-        <h1 className="mb-8 text-3xl font-bold tracking-tight">{title}</h1>
+        <h1 className="mb-8 text-3xl font-bold tracking-tight">{deriveTitle(decoded)}</h1>
         <GridSkeleton count={12} />
       </div>
     );
@@ -45,10 +48,18 @@ export function BrowsePage({ onDownload }: { onDownload: OnDownload }) {
 }
 
 function deriveTitle(path: string): string {
-  // e.g. "pages/genre_hip_hop" → "Genre Hip Hop" → "Hip Hop"
-  const tail = path.replace(/^pages\//, "").replace(/^genre_/, "").replace(/^m_/, "");
-  return tail
-    .split("_")
+  // Fallback when the API response has no title. For V1 pages
+  // ("pages/genre_hip_hop") this produces a readable "Hip Hop". For
+  // V2 view-all paths ("home/pages/NEW_ALBUM_SUGGESTIONS/view-all")
+  // we grab the middle segment since the prefix/suffix are noise.
+  const viewAllMatch = path.match(/^home\/pages\/([^/]+)\/view-all$/i);
+  const raw = viewAllMatch
+    ? viewAllMatch[1]
+    : path.replace(/^pages\//, "").replace(/^genre_/, "").replace(/^m_/, "");
+  return raw
+    .toLowerCase()
+    .split(/[_\s]+/)
+    .filter(Boolean)
     .map((s) => s.charAt(0).toUpperCase() + s.slice(1))
     .join(" ");
 }

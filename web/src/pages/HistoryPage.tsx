@@ -1,4 +1,5 @@
-import { History, Music, Trash2 } from "lucide-react";
+import { Link } from "react-router-dom";
+import { History, Home, Music, Trash2 } from "lucide-react";
 import type { OnDownload } from "@/api/download";
 import { TrackList } from "@/components/TrackList";
 import { EmptyState } from "@/components/EmptyState";
@@ -43,6 +44,11 @@ export function HistoryPage({ onDownload }: { onDownload: OnDownload }) {
           icon={Music}
           title="Nothing here yet"
           description="Play a track for at least 10 seconds and it'll show up here."
+          action={
+            <Button asChild variant="secondary" size="sm">
+              <Link to="/"><Home className="h-4 w-4" /> Browse home</Link>
+            </Button>
+          }
         />
       ) : (
         <TrackList tracks={tracks} onDownload={onDownload} numbered={false} />

@@ -1,5 +1,6 @@
 import { useNavigate } from "react-router-dom";
-import { LogOut, Settings, User as UserIcon } from "lucide-react";
+import { LogIn, LogOut, Settings, User as UserIcon, WifiOff } from "lucide-react";
+import { useOfflineMode } from "@/hooks/useOfflineMode";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -14,6 +15,11 @@ interface Props {
   username: string | null;
   avatar: string | null;
   onLogout: () => void;
+  /** App-level offline toggle. Hides online-only menu entries and
+   *  shows an offline indicator. Independent of sign-in state: a
+   *  signed-in user in offline mode still sees Log out, not Sign in. */
+  offline?: boolean;
+  onSignInRequested?: () => void;
 }
 
 /**
@@ -22,20 +28,46 @@ interface Props {
  * available, falls back to a monogram of the user's first initial. Opens a
  * dropdown with Settings, Log out, etc.
  */
-export function UserMenu({ username, avatar, onLogout }: Props) {
+export function UserMenu({
+  username,
+  avatar,
+  onLogout,
+  offline = false,
+  onSignInRequested,
+}: Props) {
   const navigate = useNavigate();
+  const { set: setOffline } = useOfflineMode();
   const initial = (username || "?").trim().charAt(0).toUpperCase();
   const imgSrc = avatar ? imageProxy(avatar) : undefined;
+  const signedIn = username !== null;
+
+  const handleSignIn = () => {
+    // Flip the LOCAL offline context so App falls through to the Login
+    // screen. We deliberately don't persist offline_mode=false to the
+    // server — if the user abandons sign-in at the Login page, a reload
+    // restores their preference and drops them back into offline mode.
+    // Login is the only way forward; there's no offline toggle there.
+    setOffline(false);
+    onSignInRequested?.();
+  };
 
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <button
-          className="flex h-9 w-9 items-center justify-center overflow-hidden rounded-full bg-black/60 text-sm font-bold text-foreground ring-1 ring-white/10 transition-colors hover:bg-black/80 hover:ring-white/20"
+          className="flex h-9 w-9 items-center justify-center overflow-hidden rounded-full bg-secondary text-sm font-bold text-foreground ring-1 ring-border transition-colors hover:bg-accent hover:ring-border"
           aria-label="Account menu"
-          title={username ?? "Account"}
+          title={
+            offline
+              ? signedIn
+                ? `${username} (offline)`
+                : "Offline"
+              : username ?? "Account"
+          }
         >
-          {imgSrc ? (
+          {offline ? (
+            <WifiOff className="h-4 w-4 text-muted-foreground" />
+          ) : imgSrc ? (
             <img
               src={imgSrc}
               alt=""
@@ -54,7 +86,9 @@ export function UserMenu({ username, avatar, onLogout }: Props) {
       <DropdownMenuContent align="end" className="w-56">
         <DropdownMenuLabel className="flex items-center gap-3">
           <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center overflow-hidden rounded-full bg-secondary text-xs font-bold">
-            {imgSrc ? (
+            {offline ? (
+              <WifiOff className="h-4 w-4 text-muted-foreground" />
+            ) : imgSrc ? (
               <img src={imgSrc} alt="" className="h-full w-full object-cover" />
             ) : (
               <span>{initial}</span>
@@ -62,10 +96,14 @@ export function UserMenu({ username, avatar, onLogout }: Props) {
           </div>
           <div className="min-w-0">
             <div className="truncate text-sm font-semibold">
-              {username ?? "Signed in"}
+              {signedIn ? username : "Offline"}
             </div>
             <div className="truncate text-[11px] font-normal text-muted-foreground">
-              Tidal account
+              {offline
+                ? signedIn
+                  ? "Offline mode"
+                  : "Local files only"
+                : "Tidal account"}
             </div>
           </div>
         </DropdownMenuLabel>
@@ -73,23 +111,31 @@ export function UserMenu({ username, avatar, onLogout }: Props) {
         <DropdownMenuItem onSelect={() => navigate("/settings")}>
           <Settings className="h-4 w-4" /> Settings
         </DropdownMenuItem>
-        <DropdownMenuItem
-          onSelect={() =>
-            window.open(
-              `https://listen.tidal.com${
-                username ? "/my-collection" : ""
-              }`,
-              "_blank",
-              "noopener",
-            )
-          }
-        >
-          <UserIcon className="h-4 w-4" /> Open in Tidal
-        </DropdownMenuItem>
+        {!offline && (
+          <DropdownMenuItem
+            onSelect={() =>
+              window.open(
+                `https://listen.tidal.com${
+                  username ? "/my-collection" : ""
+                }`,
+                "_blank",
+                "noopener",
+              )
+            }
+          >
+            <UserIcon className="h-4 w-4" /> Open in Tidal
+          </DropdownMenuItem>
+        )}
         <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={onLogout}>
-          <LogOut className="h-4 w-4" /> Log out
-        </DropdownMenuItem>
+        {signedIn ? (
+          <DropdownMenuItem onSelect={onLogout}>
+            <LogOut className="h-4 w-4" /> Log out
+          </DropdownMenuItem>
+        ) : (
+          <DropdownMenuItem onSelect={handleSignIn}>
+            <LogIn className="h-4 w-4" /> Sign in
+          </DropdownMenuItem>
+        )}
       </DropdownMenuContent>
     </DropdownMenu>
   );

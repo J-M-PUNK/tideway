@@ -62,7 +62,7 @@ export function NowPlaying({
   const pct = duration > 0 ? (currentTime / duration) * 100 : 0;
 
   return (
-    <div className="border-t border-border bg-[#0a0a0a] px-4 py-3">
+    <div className="border-t border-border bg-[hsl(var(--now-playing-bg))] px-4 py-3">
       <div className="flex items-center gap-4">
         <div className="flex min-w-0 flex-1 items-center gap-3">
           <button
@@ -102,13 +102,9 @@ export function NowPlaying({
                   </Link>
                 </span>
               ))}
-              {isLocal ? (
+              {isLocal && (
                 <span className="ml-2 rounded bg-primary/15 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-primary">
-                  Lossless
-                </span>
-              ) : (
-                <span className="ml-2 rounded bg-secondary px-1.5 py-0.5 text-[10px] uppercase tracking-wider">
-                  Preview
+                  Downloaded
                 </span>
               )}
             </div>
@@ -244,6 +240,7 @@ const QUALITY_OPTIONS: {
   { value: "low_96k", label: "Low", sublabel: "~96 kbps AAC" },
   { value: "low_320k", label: "High", sublabel: "~320 kbps AAC" },
   { value: "high_lossless", label: "Lossless", sublabel: "16-bit FLAC" },
+  { value: "hi_res_lossless", label: "Max", sublabel: "24-bit FLAC, hi-res" },
 ];
 
 /**
@@ -260,7 +257,7 @@ function StreamingQualityPicker({ isLocal }: { isLocal: boolean }) {
     return (
       <div
         className="flex items-center gap-1.5 rounded-full bg-primary/15 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-primary"
-        title="Playing from a local lossless file"
+        title="Playing the local file at its downloaded quality"
       >
         <AudioLines className="h-3 w-3" /> {label}
       </div>
@@ -306,8 +303,9 @@ function StreamingQualityPicker({ isLocal }: { isLocal: boolean }) {
         ))}
         <DropdownMenuSeparator />
         <div className="px-2 py-1.5 text-[11px] text-muted-foreground">
-          Max quality (hi-res) isn't streamable in-browser — download the
-          track for full quality.
+          Max uses significantly more bandwidth (a 4-min track is
+          ~70-140 MB depending on sample rate) and requires a PKCE
+          login with a Max-entitled Tidal account.
         </div>
       </DropdownMenuContent>
     </DropdownMenu>

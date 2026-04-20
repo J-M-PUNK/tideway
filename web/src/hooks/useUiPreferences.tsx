@@ -11,10 +11,17 @@ import {
 const STORAGE_KEY = "tidal-downloader:ui-prefs";
 
 /** Quality values that the browser's `<audio>` element can actually
- *  play. Hi-res (hi_res_lossless) is intentionally excluded — it's
- *  DASH-segmented and not natively streamable. Download the track for
- *  that quality. */
-export type StreamingQuality = "low_96k" | "low_320k" | "high_lossless";
+ *  play. The backend concatenates DASH segments server-side for the
+ *  lossless tiers, so all four qualities are now streamable — hi-res
+ *  needs a PKCE session and enough bandwidth (~140 MB for a 4-min
+ *  24/192 FLAC), but works the same way as Lossless otherwise. */
+export type StreamingQuality =
+  | "low_96k"
+  | "low_320k"
+  | "high_lossless"
+  | "hi_res_lossless";
+
+export type ThemeMode = "dark" | "light";
 
 interface UiPreferences {
   /** When true, TrackList instances hide any track not present on disk.
@@ -24,6 +31,9 @@ interface UiPreferences {
   /** Quality at which the Now-Playing bar streams non-downloaded tracks.
    *  Doesn't affect local files or downloads. */
   streamingQuality: StreamingQuality;
+  /** Active color theme. Applied via a root-element class so CSS
+   *  variables in index.css can swap their values. */
+  theme: ThemeMode;
 }
 
 interface UiPreferencesContextValue extends UiPreferences {
@@ -33,6 +43,7 @@ interface UiPreferencesContextValue extends UiPreferences {
 const DEFAULTS: UiPreferences = {
   offlineOnly: false,
   streamingQuality: "low_320k",
+  theme: "dark",
 };
 
 const Ctx = createContext<UiPreferencesContextValue>({
@@ -70,6 +81,16 @@ export function UiPreferencesProvider({ children }: { children: ReactNode }) {
       return next;
     });
   }, []);
+
+  // Flip the `light` class on <html> whenever the theme pref changes.
+  // CSS variables in index.css default to dark; the `.light` block
+  // overrides them. Running this before paint (useLayoutEffect would
+  // also work) avoids a visible flash on first mount.
+  useEffect(() => {
+    const root = document.documentElement;
+    if (prefs.theme === "light") root.classList.add("light");
+    else root.classList.remove("light");
+  }, [prefs.theme]);
 
   // Sync across tabs — if the user changes the preference in another tab,
   // we pick it up. Only apply parseable values. Without this guard,

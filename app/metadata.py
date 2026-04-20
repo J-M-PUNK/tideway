@@ -81,6 +81,57 @@ def read_track_id(file_path: Path) -> Optional[str]:
     return None
 
 
+def read_track_tags(file_path: Path) -> Optional[dict]:
+    """Extract the tags we wrote at download time plus a few generic ones
+    (title/artist/album/track_num/duration) for display in the Local
+    Library view. Returns None for untagged or unreadable files — the
+    caller skips them rather than listing "Unknown Artist" rows.
+    """
+    ext = file_path.suffix.lower()
+    try:
+        if ext == ".flac":
+            from mutagen.flac import FLAC
+
+            audio = FLAC(str(file_path))
+            tidal_id = audio.get(TIDAL_ID_TAG.lower())
+            title = audio.get("title")
+            artist = audio.get("artist")
+            album = audio.get("album")
+            track_num = audio.get("tracknumber")
+            return {
+                "tidal_id": str(tidal_id[0]) if tidal_id else None,
+                "title": str(title[0]) if title else None,
+                "artist": str(artist[0]) if artist else None,
+                "album": str(album[0]) if album else None,
+                "track_num": int(str(track_num[0])) if track_num and str(track_num[0]).isdigit() else 0,
+                "duration": int(getattr(audio.info, "length", 0) or 0),
+            }
+        if ext in (".m4a", ".mp4"):
+            from mutagen.mp4 import MP4
+
+            audio = MP4(str(file_path))
+            tidal_raw = audio.get(M4A_TIDAL_ID_KEY)
+            tidal_id: Optional[str] = None
+            if tidal_raw:
+                raw = tidal_raw[0]
+                tidal_id = raw.decode("utf-8", errors="ignore") if isinstance(raw, bytes) else str(raw)
+            trkn = audio.get("trkn")
+            track_num = 0
+            if trkn and isinstance(trkn[0], tuple) and trkn[0]:
+                track_num = int(trkn[0][0])
+            return {
+                "tidal_id": tidal_id,
+                "title": (audio.get("\xa9nam") or [None])[0],
+                "artist": (audio.get("\xa9ART") or [None])[0],
+                "album": (audio.get("\xa9alb") or [None])[0],
+                "track_num": track_num,
+                "duration": int(getattr(audio.info, "length", 0) or 0),
+            }
+    except Exception:
+        return None
+    return None
+
+
 def fetch_cover_art(album_obj) -> Optional[bytes]:
     if album_obj is None:
         return None
@@ -118,7 +169,7 @@ def _tag_flac(path: Path, track, cover_data: Optional[bytes]):
     audio = FLAC(str(path))
     audio["title"] = track.name
     audio["artist"] = _artist_names(track)
-    audio["album"] = _safe(getattr(track, "album", None), "name")
+    audio["album"] = _safe(getattr(track, "album", None), "name") or ""
     audio["tracknumber"] = str(getattr(track, "track_num", 0))
     num_tracks = _safe(getattr(track, "album", None), "num_tracks")
     if num_tracks:

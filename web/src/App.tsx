@@ -9,6 +9,7 @@ import { LyricsPanel } from "@/components/LyricsPanel";
 import { FullScreenPlayer } from "@/components/FullScreenPlayer";
 import { CommandPalette } from "@/components/CommandPalette";
 import { CreatePlaylistDialog } from "@/components/CreatePlaylistDialog";
+import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { UrlDropTarget } from "@/components/UrlDropTarget";
 import { ToastProvider, useToast } from "@/components/toast";
 import { DownloadedProvider } from "@/hooks/useDownloadedSet";
@@ -18,10 +19,13 @@ import { MyPlaylistsProvider } from "@/hooks/useMyPlaylists";
 import { RecentsProvider } from "@/hooks/useRecentlyPlayed";
 import { TrackSelectionProvider } from "@/hooks/useTrackSelection";
 import { UiPreferencesProvider } from "@/hooks/useUiPreferences";
+import { OfflineProvider, useOfflineMode } from "@/hooks/useOfflineMode";
+import { useNetworkStatus } from "@/hooks/useNetworkStatus";
 import { PlayerProvider } from "@/hooks/PlayerContext";
 import { SelectionBar } from "@/components/SelectionBar";
 import { useAuth } from "@/hooks/useAuth";
 import { useDownloads } from "@/hooks/useDownloads";
+import { useDownloadNotifications } from "@/hooks/useDownloadNotifications";
 import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { useMediaSession } from "@/hooks/useMediaSession";
 import { api } from "@/api/client";
@@ -30,6 +34,7 @@ import { Login } from "@/pages/Login";
 import { Home } from "@/pages/Home";
 import { Search } from "@/pages/Search";
 import { Library } from "@/pages/Library";
+import { LocalLibrary } from "@/pages/LocalLibrary";
 import { Explore } from "@/pages/Explore";
 import { BrowsePage } from "@/pages/BrowsePage";
 import { ChartsPage } from "@/pages/ChartsPage";
@@ -43,29 +48,43 @@ import { Downloads } from "@/pages/Downloads";
 import { SettingsPage } from "@/pages/SettingsPage";
 
 export default function App() {
+  // Outer boundary renders a full-screen fallback for errors that
+  // escape the per-route boundary (e.g. a provider blows up during
+  // its initial render). ToastProvider sits above it so the fallback
+  // doesn't try to emit a toast into nothing if some rarely-hit
+  // cleanup path throws.
   return (
     <ToastProvider>
-      <UiPreferencesProvider>
-        <DownloadStreamProvider>
-          <DownloadedProvider>
-            <FavoritesProvider>
-              <MyPlaylistsProvider>
-                <RecentsProvider>
-                  <AppInner />
-                </RecentsProvider>
-              </MyPlaylistsProvider>
-            </FavoritesProvider>
-          </DownloadedProvider>
-        </DownloadStreamProvider>
-      </UiPreferencesProvider>
+      <ErrorBoundary fullScreen>
+        <UiPreferencesProvider>
+          <OfflineProvider>
+            <DownloadStreamProvider>
+              <DownloadedProvider>
+                <FavoritesProvider>
+                  <MyPlaylistsProvider>
+                    <RecentsProvider>
+                      <AppInner />
+                    </RecentsProvider>
+                  </MyPlaylistsProvider>
+                </FavoritesProvider>
+              </DownloadedProvider>
+            </DownloadStreamProvider>
+          </OfflineProvider>
+        </UiPreferencesProvider>
+      </ErrorBoundary>
     </ToastProvider>
   );
 }
 
 function AppInner() {
   const auth = useAuth();
+  const { offline } = useOfflineMode();
+  const online = useNetworkStatus();
 
-  if (auth.loading) {
+  // Hold the spinner until both probes resolve — rendering Login
+  // prematurely would flash the sign-in screen for users who'd land
+  // straight in offline mode.
+  if (auth.loading || offline === null) {
     return (
       <div className="flex h-screen items-center justify-center text-muted-foreground">
         <Loader2 className="h-5 w-5 animate-spin" />
@@ -73,9 +92,25 @@ function AppInner() {
     );
   }
 
-  if (!auth.logged_in) {
+  // A dead network is treated like the offline preference — even if
+  // the user never flipped the toggle, it would be strange to render
+  // Login with no way to actually reach Tidal. The Login page still
+  // shows when the user is genuinely signed out on an online network,
+  // which is the case a first-time user lands in.
+  if (!auth.logged_in && !offline && online) {
     return <Login onLoggedIn={auth.refresh} />;
   }
+
+  // The toggle is the master switch — when it's on, we treat the
+  // session as offline even if a Tidal token is still valid. That's
+  // what users expect ("Work offline" should immediately hide Search,
+  // Explore, etc.) and it also lets someone browse their own files
+  // without the app chattering at Tidal in the background.
+  //
+  // OR with `!online` so a browser-level drop temporarily flips the
+  // shell into offline mode without touching the persisted preference
+  // — when connectivity returns, the OR clears and we're back online.
+  const isOffline = offline || !online;
 
   return (
     <BrowserRouter>
@@ -89,6 +124,8 @@ function AppInner() {
             username={auth.username}
             avatar={auth.avatar}
             onLogout={auth.logout}
+            offline={isOffline}
+            onSignInRequested={auth.refresh}
           />
         </TrackSelectionProvider>
       </PlayerProvider>
@@ -100,14 +137,53 @@ function Shell({
   username,
   avatar,
   onLogout,
+  offline,
+  onSignInRequested,
 }: {
   username: string | null;
   avatar: string | null;
   onLogout: () => void;
+  /** True when the user is signed out but offline mode is on. Flips
+   *  the sidebar to local-only entries and redirects online-only
+   *  routes to /library/local. */
+  offline: boolean;
+  /** Called when the user wants to exit offline mode and sign in.
+   *  Re-runs the auth probe so the App re-evaluates. */
+  onSignInRequested: () => void;
 }) {
   const downloads = useDownloads();
   const toast = useToast();
   const location = useLocation();
+  // Opt-in desktop notifications when a burst finishes. We pull the
+  // pref lazily from settings — Settings is the source of truth and
+  // the GET is cheap enough to refetch on mount without plumbing the
+  // whole settings object into context just for one boolean.
+  const [notifyEnabled, setNotifyEnabled] = useState(false);
+  useEffect(() => {
+    let cancelled = false;
+    api.settings
+      .get()
+      .then((s) => {
+        if (!cancelled) setNotifyEnabled(!!s.notify_on_complete);
+      })
+      .catch(() => {
+        /* ignore — default stays false */
+      });
+    // Settings page dispatches this event after every successful save,
+    // so toggling the pref there updates the shell in real time.
+    const onUpdate = (e: Event) => {
+      const detail = (e as CustomEvent<{ notify_on_complete?: boolean }>).detail;
+      if (detail && typeof detail.notify_on_complete === "boolean") {
+        setNotifyEnabled(detail.notify_on_complete);
+      }
+    };
+    window.addEventListener("tidal-settings-updated", onUpdate);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("tidal-settings-updated", onUpdate);
+    };
+  }, []);
+  useDownloadNotifications(notifyEnabled, downloads.active, downloads.completed);
   const [queueOpen, setQueueOpen] = useState(false);
   const [lyricsOpen, setLyricsOpen] = useState(false);
   const [fullOpen, setFullOpen] = useState(false);
@@ -201,42 +277,69 @@ function Shell({
   );
 
   return (
-    <div className="flex h-screen flex-col bg-black">
+    <div className="flex h-screen flex-col bg-background">
       <div className="flex min-h-0 flex-1 gap-2 p-2 pb-0">
         <Sidebar
           activeDownloads={downloads.active.length}
           newDownloads={newCompletedCount}
+          offline={offline}
         />
         <main
           data-scroll-container
-          className="min-w-0 flex-1 overflow-y-auto rounded-lg bg-gradient-to-b from-[#1a1a1a] to-background scrollbar-thin"
+          className="min-w-0 flex-1 overflow-y-auto rounded-lg bg-gradient-to-b from-secondary to-background scrollbar-thin"
         >
           {/* The scroll container itself carries no padding — otherwise
               `sticky top-0` on NavBar would anchor at the padding edge
               and the NavBar would visually drop 24px when the user
               scrolls. Padding lives on the route wrapper below NavBar;
               DetailHero still uses `-mx-8 -mt-6` to bleed against it. */}
-          <NavBar username={username} avatar={avatar} onLogout={onLogout} />
+          <NavBar
+            username={username}
+            avatar={avatar}
+            onLogout={onLogout}
+            offline={offline}
+            onSignInRequested={onSignInRequested}
+          />
           <div ref={fadeRef} className="animate-route px-8 py-6">
+          <ErrorBoundary resetKey={location.pathname}>
           <Routes>
-            <Route path="/" element={<Home onDownload={enqueue} />} />
-            <Route path="/search" element={<Search onDownload={enqueue} />} />
-            <Route path="/explore" element={<Explore onDownload={enqueue} />} />
-            <Route path="/charts" element={<Navigate to="/charts/new" replace />} />
-            <Route path="/charts/:chart" element={<ChartsPage onDownload={enqueue} />} />
-            <Route path="/browse/:path" element={<BrowsePage onDownload={enqueue} />} />
-            <Route path="/library" element={<Navigate to="/library/albums" replace />} />
-            <Route path="/library/:section" element={<Library onDownload={enqueue} />} />
-            <Route path="/album/:id" element={<AlbumDetail onDownload={enqueue} />} />
-            <Route path="/artist/:id" element={<ArtistDetail onDownload={enqueue} />} />
-            <Route path="/playlist/:id" element={<PlaylistDetail onDownload={enqueue} />} />
-            <Route path="/mix/:id" element={<MixDetail onDownload={enqueue} />} />
-            <Route path="/feed" element={<FeedPage onDownload={enqueue} />} />
-            <Route path="/history" element={<HistoryPage onDownload={enqueue} />} />
-            <Route path="/downloads" element={<Downloads items={downloads.items} />} />
-            <Route path="/settings" element={<SettingsPage onLogout={onLogout} />} />
-            <Route path="*" element={<Navigate to="/" replace />} />
+            {offline ? (
+              <>
+                {/* Offline mode: only show pages that don't need a live
+                    Tidal session. Everything else redirects to the local
+                    library so a stale bookmark / typed URL doesn't land
+                    the user on a page that'll immediately 401. */}
+                <Route path="/" element={<Navigate to="/library/local" replace />} />
+                <Route path="/library" element={<Navigate to="/library/local" replace />} />
+                <Route path="/library/local" element={<LocalLibrary onDownload={enqueue} />} />
+                <Route path="/downloads" element={<Downloads items={downloads.items} offline={offline} />} />
+                <Route path="/settings" element={<SettingsPage onLogout={onLogout} />} />
+                <Route path="*" element={<Navigate to="/library/local" replace />} />
+              </>
+            ) : (
+              <>
+                <Route path="/" element={<Home onDownload={enqueue} />} />
+                <Route path="/search" element={<Search onDownload={enqueue} />} />
+                <Route path="/explore" element={<Explore onDownload={enqueue} />} />
+                <Route path="/charts" element={<Navigate to="/charts/new" replace />} />
+                <Route path="/charts/:chart" element={<ChartsPage onDownload={enqueue} />} />
+                <Route path="/browse/:path" element={<BrowsePage onDownload={enqueue} />} />
+                <Route path="/library" element={<Navigate to="/library/albums" replace />} />
+                <Route path="/library/local" element={<LocalLibrary onDownload={enqueue} />} />
+                <Route path="/library/:section" element={<Library onDownload={enqueue} />} />
+                <Route path="/album/:id" element={<AlbumDetail onDownload={enqueue} />} />
+                <Route path="/artist/:id" element={<ArtistDetail onDownload={enqueue} />} />
+                <Route path="/playlist/:id" element={<PlaylistDetail onDownload={enqueue} />} />
+                <Route path="/mix/:id" element={<MixDetail onDownload={enqueue} />} />
+                <Route path="/feed" element={<FeedPage onDownload={enqueue} />} />
+                <Route path="/history" element={<HistoryPage onDownload={enqueue} />} />
+                <Route path="/downloads" element={<Downloads items={downloads.items} offline={offline} />} />
+                <Route path="/settings" element={<SettingsPage onLogout={onLogout} />} />
+                <Route path="*" element={<Navigate to="/" replace />} />
+              </>
+            )}
           </Routes>
+          </ErrorBoundary>
           </div>
         </main>
       </div>

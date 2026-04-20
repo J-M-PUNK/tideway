@@ -1,9 +1,10 @@
 import { Link } from "react-router-dom";
-import { Music, Rss } from "lucide-react";
+import { Compass, Music, Rss } from "lucide-react";
 import { api } from "@/api/client";
 import type { Album } from "@/api/types";
 import type { OnDownload } from "@/api/download";
 import { useApi } from "@/hooks/useApi";
+import { Button } from "@/components/ui/button";
 import { DownloadButton } from "@/components/DownloadButton";
 import { EmptyState } from "@/components/EmptyState";
 import { ErrorView } from "@/components/ErrorView";
@@ -45,6 +46,11 @@ export function FeedPage({ onDownload }: { onDownload: OnDownload }) {
           icon={Music}
           title="No new releases yet"
           description="Favorite or watch some artists in Tidal — their new albums will show up here as they drop."
+          action={
+            <Button asChild variant="secondary" size="sm">
+              <Link to="/library/artists"><Compass className="h-4 w-4" /> Find artists to follow</Link>
+            </Button>
+          }
         />
       </div>
     );

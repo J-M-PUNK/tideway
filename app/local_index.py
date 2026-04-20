@@ -76,11 +76,15 @@ class LocalIndex:
             snapshot = dict(self._by_id)
         # Drop stale entries during snapshot so the set we hand out matches
         # the actual filesystem.
-        stale = [tid for tid, p in snapshot.items() if not p.exists()]
+        stale = [(tid, p) for tid, p in snapshot.items() if not p.exists()]
         if stale:
             with self._lock:
-                for tid in stale:
-                    self._by_id.pop(tid, None)
-            for tid in stale:
+                # Re-check path identity under the lock — another thread may
+                # have called add(tid, new_path) in the gap, and we don't
+                # want to pop the fresh entry based on a stale path check.
+                for tid, snap_path in stale:
+                    if self._by_id.get(tid) == snap_path:
+                        self._by_id.pop(tid, None)
+            for tid, _ in stale:
                 snapshot.pop(tid, None)
         return set(snapshot.keys())

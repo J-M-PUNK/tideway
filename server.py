@@ -7,30 +7,96 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import subprocess
 import sys
 import threading
 import time
+import traceback
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, AsyncIterator, Optional
+from typing import Any, AsyncIterator, Callable, Optional
 from urllib.parse import urlparse
 
 import tidalapi
+import tidalapi.page as _tidal_page
 from fastapi import Body, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, RedirectResponse, Response
+from fastapi.responses import (
+    FileResponse,
+    RedirectResponse,
+    Response,
+    StreamingResponse,
+)
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
 from app.downloader import DownloadItem, DownloadStatus, Downloader
 from app.http import SESSION
 from app.local_index import LocalIndex
+from app.paths import bundled_resource_dir
 from app.settings import Settings, load_settings, save_settings
 from app.tidal_client import TidalClient
+
+
+logger = logging.getLogger("tidal-downloader.server")
+# Uvicorn doesn't configure our namespace by default; attach to the same
+# stderr handler it uses so our warnings/errors actually show up next to
+# the access log lines instead of being silently dropped.
+if not logger.handlers:
+    _h = logging.StreamHandler(sys.stderr)
+    _h.setFormatter(logging.Formatter("%(levelname)s:     %(message)s"))
+    logger.addHandler(_h)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+
+
+# Tidal's V2 home feed delivers "Because you liked X" / "Because you
+# listened to Y" modules as HORIZONTAL_LIST_WITH_CONTEXT with the
+# related album/artist/track nested under `header.data`. tidalapi's
+# PageCategoryV2._parse_base only copies title/subtitle/description
+# off the raw dict and drops `header`, so our server sees an empty
+# subtitle and the UI renders "Because you liked" with nothing after
+# it. Patch the base parser to synthesize a subtitle from the header
+# when the category didn't ship one explicitly.
+_orig_parse_base = _tidal_page.PageCategoryV2._parse_base
+
+
+def _header_context_label(header: dict) -> Optional[str]:
+    data = header.get("data") or {}
+    htype = (header.get("type") or "").upper()
+    if htype in ("ALBUM", "TRACK", "PLAYLIST", "MIX"):
+        title = data.get("title")
+        artists = data.get("artists") or []
+        artist = artists[0].get("name") if artists and isinstance(artists[0], dict) else None
+        if title and artist:
+            return f"{title} · {artist}"
+        return title
+    if htype == "ARTIST":
+        return data.get("name")
+    return None
+
+
+def _patched_parse_base(self, list_item):
+    _orig_parse_base(self, list_item)
+    # Stash the raw header so _serialize_page can build a clickable
+    # context badge ("Because you liked X" with X's cover).
+    # (viewAll / showMore are already captured by _parse_base into
+    # self._more.api_path — no need to copy them ourselves.)
+    header = list_item.get("header")
+    if isinstance(header, dict):
+        self._raw_header = header
+        if not self.subtitle:
+            label = _header_context_label(header)
+            if label:
+                self.subtitle = label
+
+
+_tidal_page.PageCategoryV2._parse_base = _patched_parse_base
 
 
 tidal = TidalClient()
@@ -72,6 +138,74 @@ _auth_cache_lock = threading.Lock()
 _PREVIEW_CACHE_TTL = 120.0
 _preview_cache: dict[tuple[int, str], tuple[float, str]] = {}
 _preview_cache_lock = threading.Lock()
+
+# Multi-segment DASH tracks get buffered to a temp file so Range/seek work
+# and the scrub bar tracks duration. Cache the buffered file per
+# (track_id, quality) so scrub-seeks (which fire fresh Range requests)
+# don't re-download every segment, and replaying the same track within a
+# few minutes is instant. TTL is long enough to cover a full track play
+# plus some idle time.
+_STREAM_FILE_CACHE_TTL = 600.0
+# (ts, path, mime) — mime is stored so cache-hit path doesn't need the
+# manifest's ext hint to pick Content-Type.
+_stream_file_cache: dict[tuple[int, str], tuple[float, Path, str]] = {}
+_stream_file_cache_lock = threading.Lock()
+
+# Manifest (urls + ext) cache. Tidal signs segment URLs for several
+# minutes; a short TTL here means repeated clicks on the same track
+# (quality-switch, play-again, etc.) skip the tidalapi round-trip.
+_MANIFEST_CACHE_TTL = 90.0
+_manifest_cache: dict[
+    tuple[int, str], tuple[float, list[str], Optional[str]]
+] = {}
+_manifest_cache_lock = threading.Lock()
+
+
+def _evict_expired_stream_files(now: float) -> None:
+    """Drop and unlink any cached temp files past TTL. Called lazily on
+    cache access — a periodic sweeper thread would be cleaner but this
+    keeps the bookkeeping in one place."""
+    stale: list[tuple[tuple[int, str], Path]] = []
+    with _stream_file_cache_lock:
+        for key, (ts, path, _mime) in list(_stream_file_cache.items()):
+            if now - ts > _STREAM_FILE_CACHE_TTL:
+                stale.append((key, path))
+                _stream_file_cache.pop(key, None)
+    for _, path in stale:
+        try:
+            path.unlink(missing_ok=True)
+        except Exception:
+            pass
+
+
+def _lookup_stream_cache(
+    key: tuple[int, str],
+) -> Optional[tuple[Path, str]]:
+    """Cache-hit lookup: returns (path, mime) if the cached file still
+    exists and hasn't expired, else None. Touches the timestamp on hit
+    so active tracks stay warm."""
+    now = time.monotonic()
+    _evict_expired_stream_files(now)
+    with _stream_file_cache_lock:
+        cached = _stream_file_cache.get(key)
+        if cached and cached[1].exists():
+            _stream_file_cache[key] = (now, cached[1], cached[2])
+            return cached[1], cached[2]
+    return None
+
+
+def _install_stream_cache(key: tuple[int, str], path: Path, mime: str) -> None:
+    """Install a freshly-buffered temp file into the cache. If an older
+    entry existed (rare — two concurrent first-plays racing), unlink
+    the stale file so we don't leak a tempfile until TTL sweep."""
+    with _stream_file_cache_lock:
+        old = _stream_file_cache.get(key)
+        _stream_file_cache[key] = (time.monotonic(), path, mime)
+    if old and old[1] != path:
+        try:
+            old[1].unlink(missing_ok=True)
+        except Exception:
+            pass
 
 
 def _is_logged_in() -> bool:
@@ -269,6 +403,23 @@ downloader = Downloader(
     on_file_ready=_on_file_ready,
 )
 
+# Re-enqueue anything that was still pending when we shut down. We gate
+# on check_login() because submits that fire without a valid session
+# will each fail in their expand thread and surface as FAILED rows —
+# which is loud, confusing, and not helpful (the user can't do anything
+# about it until they sign in). Instead, leave the queue file alone and
+# let the user's next session's restore pick them up.
+try:
+    if tidal.session.check_login():
+        downloader.restore()
+except Exception as _restore_exc:  # noqa: BLE001
+    import sys as _sys
+    print(
+        f"[server] downloader.restore() failed: {_restore_exc!r}",
+        file=_sys.stderr,
+        flush=True,
+    )
+
 
 def _apply_settings_quality(s: Settings) -> None:
     """Align the shared tidalapi session with the user's default quality.
@@ -461,9 +612,72 @@ def _require_auth() -> None:
         raise HTTPException(status_code=401, detail="Not authenticated")
 
 
+def _require_local_access() -> None:
+    """Allow access when the user is logged in OR offline mode is on.
+
+    Used for endpoints that only touch local state (on-disk library,
+    cached playback, settings, stats, reveal). When offline_mode is set,
+    a signed-out user can still browse and play what they've already
+    downloaded — that's the whole point of the toggle.
+    """
+    if _is_logged_in():
+        return
+    if getattr(settings, "offline_mode", False):
+        return
+    raise HTTPException(status_code=401, detail="Not authenticated")
+
+
 # ---------------------------------------------------------------------------
 # Auth
 # ---------------------------------------------------------------------------
+
+
+# Marker the desktop launcher uses to confirm a localhost port is occupied
+# by *this* app rather than some unrelated server squatting on the port.
+_HEALTH_MARKER = "tidal-downloader"
+
+# Set by the desktop launcher so /api/_internal/focus can raise the window.
+# The launcher registers a callable that runs on the pywebview thread; if
+# nobody registered one (web-only dev run) the endpoint no-ops.
+_focus_callback: Optional[Callable[[], None]] = None
+
+
+def register_focus_callback(fn: Callable[[], None]) -> None:
+    global _focus_callback
+    _focus_callback = fn
+
+
+@app.get("/api/health")
+def health() -> dict:
+    """Liveness probe AND single-instance detection marker.
+
+    The desktop launcher probes this endpoint before binding its own
+    port; an existing healthy response (with `app` == _HEALTH_MARKER)
+    means another copy is already running and the second launch should
+    exit instead of crashing on EADDRINUSE.
+    """
+    return {"ok": True, "app": _HEALTH_MARKER}
+
+
+@app.post("/api/_internal/focus", include_in_schema=False)
+def focus_window(request: Request) -> dict:
+    """Ask the running pywebview window to raise/focus itself.
+
+    Called by a second launch of the app after it detects the first is
+    already running. Restricted to loopback because the only legitimate
+    caller is a sibling process on the same machine.
+    """
+    client = request.client
+    host = client.host if client else ""
+    if host not in ("127.0.0.1", "::1", "localhost"):
+        raise HTTPException(status_code=403)
+    if _focus_callback is None:
+        return {"ok": False, "reason": "no window"}
+    try:
+        _focus_callback()
+        return {"ok": True}
+    except Exception as exc:
+        return {"ok": False, "reason": str(exc)}
 
 
 @app.get("/api/auth/status")
@@ -577,6 +791,16 @@ def auth_logout() -> dict:
     tidal.logout()
     _invalidate_auth_cache()
     _invalidate_preview_cache()
+    # Drop the persisted download queue too — it's keyed to the now-
+    # logged-out account and a different user signing in next should
+    # NOT inherit someone else's pending queue. The in-memory broker
+    # state is separate; cancel_all_active handles that only when the
+    # user explicitly requests it.
+    from app.downloader import QUEUE_STATE_FILE as _QSF
+    try:
+        _QSF.unlink(missing_ok=True)
+    except Exception:
+        pass
     return {"ok": True}
 
 
@@ -639,6 +863,109 @@ def library_playlists() -> list[dict]:
             seen.add(pid)
             out.append(playlist_to_dict(p))
     return out
+
+
+# Cache of (path, mtime_ns, size) -> tags dict, shared across /api/library/local
+# calls so repeat loads don't re-open every file. Keyed by absolute path; an
+# mtime mismatch invalidates the entry (covers re-tags, file replacements).
+_LOCAL_TAG_CACHE: dict[str, tuple[int, int, dict]] = {}
+_LOCAL_TAG_CACHE_LOCK = threading.Lock()
+
+
+def _read_cached_tags(path: Path, stat_result) -> Optional[dict]:
+    from app.metadata import read_track_tags
+
+    key = str(path)
+    mtime_ns = getattr(stat_result, "st_mtime_ns", int(stat_result.st_mtime * 1_000_000_000))
+    size = stat_result.st_size
+    with _LOCAL_TAG_CACHE_LOCK:
+        cached = _LOCAL_TAG_CACHE.get(key)
+        if cached and cached[0] == mtime_ns and cached[1] == size:
+            return cached[2]
+    tags = read_track_tags(path)
+    if tags is None:
+        return None
+    with _LOCAL_TAG_CACHE_LOCK:
+        _LOCAL_TAG_CACHE[key] = (mtime_ns, size, tags)
+    return tags
+
+
+@app.get("/api/library/local")
+def library_local() -> dict:
+    """List the user's downloaded audio files with their tags. The
+    frontend's Local Library page groups these by artist/album so the
+    user can browse what's actually on disk (as opposed to what they've
+    favorited in Tidal).
+
+    Reads tags via mutagen, cached by (path, mtime, size) so a second
+    load is effectively free. Files without usable tags are skipped
+    rather than surfaced as "Unknown Artist" rows.
+    """
+    _require_local_access()
+    import os as _os
+
+    root = Path(settings.output_dir).expanduser()
+    files: list[dict] = []
+    if not root.is_dir():
+        return {"output_dir": str(root), "files": []}
+    stack: list[Path] = [root]
+    while stack:
+        current = stack.pop()
+        try:
+            with _os.scandir(current) as it:
+                for entry in it:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(Path(entry.path))
+                            continue
+                        if not entry.is_file(follow_symlinks=False):
+                            continue
+                        ext = _os.path.splitext(entry.name)[1].lower()
+                        if ext not in _AUDIO_EXTENSIONS:
+                            continue
+                        st = entry.stat()
+                        path = Path(entry.path)
+                        tags = _read_cached_tags(path, st)
+                        if tags is None:
+                            continue
+                        # Fall back to folder names for untagged or
+                        # partially-tagged files — better than dropping them.
+                        parent = path.parent
+                        artist = tags.get("artist") or (parent.parent.name if parent != root else "")
+                        album = tags.get("album") or parent.name
+                        title = tags.get("title") or path.stem
+                        if not artist:
+                            continue
+                        try:
+                            rel = str(path.relative_to(root))
+                        except ValueError:
+                            rel = entry.name
+                        files.append({
+                            "path": str(path),
+                            "relative_path": rel,
+                            "title": title,
+                            "artist": artist,
+                            "album": album,
+                            "track_num": tags.get("track_num") or 0,
+                            "tidal_id": tags.get("tidal_id"),
+                            "duration": tags.get("duration") or 0,
+                            "size_bytes": st.st_size,
+                            "ext": ext,
+                        })
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    # Sort deterministically: artist → album → track_num → title. This is
+    # what the frontend expects to render without re-sorting on every tab
+    # switch.
+    files.sort(key=lambda f: (
+        f["artist"].lower(),
+        (f["album"] or "").lower(),
+        f["track_num"],
+        f["title"].lower(),
+    ))
+    return {"output_dir": str(root), "files": files}
 
 
 # ---------------------------------------------------------------------------
@@ -912,7 +1239,7 @@ def _is_within(child: Path, parent: Path) -> bool:
 
 @app.post("/api/reveal")
 def reveal_in_finder(req: RevealRequest) -> dict:
-    _require_auth()
+    _require_local_access()
     try:
         target = Path(req.path).expanduser().resolve(strict=True)
     except FileNotFoundError:
@@ -953,19 +1280,90 @@ def reveal_in_finder(req: RevealRequest) -> dict:
     return {"ok": True}
 
 
-_STREAMABLE_QUALITIES = {"low_96k", "low_320k", "high_lossless"}
+_STREAMABLE_QUALITIES = {"low_96k", "low_320k", "high_lossless", "hi_res_lossless"}
+
+
+def _resolve_stream_sources(
+    track_id: int, quality: str
+) -> tuple[list[str], Optional[str]]:
+    """Return (urls, ext_hint) for a track.
+
+    * Device-code sessions return a single progressive URL.
+    * PKCE sessions return a manifest whose `urls` list is either one
+      progressive URL (BTS) or many per-segment URLs (DASH). DASH
+      segments are byte-concatenable — the downloader already relies on
+      this — so the caller can either redirect (1 URL) or stream the
+      concatenated bytes back (multi-segment).
+    """
+    key = (track_id, quality)
+    now = time.monotonic()
+    with _manifest_cache_lock:
+        cached = _manifest_cache.get(key)
+        if cached and (now - cached[0]) < _MANIFEST_CACHE_TTL:
+            return (list(cached[1]), cached[2])
+
+    try:
+        track = tidal.session.track(track_id)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=f"{type(exc).__name__}: {exc}")
+
+    def _fetch_once() -> tuple[list[str], Optional[str]]:
+        if getattr(tidal.session, "is_pkce", False):
+            stream = track.get_stream()
+            manifest = stream.get_stream_manifest()
+            if getattr(manifest, "is_encrypted", False):
+                # Encrypted streams would need per-segment decryption
+                # keys we don't have — refuse rather than stream noise.
+                raise HTTPException(
+                    status_code=415,
+                    detail="Encrypted stream — not playable in the browser.",
+                )
+            urls = [u for u in list(manifest.urls or []) if u]
+            ext = getattr(manifest, "file_extension", None)
+            return (urls, ext)
+        url = track.get_url()
+        return ([url] if url else [], None)
+
+    with downloader.quality_lock:
+        original = tidal.session.config.quality
+        try:
+            tidal.session.config.quality = tidalapi.Quality[quality]
+            try:
+                urls, ext = _fetch_once()
+            except HTTPException:
+                raise
+            except Exception as exc:
+                # Tidal occasionally 5xxs or times out under load — one
+                # retry turns a lot of transient 502s into successes
+                # without masking real failures for long.
+                logger.warning(
+                    "stream resolve retry for track_id=%s quality=%s: %s: %s",
+                    track_id, quality, type(exc).__name__, exc,
+                )
+                try:
+                    urls, ext = _fetch_once()
+                except HTTPException:
+                    raise
+                except Exception as exc2:
+                    logger.error(
+                        "stream resolve failed for track_id=%s quality=%s\n%s",
+                        track_id, quality, traceback.format_exc(),
+                    )
+                    raise HTTPException(
+                        status_code=502,
+                        detail=f"{type(exc2).__name__}: {exc2}",
+                    )
+            with _manifest_cache_lock:
+                _manifest_cache[key] = (time.monotonic(), list(urls), ext)
+            return (urls, ext)
+        finally:
+            tidal.session.config.quality = original
 
 
 def _resolve_stream_url(track_id: int, quality: str) -> str:
-    """Return a signed Tidal stream URL for `track_id` at the requested
-    quality. Cached per (track, quality).
-
-    Works for both device-code and PKCE sessions. PKCE's `track.get_url()`
-    raises URLNotAvailable — we fall back to `track.get_stream()` and
-    pull the URL out of the manifest. Only single-URL (BTS) manifests are
-    served; multi-segment DASH manifests (typically hi-res) aren't
-    playable in the browser's native `<audio>` so we reject those.
-    """
+    """Single-URL variant for endpoints that redirect (e.g. /api/preview).
+    Errors 415 on multi-segment manifests — callers that need to handle
+    DASH should use `_resolve_stream_sources` directly."""
     import time
 
     key = (track_id, quality)
@@ -975,68 +1373,232 @@ def _resolve_stream_url(track_id: int, quality: str) -> str:
         if cached and (now - cached[0]) < _PREVIEW_CACHE_TTL:
             return cached[1]
 
-    try:
-        track = tidal.session.track(track_id)
-    except Exception as exc:
-        raise HTTPException(status_code=404, detail=str(exc))
-
-    with downloader.quality_lock:
-        original = tidal.session.config.quality
-        try:
-            tidal.session.config.quality = tidalapi.Quality[quality]
-            if getattr(tidal.session, "is_pkce", False):
-                # PKCE path — no direct URL, use manifest.
-                stream = track.get_stream()
-                manifest = stream.get_stream_manifest()
-                if getattr(manifest, "is_encrypted", False):
-                    raise HTTPException(
-                        status_code=415,
-                        detail="Encrypted stream — not playable in the browser.",
-                    )
-                urls = list(manifest.urls or [])
-                if len(urls) == 0:
-                    raise HTTPException(
-                        status_code=502, detail="Tidal returned no stream URL"
-                    )
-                if len(urls) > 1:
-                    # Multi-segment DASH (usually hi-res) can't be fed to
-                    # <audio> without MSE. Tell the caller to pick a
-                    # lower quality or download the track instead.
-                    raise HTTPException(
-                        status_code=415,
-                        detail=(
-                            "This quality isn't streamable in the browser. "
-                            "Download the track for full-quality playback."
-                        ),
-                    )
-                url = urls[0]
-            else:
-                url = track.get_url()
-        except HTTPException:
-            raise
-        except Exception as exc:
-            raise HTTPException(status_code=502, detail=str(exc))
-        finally:
-            tidal.session.config.quality = original
-
+    urls, _ext = _resolve_stream_sources(track_id, quality)
+    if len(urls) == 0:
+        raise HTTPException(status_code=502, detail="Tidal returned no stream URL")
+    if len(urls) > 1:
+        raise HTTPException(
+            status_code=415,
+            detail=(
+                "This quality isn't streamable via redirect. "
+                "Use /api/play which concats segments server-side."
+            ),
+        )
+    url = urls[0]
     if not url:
         raise HTTPException(status_code=502, detail="Tidal returned no stream URL")
-
     with _preview_cache_lock:
         _preview_cache[key] = (now, url)
     return url
 
 
+# Maps the manifest's file_extension hint to the Content-Type the browser
+# needs to dispatch the concatenated bytes to the right decoder. Lossless
+# via PKCE usually comes back as "flac"; m4a covers AAC in MP4.
+_EXT_TO_MIME = {
+    "flac": "audio/flac",
+    "m4a": "audio/mp4",
+    "mp4": "audio/mp4",
+    "mp3": "audio/mpeg",
+    "aac": "audio/aac",
+}
+
+
+def _mime_for_stream(ext: Optional[str], quality: str) -> str:
+    """Pick the right Content-Type for a multi-segment stream. Falls back
+    to the quality tier when the manifest doesn't return a usable
+    extension hint — Lossless/Max are always FLAC, Low is AAC. Serving
+    the wrong MIME makes `<audio>` treat FLAC as MP3 and the scrub bar
+    falls apart."""
+    if ext:
+        norm = ext.lower().lstrip(".")
+        if norm in _EXT_TO_MIME:
+            return _EXT_TO_MIME[norm]
+    if quality in ("high_lossless", "hi_res_lossless"):
+        return "audio/flac"
+    return "audio/mp4"
+
+
+def _fetch_segment(url: str) -> bytes:
+    """Download a single DASH segment to memory. Segments are small
+    (typically 200-800 KB) so in-memory is fine, and keeping each one
+    whole lets us run the fetches in parallel and then write them to
+    disk in the right order."""
+    with SESSION.get(url, stream=True, timeout=30) as resp:
+        resp.raise_for_status()
+        chunks: list[bytes] = []
+        for chunk in resp.iter_content(chunk_size=65536):
+            if chunk:
+                chunks.append(chunk)
+        return b"".join(chunks)
+
+
+# Bounded so we don't open a hundred parallel sockets to Tidal's CDN on a
+# long track — 16 keeps the pipe saturated without being abusive.
+_STREAM_FETCH_WORKERS = 16
+
+
+def _probe_segment_size(url: str) -> int:
+    """Probe a single segment's byte length via HEAD. Tidal's CDN
+    honors HEAD on signed segment URLs and returns Content-Length, so
+    this is much cheaper than a full GET — the response has no body."""
+    resp = SESSION.head(url, timeout=10, allow_redirects=True)
+    resp.raise_for_status()
+    cl = resp.headers.get("Content-Length")
+    if cl and cl.isdigit():
+        return int(cl)
+    # Some CDNs strip Content-Length on HEAD. Fall back to a 1-byte
+    # Range GET: the Content-Range header carries the total size.
+    with SESSION.get(
+        url, headers={"Range": "bytes=0-0"}, stream=True, timeout=10
+    ) as r:
+        r.raise_for_status()
+        cr = r.headers.get("Content-Range") or ""
+        if "/" in cr:
+            total = cr.rsplit("/", 1)[1].strip()
+            if total.isdigit():
+                return int(total)
+        cl2 = r.headers.get("Content-Length")
+        if cl2 and cl2.isdigit():
+            return int(cl2)
+    raise RuntimeError("no size header from segment probe")
+
+
+def _probe_total_bytes(urls: list[str]) -> Optional[int]:
+    """Sum segment byte sizes via parallel HEAD probes so we can set
+    Content-Length on the streaming response — without it, browsers
+    see duration=Infinity and the scrub bar goes dead. Runs with a
+    larger pool than the fetcher because probes are tiny; the whole
+    phase typically finishes in one round-trip's worth of time.
+
+    Returns None on any probe failure; caller streams without
+    Content-Length and accepts the scrub-bar degradation rather than
+    failing the play outright.
+    """
+    if not urls:
+        return None
+    workers = min(_STREAM_FETCH_WORKERS * 2, max(1, len(urls)))
+    try:
+        with ThreadPoolExecutor(
+            max_workers=workers, thread_name_prefix="stream-probe"
+        ) as pool:
+            sizes = list(pool.map(_probe_segment_size, urls))
+        return sum(sizes)
+    except Exception as exc:
+        logger.warning(
+            "segment size probe failed, streaming without Content-Length: %s: %s",
+            type(exc).__name__, exc,
+        )
+        return None
+
+
+def _multisegment_suffix(ext: Optional[str], quality: str) -> str:
+    if ext:
+        norm = ext.lower().lstrip(".")
+        if norm:
+            return "." + norm
+    return ".flac" if quality in ("high_lossless", "hi_res_lossless") else ".m4a"
+
+
+def _build_streaming_response(
+    track_id: int, quality: str, urls: list[str], ext: Optional[str]
+) -> StreamingResponse:
+    """Stream a multi-segment DASH track to the client in order *as*
+    segments are fetched — first byte goes out after ~one segment's
+    worth of latency instead of waiting for the entire track to buffer.
+    Writes the full track to a temp file in parallel, then installs it
+    in the stream cache on successful completion so subsequent plays
+    (which hit the cache) get FileResponse with Range/seek.
+
+    Tidal's DASH FLAC segments are byte-joinable — the first segment
+    carries STREAMINFO — so a plain concat produces a valid FLAC that
+    `<audio>` can decode progressively.
+    """
+    import tempfile
+
+    key = (track_id, quality)
+    mime = _mime_for_stream(ext, quality)
+    suffix = _multisegment_suffix(ext, quality)
+
+    tmp = tempfile.NamedTemporaryFile(
+        delete=False, suffix=suffix, prefix="tidal-stream-"
+    )
+    tmp_path = Path(tmp.name)
+    tmp.close()
+
+    # Probe segment sizes in parallel BEFORE starting full fetches so
+    # we can advertise Content-Length on the response. HEAD probes are
+    # tiny — the whole phase typically adds one HTTP round-trip of
+    # latency before first byte (say 100-250 ms) but gives the browser
+    # a finite duration so the scrub bar displays correctly.
+    total_bytes = _probe_total_bytes(urls)
+
+    workers = min(_STREAM_FETCH_WORKERS, max(1, len(urls)))
+    pool = ThreadPoolExecutor(
+        max_workers=workers, thread_name_prefix="stream-fetch"
+    )
+    # Submit all fetches up front. The pool processes 16 at a time, so
+    # by the time the client reads segment N the next 15 are already
+    # downloaded or in flight — yielding each .result() in order is
+    # near-instant once the first segment lands.
+    futures = [pool.submit(_fetch_segment, u) for u in urls]
+
+    def gen():
+        completed = False
+        try:
+            with open(tmp_path, "wb") as f:
+                for fut in futures:
+                    chunk = fut.result()
+                    f.write(chunk)
+                    yield chunk
+            completed = True
+        except Exception:
+            logger.error(
+                "stream segment fetch failed for track_id=%s quality=%s\n%s",
+                track_id, quality, traceback.format_exc(),
+            )
+            raise
+        finally:
+            for fut in futures:
+                fut.cancel()
+            pool.shutdown(wait=False)
+            if completed:
+                _install_stream_cache(key, tmp_path, mime)
+            else:
+                # Client disconnected mid-stream, or a segment fetch
+                # errored — discard the partial tempfile.
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+
+    headers = {"Cache-Control": "no-store, private"}
+    if total_bytes is not None:
+        # Preserves a finite `<audio>.duration` and drives the scrub
+        # bar on first play. We don't set Accept-Ranges: bytes — this
+        # response can't honor Range, so advertising range support
+        # would let the browser issue seeks we can't serve; the scrub
+        # bar still displays, seek just restarts from 0 until the
+        # cache warms (subsequent plays go through FileResponse).
+        headers["Content-Length"] = str(total_bytes)
+    return StreamingResponse(
+        gen(),
+        media_type=mime,
+        headers=headers,
+    )
+
+
 def _pick_stream_quality(requested: Optional[str]) -> str:
-    """Resolve the effective streaming quality. Only low/high/lossless are
-    streamable in-browser; anything higher clamps to lossless. None falls
-    back to AAC 320 which every browser can play without question."""
+    """Resolve the effective streaming quality. All four PKCE-reachable
+    tiers (low_96k / low_320k / high_lossless / hi_res_lossless) are
+    streamable in-browser via the DASH segment-concat path. Anything
+    else (legacy/unknown token) falls back to high_lossless. None falls
+    back to AAC 320 which every browser can play without question and
+    is the cheapest bandwidth default."""
     if not requested:
         return "low_320k"
     q = requested.lower()
     if q not in _STREAMABLE_QUALITIES:
-        # Silently downgrade instead of erroring — caller might have
-        # a hi-res default saved.
         return "high_lossless"
     return q
 
@@ -1062,17 +1624,59 @@ def play_track(track_id: int, quality: Optional[str] = None):
     we have one for this Tidal track, otherwise falls back to the Tidal
     stream. FileResponse emits Range-capable headers so the browser can
     seek without buffering the whole file. Accepts an optional `quality`
-    for the streaming path."""
-    _require_auth()
+    for the streaming path.
+
+    For PKCE sessions, Lossless can come back as a multi-segment DASH
+    manifest. Rather than rejecting it (which would strand the user at
+    320k AAC), we concatenate the segments on the fly — Tidal's FLAC
+    DASH segments are byte-joinable into a valid single file, same
+    trick the downloader uses. Seek is unavailable while buffering
+    since we're streaming, not serving a known-length file.
+    """
+    # Local files are playable without auth when offline mode is on;
+    # streaming still requires a live Tidal session.
+    _require_local_access()
     local = local_index.get(str(track_id))
     if local is not None:
         return FileResponse(str(local))
+    if not _is_logged_in():
+        raise HTTPException(status_code=401, detail="Not authenticated")
     q = _pick_stream_quality(quality)
-    return RedirectResponse(
-        _resolve_stream_url(track_id, q),
-        status_code=307,
-        headers={"Cache-Control": "no-store, private"},
-    )
+
+    # Fast path: if a recent play already buffered this track+quality,
+    # serve the cached file with FileResponse — Content-Length and
+    # Range/seek work, and we skip both the manifest fetch and the
+    # segment downloads entirely. Browsers fire lots of Range requests
+    # (every scrub-seek, every pause/resume), so this is the hot path
+    # after a track's been played once.
+    cache_hit = _lookup_stream_cache((track_id, q))
+    if cache_hit is not None:
+        path, mime = cache_hit
+        return FileResponse(
+            str(path),
+            media_type=mime,
+            headers={"Cache-Control": "no-store, private"},
+        )
+
+    urls, ext = _resolve_stream_sources(track_id, q)
+    if not urls:
+        raise HTTPException(status_code=502, detail="Tidal returned no stream URL")
+    if len(urls) == 1:
+        # Single URL — redirect so the browser gets Range/seek straight
+        # from the Tidal CDN. Also warm the preview cache so a repeat
+        # request within the TTL skips the session lock.
+        with _preview_cache_lock:
+            _preview_cache[(track_id, q)] = (time.monotonic(), urls[0])
+        return RedirectResponse(
+            urls[0],
+            status_code=307,
+            headers={"Cache-Control": "no-store, private"},
+        )
+    # Multi-segment, first play — stream segments to the client as they
+    # arrive (fast first-byte), and tee to a temp file that we install
+    # in the cache on successful completion so the NEXT play hits the
+    # seekable FileResponse path above.
+    return _build_streaming_response(track_id, q, urls, ext)
 
 
 @app.get("/api/downloaded")
@@ -1082,7 +1686,7 @@ def downloaded_ids() -> dict:
     Frontend calls this once on boot and then updates live via the
     `downloaded` SSE event type.
     """
-    _require_auth()
+    _require_local_access()
     return {"ids": sorted(local_index.ids())}
 
 
@@ -1265,7 +1869,7 @@ def enqueue_bulk(req: BulkDownloadRequest) -> dict:
 
 @app.get("/api/downloads")
 def list_downloads() -> list[dict]:
-    _require_auth()
+    _require_local_access()
     return [item_to_dict(i) for i in broker.snapshot()]
 
 
@@ -1293,14 +1897,106 @@ def retry_download(
 
 @app.delete("/api/downloads/completed")
 def clear_completed() -> dict:
-    _require_auth()
+    _require_local_access()
     broker.clear_completed()
     return {"ok": True}
 
 
+@app.delete("/api/downloads/active")
+def cancel_all_active() -> dict:
+    """Cancel every non-terminal item in one shot. Used by the 'Cancel
+    all' button on the Downloads page when the user wants to abandon a
+    large queue without clicking each row individually."""
+    _require_local_access()
+    from app.downloader import DownloadStatus as _DS
+
+    terminal = {_DS.COMPLETE, _DS.FAILED}
+    targets = [i.item_id for i in broker.snapshot() if i.status not in terminal]
+    for iid in targets:
+        downloader.cancel(iid)
+    return {"cancelled": len(targets)}
+
+
+@app.delete("/api/downloads/{item_id}")
+def cancel_download(item_id: str) -> dict:
+    """Cancel a single in-flight or pending download. No-op (still 200)
+    if the item is already terminal or unknown — the UI can fire this
+    optimistically without pre-checking."""
+    _require_local_access()
+    downloader.cancel(item_id)
+    return {"ok": True}
+
+
+@app.get("/api/downloads/state")
+def download_state() -> dict:
+    _require_local_access()
+    return {"paused": downloader.paused}
+
+
+@app.post("/api/downloads/pause")
+def pause_downloads() -> dict:
+    _require_auth()
+    downloader.pause()
+    return {"paused": True}
+
+
+@app.post("/api/downloads/resume")
+def resume_downloads() -> dict:
+    _require_auth()
+    downloader.resume()
+    return {"paused": False}
+
+
+_AUDIO_EXTENSIONS = {".flac", ".m4a", ".mp4", ".mp3", ".ogg", ".opus", ".aac", ".wav"}
+
+
+@app.get("/api/downloads/stats")
+def download_stats() -> dict:
+    """Aggregate size + file count of audio files under the configured
+    output directory. Used by the Downloads page to show a "4.2 GB,
+    312 files" header so the user can see at a glance how much they've
+    pulled down.
+
+    Walks the tree lazily with ``os.scandir`` (faster than rglob for
+    large libraries) and only counts files with audio extensions to
+    avoid inflating totals with stray cover art or .part files."""
+    _require_local_access()
+    import os
+
+    root = Path(settings.output_dir).expanduser()
+    total_bytes = 0
+    file_count = 0
+    if root.is_dir():
+        # Iterative DFS — recursion would blow the stack on deep trees
+        # and rglob() is ~4x slower on Windows in practice.
+        stack: list[Path] = [root]
+        while stack:
+            current = stack.pop()
+            try:
+                with os.scandir(current) as it:
+                    for entry in it:
+                        try:
+                            if entry.is_dir(follow_symlinks=False):
+                                stack.append(Path(entry.path))
+                            elif entry.is_file(follow_symlinks=False):
+                                ext = os.path.splitext(entry.name)[1].lower()
+                                if ext in _AUDIO_EXTENSIONS:
+                                    total_bytes += entry.stat().st_size
+                                    file_count += 1
+                        except OSError:
+                            continue
+            except OSError:
+                continue
+    return {
+        "output_dir": str(root),
+        "total_bytes": total_bytes,
+        "file_count": file_count,
+    }
+
+
 @app.get("/api/downloads/stream")
 async def downloads_stream(request: Request) -> EventSourceResponse:
-    _require_auth()
+    _require_local_access()
     q = await broker.subscribe()
 
     async def event_gen():
@@ -1401,7 +2097,7 @@ def _clamp_settings_to_subscription(max_quality: Optional[str]) -> None:
 
 @app.get("/api/qualities")
 def list_qualities() -> list[dict]:
-    _require_auth()
+    _require_local_access()
     # Filter to the qualities the account can actually stream. Without
     # this, the UI offers e.g. "Max (hi-res)" to HiFi-tier users and
     # every download at that quality 401s. If the subscription lookup
@@ -1451,17 +2147,19 @@ class SettingsPayload(BaseModel):
     create_album_folders: Optional[bool] = None
     skip_existing: Optional[bool] = None
     concurrent_downloads: Optional[int] = None
+    offline_mode: Optional[bool] = None
+    notify_on_complete: Optional[bool] = None
 
 
 @app.get("/api/settings")
 def get_settings() -> dict:
-    _require_auth()
+    _require_local_access()
     return asdict(settings)
 
 
 @app.put("/api/settings")
 def update_settings(payload: SettingsPayload) -> dict:
-    _require_auth()
+    _require_local_access()
     global settings
     patch = payload.model_dump(exclude_unset=True)
 
@@ -1576,6 +2274,126 @@ def _serialize_page_item(item) -> Optional[dict]:
     return None
 
 
+_CONTEXT_KIND_MAP = {
+    "ALBUM": "album",
+    "TRACK": "track",
+    "PLAYLIST": "playlist",
+    "MIX": "mix",
+    "ARTIST": "artist",
+}
+
+
+def _cover_url_from_uuid(uuid: Optional[str], size: int = 160) -> Optional[str]:
+    """Build an image URL from a bare Tidal UUID (as shipped in header.data.cover)."""
+    if not uuid or not isinstance(uuid, str):
+        return None
+    return f"https://resources.tidal.com/images/{uuid.replace('-', '/')}/{size}x{size}.jpg"
+
+
+def _header_context(header: dict) -> Optional[dict]:
+    """Turn a V2 category header dict into a clickable entity ref so the UI
+    can render an album/artist/playlist thumbnail next to "Because you liked"."""
+    data = header.get("data") or {}
+    htype = (header.get("type") or "").upper()
+    kind = _CONTEXT_KIND_MAP.get(htype)
+    if not kind:
+        return None
+    ent_id = data.get("id") or data.get("uuid")
+    if ent_id is None:
+        return None
+    if kind == "artist":
+        title = data.get("name") or ""
+        cover = _cover_url_from_uuid(data.get("picture"))
+    else:
+        title = data.get("title") or ""
+        cover = _cover_url_from_uuid(data.get("cover") or data.get("image"))
+    return {"kind": kind, "id": str(ent_id), "title": title, "cover": cover}
+
+
+def _fetch_v2_view_all(path: str) -> dict:
+    """Fetch a V2 "view-all" path (e.g.
+    ``home/pages/NEW_ALBUM_SUGGESTIONS/view-all``) and serialize it as
+    a single-category Page so the frontend can render it with PageView.
+
+    The view-all response shape is different from a regular Page — it's
+    a flat {"items": [...]} where each item has a ``type`` like
+    "ALBUM"/"TRACK"/"ARTIST"/"PLAYLIST"/"MIX" and a ``data`` payload.
+    tidalapi's Page parser expects category-typed rows, so we map items
+    ourselves using session.parse_* helpers and emit one synthetic
+    "HorizontalList" row.
+
+    Also: tidalapi's basic_request auto-injects ``sessionId`` and
+    ``limit=1000`` — that combination trips a 400 (subStatus 1002) on
+    these endpoints, so we drive ``request_session`` directly with just
+    the query params Tidal's web client sends."""
+    from urllib.parse import urljoin
+
+    session = tidal.session
+    url = urljoin(session.config.api_v2_location, path)
+    headers = {
+        "x-tidal-client-version": session.request.client_version,
+        "User-Agent": session.request.user_agent,
+        "Authorization": f"{session.token_type} {session.access_token}",
+    }
+    params = {
+        "countryCode": session.country_code,
+        "deviceType": "BROWSER",
+        "locale": session.locale,
+        "platform": "WEB",
+    }
+    resp = session.request_session.request("GET", url, params=params, headers=headers)
+    resp.raise_for_status()
+    body = resp.json()
+
+    raw_items = body.get("items") or []
+    title = body.get("title") or ""
+    out: list[dict] = []
+    for entry in raw_items:
+        item_type = (entry.get("type") or "").upper()
+        data = entry.get("data") or entry
+        try:
+            if item_type == "TRACK":
+                obj = session.parse_track(data)
+            elif item_type == "ALBUM":
+                obj = session.parse_album(data)
+            elif item_type == "ARTIST":
+                obj = session.parse_artist(data)
+            elif item_type == "PLAYLIST":
+                obj = session.parse_playlist(data)
+            elif item_type == "MIX":
+                obj = session.parse_mix(data)
+            else:
+                continue
+        except Exception:
+            continue
+        serialized = _serialize_page_item(obj)
+        if serialized:
+            out.append(serialized)
+
+    return {
+        "title": title,
+        "categories": [
+            {"type": "HorizontalList", "title": "", "items": out},
+        ],
+    }
+
+
+def _category_view_all_path(cat) -> Optional[str]:
+    """Return the api_path for this category's "View more" page, if any.
+
+    tidalapi's `More.parse` already handles both the `viewAll`
+    (bare-path) and `showMore` (dict with apiPath) shapes; we just read
+    the parsed attribute off the category. V1 categories use `.more`
+    instead of `._more`, so fall back."""
+    more = getattr(cat, "_more", None) or getattr(cat, "more", None)
+    if not more:
+        return None
+    api_path = getattr(more, "api_path", None)
+    if isinstance(api_path, str) and api_path:
+        return api_path
+    return None
+
+
 def _serialize_page(page) -> dict:
     categories: list[dict] = []
     for cat in getattr(page, "categories", []) or []:
@@ -1605,8 +2423,16 @@ def _serialize_page(page) -> dict:
         entry: dict = {"type": cat_type, "title": title, "items": items}
         if subtitle:
             entry["subtitle"] = subtitle
+        raw_header = getattr(cat, "_raw_header", None)
+        if isinstance(raw_header, dict):
+            ctx = _header_context(raw_header)
+            if ctx:
+                entry["context"] = ctx
+        view_all_path = _category_view_all_path(cat)
+        if view_all_path:
+            entry["viewAllPath"] = view_all_path
         categories.append(entry)
-    return {"categories": categories}
+    return {"title": getattr(page, "title", "") or "", "categories": categories}
 
 
 # Well-known page names the frontend can request directly.
@@ -1638,18 +2464,50 @@ class PagePathRequest(BaseModel):
 
 @app.post("/api/page/resolve")
 def resolve_page(req: PagePathRequest) -> dict:
-    """Drill into a PageLink by the api_path it returned (e.g.
-    ``pages/genre_hip_hop``). POST rather than GET because the path contains
-    slashes that get awkward in URL path segments.
-    """
+    """Drill into any api_path returned by Tidal.
+
+    Tidal emits two shapes of "view more" paths:
+      - V1 pages (``pages/genre_hip_hop``, ``pages/home``) — live under
+        ``api.tidal.com/v1/`` and parse into the classic row-based
+        Page shape. tidalapi's ``page.get`` handles these.
+      - V2 view-alls (``home/pages/NEW_ALBUM_SUGGESTIONS/view-all``,
+        ``home/feed/static``) — live under ``api.tidal.com/v2/`` and
+        return the items-array V2 shape. tidalapi has no helper for
+        arbitrary V2 paths, so we do the request ourselves and hand
+        the JSON to the same Page parser.
+
+    We distinguish by prefix: ``pages/…`` → V1; everything else → V2.
+    POST (not GET) so path slashes don't need URL encoding."""
     _require_auth()
-    path = req.path.strip()
-    if not path or not path.startswith("pages/"):
-        raise HTTPException(status_code=400, detail="path must start with 'pages/'")
+    path = req.path.strip().lstrip("/")
+    if not path:
+        raise HTTPException(status_code=400, detail="path is required")
+    if "://" in path:
+        raise HTTPException(status_code=400, detail="path must be a relative api_path")
     try:
-        page = tidal.session.page.get(path)
+        if path.startswith("pages/"):
+            page = tidal.session.page.get(path)
+        else:
+            # V2 view-all path — returns a JSON dict directly, no Page
+            # object to serialize.
+            return _fetch_v2_view_all(path)
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+        # Tidal's 400/404 bodies usually contain a JSON error that tells
+        # us exactly which parameter it's rejecting — the HTTPError
+        # itself only says "400 Bad Request". Grab the latest response
+        # tidalapi cached and log both.
+        body = ""
+        try:
+            resp = tidal.session.request.latest_err_response
+            if resp is not None:
+                body = (resp.text or "")[:500]
+        except Exception:
+            pass
+        print(
+            f"[page/resolve] failed path={path!r}: {exc} | body={body!r}",
+            flush=True,
+        )
+        raise HTTPException(status_code=502, detail=f"{path}: {exc} | {body}")
     return _serialize_page(page)
 
 
@@ -2110,3 +2968,61 @@ def image_proxy(url: str) -> Response:
             "Access-Control-Allow-Origin": "*",
         },
     )
+
+
+# ---------------------------------------------------------------------------
+# Static frontend (packaged builds)
+#
+# When a Vite build exists at <resource_dir>/web/dist, serve it as the
+# frontend: hashed assets under /assets (with far-future caching) and an
+# SPA fallback that returns index.html for any unmatched GET so React
+# Router can handle client-side routes like /search/foo or /settings.
+#
+# Registered AFTER every /api/* route above — order matters because the
+# fallback matches {full_path:path} and would otherwise shadow real API
+# endpoints. In dev (vite serves :5173 directly) the dist/ dir doesn't
+# exist and this whole block no-ops.
+# ---------------------------------------------------------------------------
+
+
+_DIST_DIR = bundled_resource_dir() / "web" / "dist"
+
+if _DIST_DIR.is_dir():
+    _ASSETS_DIR = _DIST_DIR / "assets"
+    if _ASSETS_DIR.is_dir():
+        # Vite emits hashed filenames under /assets — safe to cache forever.
+        app.mount(
+            "/assets",
+            StaticFiles(directory=_ASSETS_DIR),
+            name="assets",
+        )
+
+    _INDEX_HTML = _DIST_DIR / "index.html"
+    _DIST_ROOT_RESOLVED = _DIST_DIR.resolve()
+
+    @app.get("/{full_path:path}", include_in_schema=False)
+    async def _spa_fallback(full_path: str) -> Response:
+        # /api and /assets are already routed above; anything landing here
+        # is either a top-level static file (favicon.ico, robots.txt) or
+        # a client-side route. Resolve-and-check keeps path traversal
+        # (`..`) from escaping _DIST_DIR even if Starlette's routing
+        # normalization misses something.
+        # Unknown /api/* paths should 404, not silently serve the SPA shell —
+        # that would make typos in API clients very confusing to debug.
+        if full_path == "api" or full_path.startswith("api/"):
+            raise HTTPException(status_code=404)
+        if full_path:
+            candidate = (_DIST_DIR / full_path).resolve()
+            try:
+                candidate.relative_to(_DIST_ROOT_RESOLVED)
+            except ValueError:
+                candidate = None
+            if candidate and candidate.is_file():
+                return FileResponse(candidate)
+        if _INDEX_HTML.is_file():
+            # no-store on index.html so a user who updates the app doesn't
+            # get stuck on a cached shell pointing at stale hashed bundles.
+            return FileResponse(
+                _INDEX_HTML, headers={"Cache-Control": "no-store"}
+            )
+        raise HTTPException(status_code=404)

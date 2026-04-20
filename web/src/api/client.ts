@@ -9,6 +9,7 @@ import type {
   DownloadItem,
   FavoriteKind,
   FavoritesSnapshot,
+  LocalFile,
   Lyrics,
   MixDetail,
   Playlist,
@@ -20,11 +21,39 @@ import type {
   Track,
 } from "./types";
 
+// Upper bound on how long any JSON request is allowed to hang before
+// we give up. Without this, a request against a dead network waits for
+// the OS's TCP timeout (~30s–2min on Windows), which makes the UI look
+// frozen after a drop. 15s is generous enough that slow-but-alive
+// Tidal endpoints still succeed while dropped connections fail fast.
+const DEFAULT_TIMEOUT_MS = 15_000;
+
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
-  const resp = await fetch(path, {
-    headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
-    ...init,
-  });
+  // Compose the caller's AbortSignal (if any) with our timeout so we
+  // respect both. AbortSignal.any is available in every modern browser
+  // we target; falling back to the timeout alone keeps behavior sane
+  // on the rare UA where it isn't.
+  const timeoutSignal = AbortSignal.timeout(DEFAULT_TIMEOUT_MS);
+  const signal =
+    init?.signal && typeof AbortSignal.any === "function"
+      ? AbortSignal.any([init.signal, timeoutSignal])
+      : (init?.signal ?? timeoutSignal);
+
+  let resp: Response;
+  try {
+    resp = await fetch(path, {
+      headers: { "Content-Type": "application/json", ...(init?.headers ?? {}) },
+      ...init,
+      signal,
+    });
+  } catch (err) {
+    // Surface timeouts as a recognizable error string so callers /
+    // toasts can format them nicely instead of showing "AbortError".
+    if (err instanceof DOMException && err.name === "TimeoutError") {
+      throw new Error(`Request timed out: ${path}`);
+    }
+    throw err;
+  }
   if (!resp.ok) {
     const body = await resp.text().catch(() => "");
     throw new Error(`${resp.status}: ${body || resp.statusText}`);
@@ -64,6 +93,8 @@ export const api = {
     albums: () => req<Album[]>("/api/library/albums"),
     artists: () => req<Artist[]>("/api/library/artists"),
     playlists: () => req<Playlist[]>("/api/library/playlists"),
+    local: () =>
+      req<{ output_dir: string; files: LocalFile[] }>("/api/library/local"),
   },
   album: (id: string) => req<AlbumDetail>(`/api/album/${id}`),
   artist: (id: string) => req<ArtistDetail>(`/api/artist/${id}`),
@@ -113,8 +144,19 @@ export const api = {
         body: JSON.stringify({ quality }),
       }),
     clearCompleted: () => req<{ ok: true }>("/api/downloads/completed", { method: "DELETE" }),
+    cancel: (id: string) =>
+      req<{ ok: true }>(`/api/downloads/${id}`, { method: "DELETE" }),
+    cancelAll: () =>
+      req<{ cancelled: number }>("/api/downloads/active", { method: "DELETE" }),
     reveal: (path: string) =>
       req<{ ok: true }>("/api/reveal", { method: "POST", body: JSON.stringify({ path }) }),
+    stats: () =>
+      req<{ output_dir: string; total_bytes: number; file_count: number }>(
+        "/api/downloads/stats",
+      ),
+    state: () => req<{ paused: boolean }>("/api/downloads/state"),
+    pause: () => req<{ paused: true }>("/api/downloads/pause", { method: "POST" }),
+    resume: () => req<{ paused: false }>("/api/downloads/resume", { method: "POST" }),
   },
   settings: {
     get: () => req<Settings>("/api/settings"),

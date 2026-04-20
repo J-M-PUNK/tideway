@@ -10,6 +10,27 @@ function buildTrackSrc(track: Track, quality: StreamingQuality): string {
   return `/api/play/${track.id}?quality=${quality}`;
 }
 
+/** Turn the browser's generic playback failure into something a user can
+ *  actually act on. Max streaming has the most failure modes (needs PKCE
+ *  login, Max-tier entitlement, and Chrome has to natively decode the
+ *  hi-res FLAC) so we special-case it to point the user at the quality
+ *  picker. For other tiers we fall back to the generic message. */
+function playbackErrorMessage(
+  quality: StreamingQuality,
+  mediaError: MediaError | null,
+): string {
+  if (quality === "hi_res_lossless") {
+    return "Max streaming failed for this track — try switching to Lossless in the quality picker.";
+  }
+  if (mediaError?.code === MediaError.MEDIA_ERR_DECODE) {
+    return "The audio format isn't supported in this browser.";
+  }
+  if (mediaError?.code === MediaError.MEDIA_ERR_NETWORK) {
+    return "Network error while loading the track.";
+  }
+  return "Playback blocked or unsupported.";
+}
+
 const PERSIST_KEY = "tidal-downloader:player";
 // How often we flush the player state snapshot to localStorage. The queue,
 // index, and volume are cheap to write; we also piggyback the current time
@@ -276,7 +297,7 @@ export function usePlayer() {
             ...prev,
             playing: false,
             loading: false,
-            error: "Playback blocked or unsupported.",
+            error: playbackErrorMessage(qualityRef.current, preloadEl.error),
           }));
         });
         return;
@@ -299,7 +320,7 @@ export function usePlayer() {
         setState((prev) => ({
           ...prev,
           loading: false,
-          error: "Playback blocked or unsupported.",
+          error: playbackErrorMessage(qualityRef.current, activeEl.error),
         }));
       });
     },
@@ -315,19 +336,44 @@ export function usePlayer() {
     const onPause = () => setState((s) => ({ ...s, playing: false }));
     const onTime = () => setState((s) => ({ ...s, currentTime: audio.currentTime }));
     const onMeta = () =>
-      setState((s) => ({
-        ...s,
-        duration: isFinite(audio.duration) ? audio.duration : s.duration,
-      }));
+      setState((s) => {
+        // Tidal's DASH FLAC first segment carries a STREAMINFO whose
+        // total_samples refers to that fragment, not the whole track —
+        // so <audio>.duration from a live stream can come back as a
+        // wrong, small finite number (e.g. 10s for a 4-min track) and
+        // make the scrub bar fill up long before the song ends. The
+        // Tidal-metadata `track.duration` seeded into `s.duration` is
+        // always accurate, so only accept audio.duration when we don't
+        // already have one OR when it's within 5% of the seeded value
+        // (local files / cached stream files, where STREAMINFO is
+        // correct, land in this case).
+        if (!isFinite(audio.duration) || audio.duration <= 0) return s;
+        if (s.duration <= 0) return { ...s, duration: audio.duration };
+        const ratio = audio.duration / s.duration;
+        if (ratio >= 0.95 && ratio <= 1.05) {
+          return { ...s, duration: audio.duration };
+        }
+        return s;
+      });
     const onWaiting = () => setState((s) => ({ ...s, loading: true }));
     const onCanPlay = () => setState((s) => ({ ...s, loading: false }));
-    const onError = () =>
+    const onError = () => {
+      // Log the MediaError details to the console so we can diagnose
+      // format-vs-network failures when the user reports playback bugs.
+      // (MediaError.code: 1=aborted, 2=network, 3=decode, 4=src-not-supported.)
+      const me = audio.error;
+      if (me) {
+        console.error(
+          `[audio] error code=${me.code} message=${me.message || "(none)"} src=${audio.src}`,
+        );
+      }
       setState((s) => ({
         ...s,
         loading: false,
         playing: false,
-        error: "Preview failed to load.",
+        error: playbackErrorMessage(qualityRef.current, me),
       }));
+    };
     const onEnded = () => {
       // Sleep timer set to "end of track"? Stop here instead of advancing.
       if (endOfTrackPendingRef.current) {
@@ -408,8 +454,16 @@ export function usePlayer() {
     if (audio.src.endsWith(expected)) return;
     const wasPlaying = !audio.paused;
     const resumeAt = audio.currentTime;
+    // Setting currentTime synchronously after src change no-ops in most
+    // browsers — duration isn't known until loadedmetadata fires. Defer
+    // the seek until the new media is ready, otherwise quality changes
+    // silently restart playback from 0.
+    const onReady = () => {
+      audio.currentTime = resumeAt;
+      audio.removeEventListener("loadedmetadata", onReady);
+    };
+    audio.addEventListener("loadedmetadata", onReady);
     audio.src = expected;
-    audio.currentTime = resumeAt;
     // Drop the preload too — it was buffered at the old quality.
     if (preload) {
       preload.pause();
@@ -433,8 +487,14 @@ export function usePlayer() {
   const play = useCallback(
     (track: Track, contextTracks?: Track[]) => {
       if (!audio) return;
-      const queue = contextTracks && contextTracks.length > 0 ? contextTracks : [track];
-      const index = Math.max(0, queue.findIndex((t) => t.id === track.id));
+      let queue = contextTracks && contextTracks.length > 0 ? contextTracks : [track];
+      let index = queue.findIndex((t) => t.id === track.id);
+      // If the starting track isn't in the context, prepend it — otherwise
+      // we'd silently fall through to queue[0] and play the wrong song.
+      if (index < 0) {
+        queue = [track, ...queue];
+        index = 0;
+      }
       playAtIndex(index, queue);
     },
     [audio, playAtIndex],
@@ -471,7 +531,12 @@ export function usePlayer() {
   const seek = useCallback(
     (t: number) => {
       if (!audio) return;
-      audio.currentTime = Math.max(0, Math.min(audio.duration || Infinity, t));
+      // Clamp against state.duration (track.duration from Tidal) rather
+      // than audio.duration — on a live DASH FLAC stream audio.duration
+      // can be wrong (see onMeta above), and clamping against it would
+      // make the scrub bar refuse to go past a fake early "end".
+      const cap = stateRef.current.duration || audio.duration || Infinity;
+      audio.currentTime = Math.max(0, Math.min(cap, t));
     },
     [audio],
   );

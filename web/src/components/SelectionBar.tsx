@@ -73,10 +73,10 @@ export function SelectionBar() {
       await api.favorites.bulk("track", toLike, true);
       toast.show({
         kind: "success",
-        title: `Liking ${toLike.length} tracks`,
+        title: `Liking ${toLike.length} ${toLike.length === 1 ? "track" : "tracks"}`,
         description:
           toLike.length < ids.length
-            ? `${ids.length - toLike.length} were already liked.`
+            ? `Skipped ${ids.length - toLike.length} already liked. Running in the background.`
             : "Running in the background.",
       });
       removeMany(ids);

@@ -21,9 +21,17 @@ interface NavBarProps {
   username: string | null;
   avatar: string | null;
   onLogout: () => void;
+  offline?: boolean;
+  onSignInRequested?: () => void;
 }
 
-export function NavBar({ username, avatar, onLogout }: NavBarProps) {
+export function NavBar({
+  username,
+  avatar,
+  onLogout,
+  offline = false,
+  onSignInRequested,
+}: NavBarProps) {
   const navigate = useNavigate();
   const location = useLocation();
   const navigationType = useNavigationType();
@@ -41,8 +49,9 @@ export function NavBar({ username, avatar, onLogout }: NavBarProps) {
     // A PUSH after Back truncates the browser's forward stack — the old
     // forward chain is gone. Reset maxDepth to the new idx so the forward
     // button doesn't stay enabled pointing at entries that no longer
-    // exist. POP (back/forward buttons themselves) preserves maxDepth.
-    if (navigationType === "PUSH" || navigationType === "REPLACE") {
+    // exist. REPLACE keeps the stack intact (history.replaceState doesn't
+    // touch forward entries), so treat it like POP and preserve maxDepth.
+    if (navigationType === "PUSH") {
       setMaxDepth(idx);
     } else {
       setMaxDepth((m) => Math.max(m, idx));
@@ -58,7 +67,7 @@ export function NavBar({ username, avatar, onLogout }: NavBarProps) {
         onClick={() => canBack && navigate(-1)}
         disabled={!canBack}
         className={cn(
-          "flex h-8 w-8 items-center justify-center rounded-full bg-black/40 text-foreground hover:bg-black/60 disabled:cursor-not-allowed disabled:opacity-40",
+          "flex h-8 w-8 items-center justify-center rounded-full bg-foreground/10 text-foreground hover:bg-foreground/20 disabled:cursor-not-allowed disabled:opacity-40",
         )}
         aria-label="Go back"
       >
@@ -68,14 +77,20 @@ export function NavBar({ username, avatar, onLogout }: NavBarProps) {
         onClick={() => canForward && navigate(1)}
         disabled={!canForward}
         className={cn(
-          "flex h-8 w-8 items-center justify-center rounded-full bg-black/40 text-foreground hover:bg-black/60 disabled:cursor-not-allowed disabled:opacity-40",
+          "flex h-8 w-8 items-center justify-center rounded-full bg-foreground/10 text-foreground hover:bg-foreground/20 disabled:cursor-not-allowed disabled:opacity-40",
         )}
         aria-label="Go forward"
       >
         <ChevronRight className="h-4 w-4" />
       </button>
       <div className="ml-auto">
-        <UserMenu username={username} avatar={avatar} onLogout={onLogout} />
+        <UserMenu
+          username={username}
+          avatar={avatar}
+          onLogout={onLogout}
+          offline={offline}
+          onSignInRequested={onSignInRequested}
+        />
       </div>
     </div>
   );

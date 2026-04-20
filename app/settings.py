@@ -4,7 +4,9 @@ import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-SETTINGS_FILE = Path("settings.json")
+from app.paths import user_data_dir
+
+SETTINGS_FILE = user_data_dir() / "settings.json"
 
 
 @dataclass
@@ -17,6 +19,18 @@ class Settings:
     # How many downloads may run in parallel. Gated by the Downloader's
     # semaphore so changing this doesn't require a process restart.
     concurrent_downloads: int = 3
+    # When True, the UI hides everything that needs a live Tidal session
+    # (search, editorial, favorites, streaming fallback) and the server
+    # stops requiring auth on the handful of endpoints that only touch
+    # local state. Lets users play / manage files they already downloaded
+    # without signing in.
+    offline_mode: bool = False
+    # Opt-in desktop notifications when a download burst finishes.
+    # Implemented browser-side (Notification API) — the server just
+    # stores the preference; no push infrastructure required. Off by
+    # default because browsers require an explicit permission prompt
+    # the first time, and ambushing every new user with one is rude.
+    notify_on_complete: bool = False
 
 
 def load_settings() -> Settings:
@@ -42,7 +56,7 @@ def save_settings(settings: Settings):
     """
     target = SETTINGS_FILE
     tmp_fd, tmp_path = tempfile.mkstemp(
-        prefix=".settings.", suffix=".tmp", dir=str(target.parent) or "."
+        prefix=".settings.", suffix=".tmp", dir=str(target.parent)
     )
     try:
         with os.fdopen(tmp_fd, "w") as f:

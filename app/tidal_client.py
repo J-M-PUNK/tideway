@@ -13,7 +13,9 @@ from typing import Optional, Tuple
 
 import tidalapi
 
-SESSION_FILE = Path("tidal_session.json")
+from app.paths import user_data_dir
+
+SESSION_FILE = user_data_dir() / "tidal_session.json"
 
 
 def _fetch_all_pages(method) -> list:
@@ -159,6 +161,16 @@ _DEVICE_CODE_MAX = "high_lossless"
 
 
 class TidalClient:
+    # Proactive refresh window: if the stored expiry is within this many
+    # seconds of "now" when the watchdog ticks, refresh the token.
+    # tidalapi tokens last an hour, so a 5-minute cushion gives us plenty
+    # of margin without thrashing on refreshes.
+    _REFRESH_WINDOW_SEC = 5 * 60
+    # How often the watchdog re-checks. 60s is frequent enough that the
+    # expiry window can't slip past between checks, but light enough on
+    # cycles that nobody notices.
+    _REFRESH_CHECK_INTERVAL_SEC = 60
+
     def __init__(self):
         config = tidalapi.Config(quality=tidalapi.Quality.high_lossless)
         self.session = tidalapi.Session(config)
@@ -168,6 +180,21 @@ class TidalClient:
         # within a session, so a long TTL is fine.
         self._sub_cache: tuple[float, Optional[str]] = (0.0, None)
         self._sub_lock = threading.Lock()
+        # Serializes force_refresh calls so concurrent 401s from parallel
+        # workers don't fire two token_refresh RPCs at once (second one
+        # would race and potentially invalidate the first's token).
+        self._refresh_lock = threading.Lock()
+        # Background watchdog: refreshes the token a few minutes before
+        # it's due to expire. Without this, a long-running session (user
+        # leaves the tab open overnight) lands a 401 the next time they
+        # click anything, and though downstream callers have their own
+        # retry-on-401 wrappers, it's a worse UX than just keeping the
+        # token fresh in the background. Daemon so it doesn't block
+        # process exit.
+        self._refresh_stop = threading.Event()
+        threading.Thread(
+            target=self._refresh_watchdog, daemon=True, name="tidal-refresh"
+        ).start()
 
     # ------------------------------------------------------------------
     # Session persistence
@@ -211,7 +238,7 @@ class TidalClient:
             self.session.load_oauth_session(
                 data["token_type"],
                 self.session.access_token or data["access_token"],
-                refresh_token,
+                getattr(self.session, "refresh_token", None) or refresh_token,
                 self.session.expiry_time or expiry,
                 is_pkce=is_pkce,
             )
@@ -230,44 +257,91 @@ class TidalClient:
         why it failed. If the refresh token is itself expired, wipes the
         persisted session file so the user is bounced to the login flow
         on next auth check instead of being stuck in a retry loop.
+
+        Serialized on _refresh_lock so concurrent 401s from parallel
+        workers don't fire two token_refresh RPCs at once. The second
+        caller will see the fresh token after the first finishes.
         """
         import sys as _sys
 
-        refresh_token = getattr(self.session, "refresh_token", None)
-        if not refresh_token:
-            print(
-                "[tidal] force_refresh: no refresh_token on session",
-                file=_sys.stderr,
-                flush=True,
-            )
-            return False
-        try:
-            ok = self.session.token_refresh(refresh_token)
-        except Exception as exc:
-            print(
-                f"[tidal] force_refresh: token_refresh raised: {exc!r}",
-                file=_sys.stderr,
-                flush=True,
-            )
-            # AuthenticationError means the refresh token itself is dead.
-            # Blow the session away so the user is prompted to log in
-            # again rather than chasing 401s forever.
-            if type(exc).__name__ == "AuthenticationError":
-                try:
-                    self.logout()
-                except Exception:
-                    pass
-            return False
-        if not ok:
-            print(
-                "[tidal] force_refresh: token_refresh returned False",
-                file=_sys.stderr,
-                flush=True,
-            )
-            return False
-        self.save_session()
-        print("[tidal] force_refresh: success", file=_sys.stderr, flush=True)
-        return True
+        with self._refresh_lock:
+            refresh_token = getattr(self.session, "refresh_token", None)
+            if not refresh_token:
+                print(
+                    "[tidal] force_refresh: no refresh_token on session",
+                    file=_sys.stderr,
+                    flush=True,
+                )
+                return False
+            try:
+                ok = self.session.token_refresh(refresh_token)
+            except Exception as exc:
+                print(
+                    f"[tidal] force_refresh: token_refresh raised: {exc!r}",
+                    file=_sys.stderr,
+                    flush=True,
+                )
+                # AuthenticationError means the refresh token itself is dead.
+                # Blow the session away so the user is prompted to log in
+                # again rather than chasing 401s forever.
+                if type(exc).__name__ == "AuthenticationError":
+                    try:
+                        self.logout()
+                    except Exception:
+                        pass
+                return False
+            if not ok:
+                print(
+                    "[tidal] force_refresh: token_refresh returned False",
+                    file=_sys.stderr,
+                    flush=True,
+                )
+                return False
+            self.save_session()
+            print("[tidal] force_refresh: success", file=_sys.stderr, flush=True)
+            return True
+
+    def _refresh_watchdog(self) -> None:
+        """Background loop that refreshes the token before it expires.
+
+        Sleeps for _REFRESH_CHECK_INTERVAL_SEC between checks. Each tick:
+        if we're logged in and the stored expiry is within the window,
+        fire force_refresh. Errors inside force_refresh are already
+        logged there; the watchdog swallows its own errors so a transient
+        network blip doesn't kill the thread.
+        """
+        import sys as _sys
+
+        while not self._refresh_stop.is_set():
+            # Wake up early if someone signals stop (e.g. tests).
+            if self._refresh_stop.wait(self._REFRESH_CHECK_INTERVAL_SEC):
+                return
+            try:
+                expiry = getattr(self.session, "expiry_time", None)
+                refresh_token = getattr(self.session, "refresh_token", None)
+                if not expiry or not refresh_token:
+                    continue
+                now = (
+                    datetime.now(expiry.tzinfo)
+                    if getattr(expiry, "tzinfo", None)
+                    else datetime.now()
+                )
+                seconds_left = (expiry - now).total_seconds()
+                if seconds_left > self._REFRESH_WINDOW_SEC:
+                    continue
+                print(
+                    f"[tidal] refresh watchdog: token expires in "
+                    f"{seconds_left:.0f}s — refreshing",
+                    file=_sys.stderr,
+                    flush=True,
+                )
+                self.force_refresh()
+            except Exception as exc:
+                print(
+                    f"[tidal] refresh watchdog: ignoring error: {exc!r}",
+                    file=_sys.stderr,
+                    flush=True,
+                )
 
     def get_max_quality(self) -> Optional[str]:
         """Return the highest audio quality the logged-in account is
@@ -380,10 +454,9 @@ class TidalClient:
         }
         target = SESSION_FILE
         # Write to a sibling tempfile in the same dir so os.replace stays
-        # atomic (rename across filesystems isn't). dir="." places it next
-        # to SESSION_FILE since SESSION_FILE is a relative path.
+        # atomic (rename across filesystems isn't).
         tmp_fd, tmp_path = tempfile.mkstemp(
-            prefix=".tidal_session.", suffix=".tmp", dir=str(target.parent) or "."
+            prefix=".tidal_session.", suffix=".tmp", dir=str(target.parent)
         )
         try:
             with os.fdopen(tmp_fd, "w") as f:
@@ -458,6 +531,12 @@ class TidalClient:
         try:
             token = self.session.pkce_get_auth_token(redirect_url)
             self.session.process_auth_token(token, is_pkce_token=True)
+            # Defensive: make sure is_pkce actually sticks on the session
+            # so save_session() writes is_pkce=True. If tidalapi's
+            # process_auth_token ever stops setting this attribute, the
+            # reloaded session would silently fall back to the non-hi-res
+            # client_id on next restart.
+            self.session.is_pkce = True
             # Swap the active client_id/secret to the hi-res-entitled
             # PKCE pair so subsequent API calls use the credentials that
             # actually unlock Max quality streams.

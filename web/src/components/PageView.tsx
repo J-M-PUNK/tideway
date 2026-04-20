@@ -1,10 +1,13 @@
 import { Link } from "react-router-dom";
-import { Music } from "lucide-react";
+import { ChevronRight, Home, Music } from "lucide-react";
+import { Button } from "@/components/ui/button";
+import { EmptyState } from "@/components/EmptyState";
 import type {
   Album,
   Artist,
   MixItem,
   PageCategory,
+  PageContext,
   PageItem,
   PageLinkItem,
   Playlist,
@@ -30,7 +33,18 @@ interface Props {
  */
 export function PageView({ page, onDownload }: Props) {
   if (page.categories.length === 0) {
-    return <div className="py-12 text-center text-sm text-muted-foreground">Nothing here.</div>;
+    return (
+      <EmptyState
+        icon={Music}
+        title="Nothing here yet"
+        description="This page doesn't have any content right now. Try the home page or explore to find something to listen to."
+        action={
+          <Button asChild variant="secondary" size="sm">
+            <Link to="/"><Home className="h-4 w-4" /> Go home</Link>
+          </Button>
+        }
+      />
+    );
   }
   return (
     <div className="flex flex-col gap-8">
@@ -48,12 +62,19 @@ function Section({
   category: PageCategory;
   onDownload: OnDownload;
 }) {
-  const { type, title, subtitle, items } = category;
+  const { type, title, subtitle, items, context, viewAllPath } = category;
 
   if (type === "TrackList") {
     return (
       <div>
-        {title && <SectionHeader title={title} subtitle={subtitle} />}
+        {title && (
+          <SectionHeader
+            title={title}
+            subtitle={subtitle}
+            context={context}
+            viewAllPath={viewAllPath}
+          />
+        )}
         <TrackList
           tracks={items.filter((i): i is Track => i.kind === "track")}
           onDownload={onDownload}
@@ -78,30 +99,142 @@ function Section({
     );
   }
 
-  // Default: horizontal grid of cards (handles HorizontalList,
-  // ShortcutList, FeaturedItems, ItemList, HorizontalListWithContext, etc.)
+  // "Because you liked X" rows (context present) and any row with a
+  // viewAll get capped to a single row of cards — the rest live behind
+  // the "View more" link in the header. Everything else keeps the
+  // full responsive grid.
+  const singleRow = Boolean(context || viewAllPath);
+  const visible = singleRow ? items.slice(0, ROW_ITEM_CAP) : items;
   return (
     <div>
-      {title && <SectionHeader title={title} subtitle={subtitle} />}
-      <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6">
-        {items.map((it, idx) => (
-          <PageItemCard key={`${it.kind}-${itemKey(it)}-${idx}`} item={it} onDownload={onDownload} />
+      {title && (
+        <SectionHeader
+          title={title}
+          subtitle={subtitle}
+          context={context}
+          viewAllPath={viewAllPath}
+        />
+      )}
+      <div
+        className={cn(
+          "grid gap-4",
+          singleRow
+            ? "grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 2xl:grid-cols-6"
+            : "grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6",
+        )}
+      >
+        {visible.map((it, idx) => (
+          <PageItemCard
+            key={`${it.kind}-${itemKey(it)}-${idx}`}
+            item={it}
+            onDownload={onDownload}
+          />
         ))}
       </div>
     </div>
   );
 }
 
+// Matches the widest breakpoint so a 2xl viewport still fills its row.
+const ROW_ITEM_CAP = 6;
+
 function itemKey(i: PageItem): string {
   return "id" in i ? i.id : i.kind === "pagelink" ? i.path : "";
 }
 
-function SectionHeader({ title, subtitle }: { title: string; subtitle?: string }) {
+function contextPath(ctx: PageContext): string | null {
+  switch (ctx.kind) {
+    case "album":
+      return `/album/${ctx.id}`;
+    case "artist":
+      return `/artist/${ctx.id}`;
+    case "playlist":
+      return `/playlist/${ctx.id}`;
+    case "mix":
+      return `/mix/${encodeURIComponent(ctx.id)}`;
+    default:
+      return null;
+  }
+}
+
+function SectionHeader({
+  title,
+  subtitle,
+  context,
+  viewAllPath,
+}: {
+  title: string;
+  subtitle?: string;
+  context?: PageContext;
+  viewAllPath?: string;
+}) {
+  const ctxPath = context ? contextPath(context) : null;
+  const ctxCover = context ? imageProxy(context.cover) : null;
+
   return (
-    <div className="mb-4">
-      <h2 className="text-xl font-bold tracking-tight">{title}</h2>
-      {subtitle && (
-        <p className="mt-0.5 text-sm text-muted-foreground">{subtitle}</p>
+    <div className="mb-4 flex items-end justify-between gap-4">
+      <div className="flex min-w-0 items-center gap-3">
+        {context && (
+          ctxPath ? (
+            <Link
+              to={ctxPath}
+              className="h-12 w-12 flex-shrink-0 overflow-hidden rounded bg-secondary transition-transform hover:scale-105"
+              title={context.title}
+            >
+              {ctxCover ? (
+                <img src={ctxCover} alt="" className="h-full w-full object-cover" />
+              ) : (
+                <div className="flex h-full w-full items-center justify-center text-muted-foreground">
+                  <Music className="h-5 w-5" />
+                </div>
+              )}
+            </Link>
+          ) : (
+            <div className="h-12 w-12 flex-shrink-0 overflow-hidden rounded bg-secondary">
+              {ctxCover ? (
+                <img src={ctxCover} alt="" className="h-full w-full object-cover" />
+              ) : (
+                <div className="flex h-full w-full items-center justify-center text-muted-foreground">
+                  <Music className="h-5 w-5" />
+                </div>
+              )}
+            </div>
+          )
+        )}
+        <div className="min-w-0">
+          {context ? (
+            <>
+              <div className="truncate text-xs uppercase tracking-wider text-muted-foreground">
+                {title}
+              </div>
+              {ctxPath ? (
+                <Link
+                  to={ctxPath}
+                  className="block truncate text-xl font-bold tracking-tight hover:underline"
+                >
+                  {context.title}
+                </Link>
+              ) : (
+                <div className="truncate text-xl font-bold tracking-tight">{context.title}</div>
+              )}
+            </>
+          ) : (
+            <>
+              <h2 className="truncate text-xl font-bold tracking-tight">{title}</h2>
+              {subtitle && (
+                <div className="mt-0.5 truncate text-sm text-muted-foreground">{subtitle}</div>
+              )}
+            </>
+          )}
+        </div>
+      </div>
+      {viewAllPath && (
+        <Link
+          to={`/browse/${encodeURIComponent(viewAllPath)}`}
+          className="flex flex-shrink-0 items-center gap-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground transition-colors hover:text-foreground"
+        >
+          View more <ChevronRight className="h-3 w-3" />
+        </Link>
       )}
     </div>
   );
