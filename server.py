@@ -547,17 +547,31 @@ def _image_url(obj, size: int = 320) -> Optional[str]:
 
 
 def _artists(obj) -> list[dict]:
+    def _ref(a) -> dict:
+        # Pull the picture UUID off the embedded artist when Tidal
+        # ships one. Most track/album payloads include it for each
+        # artist entry; the album-page pill and similar chrome read
+        # this so they don't have to round-trip to /api/artist for
+        # just an avatar.
+        pic_uuid = getattr(a, "picture", None)
+        picture = (
+            _cover_url_from_uuid(pic_uuid, 160)
+            if isinstance(pic_uuid, str) and pic_uuid
+            else None
+        )
+        return {"id": str(a.id), "name": a.name, "picture": picture}
+
     out: list[dict] = []
     try:
         for a in obj.artists or []:
-            out.append({"id": str(a.id), "name": a.name})
+            out.append(_ref(a))
     except Exception:
         pass
     if not out:
         try:
             a = obj.artist
             if a is not None:
-                out.append({"id": str(a.id), "name": a.name})
+                out.append(_ref(a))
         except Exception:
             pass
     return out
