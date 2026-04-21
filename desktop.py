@@ -317,31 +317,107 @@ def main(argv: Optional[list[str]] = None) -> int:
         min_size=(800, 600),
     )
 
-    # Register the focus callback so a second launch can raise us. The
-    # callable runs on whatever thread the FastAPI handler lives on, so
-    # schedule the actual restore onto the pywebview thread via its
-    # event-dispatch mechanism.
-    def _focus() -> None:
+    # --- Hide-on-close + tray wiring ---------------------------------
+    # The user's red-button close should leave the app running so
+    # playback survives — same behavior Spotify / Tidal / Discord use.
+    # The tray icon gives them a way to raise the window back or quit
+    # deliberately. Guard the closing handler with `actually_quitting`
+    # so the tray's Quit menu item can do a real destroy() after we've
+    # set the flag.
+    actually_quitting = {"value": False}
+
+    def _on_closing() -> bool:
+        if actually_quitting["value"]:
+            return True  # let pywebview really close
         try:
-            window.restore()
+            window.hide()
         except Exception:
             pass
+        return False  # cancel the close
+
+    try:
+        window.events.closing += _on_closing
+    except Exception:
+        # Older pywebview versions used a different hook shape; if the
+        # event API is missing we fall through to legacy close-kills-
+        # everything behavior.
+        pass
+
+    def _show_window() -> None:
         try:
             window.show()
         except Exception:
             pass
+        try:
+            window.restore()
+        except Exception:
+            pass
 
+    def _quit_from_tray() -> None:
+        actually_quitting["value"] = True
+        try:
+            window.destroy()
+        except Exception:
+            pass
+
+    # Register the focus callback so a second launch can raise us. The
+    # callable runs on whatever thread the FastAPI handler lives on, so
+    # schedule the actual restore onto the pywebview thread via its
+    # event-dispatch mechanism.
     import server as _server
-    _server.register_focus_callback(_focus)
+    _server.register_focus_callback(_show_window)
+
+    # Start the tray icon. Non-blocking (run_detached internally) and
+    # survives pystray's absence — tray is None if the platform can't
+    # render it or the deps are missing, in which case the app still
+    # runs just without the menu-bar affordance.
+    try:
+        from app.tray import start_tray
+
+        icon_path = _find_tray_icon()
+        if icon_path is not None:
+            tray = start_tray(
+                icon_path=icon_path,
+                port=PORT,
+                on_show=_show_window,
+                on_quit=_quit_from_tray,
+            )
+        else:
+            tray = None
+    except Exception as exc:
+        print(f"[desktop] tray startup skipped: {exc}", file=sys.stderr, flush=True)
+        tray = None
 
     try:
         # gui=None lets pywebview pick the native backend
         # (edgechromium/WebView2 on Windows, WebKit on macOS).
         webview.start()
     finally:
+        if tray is not None:
+            try:
+                tray.stop()
+            except Exception:
+                pass
         _graceful_shutdown(server)
 
     return 0
+
+
+def _find_tray_icon() -> Optional["Path"]:
+    """Locate the tray icon PNG in dev mode and in a PyInstaller bundle.
+    Returns None when no icon can be resolved — the caller treats that
+    as "skip the tray" rather than crashing."""
+    candidates: list[Path] = []
+    if getattr(sys, "frozen", False):
+        meipass = Path(getattr(sys, "_MEIPASS", ""))
+        if meipass.is_dir():
+            candidates.append(meipass / "assets" / "tray-icon.png")
+    repo_root = Path(__file__).resolve().parent
+    candidates.append(repo_root / "assets" / "tray-icon.png")
+    for p in candidates:
+        if p.is_file():
+            return p
+    return None
 
 
 if __name__ == "__main__":

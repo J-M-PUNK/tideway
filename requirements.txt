@@ -19,6 +19,10 @@ python-vlc>=3.0.20
 # window is backgrounded). Has platform-specific backends; pynput picks
 # the right one at import time.
 pynput>=1.8.0
+# System-tray / menu-bar icon. Pairs with the close-to-tray behavior in
+# desktop.py so closing the window doesn't kill playback. Pillow is a
+# hard dep for icon rendering.
+pystray>=0.19.5
 # Build-only: PyInstaller packages desktop.py + web/dist into a native
 # .exe / .app. Not needed at runtime but bundling keeps the build command
 # documented in a single place.
