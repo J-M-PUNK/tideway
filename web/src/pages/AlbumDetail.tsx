@@ -41,11 +41,12 @@ export function AlbumDetail({ onDownload }: { onDownload: OnDownload }) {
   if (error || !album) return <ErrorView error={error ?? "Album not found"} />;
 
   const primaryArtist = album.artists[0];
-  // Primary artist's picture isn't on the Album payload — we only have
-  // id + name there. The pill uses a user-silhouette placeholder until
-  // the artist page fetches the full object. Low-cost, stays consistent.
   const artistForPill = primaryArtist
-    ? { id: primaryArtist.id, name: primaryArtist.name, picture: null }
+    ? {
+        id: primaryArtist.id,
+        name: primaryArtist.name,
+        picture: primaryArtist.picture ?? null,
+      }
     : undefined;
 
   return (

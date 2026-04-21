@@ -3,6 +3,10 @@ export type ContentKind = "track" | "album" | "artist" | "playlist";
 export interface ArtistRef {
   id: string;
   name: string;
+  /** Optional artist picture URL. Populated when Tidal embeds the
+   *  picture UUID on the track/album payload (common case).
+   *  Surfaces used to render the artist-avatar pill. */
+  picture?: string | null;
 }
 
 export interface Track {
