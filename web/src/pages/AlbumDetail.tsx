@@ -53,6 +53,7 @@ export function AlbumDetail({ onDownload }: { onDownload: OnDownload }) {
         eyebrow="Album"
         title={album.name}
         cover={album.cover}
+        blurredBackdrop
         meta={
           <div className="flex flex-wrap items-center gap-x-2">
             {artists}
@@ -106,9 +107,31 @@ export function AlbumDetail({ onDownload }: { onDownload: OnDownload }) {
         </>
       )}
 
+      {!showingCredits && (
+        <AlbumInfoFooter
+          releaseDate={album.release_date ?? null}
+          numTracks={album.num_tracks}
+          duration={album.duration}
+          copyright={album.copyright ?? null}
+        />
+      )}
+
+      {album.more_by_artist.length > 0 && (
+        <>
+          <SectionHeader
+            title={`More by ${album.artists[0]?.name ?? "this artist"}`}
+          />
+          <Grid>
+            {album.more_by_artist.slice(0, 12).map((a) => (
+              <MediaCard key={a.id} item={a} onDownload={onDownload} />
+            ))}
+          </Grid>
+        </>
+      )}
+
       {album.similar.length > 0 && (
         <>
-          <SectionHeader title="Similar albums" />
+          <SectionHeader title="You might also like" />
           <Grid>
             {album.similar.map((a) => (
               <MediaCard key={a.id} item={a} onDownload={onDownload} />
@@ -116,8 +139,85 @@ export function AlbumDetail({ onDownload }: { onDownload: OnDownload }) {
           </Grid>
         </>
       )}
+
+      {album.related_artists.length > 0 && (
+        <>
+          <SectionHeader title="Fans also like" />
+          <Grid>
+            {album.related_artists.map((a) => (
+              <MediaCard key={a.id} item={a} onDownload={onDownload} />
+            ))}
+          </Grid>
+        </>
+      )}
     </div>
   );
+}
+
+/**
+ * Footer under the tracklist — release date, track count, runtime,
+ * and the copyright line (which on most Tidal albums contains the
+ * record label). Any individual field that's missing gets dropped
+ * instead of showing "Unknown" junk.
+ */
+function AlbumInfoFooter({
+  releaseDate,
+  numTracks,
+  duration,
+  copyright,
+}: {
+  releaseDate: string | null;
+  numTracks: number;
+  duration: number;
+  copyright: string | null;
+}) {
+  const formatted = releaseDate ? formatReleaseDate(releaseDate) : null;
+  const runtime = duration ? formatDurationLong(duration) : null;
+  return (
+    <div className="mb-10 mt-10 text-sm text-muted-foreground">
+      {formatted && <div>{formatted}</div>}
+      {(numTracks > 0 || runtime) && (
+        <div>
+          {numTracks > 0 && (
+            <>
+              {numTracks} {numTracks === 1 ? "track" : "tracks"}
+            </>
+          )}
+          {numTracks > 0 && runtime && ", "}
+          {runtime}
+        </div>
+      )}
+      {copyright && <div className="mt-2 text-xs">{copyright}</div>}
+    </div>
+  );
+}
+
+function formatReleaseDate(iso: string): string {
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return iso;
+  return d.toLocaleDateString(undefined, {
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+  });
+}
+
+/**
+ * Human runtime like "53 min 42 sec" or "1 hr 12 min". We already
+ * have formatDuration for the clock-format "53:42" used inline in
+ * the hero — the footer version is wordier to match Tidal's styling.
+ */
+function formatDurationLong(totalSeconds: number): string {
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = Math.floor(totalSeconds % 60);
+  if (hours > 0) {
+    return `${hours} hr ${minutes} min`;
+  }
+  if (minutes > 0) {
+    return `${minutes} min ${seconds} sec`;
+  }
+  return `${seconds} sec`;
 }
 
 /**
