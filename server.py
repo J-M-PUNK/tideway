@@ -2188,19 +2188,48 @@ def artist_detail(artist_id: int) -> dict:
     # default get_albums query — tidal's own client shows those on the
     # artist page (below the full-length discography), so include them.
     try:
-        ep_singles = [album_to_dict(a) for a in artist.get_ep_singles(limit=40)]
+        raw_eps = list(artist.get_ep_singles(limit=40)) or []
     except Exception:
-        ep_singles = []
+        raw_eps = []
     try:
-        appears_on = [album_to_dict(a) for a in artist.get_other(limit=40)]
+        raw_appears = list(artist.get_other(limit=40)) or []
     except Exception:
-        appears_on = []
+        raw_appears = []
+
+    # Dedupe across all three discography sections. Sources:
+    #  1. tidalapi's `get_albums()` can page internally and surface the
+    #     same record twice (especially when an album has multiple
+    #     editions — deluxe, anniversary, clean).
+    #  2. Tidal sometimes tags the same release as both an album and an
+    #     EP, so `get_albums()` and `get_ep_singles()` overlap.
+    #  3. An artist's own album can bleed into `get_other()` (appears-
+    #     on) when the featured-artist metadata is ambiguous.
+    # We precedence-sort: albums win over EPs, EPs win over appears-on.
+    # The first list an id shows up in is where it stays; later lists
+    # drop it.
+    raw_albums = list(tidal.get_artist_albums(artist)) or []
+    seen: set[str] = set()
+
+    def _dedupe(items: list) -> list:
+        out = []
+        for a in items:
+            aid = str(getattr(a, "id", "") or "")
+            if not aid or aid in seen:
+                continue
+            seen.add(aid)
+            out.append(a)
+        return out
+
+    albums_objs = _dedupe(raw_albums)
+    ep_singles_objs = _dedupe(raw_eps)
+    appears_on_objs = _dedupe(raw_appears)
+
     return {
         **artist_to_dict(artist),
         "top_tracks": [track_to_dict(t) for t in tidal.get_artist_top_tracks(artist)],
-        "albums": [album_to_dict(a) for a in tidal.get_artist_albums(artist)],
-        "ep_singles": ep_singles,
-        "appears_on": appears_on,
+        "albums": [album_to_dict(a) for a in albums_objs],
+        "ep_singles": [album_to_dict(a) for a in ep_singles_objs],
+        "appears_on": [album_to_dict(a) for a in appears_on_objs],
         "bio": bio,
         "similar": similar,
         # Stable share URL for the copy/open-in-Tidal actions in the UI.
