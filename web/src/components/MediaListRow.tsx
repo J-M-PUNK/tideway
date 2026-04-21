@@ -41,19 +41,29 @@ export function MediaListRow({
       className="group flex items-center gap-4 rounded-md px-3 py-2 transition-colors hover:bg-accent"
     >
       <div
-        className={`h-12 w-12 flex-shrink-0 overflow-hidden bg-secondary ${rounded}`}
+        className={`relative h-12 w-12 flex-shrink-0 overflow-hidden bg-secondary ${rounded}`}
       >
         {cover ? (
           <img
             src={cover}
             alt=""
             loading="lazy"
-            className="h-full w-full object-cover"
+            className="h-full w-full object-cover transition-opacity group-hover:opacity-40"
           />
         ) : (
-          <div className="flex h-full w-full items-center justify-center text-muted-foreground">
+          <div className="flex h-full w-full items-center justify-center text-muted-foreground transition-opacity group-hover:opacity-40">
             <Music className="h-5 w-5" />
           </div>
+        )}
+        {item.kind !== "artist" && (
+          <PlayMediaButton
+            kind={item.kind}
+            id={item.id}
+            className={`absolute inset-0 m-auto h-8 w-8 transition-opacity ${
+              menuOpen ? "opacity-100" : "opacity-0 group-hover:opacity-100"
+            }`}
+            onOpenChange={setMenuOpen}
+          />
         )}
       </div>
       <div className="min-w-0 flex-1">
@@ -63,29 +73,21 @@ export function MediaListRow({
         </div>
       </div>
       <Trailing item={item} />
-      {item.kind !== "artist" && (
+      {onDownload && item.kind !== "artist" && (
         <div
-          className={`flex flex-shrink-0 items-center gap-1 transition-opacity ${
+          className={`flex-shrink-0 transition-opacity ${
             menuOpen ? "opacity-100" : "opacity-0 group-hover:opacity-100"
           }`}
         >
-          <PlayMediaButton
+          <DownloadButton
             kind={item.kind}
             id={item.id}
-            className="h-8 w-8"
+            onPick={onDownload}
+            iconOnly
+            variant="ghost"
+            size="sm"
             onOpenChange={setMenuOpen}
           />
-          {onDownload && (
-            <DownloadButton
-              kind={item.kind}
-              id={item.id}
-              onPick={onDownload}
-              iconOnly
-              variant="ghost"
-              size="sm"
-              onOpenChange={setMenuOpen}
-            />
-          )}
         </div>
       )}
     </Link>
