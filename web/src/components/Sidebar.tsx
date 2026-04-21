@@ -8,6 +8,7 @@ import {
   Heart,
   History,
   Home,
+  Import as ImportIcon,
   Library,
   Link2,
   ListMusic,
@@ -53,6 +54,7 @@ const library = [
   { to: "/library/local", label: "On this device", icon: HardDrive },
   { to: "/history", label: "History", icon: History },
   { to: "/stats", label: "Stats", icon: BarChart3 },
+  { to: "/import", label: "Import from Spotify", icon: ImportIcon },
 ];
 
 // In offline mode the only link we keep in the "Your Library" section

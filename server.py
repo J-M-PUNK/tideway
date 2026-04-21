@@ -40,6 +40,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from app import global_keys as global_keys_mod
 from app import player as native_player
+from app import spotify_import
 from app.downloader import DownloadItem, DownloadStatus, Downloader
 from app.http import SESSION
 from app.lastfm import LastFmClient
@@ -843,6 +844,205 @@ def update_check() -> dict:
     with _update_cache_lock:
         _update_cache["latest"] = (now, payload)
     return payload
+
+
+# ---------------------------------------------------------------------------
+# Spotify import
+# ---------------------------------------------------------------------------
+
+
+def _spotify_redirect_uri() -> str:
+    # Has to exactly match whatever the user registered in their
+    # Spotify Developer dashboard. We use our single-instance port so
+    # the auth code lands straight back into this process.
+    return f"http://127.0.0.1:{int(os.environ.get('TIDAL_DL_PORT', '47823'))}/api/import/spotify/callback"
+
+
+class _SpotifyConnectRequest(BaseModel):
+    client_id: str
+
+
+@app.get("/api/import/spotify/status")
+def spotify_status() -> dict:
+    _require_local_access()
+    auth = spotify_import.load_session()
+    connected = auth is not None
+    username = None
+    if auth is not None:
+        try:
+            me = spotify_import.current_user(auth)
+            username = me.get("display_name") or me.get("id")
+        except Exception:
+            # Token might be invalid — report not-connected so the UI
+            # surfaces the re-auth path.
+            connected = False
+    return {
+        "connected": connected,
+        "username": username,
+        "client_id_set": bool(settings.spotify_client_id),
+        "redirect_uri": _spotify_redirect_uri(),
+    }
+
+
+@app.post("/api/import/spotify/connect")
+def spotify_connect(req: _SpotifyConnectRequest) -> dict:
+    """Save the client_id + return the Spotify authorization URL.
+    Frontend opens it in an external browser; the callback route
+    below picks up the code and finalizes the session."""
+    _require_local_access()
+    client_id = (req.client_id or "").strip()
+    if not client_id:
+        raise HTTPException(status_code=400, detail="client_id is required")
+    settings.spotify_client_id = client_id
+    save_settings(settings)
+    try:
+        auth_url, _state = spotify_import.build_auth_url(
+            client_id, _spotify_redirect_uri()
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    return {"auth_url": auth_url}
+
+
+@app.get("/api/import/spotify/callback")
+def spotify_callback(code: Optional[str] = None, state: Optional[str] = None, error: Optional[str] = None):
+    """Landing endpoint Spotify redirects the browser to after the
+    user authorizes. Exchanges the code for a token, then returns a
+    small HTML page telling the user to return to the app."""
+    from fastapi.responses import HTMLResponse
+
+    if error:
+        return HTMLResponse(
+            f"<h3>Spotify authorization failed: {error}</h3>"
+            "<p>You can close this tab and try again in the app.</p>",
+            status_code=400,
+        )
+    if not code or not state:
+        return HTMLResponse(
+            "<h3>Missing code / state in callback</h3>"
+            "<p>Try connecting again from the app.</p>",
+            status_code=400,
+        )
+    auth = spotify_import.exchange_code(code, state, _spotify_redirect_uri())
+    if auth is None:
+        return HTMLResponse(
+            "<h3>Spotify token exchange failed</h3>"
+            "<p>Close this tab and try connecting again.</p>",
+            status_code=502,
+        )
+    return HTMLResponse(
+        "<h3>Connected to Spotify 🎉</h3>"
+        "<p>You can close this tab and return to the app.</p>",
+    )
+
+
+@app.post("/api/import/spotify/disconnect")
+def spotify_disconnect() -> dict:
+    _require_local_access()
+    spotify_import.clear_session()
+    return {"ok": True}
+
+
+@app.get("/api/import/spotify/playlists")
+def spotify_playlists() -> list[dict]:
+    _require_local_access()
+    auth = spotify_import.load_session()
+    if auth is None:
+        raise HTTPException(status_code=401, detail="Not connected to Spotify")
+    try:
+        return spotify_import.list_playlists(auth)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+
+class _SpotifyMatchRequest(BaseModel):
+    playlist_id: str
+
+
+@app.post("/api/import/spotify/match")
+def spotify_match(req: _SpotifyMatchRequest) -> dict:
+    """Fetch a Spotify playlist's tracks + resolve each to a Tidal
+    track. Returns a preview payload so the frontend can let the user
+    eyeball the matches before creating the playlist. Intentionally
+    blocking — a 50-track playlist resolves in a few seconds; the
+    longest playlists (thousands of tracks) run on the order of tens
+    of seconds. If that becomes a complaint, swap this for an SSE
+    stream of per-track match events."""
+    _require_auth()
+    auth = spotify_import.load_session()
+    if auth is None:
+        raise HTTPException(status_code=401, detail="Not connected to Spotify")
+    try:
+        tracks = spotify_import.list_playlist_tracks(auth, req.playlist_id)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    rows: list[dict] = []
+    for t in tracks:
+        match = spotify_import.match_track(tidal.session, t)
+        rows.append(
+            {
+                "spotify": {
+                    "name": t.get("name"),
+                    "artists": t.get("artists") or [],
+                    "duration_ms": t.get("duration_ms") or 0,
+                    "isrc": t.get("isrc"),
+                },
+                "match": match,
+            }
+        )
+    matched = sum(1 for r in rows if r["match"] is not None)
+    return {
+        "rows": rows,
+        "total": len(rows),
+        "matched": matched,
+    }
+
+
+class _SpotifyCreateRequest(BaseModel):
+    name: str
+    description: Optional[str] = ""
+    track_ids: list[str]
+
+
+@app.post("/api/import/spotify/create")
+def spotify_create(req: _SpotifyCreateRequest) -> dict:
+    """Create a Tidal playlist from a set of Tidal track ids — the
+    ones the frontend kept after reviewing matches. Uses the same
+    /api/playlists create + add-tracks endpoints the rest of the app
+    uses so we're not reimplementing playlist mutation."""
+    _require_auth()
+    name = (req.name or "").strip() or "Imported from Spotify"
+    try:
+        created = tidal.create_playlist(name, req.description or "")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Couldn't create playlist: {exc}")
+    pid = getattr(created, "id", None) or getattr(created, "uuid", None)
+    if not pid:
+        raise HTTPException(status_code=502, detail="Created playlist has no id")
+
+    # Tidal's playlist.add() takes a list of ints; batch so we don't
+    # overshoot whatever their request-size ceiling is (undocumented
+    # but 100 has been reliable across every client I've seen).
+    added = 0
+    failed = 0
+    BATCH = 100
+    for i in range(0, len(req.track_ids), BATCH):
+        chunk = req.track_ids[i : i + BATCH]
+        try:
+            int_ids = [int(x) for x in chunk]
+            created.add(int_ids)
+            added += len(chunk)
+        except Exception as exc:
+            logging.getLogger(__name__).warning(
+                "spotify import: add-batch failed (%s): %s", len(chunk), exc
+            )
+            failed += len(chunk)
+    return {
+        "playlist_id": str(pid),
+        "added": added,
+        "failed": failed,
+        "name": name,
+    }
 
 
 @app.get("/api/health")

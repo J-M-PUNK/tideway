@@ -215,6 +215,76 @@ export const api = {
       url: string | null;
       notes: string | null;
     }>("/api/update-check"),
+  import: {
+    spotify: {
+      status: () =>
+        req<{
+          connected: boolean;
+          username: string | null;
+          client_id_set: boolean;
+          redirect_uri: string;
+        }>("/api/import/spotify/status"),
+      connect: (clientId: string) =>
+        req<{ auth_url: string }>("/api/import/spotify/connect", {
+          method: "POST",
+          body: JSON.stringify({ client_id: clientId }),
+        }),
+      disconnect: () =>
+        req<{ ok: boolean }>("/api/import/spotify/disconnect", {
+          method: "POST",
+        }),
+      playlists: () =>
+        req<
+          {
+            id: string;
+            name: string;
+            tracks: number;
+            image: string | null;
+            owner: string;
+            description: string;
+          }[]
+        >("/api/import/spotify/playlists"),
+      match: (playlistId: string) =>
+        req<{
+          rows: {
+            spotify: {
+              name: string;
+              artists: string[];
+              duration_ms: number;
+              isrc: string | null;
+            };
+            match: {
+              tidal_id: string;
+              name: string;
+              artists: string[];
+              duration: number;
+              cover: string | null;
+              confidence: number;
+              reason: string;
+            } | null;
+          }[];
+          total: number;
+          matched: number;
+        }>("/api/import/spotify/match", {
+          method: "POST",
+          body: JSON.stringify({ playlist_id: playlistId }),
+        }),
+      create: (name: string, description: string, trackIds: string[]) =>
+        req<{
+          playlist_id: string;
+          added: number;
+          failed: number;
+          name: string;
+        }>("/api/import/spotify/create", {
+          method: "POST",
+          body: JSON.stringify({
+            name,
+            description,
+            track_ids: trackIds,
+          }),
+        }),
+    },
+  },
   user: {
     profile: (id: string) => req<TidalUser>(`/api/user/${encodeURIComponent(id)}`),
     playlists: (id: string) =>

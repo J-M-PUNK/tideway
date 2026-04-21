@@ -42,6 +42,11 @@ class Settings:
     # string means "use the system default". Persisted so USB DAC /
     # Bluetooth choices survive relaunch.
     audio_output_device: str = ""
+    # Spotify Developer app client_id, used by the Spotify → Tidal
+    # playlist importer. Users register their own app at
+    # developer.spotify.com and paste the id here. PKCE OAuth so we
+    # don't need a secret. Empty string = import feature hidden in UI.
+    spotify_client_id: str = ""
 
 
 def load_settings() -> Settings:
