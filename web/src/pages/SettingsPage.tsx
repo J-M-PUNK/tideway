@@ -250,10 +250,6 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
         />
       </Section>
 
-      <NativeEngineSection
-        checked={ui.nativeEngine}
-        onChange={(v) => ui.set({ nativeEngine: v })}
-      />
 
 
       <Section
@@ -411,68 +407,6 @@ function ThemePicker({
     </div>
   );
 }
-
-/**
- * Native audio engine toggle. The browser's `<audio>` element can't
- * decode Atmos / MQA / Sony 360 — this surface lets users opt into a
- * libvlc-backed playback path on machines where the backend has VLC
- * available. Probes `/api/player/available` once on mount so we can
- * disable the toggle (with an explanation) on machines where libvlc
- * couldn't load.
- */
-function NativeEngineSection({
-  checked,
-  onChange,
-}: {
-  checked: boolean;
-  onChange: (v: boolean) => void;
-}) {
-  const [available, setAvailable] = useState<boolean | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    api.player
-      .available()
-      .then((res) => {
-        if (!cancelled) setAvailable(res.available);
-      })
-      .catch(() => {
-        if (!cancelled) setAvailable(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  return (
-    <Section
-      title="Audio engine"
-      description="The browser's audio element can't decode Dolby Atmos, MQA, or Sony 360 Reality Audio — they come out as stereo downmixes. Turn on the native engine if your Tidal subscription includes those formats."
-    >
-      <label className="flex items-start gap-3 text-sm">
-        <input
-          type="checkbox"
-          checked={checked && !!available}
-          onChange={(e) => onChange(e.target.checked)}
-          disabled={!available}
-          className="mt-0.5 h-4 w-4 accent-primary disabled:opacity-40"
-        />
-        <span>
-          <span className="font-medium">Use native engine (libvlc)</span>
-          <br />
-          <span className="text-xs text-muted-foreground">
-            {available === null
-              ? "Checking…"
-              : available
-                ? "Unlocks Atmos / MQA / 360 playback. Playback moves to the backend; the UI becomes a remote control."
-                : "Unavailable on this machine — libvlc couldn't be loaded. Reinstall the app or install VLC to enable."}
-          </span>
-        </span>
-      </label>
-    </Section>
-  );
-}
-
 
 /**
  * Last.fm scrobbling setup. Three states:

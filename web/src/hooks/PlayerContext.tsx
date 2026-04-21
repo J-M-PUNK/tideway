@@ -1,7 +1,5 @@
 import { createContext, useContext, useMemo, type ReactNode } from "react";
 import { usePlayer, type Player, type RepeatMode } from "./usePlayer";
-import { usePlayerNative } from "./usePlayerNative";
-import { useUiPreferences } from "./useUiPreferences";
 import type { Track } from "@/api/types";
 
 /**
@@ -72,34 +70,7 @@ const ActionsCtx = createContext<PlayerActions | null>(null);
 const SleepCtx = createContext<PlayerSleep | null>(null);
 
 export function PlayerProvider({ children }: { children: ReactNode }) {
-  // Pick the engine based on the user's preference. React remounts the
-  // child provider when this flag flips, which tears down the inactive
-  // engine's resources (audio elements or SSE subscription) cleanly.
-  const { nativeEngine } = useUiPreferences();
-  return nativeEngine ? (
-    <NativePlayerProvider>{children}</NativePlayerProvider>
-  ) : (
-    <HtmlPlayerProvider>{children}</HtmlPlayerProvider>
-  );
-}
-
-function HtmlPlayerProvider({ children }: { children: ReactNode }) {
   const player = usePlayer();
-  return <PlayerProviderInner player={player}>{children}</PlayerProviderInner>;
-}
-
-function NativePlayerProvider({ children }: { children: ReactNode }) {
-  const player = usePlayerNative();
-  return <PlayerProviderInner player={player}>{children}</PlayerProviderInner>;
-}
-
-function PlayerProviderInner({
-  player,
-  children,
-}: {
-  player: Player;
-  children: ReactNode;
-}) {
 
   // Each memo's deps list is *exactly* what should trigger its consumers.
   const meta = useMemo<PlayerMeta>(
