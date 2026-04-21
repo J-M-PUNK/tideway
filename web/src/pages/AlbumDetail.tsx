@@ -1,6 +1,8 @@
 import { useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
+import { ChevronRight } from "lucide-react";
 import { api } from "@/api/client";
+import type { Album, Artist } from "@/api/types";
 import type { OnDownload } from "@/api/download";
 import { useApi } from "@/hooks/useApi";
 import { AddToLibraryButton } from "@/components/AddToLibraryButton";
@@ -13,7 +15,7 @@ import { ShuffleButton } from "@/components/ShuffleButton";
 import { PlayAllButton } from "@/components/PlayAllButton";
 import { TrackList } from "@/components/TrackList";
 import { ErrorView } from "@/components/ErrorView";
-import { Grid, SectionHeader } from "@/components/Grid";
+import { SectionHeader } from "@/components/Grid";
 import { MediaCard } from "@/components/MediaCard";
 import { HeroSkeleton, TrackListSkeleton } from "@/components/Skeletons";
 import { useLastfmAlbumPlaycount } from "@/hooks/useLastfmPlaycount";
@@ -38,33 +40,34 @@ export function AlbumDetail({ onDownload }: { onDownload: OnDownload }) {
   }
   if (error || !album) return <ErrorView error={error ?? "Album not found"} />;
 
-  const artists = album.artists.map((a, i) => (
-    <span key={a.id}>
-      {i > 0 && <span className="text-muted-foreground"> · </span>}
-      <Link to={`/artist/${a.id}`} className="font-semibold text-foreground hover:underline">
-        {a.name}
-      </Link>
-    </span>
-  ));
+  const primaryArtist = album.artists[0];
+  // Primary artist's picture isn't on the Album payload — we only have
+  // id + name there. The pill uses a user-silhouette placeholder until
+  // the artist page fetches the full object. Low-cost, stays consistent.
+  const artistForPill = primaryArtist
+    ? { id: primaryArtist.id, name: primaryArtist.name, picture: null }
+    : undefined;
 
   return (
     <div>
       <DetailHero
-        eyebrow="Album"
         title={album.name}
         cover={album.cover}
         blurredBackdrop
+        byArtist={artistForPill}
         meta={
-          <div className="flex flex-wrap items-center gap-x-2">
-            {artists}
-            {album.year && <span>· {album.year}</span>}
-            <span>
-              · {album.num_tracks} tracks · {formatDuration(album.duration)}
-            </span>
-            <AlbumPlaycountBadge
-              artist={album.artists[0]?.name ?? ""}
-              album={album.name}
-            />
+          <div className="flex flex-col gap-1.5">
+            <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+              {album.num_tracks} {album.num_tracks === 1 ? "track" : "tracks"}
+              {album.duration ? ` (${formatDuration(album.duration)})` : ""}
+            </div>
+            <div className="flex items-center gap-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+              {album.year && <span>{album.year}</span>}
+              <AlbumPlaycountBadge
+                artist={album.artists[0]?.name ?? ""}
+                album={album.name}
+              />
+            </div>
           </div>
         }
         actions={
@@ -117,39 +120,71 @@ export function AlbumDetail({ onDownload }: { onDownload: OnDownload }) {
       )}
 
       {album.more_by_artist.length > 0 && (
-        <>
-          <SectionHeader
-            title={`More by ${album.artists[0]?.name ?? "this artist"}`}
-          />
-          <Grid>
-            {album.more_by_artist.slice(0, 12).map((a) => (
-              <MediaCard key={a.id} item={a} onDownload={onDownload} />
-            ))}
-          </Grid>
-        </>
+        <SingleRowSection
+          title={`More by ${album.artists[0]?.name ?? "this artist"}`}
+          viewAllHref={
+            album.artists[0] ? `/artist/${album.artists[0].id}` : undefined
+          }
+          items={album.more_by_artist}
+          onDownload={onDownload}
+        />
       )}
 
       {album.similar.length > 0 && (
-        <>
-          <SectionHeader title="You might also like" />
-          <Grid>
-            {album.similar.map((a) => (
-              <MediaCard key={a.id} item={a} onDownload={onDownload} />
-            ))}
-          </Grid>
-        </>
+        <SingleRowSection
+          title="You might also like"
+          items={album.similar}
+          onDownload={onDownload}
+        />
       )}
 
       {album.related_artists.length > 0 && (
-        <>
-          <SectionHeader title="Fans also like" />
-          <Grid>
-            {album.related_artists.map((a) => (
-              <MediaCard key={a.id} item={a} onDownload={onDownload} />
-            ))}
-          </Grid>
-        </>
+        <SingleRowSection
+          title="Fans also like"
+          items={album.related_artists}
+          onDownload={onDownload}
+        />
       )}
+    </div>
+  );
+}
+
+/**
+ * Single horizontal row of cards capped to the visible column count,
+ * with a "View more" link on the right. Mirrors the treatment used on
+ * Home / Explore so album-page related sections feel consistent with
+ * the rest of the app. Hides the view-more link when there's no
+ * sensible destination to route to.
+ */
+function SingleRowSection({
+  title,
+  viewAllHref,
+  items,
+  onDownload,
+}: {
+  title: string;
+  viewAllHref?: string;
+  items: (Album | Artist)[];
+  onDownload: OnDownload;
+}) {
+  return (
+    <div className="mb-10">
+      <div className="mb-4 flex items-baseline justify-between gap-4">
+        <h2 className="text-xl font-bold tracking-tight">{title}</h2>
+        {viewAllHref && (
+          <Link
+            to={viewAllHref}
+            className="flex flex-shrink-0 items-center gap-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground transition-colors hover:text-foreground"
+          >
+            View more <ChevronRight className="h-3 w-3" />
+          </Link>
+        )}
+      </div>
+      <div className="grid gap-4 grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 2xl:grid-cols-6">
+        {items.slice(0, 6).map((it) => (
+          <MediaCard key={it.id} item={it} onDownload={onDownload} />
+        ))}
+      </div>
     </div>
   );
 }
@@ -236,12 +271,10 @@ function AlbumPlaycountBadge({ artist, album }: { artist: string; album: string 
   if (user <= 0 && listeners <= 0 && plays <= 0) return null;
   return (
     <>
-      {listeners > 0 && <span>· {formatCompact(listeners)} listeners</span>}
-      {plays > 0 && <span>· {formatCompact(plays)} plays</span>}
+      {listeners > 0 && <span>{formatCompact(listeners)} listeners</span>}
+      {plays > 0 && <span>{formatCompact(plays)} plays</span>}
       {user > 0 && (
-        <span className="text-primary">
-          · you: {user.toLocaleString()}
-        </span>
+        <span className="text-primary">you: {user.toLocaleString()}</span>
       )}
     </>
   );

@@ -1,9 +1,10 @@
-import { Music } from "lucide-react";
+import { Link } from "react-router-dom";
+import { Music, User as UserIcon } from "lucide-react";
 import { cn, imageProxy } from "@/lib/utils";
 import { useCoverColor } from "@/hooks/useCoverColor";
 
 interface Props {
-  eyebrow: string;
+  eyebrow?: string;
   title: string;
   cover: string | null;
   meta?: React.ReactNode;
@@ -11,11 +12,19 @@ interface Props {
   actions?: React.ReactNode;
   /**
    * When true, render the cover art as a large blurred backdrop behind
-   * the hero (mimicking Tidal's album page). Falls back to the plain
-   * dominant-color gradient when no cover is available. Default false
-   * so Artist / Playlist / User pages keep the simpler treatment.
+   * the hero (mimicking Tidal's album page). Also tightens vertical
+   * spacing and drops the eyebrow text by default — Tidal-style hero
+   * doesn't need an "ALBUM" label when the blurred cover already
+   * signals context. Falls back to the plain dominant-color gradient
+   * when no cover is available.
    */
   blurredBackdrop?: boolean;
+  /**
+   * Optional artist row rendered as a small avatar-pill under the
+   * title. Used on the album page so the primary artist is clickable
+   * without crowding the meta row with link markup.
+   */
+  byArtist?: { id: string; name: string; picture: string | null };
 }
 
 /**
@@ -32,6 +41,7 @@ export function DetailHero({
   round,
   actions,
   blurredBackdrop = false,
+  byArtist,
 }: Props) {
   const src = imageProxy(cover);
   const dominant = useCoverColor(src);
@@ -75,10 +85,16 @@ export function DetailHero({
           />
         </>
       )}
-      <div className="relative flex flex-col items-end gap-6 md:flex-row">
+      <div
+        className={cn(
+          "relative flex flex-col items-end md:flex-row",
+          blurredBackdrop ? "gap-5" : "gap-6",
+        )}
+      >
         <div
           className={cn(
-            "h-56 w-56 flex-shrink-0 overflow-hidden bg-secondary shadow-2xl",
+            "flex-shrink-0 overflow-hidden bg-secondary shadow-2xl",
+            blurredBackdrop ? "h-60 w-60" : "h-56 w-56",
             round ? "rounded-full" : "rounded-md",
           )}
         >
@@ -90,26 +106,69 @@ export function DetailHero({
             </div>
           )}
         </div>
-        <div className="min-w-0 flex-1 pb-4">
-          <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-            {eyebrow}
-          </div>
+        <div className="min-w-0 flex-1 pb-2">
+          {eyebrow && (
+            <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+              {eyebrow}
+            </div>
+          )}
           <h1
             className={cn(
-              "mt-2 font-black tracking-tight",
-              title.length > 30 ? "text-4xl" : "text-5xl",
+              "font-black tracking-tight",
+              eyebrow ? "mt-2" : "",
+              blurredBackdrop
+                ? title.length > 30 ? "text-3xl" : "text-4xl"
+                : title.length > 30 ? "text-4xl" : "text-5xl",
             )}
           >
             {title}
           </h1>
-          {meta && <div className="mt-4 text-sm text-muted-foreground">{meta}</div>}
+          {byArtist && <ArtistPill artist={byArtist} />}
+          {meta && (
+            <div
+              className={cn(
+                "text-sm text-muted-foreground",
+                byArtist ? "mt-3" : "mt-4",
+              )}
+            >
+              {meta}
+            </div>
+          )}
         </div>
       </div>
       {actions && (
-        <div className="relative mt-6 flex flex-wrap items-center gap-3">
+        <div
+          className={cn(
+            "relative flex flex-wrap items-center gap-3",
+            blurredBackdrop ? "mt-5" : "mt-6",
+          )}
+        >
           {actions}
         </div>
       )}
     </div>
+  );
+}
+
+function ArtistPill({
+  artist,
+}: {
+  artist: { id: string; name: string; picture: string | null };
+}) {
+  const pic = imageProxy(artist.picture);
+  return (
+    <Link
+      to={`/artist/${artist.id}`}
+      className="mt-3 inline-flex items-center gap-2 text-sm font-semibold text-foreground hover:underline"
+    >
+      <span className="flex h-6 w-6 flex-shrink-0 items-center justify-center overflow-hidden rounded-full bg-secondary">
+        {pic ? (
+          <img src={pic} alt="" className="h-full w-full object-cover" />
+        ) : (
+          <UserIcon className="h-3.5 w-3.5 text-muted-foreground" />
+        )}
+      </span>
+      {artist.name}
+    </Link>
   );
 }
