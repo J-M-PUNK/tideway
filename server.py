@@ -1010,6 +1010,101 @@ class _TextImportRequest(BaseModel):
     text: str
 
 
+@app.post("/api/import/spotify/liked-tracks/match")
+def spotify_match_liked_tracks() -> dict:
+    """Pull the user's Liked Songs + match each against Tidal. Same
+    shape as the playlist matcher; frontend feeds rows into the
+    bulk-favorite flow instead of creating a playlist."""
+    _require_auth()
+    auth = spotify_import.load_session()
+    if auth is None:
+        raise HTTPException(status_code=401, detail="Not connected to Spotify")
+    try:
+        tracks = spotify_import.list_liked_tracks(auth)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    rows = [
+        {
+            "spotify": {
+                "name": t.get("name"),
+                "artists": t.get("artists") or [],
+                "duration_ms": t.get("duration_ms") or 0,
+                "isrc": t.get("isrc"),
+            },
+            "match": spotify_import.match_track(tidal.session, t),
+        }
+        for t in tracks
+    ]
+    matched = sum(1 for r in rows if r["match"] is not None)
+    return {"rows": rows, "total": len(rows), "matched": matched}
+
+
+@app.post("/api/import/spotify/saved-albums/match")
+def spotify_match_saved_albums() -> dict:
+    _require_auth()
+    auth = spotify_import.load_session()
+    if auth is None:
+        raise HTTPException(status_code=401, detail="Not connected to Spotify")
+    try:
+        albums = spotify_import.list_saved_albums(auth)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    rows = spotify_import.match_albums(tidal.session, albums)
+    matched = sum(1 for r in rows if r["match"] is not None)
+    return {"rows": rows, "total": len(rows), "matched": matched}
+
+
+@app.post("/api/import/spotify/followed-artists/match")
+def spotify_match_followed_artists() -> dict:
+    """Needs the user-follow-read scope; sessions that predate this
+    feature will 403 from Spotify. Surface a clear re-auth prompt
+    via the HTTP detail so the UI can suggest disconnecting +
+    reconnecting."""
+    _require_auth()
+    auth = spotify_import.load_session()
+    if auth is None:
+        raise HTTPException(status_code=401, detail="Not connected to Spotify")
+    try:
+        artists = spotify_import.list_followed_artists(auth)
+    except Exception as exc:
+        msg = str(exc)
+        if "403" in msg or "Insufficient" in msg:
+            raise HTTPException(
+                status_code=403,
+                detail="Your Spotify session doesn't have permission to read followed artists. Disconnect and reconnect to re-grant.",
+            )
+        raise HTTPException(status_code=502, detail=msg)
+    rows = spotify_import.match_artists(tidal.session, artists)
+    matched = sum(1 for r in rows if r["match"] is not None)
+    return {"rows": rows, "total": len(rows), "matched": matched}
+
+
+class _BulkFavoriteImportRequest(BaseModel):
+    kind: str  # "track" | "album" | "artist"
+    ids: list[str]
+
+
+@app.post("/api/import/favorite")
+def import_favorite(req: _BulkFavoriteImportRequest) -> dict:
+    """Bulk-favorite a list of Tidal ids. Wraps the existing
+    /api/favorites/bulk handler — import review screens call this
+    after the user confirms their selection. Sync (not fire-and-
+    forget like the legacy bulk endpoint) so the UI can show the
+    final count."""
+    _require_auth()
+    if req.kind not in FAVORITE_KINDS:
+        raise HTTPException(status_code=400, detail=f"Unknown kind: {req.kind}")
+    added = 0
+    failed = 0
+    for obj_id in req.ids:
+        try:
+            tidal.favorite(req.kind, obj_id, add=True)
+            added += 1
+        except Exception:
+            failed += 1
+    return {"kind": req.kind, "added": added, "failed": failed}
+
+
 class _DeezerImportRequest(BaseModel):
     source: str  # playlist id OR full Deezer URL
 

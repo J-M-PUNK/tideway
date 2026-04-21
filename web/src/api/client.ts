@@ -355,7 +355,42 @@ export const api = {
             track_ids: trackIds,
           }),
         }),
+      matchLibrary: (
+        kind: "liked-tracks" | "saved-albums" | "followed-artists",
+      ) =>
+        req<{
+          rows: {
+            spotify: {
+              name: string;
+              artists: string[];
+              duration_ms: number;
+              isrc: string | null;
+            };
+            match: {
+              tidal_id: string;
+              name: string;
+              artists: string[];
+              duration: number;
+              cover: string | null;
+              confidence: number;
+              reason: string;
+            } | null;
+          }[];
+          total: number;
+          matched: number;
+        }>(`/api/import/spotify/${kind}/match`, { method: "POST" }),
     },
+    favorite: (
+      kind: "track" | "album" | "artist",
+      ids: string[],
+    ) =>
+      req<{ kind: string; added: number; failed: number }>(
+        "/api/import/favorite",
+        {
+          method: "POST",
+          body: JSON.stringify({ kind, ids }),
+        },
+      ),
   },
   user: {
     profile: (id: string) => req<TidalUser>(`/api/user/${encodeURIComponent(id)}`),

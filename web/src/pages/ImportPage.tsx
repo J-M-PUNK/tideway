@@ -3,12 +3,17 @@ import {
   AlertTriangle,
   Check,
   ChevronLeft,
+  ChevronRight,
+  Disc3,
   ExternalLink,
   FileText,
+  Heart,
   ImportIcon,
+  ListMusic,
   Loader2,
   Music,
   Upload,
+  User as UserIcon,
 } from "lucide-react";
 import { api } from "@/api/client";
 import { Button } from "@/components/ui/button";
@@ -44,19 +49,28 @@ type MatchRow = MatchResult["rows"][number];
 
 type Source = "spotify" | "deezer" | "text";
 
+/**
+ * MatchReview action. `playlist` → creates a Tidal playlist with the
+ * matched tracks. `favorite` → bulk-adds each match to the user's
+ * Tidal favorites (for liked songs / saved albums / followed artists).
+ */
+type ReviewAction =
+  | {
+      kind: "playlist";
+      defaultName: string;
+      defaultDescription: string;
+    }
+  | {
+      kind: "favorite";
+      favoriteKind: "track" | "album" | "artist";
+      label: string;
+    };
+
+type ReviewState = { rows: MatchRow[]; action: ReviewAction };
+
 export function ImportPage() {
   const [source, setSource] = useState<Source>("spotify");
-  // One piece of state covers both flows — null = picker screen,
-  // populated = review screen. The creation step is identical either
-  // way (generic /api/import/create endpoint).
-  const [review, setReview] = useState<
-    | {
-        rows: MatchRow[];
-        defaultName: string;
-        defaultDescription: string;
-      }
-    | null
-  > (null);
+  const [review, setReview] = useState<ReviewState | null>(null);
 
   return (
     <div>
@@ -64,8 +78,7 @@ export function ImportPage() {
       {review ? (
         <MatchReview
           rows={review.rows}
-          defaultName={review.defaultName}
-          defaultDescription={review.defaultDescription}
+          action={review.action}
           onBack={() => setReview(null)}
           onDone={() => setReview(null)}
         />
@@ -74,13 +87,7 @@ export function ImportPage() {
           <SourceTabs value={source} onChange={setSource} />
           {source === "spotify" && (
             <SpotifyFlow
-              onReview={(rows, name, description) =>
-                setReview({
-                  rows,
-                  defaultName: name,
-                  defaultDescription: description,
-                })
-              }
+              onReview={(rows, action) => setReview({ rows, action })}
             />
           )}
           {source === "deezer" && (
@@ -88,8 +95,11 @@ export function ImportPage() {
               onReview={(rows, name, description) =>
                 setReview({
                   rows,
-                  defaultName: name,
-                  defaultDescription: description,
+                  action: {
+                    kind: "playlist",
+                    defaultName: name,
+                    defaultDescription: description,
+                  },
                 })
               }
             />
@@ -99,8 +109,11 @@ export function ImportPage() {
               onReview={(rows, name) =>
                 setReview({
                   rows,
-                  defaultName: name,
-                  defaultDescription: "Imported playlist",
+                  action: {
+                    kind: "playlist",
+                    defaultName: name,
+                    defaultDescription: "Imported playlist",
+                  },
                 })
               }
             />
@@ -165,13 +178,21 @@ function SourceTabs({
 // Spotify flow (OAuth → pick playlist → match → hand off to review)
 // ---------------------------------------------------------------------------
 
+type SpotifySubFlow =
+  | { kind: "hub" }
+  | { kind: "playlists" }
+  | { kind: "playlist-matching"; playlist: SpotifyPlaylist }
+  | { kind: "library-matching"; libraryKind: LibraryKind };
+
+type LibraryKind = "liked-tracks" | "saved-albums" | "followed-artists";
+
 function SpotifyFlow({
   onReview,
 }: {
-  onReview: (rows: MatchRow[], name: string, description: string) => void;
+  onReview: (rows: MatchRow[], action: ReviewAction) => void;
 }) {
   const [status, setStatus] = useState<SpotifyStatus | null>(null);
-  const [matchingFor, setMatchingFor] = useState<SpotifyPlaylist | null>(null);
+  const [sub, setSub] = useState<SpotifySubFlow>({ kind: "hub" });
 
   useEffect(() => {
     let cancelled = false;
@@ -205,18 +226,55 @@ function SpotifyFlow({
     );
   }
 
-  if (matchingFor) {
+  if (sub.kind === "playlists") {
+    return (
+      <div>
+        <BackLink onBack={() => setSub({ kind: "hub" })} />
+        <PlaylistPicker
+          onPick={(p) => setSub({ kind: "playlist-matching", playlist: p })}
+        />
+      </div>
+    );
+  }
+
+  if (sub.kind === "playlist-matching") {
     return (
       <PlaylistMatching
-        playlist={matchingFor}
+        playlist={sub.playlist}
         onReady={(rows) =>
-          onReview(rows, matchingFor.name, matchingFor.description || "")
+          onReview(rows, {
+            kind: "playlist",
+            defaultName: sub.playlist.name,
+            defaultDescription: sub.playlist.description || "",
+          })
         }
-        onBack={() => setMatchingFor(null)}
+        onBack={() => setSub({ kind: "playlists" })}
       />
     );
   }
 
+  if (sub.kind === "library-matching") {
+    return (
+      <LibraryMatching
+        libraryKind={sub.libraryKind}
+        onReady={(rows) =>
+          onReview(rows, {
+            kind: "favorite",
+            favoriteKind:
+              sub.libraryKind === "liked-tracks"
+                ? "track"
+                : sub.libraryKind === "saved-albums"
+                  ? "album"
+                  : "artist",
+            label: LIBRARY_LABELS[sub.libraryKind],
+          })
+        }
+        onBack={() => setSub({ kind: "hub" })}
+      />
+    );
+  }
+
+  // Hub — pick what to import.
   return (
     <>
       {status.username && (
@@ -232,6 +290,7 @@ function SpotifyFlow({
                 connected: false,
                 username: null,
               });
+              setSub({ kind: "hub" });
             }}
             className="underline hover:text-foreground"
           >
@@ -239,8 +298,137 @@ function SpotifyFlow({
           </button>
         </div>
       )}
-      <PlaylistPicker onPick={setMatchingFor} />
+      <div className="grid gap-3 sm:grid-cols-2">
+        <HubCard
+          icon={ListMusic}
+          title="Playlists"
+          description="Import one of your Spotify playlists as a new Tidal playlist."
+          onClick={() => setSub({ kind: "playlists" })}
+        />
+        <HubCard
+          icon={Heart}
+          title="Liked Songs"
+          description="Favorite every track in your Spotify Liked Songs on Tidal."
+          onClick={() =>
+            setSub({ kind: "library-matching", libraryKind: "liked-tracks" })
+          }
+        />
+        <HubCard
+          icon={Disc3}
+          title="Saved Albums"
+          description="Add your Spotify saved albums to Tidal favorites."
+          onClick={() =>
+            setSub({ kind: "library-matching", libraryKind: "saved-albums" })
+          }
+        />
+        <HubCard
+          icon={UserIcon}
+          title="Followed Artists"
+          description="Follow the artists you follow on Spotify. Fuzzy name match — review before confirming."
+          onClick={() =>
+            setSub({
+              kind: "library-matching",
+              libraryKind: "followed-artists",
+            })
+          }
+        />
+      </div>
     </>
+  );
+}
+
+const LIBRARY_LABELS: Record<LibraryKind, string> = {
+  "liked-tracks": "Liked Songs",
+  "saved-albums": "Saved Albums",
+  "followed-artists": "Followed Artists",
+};
+
+function HubCard({
+  icon: Icon,
+  title,
+  description,
+  onClick,
+}: {
+  icon: typeof Heart;
+  title: string;
+  description: string;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className="group flex items-start gap-3 rounded-lg border border-border/50 bg-card/40 p-4 text-left transition-colors hover:bg-accent/40"
+    >
+      <Icon className="mt-0.5 h-5 w-5 flex-shrink-0 text-primary" />
+      <div className="min-w-0 flex-1">
+        <div className="font-semibold">{title}</div>
+        <div className="mt-0.5 text-sm text-muted-foreground">
+          {description}
+        </div>
+      </div>
+      <ChevronRight className="mt-1 h-4 w-4 flex-shrink-0 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
+    </button>
+  );
+}
+
+function BackLink({ onBack }: { onBack: () => void }) {
+  return (
+    <Button size="sm" variant="ghost" onClick={onBack} className="mb-3">
+      <ChevronLeft className="h-4 w-4" /> Back
+    </Button>
+  );
+}
+
+function LibraryMatching({
+  libraryKind,
+  onReady,
+  onBack,
+}: {
+  libraryKind: LibraryKind;
+  onReady: (rows: MatchRow[]) => void;
+  onBack: () => void;
+}) {
+  const toast = useToast();
+  useEffect(() => {
+    let cancelled = false;
+    api.import.spotify
+      .matchLibrary(libraryKind)
+      .then((r) => {
+        if (cancelled) return;
+        if (r.total === 0) {
+          toast.show({
+            kind: "info",
+            title: `No ${LIBRARY_LABELS[libraryKind].toLowerCase()} found`,
+          });
+          onBack();
+          return;
+        }
+        onReady(r.rows);
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        toast.show({
+          kind: "error",
+          title: "Couldn't fetch from Spotify",
+          description: err instanceof Error ? err.message : String(err),
+        });
+        onBack();
+      });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [libraryKind]);
+  return (
+    <div className="flex flex-col gap-3">
+      <BackLink onBack={onBack} />
+      <div className="rounded-lg border border-border/50 bg-card/40 p-5 text-sm text-muted-foreground">
+        <Loader2 className="mr-2 inline h-4 w-4 animate-spin" />
+        Fetching {LIBRARY_LABELS[libraryKind].toLowerCase()} from Spotify and
+        matching against Tidal…
+      </div>
+    </div>
   );
 }
 
@@ -690,21 +878,20 @@ function TextFlow({
 
 function MatchReview({
   rows,
-  defaultName,
-  defaultDescription,
+  action,
   onBack,
   onDone,
 }: {
   rows: MatchRow[];
-  defaultName: string;
-  defaultDescription: string;
+  action: ReviewAction;
   onBack: () => void;
   onDone: () => void;
 }) {
   const toast = useToast();
-  const [name, setName] = useState(defaultName);
+  const [name, setName] = useState(
+    action.kind === "playlist" ? action.defaultName : "",
+  );
   const [selected, setSelected] = useState<Set<string>>(() => {
-    // Auto-select high-confidence matches (ISRC or fuzzy ≥ 0.7).
     const auto = new Set<string>();
     for (const row of rows) {
       if (row.match && row.match.confidence >= 0.7) {
@@ -713,7 +900,7 @@ function MatchReview({
     }
     return auto;
   });
-  const [creating, setCreating] = useState(false);
+  const [busy, setBusy] = useState(false);
 
   const toggle = (id: string) => {
     setSelected((cur) => {
@@ -727,73 +914,112 @@ function MatchReview({
   const matched = rows.filter((r) => r.match !== null).length;
   const unmatched = rows.length - matched;
 
-  const create = async () => {
+  const confirm = async () => {
     if (selected.size === 0) {
-      toast.show({ kind: "info", title: "Pick at least one track" });
+      toast.show({ kind: "info", title: "Pick at least one row" });
       return;
     }
-    setCreating(true);
+    setBusy(true);
     try {
-      const res = await api.import.create(
-        name,
-        defaultDescription,
-        Array.from(selected),
-      );
-      toast.show({
-        kind: "success",
-        title: `Created "${res.name}"`,
-        description: `${res.added} tracks added${res.failed ? `, ${res.failed} failed` : ""}.`,
-      });
+      if (action.kind === "playlist") {
+        const res = await api.import.create(
+          name,
+          action.defaultDescription,
+          Array.from(selected),
+        );
+        toast.show({
+          kind: "success",
+          title: `Created "${res.name}"`,
+          description: `${res.added} tracks added${res.failed ? `, ${res.failed} failed` : ""}.`,
+        });
+      } else {
+        const res = await api.import.favorite(
+          action.favoriteKind,
+          Array.from(selected),
+        );
+        const verb =
+          action.favoriteKind === "artist" ? "followed" : "favorited";
+        toast.show({
+          kind: "success",
+          title: `${res.added} ${action.favoriteKind}${res.added === 1 ? "" : "s"} ${verb}`,
+          description: res.failed ? `${res.failed} failed` : undefined,
+        });
+      }
       onDone();
     } catch (err) {
       toast.show({
         kind: "error",
-        title: "Couldn't create playlist",
+        title:
+          action.kind === "playlist"
+            ? "Couldn't create playlist"
+            : "Couldn't favorite",
         description: err instanceof Error ? err.message : String(err),
       });
     } finally {
-      setCreating(false);
+      setBusy(false);
     }
   };
+
+  // Labels scale with the action: playlist creation needs a name
+  // input; library imports show a summary line instead. Row noun
+  // (track / album / artist) matches the kind for plural-correct
+  // counters.
+  const rowNoun =
+    action.kind === "favorite"
+      ? action.favoriteKind
+      : "track";
+  const confirmLabel =
+    action.kind === "playlist"
+      ? `Create "${name || "playlist"}" with ${selected.size} ${pluralize(rowNoun, selected.size)}`
+      : `${action.favoriteKind === "artist" ? "Follow" : "Favorite"} ${selected.size} ${pluralize(rowNoun, selected.size)}`;
 
   return (
     <div>
       <div className="mb-4 flex items-center justify-between gap-3">
-        <Button size="sm" variant="ghost" onClick={onBack} disabled={creating}>
+        <Button size="sm" variant="ghost" onClick={onBack} disabled={busy}>
           <ChevronLeft className="h-4 w-4" /> Back
         </Button>
-        <Button onClick={create} disabled={creating || selected.size === 0}>
-          {creating ? (
+        <Button onClick={confirm} disabled={busy || selected.size === 0}>
+          {busy ? (
             <Loader2 className="h-4 w-4 animate-spin" />
           ) : (
             <Check className="h-4 w-4" />
           )}
-          Create "{name}" with {selected.size} tracks
+          {confirmLabel}
         </Button>
       </div>
 
       <div className="mb-4 flex flex-col gap-3 rounded-lg border border-border/50 bg-card/40 p-4">
         <div className="text-sm font-semibold">
-          Matched {matched} of {rows.length} tracks
+          Matched {matched} of {rows.length} {pluralize(rowNoun, rows.length)}
           {unmatched > 0 && (
             <span className="ml-2 text-amber-300">
               · {unmatched} couldn't be found on Tidal
             </span>
           )}
         </div>
-        <div className="flex flex-col gap-1">
-          <label className="text-xs font-semibold text-muted-foreground">
-            Playlist name
-          </label>
-          <Input
-            value={name}
-            onChange={(e) => setName(e.target.value)}
-            placeholder="Playlist name"
-          />
-        </div>
+        {action.kind === "playlist" && (
+          <div className="flex flex-col gap-1">
+            <label className="text-xs font-semibold text-muted-foreground">
+              Playlist name
+            </label>
+            <Input
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              placeholder="Playlist name"
+            />
+          </div>
+        )}
         <div className="text-xs text-muted-foreground">
-          High-confidence matches (ISRC or strong fuzzy match) are
-          pre-selected. Uncheck any you'd rather skip.
+          High-confidence matches are pre-selected. Uncheck any you'd rather
+          skip.
+          {action.kind === "favorite" && action.favoriteKind === "artist" && (
+            <>
+              {" "}Artist matching is fuzzier than track matching — identical-
+              name artists exist (e.g. multiple acts called "Beach House"),
+              so double-check the low-confidence rows before confirming.
+            </>
+          )}
         </div>
       </div>
 
@@ -809,6 +1035,14 @@ function MatchReview({
       </div>
     </div>
   );
+}
+
+function pluralize(word: string, n: number): string {
+  if (n === 1) return word;
+  if (word === "track" || word === "album" || word === "artist") {
+    return `${word}s`;
+  }
+  return word;
 }
 
 function MatchRowView({

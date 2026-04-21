@@ -40,11 +40,12 @@ SPOTIFY_AUTH_URL = "https://accounts.spotify.com/authorize"
 SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token"
 SPOTIFY_API = "https://api.spotify.com/v1"
 
-# Minimum scopes for reading the user's playlists. "playlist-read-
-# private" lets us see private playlists the user owns / is a
-# collaborator on; "user-library-read" gives access to Liked Songs
-# (so we can offer that as an import source).
-SCOPES = "playlist-read-private user-library-read"
+# Scopes we request on OAuth:
+#  playlist-read-private — user's private + collaborative playlists
+#  user-library-read     — saved tracks (Liked Songs) + saved albums
+#  user-follow-read      — followed artists
+# All read-only. Nothing we fetch here mutates the user's Spotify account.
+SCOPES = "playlist-read-private user-library-read user-follow-read"
 
 SESSION_FILE = user_data_dir() / "spotify_session.json"
 
@@ -401,3 +402,274 @@ def _shape_match(t: dict, *, confidence: float, reason: str) -> dict:
         "confidence": round(float(confidence), 3),
         "reason": reason,
     }
+
+
+# ---------------------------------------------------------------------------
+# Library listers (Liked Songs / Saved Albums / Followed Artists)
+# ---------------------------------------------------------------------------
+
+
+def list_liked_tracks(auth: SpotifyAuth) -> list[dict]:
+    """Paginate /me/tracks — the user's Liked Songs — and return
+    match-shaped rows."""
+    out: list[dict] = []
+    url = "/me/tracks?limit=50"
+    while url:
+        data = _get(auth, url)
+        for item in data.get("items") or []:
+            track = (item or {}).get("track") or {}
+            if not track:
+                continue
+            artists = [a.get("name", "") for a in (track.get("artists") or [])]
+            out.append(
+                {
+                    "id": track.get("id"),
+                    "name": track.get("name") or "",
+                    "artists": [a for a in artists if a],
+                    "duration_ms": track.get("duration_ms") or 0,
+                    "isrc": (track.get("external_ids") or {}).get("isrc") or None,
+                }
+            )
+        next_url = data.get("next")
+        url = next_url.replace(SPOTIFY_API, "") if next_url else None
+    return out
+
+
+def list_saved_albums(auth: SpotifyAuth) -> list[dict]:
+    """Paginate /me/albums. Rows are normalized to what our album
+    matcher expects (name, primary_artist, upc, total_tracks)."""
+    out: list[dict] = []
+    url = "/me/albums?limit=50"
+    while url:
+        data = _get(auth, url)
+        for item in data.get("items") or []:
+            album = (item or {}).get("album") or {}
+            if not album:
+                continue
+            artists = [a.get("name", "") for a in (album.get("artists") or [])]
+            out.append(
+                {
+                    "id": album.get("id"),
+                    "name": album.get("name") or "",
+                    "artists": [a for a in artists if a],
+                    "total_tracks": album.get("total_tracks") or 0,
+                    "upc": (album.get("external_ids") or {}).get("upc") or None,
+                    "image": (
+                        (album.get("images") or [{}])[0].get("url")
+                        if album.get("images")
+                        else None
+                    ),
+                }
+            )
+        next_url = data.get("next")
+        url = next_url.replace(SPOTIFY_API, "") if next_url else None
+    return out
+
+
+def list_followed_artists(auth: SpotifyAuth) -> list[dict]:
+    """Paginate /me/following?type=artist. Cursor-based pagination
+    (unlike everything else in Spotify's API)."""
+    out: list[dict] = []
+    url = "/me/following?type=artist&limit=50"
+    while url:
+        data = _get(auth, url)
+        block = data.get("artists") or {}
+        for a in block.get("items") or []:
+            if not isinstance(a, dict):
+                continue
+            out.append(
+                {
+                    "id": a.get("id"),
+                    "name": a.get("name") or "",
+                    "followers": (a.get("followers") or {}).get("total") or 0,
+                    "genres": a.get("genres") or [],
+                    "image": (
+                        (a.get("images") or [{}])[0].get("url")
+                        if a.get("images")
+                        else None
+                    ),
+                }
+            )
+        next_url = block.get("next")
+        url = next_url.replace(SPOTIFY_API, "") if next_url else None
+    return out
+
+
+# ---------------------------------------------------------------------------
+# Album + artist matchers
+# ---------------------------------------------------------------------------
+
+
+def match_album(session, spotify_album: dict) -> Optional[dict]:
+    """UPC fast path → fuzzy title + primary artist + track-count
+    tiebreaker. UPC identifies a specific release (same ISRC concept
+    but at the album level)."""
+    name = spotify_album.get("name") or ""
+    artists = spotify_album.get("artists") or []
+    primary = artists[0] if artists else ""
+    upc = spotify_album.get("upc")
+    total_tracks = spotify_album.get("total_tracks") or 0
+
+    if upc:
+        try:
+            resp = session.request.request("GET", f"albums/byBarcodeId", params={"barcodeId": upc})
+            if resp.status_code < 400:
+                body = resp.json()
+                items = body.get("items") if isinstance(body, dict) else body
+                if items:
+                    a = items[0]
+                    return _shape_album_match(a, confidence=1.0, reason="upc")
+        except Exception:
+            pass
+
+    query = f"{name} {primary}".strip()
+    if not query:
+        return None
+    try:
+        resp = session.request.request(
+            "GET",
+            "search/albums",
+            params={"query": query, "limit": 5, "countryCode": session.country_code},
+        )
+        if resp.status_code >= 400:
+            return None
+        body = resp.json()
+    except Exception:
+        return None
+    candidates = body.get("items") or []
+    best: Optional[tuple[float, dict]] = None
+    for c in candidates:
+        c_name = c.get("title") or ""
+        c_artists = c.get("artists") or []
+        c_primary = (c_artists[0].get("name") if c_artists else "") or ""
+        c_tracks = c.get("numberOfTracks") or 0
+        name_score = _similarity(name, c_name)
+        artist_score = _similarity(primary, c_primary)
+        # Track-count tiebreaker — same album usually has the same
+        # count; deluxe vs. standard editions differ. Lightly weighted.
+        if total_tracks > 0 and c_tracks > 0:
+            diff = abs(c_tracks - total_tracks)
+            count_score = 1.0 if diff == 0 else max(0.0, 1.0 - diff / 10.0)
+        else:
+            count_score = 0.5
+        score = 0.5 * name_score + 0.4 * artist_score + 0.1 * count_score
+        if best is None or score > best[0]:
+            best = (score, c)
+    if best is None:
+        return None
+    score, c = best
+    if score < 0.55:
+        return None
+    return _shape_album_match(c, confidence=score, reason="fuzzy")
+
+
+def _shape_album_match(a: dict, *, confidence: float, reason: str) -> dict:
+    artists = [ar.get("name", "") for ar in (a.get("artists") or [])]
+    cover_uuid = a.get("cover")
+    cover = (
+        f"https://resources.tidal.com/images/{cover_uuid.replace('-', '/')}/320x320.jpg"
+        if isinstance(cover_uuid, str) and cover_uuid
+        else None
+    )
+    return {
+        "tidal_id": str(a.get("id")),
+        "name": a.get("title") or "",
+        "artists": [ar for ar in artists if ar],
+        "duration": a.get("duration") or 0,
+        "cover": cover,
+        "confidence": round(float(confidence), 3),
+        "reason": reason,
+    }
+
+
+def match_artist(session, spotify_artist: dict) -> Optional[dict]:
+    """Fuzzy name match, tie-broken by Tidal popularity. Artist
+    matching is fuzzier than track/album matching — identical-name
+    different artists are common ("Beach House" vs. another "Beach
+    House" with 200 listeners). We use popularity as a tiebreaker
+    because the user almost always means the big one.
+    """
+    name = spotify_artist.get("name") or ""
+    if not name:
+        return None
+    try:
+        resp = session.request.request(
+            "GET",
+            "search/artists",
+            params={"query": name, "limit": 5, "countryCode": session.country_code},
+        )
+        if resp.status_code >= 400:
+            return None
+        body = resp.json()
+    except Exception:
+        return None
+    candidates = body.get("items") or []
+    if not candidates:
+        return None
+    # Score: high name similarity dominates; popularity nudges ties.
+    best: Optional[tuple[float, dict]] = None
+    max_pop = max((c.get("popularity") or 0) for c in candidates) or 1
+    for c in candidates:
+        name_score = _similarity(name, c.get("name") or "")
+        pop_score = (c.get("popularity") or 0) / max_pop
+        score = 0.85 * name_score + 0.15 * pop_score
+        if best is None or score > best[0]:
+            best = (score, c)
+    if best is None:
+        return None
+    score, c = best
+    if score < 0.6:
+        return None
+    pic_uuid = c.get("picture")
+    picture = (
+        f"https://resources.tidal.com/images/{pic_uuid.replace('-', '/')}/320x320.jpg"
+        if isinstance(pic_uuid, str) and pic_uuid
+        else None
+    )
+    return {
+        "tidal_id": str(c.get("id")),
+        "name": c.get("name") or "",
+        # `artists` kept for a uniform shape with track/album matches —
+        # the UI reads this field for every kind.
+        "artists": [],
+        "duration": 0,
+        "cover": picture,
+        "confidence": round(float(score), 3),
+        "reason": "fuzzy",
+    }
+
+
+def match_albums(session, rows: list[dict]) -> list[dict]:
+    out: list[dict] = []
+    for r in rows:
+        match = match_album(session, r)
+        out.append(
+            {
+                "spotify": {
+                    "name": r.get("name"),
+                    "artists": r.get("artists") or [],
+                    "duration_ms": 0,
+                    "isrc": None,
+                },
+                "match": match,
+            }
+        )
+    return out
+
+
+def match_artists(session, rows: list[dict]) -> list[dict]:
+    out: list[dict] = []
+    for r in rows:
+        match = match_artist(session, r)
+        out.append(
+            {
+                "spotify": {
+                    "name": r.get("name"),
+                    "artists": [],
+                    "duration_ms": 0,
+                    "isrc": None,
+                },
+                "match": match,
+            }
+        )
+    return out
