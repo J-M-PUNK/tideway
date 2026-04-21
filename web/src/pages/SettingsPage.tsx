@@ -263,6 +263,8 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
         />
       </Section>
 
+      <AudioEngineSection />
+
       <Section
         title="Notifications"
         description="Show a desktop notification when a batch of downloads finishes. Your browser will prompt for permission the first time a download completes after this is on."
@@ -407,6 +409,223 @@ function ThemePicker({
     </div>
   );
 }
+
+/**
+ * Equalizer + audio-output device picker. Both drive libvlc directly
+ * and both are persisted in the backend settings.json so a relaunch
+ * keeps the user's sound + device.
+ *
+ * Preset dropdown just picks one of libvlc's 18 built-ins and lets
+ * the backend resolve to per-band amplitudes (so "Rock" renders the
+ * matching slider curve immediately). Manual slider changes POST the
+ * full band array with `preamp` = null — `null` means "leave preamp
+ * at libvlc's default" vs. an explicit number.
+ */
+function AudioEngineSection() {
+  const toast = useToast();
+  const [eq, setEq] = useState<{
+    bands: number[];
+    preamp: number | null;
+    band_count: number;
+    frequencies: number[];
+    presets: { index: number; name: string }[];
+  } | null>(null);
+  const [devices, setDevices] = useState<{
+    devices: { id: string; name: string }[];
+    current: string;
+  } | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [e, d] = await Promise.all([
+          api.player.eq(),
+          api.player.outputDevices(),
+        ]);
+        if (cancelled) return;
+        setEq(e);
+        setDevices(d);
+      } catch {
+        /* libvlc not available — section just stays empty */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Local mirror of the slider state so dragging is instant; flush to
+  // the backend on release (via mouse-up / change commit).
+  const [localBands, setLocalBands] = useState<number[] | null>(null);
+  useEffect(() => {
+    if (eq) setLocalBands(eq.bands.length ? eq.bands : new Array(eq.band_count).fill(0));
+  }, [eq]);
+
+  if (!eq || !devices) return null;
+
+  const flush = async (bands: number[]) => {
+    setLocalBands(bands);
+    try {
+      await api.player.setEq(bands, null);
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: "Couldn't apply EQ",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+
+  const pickPreset = async (idx: number) => {
+    try {
+      const res = await api.player.setEqPreset(idx);
+      setLocalBands(res.bands);
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: "Couldn't apply preset",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+
+  const reset = () => {
+    const flat = new Array(eq.band_count).fill(0);
+    flush(flat);
+  };
+
+  const pickDevice = async (id: string) => {
+    try {
+      await api.player.setOutputDevice(id);
+      setDevices({ ...devices, current: id });
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: "Couldn't switch output device",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+
+  return (
+    <Section
+      title="Audio"
+      description="Equalizer and output device run through the native audio engine. Tidal's own app has neither."
+    >
+      <Field label="Output device">
+        <select
+          value={devices.current}
+          onChange={(e) => pickDevice(e.target.value)}
+          className="h-10 rounded-md border border-input bg-secondary px-3 text-sm"
+        >
+          {devices.devices.map((d) => (
+            <option key={d.id || "default"} value={d.id}>
+              {d.name}
+            </option>
+          ))}
+        </select>
+      </Field>
+
+      <Field
+        label="Equalizer"
+        hint="Drag sliders or pick a preset. Reset flattens to zero."
+      >
+        <div className="flex flex-col gap-3">
+          <div className="flex flex-wrap items-center gap-2">
+            <select
+              onChange={(e) => {
+                const n = parseInt(e.target.value, 10);
+                if (!isNaN(n)) pickPreset(n);
+              }}
+              value=""
+              className="h-9 rounded-md border border-input bg-secondary px-3 text-xs"
+            >
+              <option value="">Presets…</option>
+              {eq.presets.map((p) => (
+                <option key={p.index} value={p.index}>
+                  {p.name}
+                </option>
+              ))}
+            </select>
+            <Button size="sm" variant="outline" onClick={reset}>
+              Reset
+            </Button>
+          </div>
+
+          <div className="flex items-end gap-3">
+            {localBands?.map((v, i) => (
+              <EqSlider
+                key={i}
+                value={v}
+                freq={eq.frequencies[i]}
+                onChange={(nv) => {
+                  const next = [...localBands];
+                  next[i] = nv;
+                  setLocalBands(next);
+                }}
+                onCommit={(nv) => {
+                  const next = [...localBands];
+                  next[i] = nv;
+                  flush(next);
+                }}
+              />
+            ))}
+          </div>
+        </div>
+      </Field>
+    </Section>
+  );
+}
+
+function EqSlider({
+  value,
+  freq,
+  onChange,
+  onCommit,
+}: {
+  value: number;
+  freq: number;
+  onChange: (v: number) => void;
+  onCommit: (v: number) => void;
+}) {
+  const label =
+    freq >= 1000 ? `${Math.round(freq / 100) / 10}k` : `${Math.round(freq)}`;
+  return (
+    <div className="flex flex-col items-center gap-2">
+      <div className="text-xs tabular-nums text-muted-foreground">
+        {value >= 0 ? "+" : ""}
+        {value.toFixed(1)}
+      </div>
+      <input
+        type="range"
+        min={-20}
+        max={20}
+        step={0.5}
+        value={value}
+        onChange={(e) => onChange(parseFloat(e.target.value))}
+        onMouseUp={(e) =>
+          onCommit(parseFloat((e.target as HTMLInputElement).value))
+        }
+        onTouchEnd={(e) =>
+          onCommit(parseFloat((e.target as HTMLInputElement).value))
+        }
+        onKeyUp={(e) =>
+          onCommit(parseFloat((e.target as HTMLInputElement).value))
+        }
+        className="eq-slider h-32 w-4 accent-primary"
+        style={
+          {
+            writingMode: "vertical-lr",
+            direction: "rtl",
+          } as React.CSSProperties
+        }
+      />
+      <div className="text-xs text-muted-foreground">{label}</div>
+    </div>
+  );
+}
+
 
 /**
  * Last.fm scrobbling setup. Three states:

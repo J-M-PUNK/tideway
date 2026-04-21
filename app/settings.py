@@ -3,6 +3,7 @@ import os
 import tempfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
+from typing import Optional
 
 from app.paths import user_data_dir
 
@@ -31,6 +32,16 @@ class Settings:
     # default because browsers require an explicit permission prompt
     # the first time, and ambushing every new user with one is rude.
     notify_on_complete: bool = False
+    # --- Audio engine (libvlc) settings ---------------------------------
+    # 10-band equalizer amplitudes in dB, -20..+20. Empty list = flat /
+    # off. Replaces any prior EQ when re-applied. When `eq_preamp` is
+    # None the equalizer's preamp stays at libvlc's default.
+    eq_bands: list[float] = field(default_factory=list)
+    eq_preamp: Optional[float] = None
+    # Libvlc output-device id (from `audio_output_device_enum`). Empty
+    # string means "use the system default". Persisted so USB DAC /
+    # Bluetooth choices survive relaunch.
+    audio_output_device: str = ""
 
 
 def load_settings() -> Settings:
