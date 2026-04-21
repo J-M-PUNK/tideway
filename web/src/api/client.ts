@@ -206,6 +206,15 @@ export const api = {
       }),
   },
   me: () => req<{ username: string }>("/api/me"),
+  version: () => req<{ version: string }>("/api/version"),
+  updateCheck: () =>
+    req<{
+      available: boolean;
+      current: string;
+      latest: string | null;
+      url: string | null;
+      notes: string | null;
+    }>("/api/update-check"),
   user: {
     profile: (id: string) => req<TidalUser>(`/api/user/${encodeURIComponent(id)}`),
     playlists: (id: string) =>

@@ -19,6 +19,8 @@ block_cipher = None
 
 repo_root = Path(SPECPATH).resolve()
 dist_dir = repo_root / "web" / "dist"
+_version_file = repo_root / "VERSION"
+APP_VERSION = _version_file.read_text().strip() if _version_file.is_file() else "0.0.0"
 
 if not dist_dir.is_dir():
     raise SystemExit(
@@ -30,6 +32,10 @@ datas = [
     # (source, dest-inside-bundle)
     (str(dist_dir), "web/dist"),
 ]
+
+# Ship the VERSION file so the server can read it at runtime.
+if _version_file.is_file():
+    datas.append((str(_version_file), "."))
 
 binaries = []
 
