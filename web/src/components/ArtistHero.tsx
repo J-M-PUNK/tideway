@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import {
   Check,
   Copy,
@@ -187,42 +188,12 @@ function FollowToggle({ artistId }: { artistId: string }) {
 }
 
 function ArtistRadioButton({ artistId }: { artistId: string }) {
-  const [loading, setLoading] = useState(false);
-  const toast = useToast();
-  const actions = usePlayerActions();
-
-  const onRadio = async () => {
-    if (loading) return;
-    setLoading(true);
-    try {
-      const tracks = await api.artistRadio(artistId);
-      if (tracks.length === 0) {
-        toast.show({ kind: "info", title: "No radio available" });
-        return;
-      }
-      actions.play(tracks[0], tracks);
-      toast.show({
-        kind: "success",
-        title: "Artist radio started",
-        description: `${tracks.length} tracks queued.`,
-      });
-    } catch (err) {
-      toast.show({
-        kind: "error",
-        title: "Couldn't start radio",
-        description: err instanceof Error ? err.message : String(err),
-      });
-    } finally {
-      setLoading(false);
-    }
-  };
-
+  const navigate = useNavigate();
   return (
     <button
-      onClick={onRadio}
-      disabled={loading}
-      className="flex flex-col items-center gap-1 text-muted-foreground transition-colors hover:text-foreground disabled:opacity-50"
-      title="Start artist radio"
+      onClick={() => navigate(`/radio/artist/${artistId}`)}
+      className="flex flex-col items-center gap-1 text-muted-foreground transition-colors hover:text-foreground"
+      title="Open artist radio"
     >
       <Radio className="h-5 w-5" />
       <div className="text-xs font-semibold">Artist radio</div>
