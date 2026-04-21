@@ -1627,7 +1627,12 @@ def _native_player():
             status_code=503,
             detail="Native audio engine unavailable (libvlc not loaded)",
         )
-    return native_player.get_player(lambda: tidal.session)
+    return native_player.get_player(
+        lambda: tidal.session,
+        local_lookup=lambda tid: str(local_index.get(str(tid)))
+        if local_index.get(str(tid))
+        else None,
+    )
 
 
 def _snapshot_dict(snap: native_player.PlayerSnapshot) -> dict:
@@ -1652,56 +1657,60 @@ def player_available() -> dict:
 
 @app.get("/api/player/state")
 def player_state() -> dict:
-    _require_auth()
+    # Local-access gate (not _require_auth) so offline users can play
+    # their downloaded tracks. The load() path inside the VLC player
+    # checks local_index first and only falls through to Tidal when
+    # a track isn't on disk.
+    _require_local_access()
     return _snapshot_dict(_native_player().snapshot())
 
 
 @app.post("/api/player/load")
 def player_load(req: _PlayerLoadRequest) -> dict:
-    _require_auth()
+    _require_local_access()
     snap = _native_player().load(req.track_id, quality=req.quality)
     return _snapshot_dict(snap)
 
 
 @app.post("/api/player/play")
 def player_play() -> dict:
-    _require_auth()
+    _require_local_access()
     return _snapshot_dict(_native_player().play())
 
 
 @app.post("/api/player/pause")
 def player_pause() -> dict:
-    _require_auth()
+    _require_local_access()
     return _snapshot_dict(_native_player().pause())
 
 
 @app.post("/api/player/resume")
 def player_resume() -> dict:
-    _require_auth()
+    _require_local_access()
     return _snapshot_dict(_native_player().resume())
 
 
 @app.post("/api/player/stop")
 def player_stop() -> dict:
-    _require_auth()
+    _require_local_access()
     return _snapshot_dict(_native_player().stop())
 
 
 @app.post("/api/player/seek")
 def player_seek(req: _PlayerSeekRequest) -> dict:
-    _require_auth()
+    _require_local_access()
     return _snapshot_dict(_native_player().seek(req.fraction))
 
 
 @app.post("/api/player/volume")
 def player_volume(req: _PlayerVolumeRequest) -> dict:
-    _require_auth()
+    _require_local_access()
     return _snapshot_dict(_native_player().set_volume(req.volume))
 
 
 @app.post("/api/player/muted")
 def player_muted(req: _PlayerMutedRequest) -> dict:
-    _require_auth()
+    _require_local_access()
     return _snapshot_dict(_native_player().set_muted(req.muted))
 
 
@@ -1717,7 +1726,7 @@ async def player_events(request: Request):
     playback. When paused/idle we drop to a 1Hz heartbeat to keep the
     connection alive without wasting cycles.
     """
-    _require_auth()
+    _require_local_access()
     player = _native_player()
     queue: asyncio.Queue[Optional[dict]] = asyncio.Queue(maxsize=32)
     loop = asyncio.get_running_loop()

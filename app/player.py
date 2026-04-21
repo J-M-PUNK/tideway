@@ -86,12 +86,21 @@ class VLCPlayer:
     layer should queue snapshots rather than do anything heavy in-line.
     """
 
-    def __init__(self, session_getter: Callable[[], tidalapi.Session]):
+    def __init__(
+        self,
+        session_getter: Callable[[], tidalapi.Session],
+        local_lookup: Optional[Callable[[str], Optional[str]]] = None,
+    ):
         if vlc is None:
             raise RuntimeError(
                 f"libvlc not available: {_VLC_IMPORT_ERROR}"
             )
         self._session_getter = session_getter
+        # Optional: returns a filesystem path for a track id if the user
+        # already has it downloaded. We skip the Tidal manifest fetch
+        # entirely in that case — faster, bandwidth-free, and works in
+        # offline mode without a live session.
+        self._local_lookup = local_lookup
         # --no-video: we don't have a window. --quiet: libvlc's stderr
         # is chatty. --intf dummy: prevent it opening its own UI.
         self._instance = vlc.Instance("--no-video", "--quiet", "--intf", "dummy")
@@ -356,15 +365,22 @@ class VLCPlayer:
     def _resolve_stream(
         self, track_id: str, quality: Optional[str]
     ) -> tuple[str, Optional[float]]:
-        """Resolve a Tidal track id to a playable local MPD file path.
+        """Resolve a Tidal track id to a playable path.
 
-        Reuses the same code path the downloader uses for PKCE sessions:
-        `track.get_stream().get_stream_manifest()` yields a DASH manifest
-        whose raw content we decode and write to a temp file. libvlc
-        natively parses DASH and will fetch segments as it plays.
+        Two paths:
+          1. Local: the user has this track downloaded. Return the file
+             path directly — libvlc decodes local FLAC / AAC natively.
+             No network, no session required.
+          2. Streaming: fetch the DASH manifest via tidalapi (same path
+             the downloader uses) and write it to a temp MPD file.
+             libvlc's built-in DASH demuxer handles segment fetching.
 
-        Returns (mpd_path, duration_seconds).
+        Returns (path, duration_seconds).
         """
+        if self._local_lookup is not None:
+            local_path = self._local_lookup(track_id)
+            if local_path:
+                return local_path, None
         session = self._session_getter()
         override = None
         if quality:
@@ -410,13 +426,16 @@ _singleton: Optional[VLCPlayer] = None
 _singleton_lock = threading.Lock()
 
 
-def get_player(session_getter: Callable[[], tidalapi.Session]) -> VLCPlayer:
+def get_player(
+    session_getter: Callable[[], tidalapi.Session],
+    local_lookup: Optional[Callable[[str], Optional[str]]] = None,
+) -> VLCPlayer:
     """Lazy singleton. Constructed on first call so importing the module
     is free even when VLC isn't in use."""
     global _singleton
     with _singleton_lock:
         if _singleton is None:
-            _singleton = VLCPlayer(session_getter)
+            _singleton = VLCPlayer(session_getter, local_lookup=local_lookup)
         return _singleton
 
 

@@ -34,11 +34,6 @@ interface UiPreferences {
   /** Active color theme. Applied via a root-element class so CSS
    *  variables in index.css can swap their values. */
   theme: ThemeMode;
-  /** When true, playback goes through the libvlc backend instead of
-   *  the browser `<audio>` element. Required to decode Dolby Atmos /
-   *  MQA / Sony 360 Reality Audio — the HTML element can't handle
-   *  those codecs. Defaults off until the new path has soak time. */
-  nativeEngine: boolean;
 }
 
 interface UiPreferencesContextValue extends UiPreferences {
@@ -49,7 +44,6 @@ const DEFAULTS: UiPreferences = {
   offlineOnly: false,
   streamingQuality: "low_320k",
   theme: "dark",
-  nativeEngine: false,
 };
 
 const Ctx = createContext<UiPreferencesContextValue>({
