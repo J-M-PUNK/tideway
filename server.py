@@ -583,6 +583,7 @@ def track_to_dict(t) -> dict:
 
 
 def album_to_dict(a) -> dict:
+    release_date = _first(lambda: a.release_date)
     return {
         "kind": "album",
         "id": str(a.id),
@@ -594,6 +595,12 @@ def album_to_dict(a) -> dict:
         "artists": _artists(a),
         "explicit": bool(_first(lambda: a.explicit)),
         "share_url": _first(lambda: a.share_url),
+        # Release date as an ISO date string (YYYY-MM-DD); the Tidal
+        # object exposes it as a datetime.date. Frontend formats it.
+        "release_date": str(release_date) if release_date else None,
+        # Copyright line, usually "℗ 2024 <Label>" — we show it at the
+        # bottom of the album page the way Tidal does.
+        "copyright": _first(lambda: a.copyright) or None,
     }
 
 
@@ -2093,9 +2100,10 @@ def album_detail(album_id: int) -> dict:
         album = tidal.session.album(album_id)
     except Exception as exc:
         raise HTTPException(status_code=404, detail=str(exc))
-    # Similar and review are both best-effort — Tidal returns 404 for many
-    # albums (user-only content, non-editorial releases, region locks).
-    # We'd rather render the page without them than 500 the whole request.
+    # Similar / review / more-by-artist / related-artists are all best-
+    # effort. Tidal 404s on many of these for non-editorial content; we'd
+    # rather render the page without a given section than 500 the whole
+    # request.
     try:
         similar = [album_to_dict(a) for a in album.similar()][:12]
     except Exception:
@@ -2104,11 +2112,49 @@ def album_detail(album_id: int) -> dict:
         review = album.review() or None
     except Exception:
         review = None
+
+    # Other albums by the primary artist, excluding the current album.
+    # We take full-lengths first, then pad with EP/singles so the row
+    # always has something to show when we can fetch anything at all.
+    more_by: list[dict] = []
+    related_artists: list[dict] = []
+    primary = _first(lambda: album.artist) or (
+        album.artists[0] if getattr(album, "artists", None) else None
+    )
+    if primary is not None:
+        try:
+            full = list(tidal.get_artist_albums(primary)) or []
+        except Exception:
+            full = []
+        try:
+            eps = list(primary.get_ep_singles(limit=20)) or []
+        except Exception:
+            eps = []
+        combined = full + eps
+        current_id = str(album.id)
+        seen: set[str] = set()
+        for a in combined:
+            aid = str(getattr(a, "id", "") or "")
+            if not aid or aid == current_id or aid in seen:
+                continue
+            seen.add(aid)
+            more_by.append(album_to_dict(a))
+            if len(more_by) >= 12:
+                break
+        try:
+            related_artists = [
+                artist_to_dict(x) for x in primary.get_similar()
+            ][:12]
+        except Exception:
+            related_artists = []
+
     return {
         **album_to_dict(album),
         "tracks": [track_to_dict(t) for t in tidal.get_album_tracks(album)],
         "similar": similar,
         "review": review,
+        "more_by_artist": more_by,
+        "related_artists": related_artists,
     }
 
 

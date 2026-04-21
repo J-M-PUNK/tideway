@@ -32,6 +32,8 @@ export interface Album {
   artists: ArtistRef[];
   explicit: boolean;
   share_url?: string | null;
+  release_date?: string | null;
+  copyright?: string | null;
 }
 
 export interface Artist {
@@ -113,6 +115,8 @@ export interface AlbumDetail extends Album {
   tracks: Track[];
   similar: Album[];
   review: string | null;
+  more_by_artist: Album[];
+  related_artists: Artist[];
 }
 
 export interface ArtistDetail extends Artist {
