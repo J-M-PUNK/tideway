@@ -2196,27 +2196,53 @@ def artist_detail(artist_id: int) -> dict:
     except Exception:
         raw_appears = []
 
-    # Dedupe across all three discography sections. Sources:
+    # Dedupe across all three discography sections. Sources of dupes:
     #  1. tidalapi's `get_albums()` can page internally and surface the
-    #     same record twice (especially when an album has multiple
-    #     editions — deluxe, anniversary, clean).
-    #  2. Tidal sometimes tags the same release as both an album and an
-    #     EP, so `get_albums()` and `get_ep_singles()` overlap.
+    #     same record twice.
+    #  2. Tidal sometimes tags the same release as both an album and
+    #     an EP, so `get_albums()` and `get_ep_singles()` overlap.
     #  3. An artist's own album can bleed into `get_other()` (appears-
     #     on) when the featured-artist metadata is ambiguous.
-    # We precedence-sort: albums win over EPs, EPs win over appears-on.
-    # The first list an id shows up in is where it stays; later lists
-    # drop it.
+    #  4. Tidal's catalog regularly carries the SAME logical release
+    #     under multiple distinct ids — separate regional listings,
+    #     re-uploads, distributor changes. ID-based dedup misses these.
+    #
+    # Key on (normalized_title, version, primary_artist_id, explicit)
+    # so different editions (deluxe / anniversary), different
+    # artists with same title, and explicit-vs-clean variants all stay
+    # separate — but duplicate uploads of the same release collapse.
+    # Precedence: albums win over EPs, EPs win over appears-on. The
+    # first list a key appears in is where it stays.
     raw_albums = list(tidal.get_artist_albums(artist)) or []
-    seen: set[str] = set()
+
+    def _album_key(a) -> Optional[tuple]:
+        name = (getattr(a, "name", "") or "").strip().lower()
+        if not name:
+            return None
+        version = (getattr(a, "version", "") or "").strip().lower()
+        try:
+            artist_id = str(getattr(a.artist, "id", "") or "")
+        except Exception:
+            artist_id = ""
+        explicit = bool(getattr(a, "explicit", False))
+        return (name, version, artist_id, explicit)
+
+    seen_keys: set[tuple] = set()
+    seen_ids: set[str] = set()
 
     def _dedupe(items: list) -> list:
         out = []
         for a in items:
             aid = str(getattr(a, "id", "") or "")
-            if not aid or aid in seen:
+            if aid and aid in seen_ids:
                 continue
-            seen.add(aid)
+            key = _album_key(a)
+            if key is not None:
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+            if aid:
+                seen_ids.add(aid)
             out.append(a)
         return out
 
