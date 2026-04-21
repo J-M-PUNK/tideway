@@ -1708,6 +1708,7 @@ def _native_player():
         local_lookup=lambda tid: str(local_index.get(str(tid)))
         if local_index.get(str(tid))
         else None,
+        quality_clamp=tidal.clamp_quality_to_subscription,
     )
     # One-shot: re-apply persisted EQ + output device so users who
     # set a USB-DAC preference or an EQ preset keep it across restart.

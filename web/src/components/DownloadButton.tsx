@@ -66,6 +66,45 @@ interface Props {
   iconOnly?: boolean;
   className?: string;
   onOpenChange?: (open: boolean) => void;
+  /** Optional — when supplied, each quality option gets a small
+   *  annotation showing what codec the user will actually get for
+   *  THIS track at that tier. Removes the "Max" ambiguity (Max could
+   *  mean Dolby Atmos, MQA, hi-res FLAC, or plain lossless depending
+   *  on the track). */
+  audioModes?: string[];
+  mediaTags?: string[];
+}
+
+/**
+ * Map a quality tier + this track's Tidal format tags → what the
+ * user will actually receive. Returns null when the tier is
+ * unambiguous (Low / Normal are always AAC) or the tags don't
+ * resolve to something distinctive.
+ */
+function effectiveFormatLabel(
+  quality: string,
+  modes: string[] | undefined,
+  tags: string[] | undefined,
+): string | null {
+  if (!modes && !tags) return null;
+  const M = new Set((modes ?? []).map((x) => x.toUpperCase()));
+  const T = new Set((tags ?? []).map((x) => x.toUpperCase()));
+  if (quality === "hi_res_lossless") {
+    if (M.has("DOLBY_ATMOS")) return "Dolby Atmos";
+    if (M.has("SONY_360RA")) return "Sony 360 RA";
+    if (T.has("HIRES_LOSSLESS")) return "Hi-Res FLAC";
+    if (T.has("MQA")) return "MQA";
+    if (T.has("LOSSLESS")) return "Same as Lossless for this track";
+    return null;
+  }
+  if (quality === "high_lossless") {
+    if (M.has("DOLBY_ATMOS") || M.has("SONY_360RA")) {
+      return "Stereo FLAC downmix";
+    }
+    if (T.has("LOSSLESS") || T.has("HIRES_LOSSLESS")) return "FLAC CD";
+    return null;
+  }
+  return null;
 }
 
 export function DownloadButton({
@@ -78,6 +117,8 @@ export function DownloadButton({
   iconOnly,
   className,
   onOpenChange,
+  audioModes,
+  mediaTags,
 }: Props) {
   const qualities = useQualities() ?? [];
   const [defaultQuality, setDefaultQuality] = useState<string | null>(_cachedDefaultQuality);
@@ -125,6 +166,7 @@ export function DownloadButton({
         <DropdownMenuSeparator />
         {qualities.map((q) => {
           const isDefault = defaultQuality === q.value;
+          const effective = effectiveFormatLabel(q.value, audioModes, mediaTags);
           return (
             <DropdownMenuItem
               key={q.value}
@@ -139,6 +181,11 @@ export function DownloadButton({
                   <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
                     {q.codec}
                   </span>
+                  {effective && (
+                    <span className="rounded bg-primary/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-primary">
+                      {effective}
+                    </span>
+                  )}
                 </div>
                 <div className="text-xs text-muted-foreground">{q.bitrate}</div>
                 <div className="text-[11px] text-muted-foreground/70">{q.description}</div>

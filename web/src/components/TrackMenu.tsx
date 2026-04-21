@@ -198,6 +198,8 @@ export function TrackMenuItems({
       <DownloadSubmenu
         parts={parts}
         onPick={(quality) => onDownload("track", track.id, quality)}
+        audioModes={track.audio_modes}
+        mediaTags={track.media_tags}
       />
       {track.album && !onAlbumPage && (
         <Item asChild>
@@ -356,9 +358,13 @@ function AddToPlaylistSubmenu({
 function DownloadSubmenu({
   parts,
   onPick,
+  audioModes,
+  mediaTags,
 }: {
   parts: MenuParts;
   onPick: (quality?: string) => void;
+  audioModes?: string[];
+  mediaTags?: string[];
 }) {
   const { Item, Separator, Sub, SubTrigger, SubContent } = parts;
   const qualities = useQualities() ?? [];
@@ -370,17 +376,57 @@ function DownloadSubmenu({
       <SubContent>
         <Item onSelect={() => onPick()}>Use default quality</Item>
         <Separator />
-        {qualities.map((q) => (
-          <Item key={q.value} onSelect={() => onPick(q.value)}>
-            <div className="flex flex-col">
-              <span>
-                {q.label} · {q.codec}
-              </span>
-              <span className="text-[11px] text-muted-foreground">{q.bitrate}</span>
-            </div>
-          </Item>
-        ))}
+        {qualities.map((q) => {
+          const effective = trackEffectiveFormat(q.value, audioModes, mediaTags);
+          return (
+            <Item key={q.value} onSelect={() => onPick(q.value)}>
+              <div className="flex flex-col">
+                <div className="flex items-center gap-2">
+                  <span>
+                    {q.label} · {q.codec}
+                  </span>
+                  {effective && (
+                    <span className="rounded bg-primary/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-primary">
+                      {effective}
+                    </span>
+                  )}
+                </div>
+                <span className="text-[11px] text-muted-foreground">{q.bitrate}</span>
+              </div>
+            </Item>
+          );
+        })}
       </SubContent>
     </Sub>
   );
+}
+
+/**
+ * Same logic as DownloadButton's effectiveFormatLabel. Duplicated
+ * (rather than imported) because the TrackMenu's Radix submenu
+ * primitives don't mount children eagerly — pulling in the full
+ * DownloadButton for its helper would be overkill.
+ */
+function trackEffectiveFormat(
+  quality: string,
+  modes: string[] | undefined,
+  tags: string[] | undefined,
+): string | null {
+  if (!modes && !tags) return null;
+  const M = new Set((modes ?? []).map((x) => x.toUpperCase()));
+  const T = new Set((tags ?? []).map((x) => x.toUpperCase()));
+  if (quality === "hi_res_lossless") {
+    if (M.has("DOLBY_ATMOS")) return "Dolby Atmos";
+    if (M.has("SONY_360RA")) return "Sony 360 RA";
+    if (T.has("HIRES_LOSSLESS")) return "Hi-Res FLAC";
+    if (T.has("MQA")) return "MQA";
+    if (T.has("LOSSLESS")) return "Same as Lossless";
+    return null;
+  }
+  if (quality === "high_lossless") {
+    if (M.has("DOLBY_ATMOS") || M.has("SONY_360RA")) return "Stereo downmix";
+    if (T.has("LOSSLESS") || T.has("HIRES_LOSSLESS")) return "FLAC CD";
+    return null;
+  }
+  return null;
 }

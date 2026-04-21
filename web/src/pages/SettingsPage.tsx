@@ -228,19 +228,27 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
         </Field>
         <Field
           label="Streaming quality"
-          hint="Quality used when playing a track that isn't downloaded. Higher tiers use more bandwidth and need a subscription that supports them."
+          hint="Quality used when playing a track that isn't downloaded. Only tiers your subscription supports appear here."
         >
           <select
-            value={ui.streamingQuality}
+            value={
+              // Clamp the stored value against the filtered list so a
+              // stale "hi_res_lossless" pref doesn't show an off-list
+              // value after a subscription downgrade.
+              qualities.some((q) => q.value === ui.streamingQuality)
+                ? ui.streamingQuality
+                : qualities[0]?.value ?? "low_320k"
+            }
             onChange={(e) =>
               ui.set({ streamingQuality: e.target.value as StreamingQuality })
             }
             className="h-10 rounded-md border border-input bg-secondary px-3 text-sm"
           >
-            <option value="low_96k">Low — 96 kbps AAC</option>
-            <option value="low_320k">Normal — 320 kbps AAC</option>
-            <option value="high_lossless">Lossless — FLAC CD</option>
-            <option value="hi_res_lossless">Max — FLAC up to 24-bit</option>
+            {qualities.map((q) => (
+              <option key={q.value} value={q.value}>
+                {q.label} — {q.bitrate}
+              </option>
+            ))}
           </select>
         </Field>
         <Toggle
