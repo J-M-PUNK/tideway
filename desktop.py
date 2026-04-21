@@ -14,12 +14,61 @@ hung blank webview.
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import threading
 import time
 import urllib.error
 import urllib.request
+from pathlib import Path
 from typing import Optional
+
+
+def _bootstrap_bundled_vlc() -> None:
+    """Point python-vlc at our bundled libvlc when running frozen.
+
+    The spec file copies libvlc.dylib + the plugin directory into
+    `<bundle>/Contents/Frameworks/vlc/`. At runtime PyInstaller sets
+    `sys._MEIPASS` to that directory. python-vlc reads
+    PYTHON_VLC_LIB_PATH / PYTHON_VLC_MODULE_PATH *at import time*, so
+    we set them here — before any module that transitively imports
+    `vlc` gets a chance to load. When not frozen (dev mode) we leave
+    env alone so python-vlc can find a system-installed VLC.
+
+    We also pre-load libvlccore.dylib from the bundled path. libvlc's
+    mach-O header references `@rpath/libvlccore.dylib` for its main
+    dependency — without a pre-load the dyld resolver falls back to a
+    system VLC (if installed) or fails. Pre-loading with an absolute
+    path caches the library under its install name so libvlc picks up
+    the bundled copy when it's loaded a moment later.
+    """
+    if not getattr(sys, "frozen", False):
+        return
+    meipass = Path(getattr(sys, "_MEIPASS", ""))
+    if not meipass.is_dir():
+        return
+    lib_dir = meipass / "vlc" / "lib"
+    plugins = meipass / "vlc" / "plugins"
+
+    # Pre-load libvlccore so libvlc's @rpath reference resolves to the
+    # bundled copy. Order matters: libvlccore first, then libvlc.
+    core = lib_dir / "libvlccore.dylib"
+    lib = lib_dir / "libvlc.dylib"
+    if core.is_file() and lib.is_file():
+        try:
+            import ctypes
+            ctypes.CDLL(str(core))
+        except OSError:
+            # If this fails we fall through to python-vlc's own search,
+            # which will at least try the system VLC.
+            pass
+    if lib.is_file():
+        os.environ.setdefault("PYTHON_VLC_LIB_PATH", str(lib))
+    if plugins.is_dir():
+        os.environ.setdefault("PYTHON_VLC_MODULE_PATH", str(plugins))
+
+
+_bootstrap_bundled_vlc()
 
 # Binding 127.0.0.1 (not 0.0.0.0) keeps the server invisible to the LAN —
 # the desktop app is a single-user tool and nothing on it should be
