@@ -304,21 +304,34 @@ class VLCPlayer:
     ) -> None:
         """Apply a manual EQ. `bands` must be length `eq_bands_count()`;
         values are amplitudes in dB, clamped to [-20, 20]. Empty list
-        disables the EQ entirely."""
+        disables the EQ entirely.
+
+        Uses the module-level C bindings so we can explicitly release
+        the AudioEqualizer handle after set_equalizer — matches the
+        preset path and prevents a slow leak when the user drags a
+        slider (we rebuild the EQ on every commit)."""
         with self._lock:
             if not bands:
                 # Empty list = disable EQ entirely. libvlc's API says
                 # passing a null AudioEqualizer disables filtering.
                 self._player.set_equalizer(None)
                 return
-            eq = vlc.AudioEqualizer()
-            if preamp is not None:
-                eq.set_preamp(max(-20.0, min(20.0, float(preamp))))
-            count = vlc.libvlc_audio_equalizer_get_band_count()
-            for i in range(min(count, len(bands))):
-                v = max(-20.0, min(20.0, float(bands[i])))
-                eq.set_amp_at_index(v, i)
-            self._player.set_equalizer(eq)
+            eq = vlc.libvlc_audio_equalizer_new()
+            try:
+                if preamp is not None:
+                    vlc.libvlc_audio_equalizer_set_preamp(
+                        eq, max(-20.0, min(20.0, float(preamp)))
+                    )
+                count = vlc.libvlc_audio_equalizer_get_band_count()
+                for i in range(min(count, len(bands))):
+                    v = max(-20.0, min(20.0, float(bands[i])))
+                    vlc.libvlc_audio_equalizer_set_amp_at_index(eq, v, i)
+                self._player.set_equalizer(eq)
+            finally:
+                # MediaPlayer.set_equalizer retains its own reference —
+                # safe to release ours immediately (same pattern the
+                # preset path uses).
+                vlc.libvlc_audio_equalizer_release(eq)
 
     def apply_equalizer_preset(self, preset_index: int) -> list[float]:
         """Apply one of libvlc's built-in presets. Returns the band
