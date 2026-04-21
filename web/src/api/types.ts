@@ -63,8 +63,17 @@ export interface Playlist {
   duration: number;
   cover: string | null;
   creator: string | null;
+  creator_id?: string | null;
   owned: boolean;
   share_url?: string | null;
+}
+
+export interface TidalUser {
+  id: string;
+  name: string;
+  first_name: string;
+  last_name: string;
+  picture: string | null;
 }
 
 export interface PlaylistFolder {
@@ -157,6 +166,7 @@ export interface AuthStatus {
   logged_in: boolean;
   username: string | null;
   avatar: string | null;
+  user_id: string | null;
 }
 
 export interface LastFmStatus {

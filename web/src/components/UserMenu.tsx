@@ -15,6 +15,7 @@ import { imageProxy } from "@/lib/utils";
 interface Props {
   username: string | null;
   avatar: string | null;
+  userId?: string | null;
   onLogout: () => void;
   /** App-level offline toggle. Hides online-only menu entries and
    *  shows an offline indicator. Independent of sign-in state: a
@@ -32,6 +33,7 @@ interface Props {
 export function UserMenu({
   username,
   avatar,
+  userId = null,
   onLogout,
   offline = false,
   onSignInRequested,
@@ -109,6 +111,11 @@ export function UserMenu({
           </div>
         </DropdownMenuLabel>
         <DropdownMenuSeparator />
+        {signedIn && userId && !offline && (
+          <DropdownMenuItem onSelect={() => navigate(`/user/${userId}`)}>
+            <UserIcon className="h-4 w-4" /> My profile
+          </DropdownMenuItem>
+        )}
         <DropdownMenuItem onSelect={() => navigate("/settings")}>
           <Settings className="h-4 w-4" /> Settings
         </DropdownMenuItem>

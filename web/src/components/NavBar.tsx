@@ -20,6 +20,7 @@ function readIdx(): number {
 interface NavBarProps {
   username: string | null;
   avatar: string | null;
+  userId?: string | null;
   onLogout: () => void;
   offline?: boolean;
   onSignInRequested?: () => void;
@@ -28,6 +29,7 @@ interface NavBarProps {
 export function NavBar({
   username,
   avatar,
+  userId = null,
   onLogout,
   offline = false,
   onSignInRequested,
@@ -87,6 +89,7 @@ export function NavBar({
         <UserMenu
           username={username}
           avatar={avatar}
+          userId={userId}
           onLogout={onLogout}
           offline={offline}
           onSignInRequested={onSignInRequested}

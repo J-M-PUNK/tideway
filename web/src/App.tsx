@@ -42,9 +42,11 @@ import { Library } from "@/pages/Library";
 import { LocalLibrary } from "@/pages/LocalLibrary";
 import { Explore } from "@/pages/Explore";
 import { FolderDetail } from "@/pages/FolderDetail";
+import { FollowListPage } from "@/pages/FollowListPage";
 import { GenresPage } from "@/pages/GenresPage";
 import { MixesPage } from "@/pages/MixesPage";
 import { MoodsPage } from "@/pages/MoodsPage";
+import { ProfilePage } from "@/pages/ProfilePage";
 import { BrowsePage } from "@/pages/BrowsePage";
 import { ChartsPage } from "@/pages/ChartsPage";
 import { FeedPage } from "@/pages/FeedPage";
@@ -135,6 +137,7 @@ function AppInner() {
             <Shell
               username={auth.username}
               avatar={auth.avatar}
+              userId={auth.user_id}
               onLogout={auth.logout}
               offline={isOffline}
               onSignInRequested={auth.refresh}
@@ -150,12 +153,14 @@ function AppInner() {
 function Shell({
   username,
   avatar,
+  userId,
   onLogout,
   offline,
   onSignInRequested,
 }: {
   username: string | null;
   avatar: string | null;
+  userId: string | null;
   onLogout: () => void;
   /** True when the user is signed out but offline mode is on. Flips
    *  the sidebar to local-only entries and redirects online-only
@@ -337,6 +342,7 @@ function Shell({
           <NavBar
             username={username}
             avatar={avatar}
+            userId={userId}
             onLogout={onLogout}
             offline={offline}
             onSignInRequested={onSignInRequested}
@@ -379,6 +385,9 @@ function Shell({
                 <Route path="/feed" element={<FeedPage onDownload={enqueue} />} />
                 <Route path="/history" element={<HistoryPage onDownload={enqueue} />} />
                 <Route path="/stats" element={<StatsPage />} />
+                <Route path="/user/:id" element={<ProfilePage onDownload={enqueue} />} />
+                <Route path="/user/:id/followers" element={<FollowListPage kind="followers" />} />
+                <Route path="/user/:id/following" element={<FollowListPage kind="following" />} />
                 <Route path="/popular" element={<PopularPage onDownload={enqueue} />} />
                 <Route path="/downloads" element={<Downloads items={downloads.items} offline={offline} />} />
                 <Route path="/settings" element={<SettingsPage onLogout={onLogout} />} />

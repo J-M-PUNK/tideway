@@ -32,6 +32,7 @@ import type {
   SearchResponse,
   Settings,
   TidalPage,
+  TidalUser,
   Track,
   Video,
 } from "./types";
@@ -204,6 +205,33 @@ export const api = {
       }),
   },
   me: () => req<{ username: string }>("/api/me"),
+  user: {
+    profile: (id: string) => req<TidalUser>(`/api/user/${encodeURIComponent(id)}`),
+    playlists: (id: string) =>
+      req<Playlist[]>(`/api/user/${encodeURIComponent(id)}/playlists`),
+    followers: (id: string) =>
+      req<TidalUser[]>(`/api/user/${encodeURIComponent(id)}/followers`),
+    following: (id: string) =>
+      req<TidalUser[]>(`/api/user/${encodeURIComponent(id)}/following`),
+    follow: (id: string) =>
+      req<{ ok: boolean; error?: string }>(
+        `/api/user/${encodeURIComponent(id)}/follow`,
+        { method: "POST" },
+      ),
+    unfollow: (id: string) =>
+      req<{ ok: boolean; error?: string }>(
+        `/api/user/${encodeURIComponent(id)}/follow`,
+        { method: "DELETE" },
+      ),
+    isFollowing: (id: string) =>
+      req<{ following: boolean }>(
+        `/api/me/following/status/${encodeURIComponent(id)}`,
+      ),
+    counts: (id: string) =>
+      req<{ followers: number; following: number }>(
+        `/api/user/${encodeURIComponent(id)}/counts`,
+      ),
+  },
   // Tidal's "event producer" — play reporting so tracks count for
   // Recently Played, recommendations, and artist royalties. Fire-and-
   // forget from the caller's perspective; the server queues and sends.

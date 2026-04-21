@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams } from "react-router-dom";
 import { Folder, FolderMinus, Loader2, Pencil, Trash2 } from "lucide-react";
 import { api } from "@/api/client";
 import type { OnDownload } from "@/api/download";
@@ -140,7 +140,24 @@ export function PlaylistDetail({ onDownload }: { onDownload: OnDownload }) {
               <p className="line-clamp-2 text-muted-foreground">{playlist.description}</p>
             )}
             <span>
-              {playlist.creator ? `By ${playlist.creator} · ` : ""}
+              {playlist.creator && (
+                <>
+                  By{" "}
+                  {playlist.creator_id && playlist.creator_id !== "0" ? (
+                    <Link
+                      to={`/user/${playlist.creator_id}`}
+                      className="font-semibold text-foreground hover:underline"
+                    >
+                      {playlist.creator}
+                    </Link>
+                  ) : (
+                    <span className="font-semibold text-foreground">
+                      {playlist.creator}
+                    </span>
+                  )}{" "}
+                  ·{" "}
+                </>
+              )}
               {tracks.length} tracks · {formatDuration(playlist.duration)}
             </span>
           </div>

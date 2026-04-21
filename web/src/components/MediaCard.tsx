@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { Music } from "lucide-react";
 import type { Album, Artist, Playlist } from "@/api/types";
 import type { OnDownload } from "@/api/download";
@@ -16,6 +16,7 @@ export function MediaCard({
   onDownload?: OnDownload;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
+  const navigate = useNavigate();
 
   const href =
     item.kind === "album"
@@ -25,7 +26,6 @@ export function MediaCard({
         : `/playlist/${item.id}`;
 
   const cover = imageProxy(item.kind === "artist" ? item.picture : item.cover);
-  const subtitle = subtitleFor(item);
   const rounded = item.kind === "artist" ? "rounded-full" : "rounded-md";
 
   return (
@@ -67,22 +67,61 @@ export function MediaCard({
       </div>
       <div className="min-w-0">
         <div className="truncate font-semibold">{item.name}</div>
-        <div className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">{subtitle}</div>
+        <div className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">
+          <Subtitle item={item} onNavigate={navigate} />
+        </div>
       </div>
     </Link>
   );
 }
 
-function subtitleFor(item: Item): string {
+/**
+ * Subtitle renderer that embeds the creator name as a clickable link
+ * to their profile (when we have a real creator_id). Stops event
+ * propagation so the outer card `<Link>` doesn't swallow the click
+ * and also respects the "0" sentinel Tidal uses for editorial
+ * accounts.
+ */
+function Subtitle({
+  item,
+  onNavigate,
+}: {
+  item: Item;
+  onNavigate: (path: string) => void;
+}) {
   if (item.kind === "album") {
     const artists = item.artists.map((a) => a.name).join(", ");
     const parts = [artists];
     if (item.year) parts.push(String(item.year));
-    return parts.filter(Boolean).join(" · ");
+    return <>{parts.filter(Boolean).join(" · ")}</>;
   }
-  if (item.kind === "artist") return "Artist";
-  const parts: string[] = [];
-  if (item.creator) parts.push(`By ${item.creator}`);
-  parts.push(`${item.num_tracks} tracks`);
-  return parts.join(" · ");
+  if (item.kind === "artist") return <>Artist</>;
+  // Playlist — creator may be clickable.
+  const hasCreatorLink =
+    item.creator && item.creator_id && item.creator_id !== "0";
+  return (
+    <>
+      {item.creator && (
+        <>
+          By{" "}
+          {hasCreatorLink ? (
+            <button
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                onNavigate(`/user/${item.creator_id}`);
+              }}
+              className="hover:text-foreground hover:underline"
+            >
+              {item.creator}
+            </button>
+          ) : (
+            <span>{item.creator}</span>
+          )}
+          {" · "}
+        </>
+      )}
+      {item.num_tracks} tracks
+    </>
+  );
 }
