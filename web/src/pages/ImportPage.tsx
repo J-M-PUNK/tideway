@@ -42,7 +42,7 @@ type SpotifyPlaylist = Awaited<
 type MatchResult = Awaited<ReturnType<typeof api.import.spotify.match>>;
 type MatchRow = MatchResult["rows"][number];
 
-type Source = "spotify" | "text";
+type Source = "spotify" | "deezer" | "text";
 
 export function ImportPage() {
   const [source, setSource] = useState<Source>("spotify");
@@ -72,7 +72,7 @@ export function ImportPage() {
       ) : (
         <>
           <SourceTabs value={source} onChange={setSource} />
-          {source === "spotify" ? (
+          {source === "spotify" && (
             <SpotifyFlow
               onReview={(rows, name, description) =>
                 setReview({
@@ -82,7 +82,19 @@ export function ImportPage() {
                 })
               }
             />
-          ) : (
+          )}
+          {source === "deezer" && (
+            <DeezerFlow
+              onReview={(rows, name, description) =>
+                setReview({
+                  rows,
+                  defaultName: name,
+                  defaultDescription: description,
+                })
+              }
+            />
+          )}
+          {source === "text" && (
             <TextFlow
               onReview={(rows, name) =>
                 setReview({
@@ -126,6 +138,7 @@ function SourceTabs({
       {(
         [
           { id: "spotify" as const, label: "Spotify", icon: Music },
+          { id: "deezer" as const, label: "Deezer", icon: Music },
           { id: "text" as const, label: "File / Text", icon: FileText },
         ]
       ).map(({ id, label, icon: Icon }) => (
@@ -460,6 +473,92 @@ function PlaylistMatching({
       <div className="rounded-lg border border-border/50 bg-card/40 p-5 text-sm text-muted-foreground">
         <Loader2 className="mr-2 inline h-4 w-4 animate-spin" />
         Matching {playlist.tracks} tracks against Tidal…
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Deezer flow (paste URL → fetch public playlist → match)
+// ---------------------------------------------------------------------------
+
+function DeezerFlow({
+  onReview,
+}: {
+  onReview: (rows: MatchRow[], name: string, description: string) => void;
+}) {
+  const toast = useToast();
+  const [source, setSource] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  const run = async () => {
+    const s = source.trim();
+    if (!s) {
+      toast.show({
+        kind: "info",
+        title: "Paste a Deezer playlist URL or id",
+      });
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = await api.import.deezer.match(s);
+      if (res.total === 0) {
+        toast.show({
+          kind: "info",
+          title: "Empty playlist",
+          description:
+            "Deezer returned no tracks — make sure the playlist is public.",
+        });
+        return;
+      }
+      onReview(
+        res.rows,
+        res.playlist.name || "Imported from Deezer",
+        res.playlist.description || "Imported playlist",
+      );
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: "Couldn't fetch playlist",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="max-w-xl rounded-lg border border-border/50 bg-card/40 p-6">
+      <h2 className="text-lg font-semibold">From a Deezer playlist</h2>
+      <p className="mt-1 text-sm text-muted-foreground">
+        Paste the link to any <strong>public</strong> Deezer playlist. No
+        sign-in needed on our end — we just fetch the track list from
+        Deezer's public API and match it against Tidal. Private playlists:
+        open the playlist in Deezer, set it to public, import, set it back.
+      </p>
+
+      <div className="mt-5 flex flex-col gap-2">
+        <label className="text-xs font-semibold text-muted-foreground">
+          Playlist URL or id
+        </label>
+        <Input
+          value={source}
+          onChange={(e) => setSource(e.target.value)}
+          placeholder="https://www.deezer.com/playlist/1234567890"
+          spellCheck={false}
+        />
+      </div>
+
+      <div className="mt-4">
+        <Button onClick={run} disabled={busy || !source.trim()}>
+          {busy ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <Check className="h-4 w-4" />
+          )}
+          Fetch + match
+        </Button>
       </div>
     </div>
   );

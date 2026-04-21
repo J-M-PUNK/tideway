@@ -233,6 +233,34 @@ export const api = {
           track_ids: trackIds,
         }),
       }),
+    deezer: {
+      match: (source: string) =>
+        req<{
+          rows: {
+            spotify: {
+              name: string;
+              artists: string[];
+              duration_ms: number;
+              isrc: string | null;
+            };
+            match: {
+              tidal_id: string;
+              name: string;
+              artists: string[];
+              duration: number;
+              cover: string | null;
+              confidence: number;
+              reason: string;
+            } | null;
+          }[];
+          total: number;
+          matched: number;
+          playlist: { name: string; description: string };
+        }>("/api/import/deezer/match", {
+          method: "POST",
+          body: JSON.stringify({ source }),
+        }),
+    },
     text: {
       parse: (text: string) =>
         req<{
