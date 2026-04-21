@@ -77,9 +77,14 @@ interface Props {
 
 /**
  * Map a quality tier + this track's Tidal format tags → what the
- * user will actually receive. Returns null when the tier is
- * unambiguous (Low / Normal are always AAC) or the tags don't
- * resolve to something distinctive.
+ * user will actually receive FROM OUR CLIENT. Returns null when the
+ * tier is unambiguous (Low / Normal are always AAC).
+ *
+ * Immersive-audio tags (Dolby Atmos / Sony 360 RA / MQA) exist on the
+ * catalog metadata, but Tidal only serves those streams to client_ids
+ * on their authorized-partner list. Our PKCE session gets a stereo
+ * FLAC downmix regardless of what the track is tagged as. The labels
+ * below reflect what we actually get back, not what Tidal advertises.
  */
 function effectiveFormatLabel(
   quality: string,
@@ -89,19 +94,16 @@ function effectiveFormatLabel(
   if (!modes && !tags) return null;
   const M = new Set((modes ?? []).map((x) => x.toUpperCase()));
   const T = new Set((tags ?? []).map((x) => x.toUpperCase()));
+  const immersive =
+    M.has("DOLBY_ATMOS") || M.has("SONY_360RA") || T.has("MQA");
   if (quality === "hi_res_lossless") {
-    if (M.has("DOLBY_ATMOS")) return "Dolby Atmos";
-    if (M.has("SONY_360RA")) return "Sony 360 RA";
+    if (immersive) return "Stereo downmix";
     if (T.has("HIRES_LOSSLESS")) return "Hi-Res FLAC";
-    if (T.has("MQA")) return "MQA";
-    if (T.has("LOSSLESS")) return "Same as Lossless for this track";
+    if (T.has("LOSSLESS")) return "Same as Lossless";
     return null;
   }
   if (quality === "high_lossless") {
-    if (M.has("DOLBY_ATMOS") || M.has("SONY_360RA")) {
-      return "Stereo FLAC downmix";
-    }
-    if (T.has("LOSSLESS") || T.has("HIRES_LOSSLESS")) return "FLAC CD";
+    if (T.has("LOSSLESS") || T.has("HIRES_LOSSLESS") || immersive) return "FLAC CD";
     return null;
   }
   return null;

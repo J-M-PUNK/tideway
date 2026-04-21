@@ -412,20 +412,23 @@ function trackEffectiveFormat(
   modes: string[] | undefined,
   tags: string[] | undefined,
 ): string | null {
+  // Keep this in sync with DownloadButton.effectiveFormatLabel — the
+  // TrackMenu lives inside a Radix submenu that unmounts with its
+  // parent, so sharing the helper across files isn't worth the
+  // module-boundary juggling.
   if (!modes && !tags) return null;
   const M = new Set((modes ?? []).map((x) => x.toUpperCase()));
   const T = new Set((tags ?? []).map((x) => x.toUpperCase()));
+  const immersive =
+    M.has("DOLBY_ATMOS") || M.has("SONY_360RA") || T.has("MQA");
   if (quality === "hi_res_lossless") {
-    if (M.has("DOLBY_ATMOS")) return "Dolby Atmos";
-    if (M.has("SONY_360RA")) return "Sony 360 RA";
+    if (immersive) return "Stereo downmix";
     if (T.has("HIRES_LOSSLESS")) return "Hi-Res FLAC";
-    if (T.has("MQA")) return "MQA";
     if (T.has("LOSSLESS")) return "Same as Lossless";
     return null;
   }
   if (quality === "high_lossless") {
-    if (M.has("DOLBY_ATMOS") || M.has("SONY_360RA")) return "Stereo downmix";
-    if (T.has("LOSSLESS") || T.has("HIRES_LOSSLESS")) return "FLAC CD";
+    if (T.has("LOSSLESS") || T.has("HIRES_LOSSLESS") || immersive) return "FLAC CD";
     return null;
   }
   return null;
