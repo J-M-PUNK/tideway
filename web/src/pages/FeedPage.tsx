@@ -1,9 +1,11 @@
+import { useEffect } from "react";
 import { Link } from "react-router-dom";
 import { Compass, Music, Rss } from "lucide-react";
 import { api } from "@/api/client";
 import type { Album } from "@/api/types";
 import type { OnDownload } from "@/api/download";
 import { useApi } from "@/hooks/useApi";
+import { markFeedSeen } from "@/hooks/useFeedUnread";
 import { Button } from "@/components/ui/button";
 import { DownloadButton } from "@/components/DownloadButton";
 import { EmptyState } from "@/components/EmptyState";
@@ -21,6 +23,14 @@ type FeedItem = Album & { released_at: string };
  */
 export function FeedPage({ onDownload }: { onDownload: OnDownload }) {
   const { data, loading, error } = useApi(() => api.feed(), []);
+
+  // Landing on the feed = the user has "seen" everything through now.
+  // Clear the sidebar badge. We do this on successful load so a failed
+  // fetch doesn't stomp the state — otherwise an offline blip would
+  // silently reset the unread counter.
+  useEffect(() => {
+    if (data) markFeedSeen();
+  }, [data]);
 
   if (loading) {
     return (

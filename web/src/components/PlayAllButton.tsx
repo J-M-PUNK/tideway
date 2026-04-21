@@ -9,14 +9,17 @@ interface Props {
 }
 
 /**
- * Big round Play button that queues a list of tracks into the player. If
- * the current track is already in this queue, the button becomes Pause.
+ * Big round Play button that queues a list of tracks into the player.
+ * If the current track is already in this queue, the button becomes
+ * Pause. Default size is `md` — large enough to be the clear primary
+ * CTA on a detail page, small enough to pair visually with the other
+ * labeled action buttons in the actions row.
  */
-export function PlayAllButton({ tracks, size = "lg" }: Props) {
+export function PlayAllButton({ tracks, size = "md" }: Props) {
   const { track, playing } = usePlayerMeta();
   const actions = usePlayerActions();
 
-  const dim = size === "lg" ? "h-14 w-14" : "h-11 w-11";
+  const dim = size === "lg" ? "h-14 w-14" : "h-12 w-12";
   const icon = size === "lg" ? "h-6 w-6" : "h-5 w-5";
   const isOurQueue = !!track && tracks.some((t) => t.id === track.id);
 

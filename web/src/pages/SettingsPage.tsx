@@ -251,6 +251,8 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
         />
       </Section>
 
+      <LastFmSection />
+
       <Section title="Keyboard shortcuts" description="Speed up your navigation.">
         <ShortcutRow keys={["⌘", "K"]} label="Focus search" />
         <ShortcutRow keys={["Space"]} label="Play / pause preview" />
@@ -380,6 +382,270 @@ function ThemePicker({
         );
       })}
     </div>
+  );
+}
+
+/**
+ * Last.fm scrobbling setup. Three states:
+ *  1. No API credentials → show a "why" blurb + key/secret inputs +
+ *     a deep link to last.fm's API-account page.
+ *  2. Credentials set but not yet connected → a button that opens the
+ *     browser to last.fm's auth URL and a "I've approved" confirmation.
+ *  3. Connected → username + disconnect button.
+ *
+ * Lives as its own component so the three-state machine stays compact
+ * and doesn't complicate the main settings body.
+ */
+function LastFmSection() {
+  const toast = useToast();
+  const [status, setStatus] = useState<{
+    has_credentials: boolean;
+    using_default_credentials: boolean;
+    connected: boolean;
+    username: string | null;
+  } | null>(null);
+  const [apiKey, setApiKey] = useState("");
+  const [apiSecret, setApiSecret] = useState("");
+  const [pendingToken, setPendingToken] = useState<string | null>(null);
+  const [busy, setBusy] = useState<null | "save" | "connect" | "complete" | "disconnect">(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.lastfm
+      .status()
+      .then((s) => {
+        if (!cancelled) setStatus(s);
+      })
+      .catch(() => {
+        if (!cancelled)
+          setStatus({
+            has_credentials: false,
+            using_default_credentials: false,
+            connected: false,
+            username: null,
+          });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const saveCreds = async () => {
+    if (!apiKey.trim() || !apiSecret.trim()) return;
+    setBusy("save");
+    try {
+      const s = await api.lastfm.setCredentials(apiKey.trim(), apiSecret.trim());
+      setStatus(s);
+      setApiKey("");
+      setApiSecret("");
+      toast.show({ kind: "success", title: "API credentials saved" });
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: "Couldn't save credentials",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const startConnect = async () => {
+    setBusy("connect");
+    try {
+      const { auth_url, token } = await api.lastfm.connectStart();
+      setPendingToken(token);
+      // pywebview drops window.open for cross-origin URLs; route
+      // through the backend so Python's webbrowser module launches
+      // the system default. Fallback to window.open for dev browser mode.
+      try {
+        await api.openExternal(auth_url);
+      } catch {
+        window.open(auth_url, "_blank", "noopener");
+      }
+      toast.show({
+        kind: "info",
+        title: "Approve in browser",
+        description: "Then click Continue to finish connecting.",
+      });
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: "Couldn't start Last.fm auth",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const completeConnect = async () => {
+    if (!pendingToken) return;
+    setBusy("complete");
+    try {
+      const { username } = await api.lastfm.connectComplete(pendingToken);
+      setPendingToken(null);
+      const s = await api.lastfm.status();
+      setStatus(s);
+      toast.show({
+        kind: "success",
+        title: "Last.fm connected",
+        description: `Scrobbling as ${username}`,
+      });
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: "Couldn't finish connecting",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const disconnect = async () => {
+    setBusy("disconnect");
+    try {
+      const s = await api.lastfm.disconnect();
+      setStatus(s);
+      setPendingToken(null);
+      toast.show({ kind: "info", title: "Disconnected from Last.fm" });
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: "Couldn't disconnect",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const openApiAccountPage = async () => {
+    const url = "https://www.last.fm/api/account/create";
+    try {
+      await api.openExternal(url);
+    } catch {
+      window.open(url, "_blank", "noopener");
+    }
+  };
+
+  return (
+    <Section
+      title="Last.fm"
+      description="Track your listening history with Last.fm. Tidal doesn't share play data on its own, so this is the easiest way to get stats, charts, and year-end recaps for what you play here."
+    >
+      {!status ? (
+        <Skeleton className="h-10 w-full" />
+      ) : status.connected ? (
+        <div className="flex items-center justify-between rounded-md border border-border/50 bg-card/60 p-4">
+          <div>
+            <div className="text-sm font-semibold">Connected</div>
+            <div className="text-xs text-muted-foreground">
+              Scrobbling as <span className="text-foreground">{status.username}</span>
+            </div>
+          </div>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={disconnect}
+            disabled={busy !== null}
+          >
+            {busy === "disconnect" && <Loader2 className="h-4 w-4 animate-spin" />}
+            Disconnect
+          </Button>
+        </div>
+      ) : status.has_credentials ? (
+        <div className="flex flex-col gap-3 rounded-md border border-border/50 bg-card/60 p-4">
+          <div className="text-sm">
+            {status.using_default_credentials
+              ? "Click Connect to authorize this app on your Last.fm account."
+              : "API credentials saved. Click Connect to authorize this app on your Last.fm account."}
+          </div>
+          <div className="flex items-center gap-2">
+            <Button
+              onClick={startConnect}
+              disabled={busy !== null}
+              variant={pendingToken ? "outline" : "default"}
+              size="sm"
+            >
+              {busy === "connect" && <Loader2 className="h-4 w-4 animate-spin" />}
+              {pendingToken ? "Open Last.fm again" : "Connect"}
+            </Button>
+            {pendingToken && (
+              <Button
+                onClick={completeConnect}
+                disabled={busy !== null}
+                size="sm"
+              >
+                {busy === "complete" && <Loader2 className="h-4 w-4 animate-spin" />}
+                I've approved — finish connecting
+              </Button>
+            )}
+            {/* "Reset credentials" only makes sense when the user has
+                entered their own. With baked-in defaults there's nothing
+                personal stored here. */}
+            {!status.using_default_credentials && (
+              <Button
+                variant="ghost"
+                size="sm"
+                onClick={disconnect}
+                disabled={busy !== null}
+              >
+                Reset credentials
+              </Button>
+            )}
+          </div>
+          {pendingToken && (
+            <p className="text-xs text-muted-foreground">
+              Browser should have opened to Last.fm. Approve the app, then
+              click "I've approved".
+            </p>
+          )}
+        </div>
+      ) : (
+        <div className="flex flex-col gap-3 rounded-md border border-border/50 bg-card/60 p-4">
+          <p className="text-sm text-muted-foreground">
+            Paste your Last.fm API key and secret.{" "}
+            <button
+              onClick={openApiAccountPage}
+              className="text-primary hover:underline"
+            >
+              Create a free API account
+            </button>{" "}
+            if you don't have one — any application name works, callback
+            URL can be blank.
+          </p>
+          <Field label="API key">
+            <Input
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              placeholder="e.g. 1a2b3c4d5e6f…"
+              autoComplete="off"
+            />
+          </Field>
+          <Field label="API secret">
+            <Input
+              value={apiSecret}
+              onChange={(e) => setApiSecret(e.target.value)}
+              placeholder="e.g. 7g8h9i0j…"
+              autoComplete="off"
+              type="password"
+            />
+          </Field>
+          <div>
+            <Button
+              size="sm"
+              onClick={saveCreds}
+              disabled={!apiKey.trim() || !apiSecret.trim() || busy !== null}
+            >
+              {busy === "save" && <Loader2 className="h-4 w-4 animate-spin" />}
+              Save credentials
+            </Button>
+          </div>
+        </div>
+      )}
+    </Section>
   );
 }
 

@@ -1,9 +1,11 @@
+import { useState } from "react";
 import { Link } from "react-router-dom";
 import {
   AudioLines,
   ListMusic,
   Loader2,
   Mic2,
+  MoreHorizontal,
   Music,
   Pause,
   Play,
@@ -26,6 +28,17 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuTrigger,
+} from "@/components/ui/context-menu";
+import {
+  CONTEXT_MENU_PARTS,
+  DROPDOWN_MENU_PARTS,
+  TrackMenuItems,
+} from "@/components/TrackMenu";
+import { CreditsDialog } from "@/components/CreditsDialog";
 import { DownloadButton } from "@/components/DownloadButton";
 import { HeartButton } from "@/components/HeartButton";
 import { SleepTimerButton } from "@/components/SleepTimerButton";
@@ -49,10 +62,15 @@ export function NowPlaying({
   onExpand: () => void;
   onDownload: OnDownload;
 }) {
-  const { track, playing, loading, error, volume, shuffle, repeat, hasNext, hasPrev } = usePlayerMeta();
+  const { track, playing, loading, error, volume, shuffle, repeat, hasNext, hasPrev, queue } =
+    usePlayerMeta();
   const { currentTime, duration } = usePlayerTime();
   const actions = usePlayerActions();
   const isLocal = useIsDownloaded(track?.id ?? "");
+  // Shared credits-dialog state, opened by the right-click menu on the
+  // current-track info block. Kept at this level so closing the menu
+  // doesn't tear down the dialog.
+  const [creditsOpen, setCreditsOpen] = useState(false);
   // Record plays from here — NowPlaying already re-renders on every
   // timeupdate (via PlayerTime context), so subscribing here is free.
   useRecordPlays(track, currentTime);
@@ -64,6 +82,8 @@ export function NowPlaying({
   return (
     <div className="border-t border-border bg-[hsl(var(--now-playing-bg))] px-4 py-3">
       <div className="flex items-center gap-4">
+        <ContextMenu>
+          <ContextMenuTrigger asChild>
         <div className="flex min-w-0 flex-1 items-center gap-3">
           <button
             onClick={onExpand}
@@ -112,8 +132,49 @@ export function NowPlaying({
           <div className="flex items-center">
             <HeartButton kind="track" id={track.id} size="sm" />
             <DownloadButton kind="track" id={track.id} onPick={onDownload} iconOnly variant="ghost" />
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  className="h-8 w-8"
+                  title="More"
+                  aria-label="Track actions"
+                >
+                  <MoreHorizontal className="h-4 w-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-60">
+                <TrackMenuItems
+                  parts={DROPDOWN_MENU_PARTS}
+                  track={track}
+                  context={queue.length > 0 ? queue : [track]}
+                  onDownload={onDownload}
+                  onShowCredits={() => setCreditsOpen(true)}
+                  showSelect={false}
+                />
+              </DropdownMenuContent>
+            </DropdownMenu>
           </div>
         </div>
+          </ContextMenuTrigger>
+          <ContextMenuContent className="w-60">
+            <TrackMenuItems
+              parts={CONTEXT_MENU_PARTS}
+              track={track}
+              context={queue.length > 0 ? queue : [track]}
+              onDownload={onDownload}
+              onShowCredits={() => setCreditsOpen(true)}
+              showSelect={false}
+            />
+          </ContextMenuContent>
+        </ContextMenu>
+        <CreditsDialog
+          trackId={track.id}
+          trackName={track.name}
+          open={creditsOpen}
+          onOpenChange={setCreditsOpen}
+        />
 
         <div className="flex flex-1 flex-col items-center gap-1.5">
           <div className="flex items-center gap-2">

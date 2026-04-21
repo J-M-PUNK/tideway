@@ -215,8 +215,10 @@ function LocalRow({
 
   return (
     <div
+      onDoubleClick={file.tidal_id ? play : undefined}
       className={cn(
-        "group grid grid-cols-[40px_4fr_3fr_2fr_80px_auto] items-center gap-3 px-3 py-2 text-sm",
+        "group grid select-none grid-cols-[40px_4fr_3fr_2fr_80px_auto] items-center gap-3 px-3 py-2 text-sm",
+        file.tidal_id && "cursor-default",
         rowIndex !== 0 && "border-t border-border/50",
       )}
     >

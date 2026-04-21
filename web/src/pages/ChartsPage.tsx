@@ -5,6 +5,7 @@ import { api } from "@/api/client";
 import type { OnDownload } from "@/api/download";
 import { useApi } from "@/hooks/useApi";
 import { PageView } from "@/components/PageView";
+import { ChartsNav } from "@/components/ChartsNav";
 import { ErrorView } from "@/components/ErrorView";
 import { GridSkeleton } from "@/components/Skeletons";
 
@@ -49,10 +50,14 @@ export function ChartsPage({ onDownload }: { onDownload: OnDownload }) {
   const { data, loading, error } = useApi(() => api.pagePath(spec.path), [spec.path]);
 
   const Icon = spec.icon;
+  // New Releases stays standalone; only Top and Rising share the
+  // Charts tab strip (Popular lives on its own route).
+  const showChartsNav = chart === "top" || chart === "rising";
 
   if (loading) {
     return (
       <div>
+        {showChartsNav && <ChartsNav />}
         <Header icon={Icon} title={spec.title} subtitle={spec.subtitle} />
         <GridSkeleton count={12} />
       </div>
@@ -62,6 +67,7 @@ export function ChartsPage({ onDownload }: { onDownload: OnDownload }) {
 
   return (
     <div>
+      {showChartsNav && <ChartsNav />}
       <Header icon={Icon} title={spec.title} subtitle={spec.subtitle} />
       <PageView page={data} onDownload={onDownload} />
     </div>

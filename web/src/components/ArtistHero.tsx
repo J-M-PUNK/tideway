@@ -24,6 +24,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { useToast } from "@/components/toast";
 import { useFavorites } from "@/hooks/useFavorites";
+import { useLastfmArtistPlaycount } from "@/hooks/useLastfmPlaycount";
 import { usePlayerActions, usePlayerMeta } from "@/hooks/PlayerContext";
 import { cn, imageProxy } from "@/lib/utils";
 
@@ -106,6 +107,7 @@ export function ArtistHero({
         <h1 className="text-5xl font-black tracking-tight drop-shadow-lg">
           {artistName}
         </h1>
+        <ArtistPlaycountLine artistName={artistName} />
 
         <div className="mt-6 flex flex-wrap items-center gap-4">
           <button
@@ -276,7 +278,16 @@ function ArtistMoreMenu({
     }
   };
 
-  const openInTidal = () => window.open(shareUrl, "_blank", "noopener");
+  const openInTidal = async () => {
+    // Route through the backend so pywebview's embedded WebView can't
+    // swallow the window.open call — Python's webbrowser launches the
+    // system default. Fallback keeps dev browser mode working.
+    try {
+      await api.openExternal(shareUrl);
+    } catch {
+      window.open(shareUrl, "_blank", "noopener");
+    }
+  };
 
   const downloadCatalog = async () => {
     if (allAlbums.length === 0) {
@@ -326,4 +337,47 @@ function ArtistMoreMenu({
       </DropdownMenuContent>
     </DropdownMenu>
   );
+}
+
+/**
+ * Last.fm context line under the artist name. Two halves, either of
+ * which may be missing:
+ *  - Global listeners / scrobbles across all Last.fm users. Shown
+ *    whenever Last.fm has credentials configured, connected or not.
+ *  - Personal "you've played them X times", shown only when the
+ *    connected user has actually scrobbled them.
+ * Suppresses itself entirely if neither half has data.
+ */
+function ArtistPlaycountLine({ artistName }: { artistName: string }) {
+  const pc = useLastfmArtistPlaycount(artistName);
+  if (!pc) return null;
+  const user = pc.userplaycount ?? 0;
+  const listeners = pc.listeners ?? 0;
+  const global = pc.playcount ?? 0;
+  if (user <= 0 && listeners <= 0 && global <= 0) return null;
+
+  const parts: string[] = [];
+  if (listeners > 0) parts.push(`${formatCompact(listeners)} listeners`);
+  if (global > 0) parts.push(`${formatCompact(global)} plays`);
+  const personal = user > 0
+    ? `You've played them ${user.toLocaleString()} ${user === 1 ? "time" : "times"}`
+    : "";
+
+  return (
+    <div className="mt-1 flex flex-wrap items-center gap-x-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground drop-shadow">
+      {parts.length > 0 && <span>{parts.join(" · ")}</span>}
+      {parts.length > 0 && personal && <span aria-hidden>·</span>}
+      {personal && <span className="text-primary">{personal}</span>}
+    </div>
+  );
+}
+
+/** Compact number format: 1240 → "1.2K", 1_234_567 → "1.2M". Matches
+ *  what Spotify / Last.fm show. Falls back to toLocaleString for values
+ *  under a thousand. */
+function formatCompact(n: number): string {
+  if (n < 1000) return n.toLocaleString();
+  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}K`;
+  if (n < 1_000_000_000) return `${(n / 1_000_000).toFixed(n < 10_000_000 ? 1 : 0)}M`;
+  return `${(n / 1_000_000_000).toFixed(1)}B`;
 }

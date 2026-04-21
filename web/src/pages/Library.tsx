@@ -1,12 +1,14 @@
 import { useEffect, useMemo, useState } from "react";
-import { Compass, Disc3, Download, Heart, Library as LibraryIcon, List, ListMusic, Loader2, User } from "lucide-react";
+import { Compass, Disc3, Download, Folder, Heart, Library as LibraryIcon, List, ListMusic, Loader2, Plus, User } from "lucide-react";
 import { Link, Navigate, useParams } from "react-router-dom";
 import { api } from "@/api/client";
-import type { Album, Artist, Playlist, Track } from "@/api/types";
+import type { Album, Artist, Playlist, PlaylistFolder, Track } from "@/api/types";
 import type { OnDownload } from "@/api/download";
 import { Grid } from "@/components/Grid";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import { CreateFolderDialog } from "@/components/CreateFolderDialog";
+import { CreatePlaylistDialog } from "@/components/CreatePlaylistDialog";
 import { MediaCard } from "@/components/MediaCard";
 import { TrackList } from "@/components/TrackList";
 import { EmptyState } from "@/components/EmptyState";
@@ -62,12 +64,14 @@ export function Library({ onDownload }: { onDownload: OnDownload }) {
   const { title, icon: Icon, emptyHint } = META[type];
 
   const [data, setData] = useState<LibraryItem[] | null>(null);
+  const [folders, setFolders] = useState<PlaylistFolder[]>([]);
   const [loadError, setLoadError] = useState<Error | null>(null);
   const [filter, setFilter] = useState("");
   const [sort, setSort] = useState<Sort>("recent");
 
   useEffect(() => {
     setData(null);
+    setFolders([]);
     setLoadError(null);
     setFilter("");
     let cancelled = false;
@@ -81,6 +85,16 @@ export function Library({ onDownload }: { onDownload: OnDownload }) {
               ? api.library.playlists()
               : api.library.tracks());
         if (!cancelled) setData(items);
+        if (!cancelled && type === "playlists") {
+          // Folders live alongside playlists. Fetch them in parallel so
+          // the main grid doesn't block on folder load.
+          try {
+            const f = await api.library.folders.list("root");
+            if (!cancelled) setFolders(f);
+          } catch {
+            /* folders optional — silent */
+          }
+        }
       } catch (err) {
         if (!cancelled)
           setLoadError(err instanceof Error ? err : new Error(String(err)));
@@ -90,6 +104,15 @@ export function Library({ onDownload }: { onDownload: OnDownload }) {
       cancelled = true;
     };
   }, [type]);
+
+  const refreshFolders = async () => {
+    try {
+      const f = await api.library.folders.list("root");
+      setFolders(f);
+    } catch {
+      /* silent */
+    }
+  };
 
   const filtered = useMemo(() => {
     if (!data) return [];
@@ -122,6 +145,25 @@ export function Library({ onDownload }: { onDownload: OnDownload }) {
           {type === "tracks" && data && data.length > 0 && (
             <DownloadAllTracks tracks={data as Track[]} />
           )}
+          {type === "playlists" && (
+            <>
+              <CreateFolderDialog
+                onCreated={refreshFolders}
+                trigger={
+                  <Button variant="outline" size="sm">
+                    <Folder className="h-4 w-4" /> New folder
+                  </Button>
+                }
+              />
+              <CreatePlaylistDialog
+                trigger={
+                  <Button variant="outline" size="sm">
+                    <Plus className="h-4 w-4" /> New playlist
+                  </Button>
+                }
+              />
+            </>
+          )}
           <Input
             value={filter}
             onChange={(e) => setFilter(e.target.value)}
@@ -144,11 +186,27 @@ export function Library({ onDownload }: { onDownload: OnDownload }) {
         <EmptyState
           icon={LibraryIcon}
           title={`No ${title.toLowerCase()} yet`}
-          description={emptyHint}
+          description={
+            type === "playlists"
+              ? "Create one below, or favorite a Tidal playlist to see it here."
+              : emptyHint
+          }
           action={
-            <Button asChild variant="secondary" size="sm">
-              <Link to="/explore"><Compass className="h-4 w-4" /> Explore Tidal</Link>
-            </Button>
+            type === "playlists" ? (
+              <CreatePlaylistDialog
+                trigger={
+                  <Button variant="secondary" size="sm">
+                    <Plus className="h-4 w-4" /> New playlist
+                  </Button>
+                }
+              />
+            ) : (
+              <Button asChild variant="secondary" size="sm">
+                <Link to="/explore">
+                  <Compass className="h-4 w-4" /> Explore Tidal
+                </Link>
+              </Button>
+            )
           }
         />
       )}
@@ -162,13 +220,51 @@ export function Library({ onDownload }: { onDownload: OnDownload }) {
       )}
 
       {data && filtered.length > 0 && type !== "tracks" && (
-        <Grid>
-          {(filtered as (Album | Artist | Playlist)[]).map((item) => (
-            <MediaCard key={item.id} item={item} onDownload={onDownload} />
-          ))}
-        </Grid>
+        <>
+          {type === "playlists" && folders.length > 0 && (
+            // Folders render as their own row above the playlist grid —
+            // matches the filesystem mental model (directories above
+            // files) and keeps the folder affordance visible without
+            // requiring a click-to-expand. Click a folder → drills
+            // into its detail page.
+            <div className="mb-8">
+              <h2 className="mb-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+                Folders
+              </h2>
+              <Grid>
+                {folders.map((f) => (
+                  <FolderCard key={f.id} folder={f} />
+                ))}
+              </Grid>
+            </div>
+          )}
+          <Grid>
+            {(filtered as (Album | Artist | Playlist)[]).map((item) => (
+              <MediaCard key={item.id} item={item} onDownload={onDownload} />
+            ))}
+          </Grid>
+        </>
       )}
     </div>
+  );
+}
+
+function FolderCard({ folder }: { folder: PlaylistFolder }) {
+  return (
+    <Link
+      to={`/library/folder/${encodeURIComponent(folder.id)}`}
+      className="group flex flex-col gap-3 rounded-lg bg-card p-4 transition-colors hover:bg-accent"
+    >
+      <div className="flex aspect-square items-center justify-center rounded-md bg-secondary">
+        <Folder className="h-16 w-16 text-muted-foreground transition-colors group-hover:text-foreground" />
+      </div>
+      <div className="min-w-0">
+        <div className="truncate font-semibold">{folder.name}</div>
+        <div className="truncate text-xs text-muted-foreground">
+          {folder.num_items} {folder.num_items === 1 ? "item" : "items"}
+        </div>
+      </div>
+    </Link>
   );
 }
 
