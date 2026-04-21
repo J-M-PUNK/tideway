@@ -4,9 +4,11 @@ import {
   Check,
   ChevronLeft,
   ExternalLink,
+  FileText,
   ImportIcon,
   Loader2,
   Music,
+  Upload,
 } from "lucide-react";
 import { api } from "@/api/client";
 import { Button } from "@/components/ui/button";
@@ -14,31 +16,149 @@ import { Input } from "@/components/ui/input";
 import { useToast } from "@/components/toast";
 import { EmptyState } from "@/components/EmptyState";
 import { Skeleton } from "@/components/Skeletons";
-import { imageProxy } from "@/lib/utils";
+import { imageProxy, cn } from "@/lib/utils";
 
 /**
- * Spotify → Tidal playlist import.
+ * Playlist import hub. Two sources today:
  *
- * Three states:
- *   1. Not connected → setup form (paste client_id, open auth URL in
- *      an external browser, come back and click "I've authorized").
- *   2. Connected, no playlist selected → playlist picker.
- *   3. Playlist selected → match preview with per-row checkboxes +
- *      "Create Tidal playlist" button.
+ *   1. Spotify OAuth — pick from the user's Spotify playlists and
+ *      import one at a time. Handles the PKCE dance itself.
+ *   2. File / text — paste or drag-drop an M3U / M3U8 / plain text
+ *      playlist. Works for any source we don't have OAuth for
+ *      (iTunes exports, MusicBee, Apple Music via third-party
+ *      exporters, random lists, etc.).
  *
- * The user has to register a Spotify Developer app (free) and paste
- * its client_id — same friction model as Last.fm. Docs linked inline.
+ * Both flows produce the same "match review" payload shape, so the
+ * review + create screen is shared. Adding Deezer later is mostly
+ * OAuth plumbing — nothing below the match step has to change.
  */
 
-type Status = Awaited<ReturnType<typeof api.import.spotify.status>>;
-type Playlist = Awaited<
+type SpotifyStatus = Awaited<
+  ReturnType<typeof api.import.spotify.status>
+>;
+type SpotifyPlaylist = Awaited<
   ReturnType<typeof api.import.spotify.playlists>
 >[number];
 type MatchResult = Awaited<ReturnType<typeof api.import.spotify.match>>;
+type MatchRow = MatchResult["rows"][number];
+
+type Source = "spotify" | "text";
 
 export function ImportPage() {
-  const [status, setStatus] = useState<Status | null>(null);
-  const [selected, setSelected] = useState<Playlist | null>(null);
+  const [source, setSource] = useState<Source>("spotify");
+  // One piece of state covers both flows — null = picker screen,
+  // populated = review screen. The creation step is identical either
+  // way (generic /api/import/create endpoint).
+  const [review, setReview] = useState<
+    | {
+        rows: MatchRow[];
+        defaultName: string;
+        defaultDescription: string;
+      }
+    | null
+  > (null);
+
+  return (
+    <div>
+      <Header />
+      {review ? (
+        <MatchReview
+          rows={review.rows}
+          defaultName={review.defaultName}
+          defaultDescription={review.defaultDescription}
+          onBack={() => setReview(null)}
+          onDone={() => setReview(null)}
+        />
+      ) : (
+        <>
+          <SourceTabs value={source} onChange={setSource} />
+          {source === "spotify" ? (
+            <SpotifyFlow
+              onReview={(rows, name, description) =>
+                setReview({
+                  rows,
+                  defaultName: name,
+                  defaultDescription: description,
+                })
+              }
+            />
+          ) : (
+            <TextFlow
+              onReview={(rows, name) =>
+                setReview({
+                  rows,
+                  defaultName: name,
+                  defaultDescription: "Imported playlist",
+                })
+              }
+            />
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+function Header() {
+  return (
+    <div className="mb-6">
+      <h1 className="flex items-center gap-3 text-3xl font-bold tracking-tight">
+        <ImportIcon className="h-7 w-7" /> Import playlists
+      </h1>
+      <p className="mt-1 text-sm text-muted-foreground">
+        Pull playlists from Spotify or an M3U / text file into Tidal. Every
+        track is matched by ISRC (when known) or by fuzzy title + artist;
+        you review the matches before anything is created.
+      </p>
+    </div>
+  );
+}
+
+function SourceTabs({
+  value,
+  onChange,
+}: {
+  value: Source;
+  onChange: (s: Source) => void;
+}) {
+  return (
+    <div className="mb-6 inline-flex rounded-md border border-border bg-secondary p-0.5">
+      {(
+        [
+          { id: "spotify" as const, label: "Spotify", icon: Music },
+          { id: "text" as const, label: "File / Text", icon: FileText },
+        ]
+      ).map(({ id, label, icon: Icon }) => (
+        <button
+          key={id}
+          type="button"
+          onClick={() => onChange(id)}
+          className={cn(
+            "flex items-center gap-2 rounded-sm px-3 py-1.5 text-sm transition-colors",
+            value === id
+              ? "bg-background font-semibold text-foreground"
+              : "text-muted-foreground hover:text-foreground",
+          )}
+        >
+          <Icon className="h-4 w-4" />
+          {label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Spotify flow (OAuth → pick playlist → match → hand off to review)
+// ---------------------------------------------------------------------------
+
+function SpotifyFlow({
+  onReview,
+}: {
+  onReview: (rows: MatchRow[], name: string, description: string) => void;
+}) {
+  const [status, setStatus] = useState<SpotifyStatus | null>(null);
+  const [matchingFor, setMatchingFor] = useState<SpotifyPlaylist | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -59,81 +179,63 @@ export function ImportPage() {
     };
   }, []);
 
-  if (!status) {
-    return (
-      <div>
-        <Header />
-        <Skeleton className="h-24 w-full" />
-      </div>
-    );
-  }
+  if (!status) return <Skeleton className="h-24 w-full" />;
 
   if (!status.connected) {
     return (
-      <div>
-        <Header />
-        <ConnectForm
-          status={status}
-          onConnected={() =>
-            api.import.spotify.status().then(setStatus).catch(() => {})
-          }
-        />
-      </div>
+      <ConnectForm
+        status={status}
+        onConnected={() =>
+          api.import.spotify.status().then(setStatus).catch(() => {})
+        }
+      />
     );
   }
 
-  if (selected) {
+  if (matchingFor) {
     return (
-      <div>
-        <Header />
-        <MatchReview
-          playlist={selected}
-          onBack={() => setSelected(null)}
-          onDone={() => setSelected(null)}
-        />
-      </div>
+      <PlaylistMatching
+        playlist={matchingFor}
+        onReady={(rows) =>
+          onReview(rows, matchingFor.name, matchingFor.description || "")
+        }
+        onBack={() => setMatchingFor(null)}
+      />
     );
   }
 
   return (
-    <div>
-      <Header username={status.username} />
-      <PlaylistPicker onPick={setSelected} />
-    </div>
+    <>
+      {status.username && (
+        <div className="mb-4 text-xs text-muted-foreground">
+          Connected as{" "}
+          <span className="font-medium text-foreground">{status.username}</span>
+          {" · "}
+          <button
+            onClick={async () => {
+              await api.import.spotify.disconnect();
+              setStatus({
+                ...status,
+                connected: false,
+                username: null,
+              });
+            }}
+            className="underline hover:text-foreground"
+          >
+            Disconnect
+          </button>
+        </div>
+      )}
+      <PlaylistPicker onPick={setMatchingFor} />
+    </>
   );
 }
-
-function Header({ username }: { username?: string | null }) {
-  return (
-    <div className="mb-6">
-      <h1 className="flex items-center gap-3 text-3xl font-bold tracking-tight">
-        <ImportIcon className="h-7 w-7" /> Import from Spotify
-      </h1>
-      <p className="mt-1 text-sm text-muted-foreground">
-        Pull your Spotify playlists into Tidal. Each track is matched to
-        Tidal by ISRC or by fuzzy title + artist; you review the matches
-        before anything is created.
-        {username && (
-          <>
-            {" "}
-            Connected as{" "}
-            <span className="font-medium text-foreground">{username}</span>.
-          </>
-        )}
-      </p>
-    </div>
-  );
-}
-
-// ---------------------------------------------------------------------------
-// Setup: paste client_id, open Spotify auth
-// ---------------------------------------------------------------------------
 
 function ConnectForm({
   status,
   onConnected,
 }: {
-  status: Status;
+  status: SpotifyStatus;
   onConnected: () => void;
 }) {
   const toast = useToast();
@@ -150,8 +252,6 @@ function ConnectForm({
     setBusy(true);
     try {
       const { auth_url } = await api.import.spotify.connect(id);
-      // Open in the system browser so the user sees Spotify's real
-      // login — we never see their password.
       await api.openExternal(auth_url);
       setAwaiting(true);
     } catch (err) {
@@ -165,22 +265,12 @@ function ConnectForm({
     }
   };
 
-  const recheck = async () => {
-    setBusy(true);
-    try {
-      onConnected();
-    } finally {
-      setBusy(false);
-    }
-  };
-
   return (
     <div className="max-w-xl rounded-lg border border-border/50 bg-card/40 p-6">
       <h2 className="text-lg font-semibold">Connect your Spotify account</h2>
       <p className="mt-1 text-sm text-muted-foreground">
         One-time setup. Register a free Spotify Developer app, paste its
-        client ID below, authorize in your browser, and your playlists
-        show up here.
+        client ID, authorize in your browser, and your playlists show up here.
       </p>
 
       <ol className="mt-4 list-decimal space-y-2 pl-5 text-sm">
@@ -188,7 +278,9 @@ function ConnectForm({
           Go to{" "}
           <button
             onClick={() =>
-              api.openExternal("https://developer.spotify.com/dashboard").catch(() => {})
+              api
+                .openExternal("https://developer.spotify.com/dashboard")
+                .catch(() => {})
             }
             className="text-primary hover:underline"
           >
@@ -199,10 +291,13 @@ function ConnectForm({
         <li>
           Add this as a Redirect URI exactly:
           <code className="mt-1 block w-fit rounded bg-secondary px-2 py-1 text-xs">
-            {status.redirect_uri || "http://127.0.0.1:47823/api/import/spotify/callback"}
+            {status.redirect_uri ||
+              "http://127.0.0.1:47823/api/import/spotify/callback"}
           </code>
         </li>
-        <li>Copy the app's <strong>Client ID</strong> and paste it below.</li>
+        <li>
+          Copy the app's <strong>Client ID</strong> and paste it below.
+        </li>
       </ol>
 
       <div className="mt-5 flex flex-col gap-2">
@@ -233,7 +328,7 @@ function ConnectForm({
               <Loader2 className="h-4 w-4 animate-spin" />
               Waiting for you to approve in the browser…
             </div>
-            <Button size="sm" variant="outline" onClick={recheck}>
+            <Button size="sm" variant="outline" onClick={onConnected}>
               I've authorized
             </Button>
           </>
@@ -243,13 +338,13 @@ function ConnectForm({
   );
 }
 
-// ---------------------------------------------------------------------------
-// Playlist picker
-// ---------------------------------------------------------------------------
-
-function PlaylistPicker({ onPick }: { onPick: (p: Playlist) => void }) {
+function PlaylistPicker({
+  onPick,
+}: {
+  onPick: (p: SpotifyPlaylist) => void;
+}) {
   const toast = useToast();
-  const [lists, setLists] = useState<Playlist[] | null>(null);
+  const [lists, setLists] = useState<SpotifyPlaylist[] | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -326,41 +421,23 @@ function PlaylistPicker({ onPick }: { onPick: (p: Playlist) => void }) {
   );
 }
 
-// ---------------------------------------------------------------------------
-// Match review + create
-// ---------------------------------------------------------------------------
-
-function MatchReview({
+function PlaylistMatching({
   playlist,
+  onReady,
   onBack,
-  onDone,
 }: {
-  playlist: Playlist;
+  playlist: SpotifyPlaylist;
+  onReady: (rows: MatchRow[]) => void;
   onBack: () => void;
-  onDone: () => void;
 }) {
   const toast = useToast();
-  const [result, setResult] = useState<MatchResult | null>(null);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [creating, setCreating] = useState(false);
-
   useEffect(() => {
     let cancelled = false;
     api.import.spotify
       .match(playlist.id)
       .then((r) => {
         if (cancelled) return;
-        setResult(r);
-        // Default: select every row with a match at confidence >=
-        // 0.7, the threshold where we're pretty sure it's the right
-        // track. Users can hand-pick the rest.
-        const auto = new Set<string>();
-        for (const row of r.rows) {
-          if (row.match && row.match.confidence >= 0.7) {
-            auto.add(row.match.tidal_id);
-          }
-        }
-        setSelected(auto);
+        onReady(r.rows);
       })
       .catch((err) => {
         if (cancelled) return;
@@ -369,25 +446,175 @@ function MatchReview({
           title: "Matching failed",
           description: err instanceof Error ? err.message : String(err),
         });
+        onBack();
       });
     return () => {
       cancelled = true;
     };
-  }, [playlist.id, toast]);
-
-  if (!result) {
-    return (
-      <div className="flex flex-col gap-3">
-        <Button size="sm" variant="ghost" onClick={onBack}>
-          <ChevronLeft className="h-4 w-4" /> Back to playlists
-        </Button>
-        <div className="rounded-lg border border-border/50 bg-card/40 p-5 text-sm text-muted-foreground">
-          <Loader2 className="mr-2 inline h-4 w-4 animate-spin" />
-          Matching {playlist.tracks} tracks against Tidal…
-        </div>
+  }, [playlist.id, onReady, onBack, toast]);
+  return (
+    <div className="flex flex-col gap-3">
+      <Button size="sm" variant="ghost" onClick={onBack}>
+        <ChevronLeft className="h-4 w-4" /> Cancel
+      </Button>
+      <div className="rounded-lg border border-border/50 bg-card/40 p-5 text-sm text-muted-foreground">
+        <Loader2 className="mr-2 inline h-4 w-4 animate-spin" />
+        Matching {playlist.tracks} tracks against Tidal…
       </div>
-    );
-  }
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Text / file flow
+// ---------------------------------------------------------------------------
+
+function TextFlow({
+  onReview,
+}: {
+  onReview: (rows: MatchRow[], name: string) => void;
+}) {
+  const toast = useToast();
+  const [text, setText] = useState("");
+  const [name, setName] = useState("Imported playlist");
+  const [busy, setBusy] = useState(false);
+
+  const onFile = async (file: File | null) => {
+    if (!file) return;
+    try {
+      const content = await file.text();
+      setText(content);
+      // Default the playlist name to the filename (stripped extension).
+      const base = file.name.replace(/\.(m3u8?|txt|csv|tsv)$/i, "");
+      setName(base || file.name);
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: "Couldn't read file",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+
+  const run = async () => {
+    if (!text.trim()) {
+      toast.show({ kind: "info", title: "Paste or upload a playlist first" });
+      return;
+    }
+    setBusy(true);
+    try {
+      const res = await api.import.text.parse(text);
+      if (res.total === 0) {
+        toast.show({
+          kind: "info",
+          title: "No tracks found",
+          description: "The input didn't look like a playlist we could parse.",
+        });
+        return;
+      }
+      onReview(res.rows, name || "Imported playlist");
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: "Match failed",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="max-w-2xl rounded-lg border border-border/50 bg-card/40 p-6">
+      <h2 className="text-lg font-semibold">From a playlist file</h2>
+      <p className="mt-1 text-sm text-muted-foreground">
+        Works with .m3u / .m3u8 files from iTunes, MusicBee, Plex, or any
+        exporter that produces the standard format. Plain text also works —
+        one{" "}
+        <code className="rounded bg-secondary px-1">Artist - Title</code> per
+        line.
+      </p>
+
+      <div className="mt-5 flex flex-col gap-2">
+        <label className="text-xs font-semibold text-muted-foreground">
+          Playlist name
+        </label>
+        <Input
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="My imported playlist"
+        />
+      </div>
+
+      <div className="mt-5 flex flex-col gap-2">
+        <label className="text-xs font-semibold text-muted-foreground">
+          Paste content
+        </label>
+        <textarea
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          rows={10}
+          spellCheck={false}
+          className="rounded-md border border-input bg-secondary px-3 py-2 text-xs font-mono"
+          placeholder={"#EXTM3U\n#EXTINF:183,The Beatles - Something\n...\n\nOr just:\nThe Beatles - Something\nRadiohead - Paranoid Android"}
+        />
+      </div>
+
+      <div className="mt-4 flex items-center gap-3">
+        <label className="inline-flex cursor-pointer items-center gap-2 rounded-md border border-border bg-secondary px-3 py-1.5 text-xs font-semibold hover:bg-accent">
+          <Upload className="h-3.5 w-3.5" />
+          Upload file
+          <input
+            type="file"
+            accept=".m3u,.m3u8,.txt,.csv,.tsv,text/plain"
+            onChange={(e) => onFile(e.target.files?.[0] ?? null)}
+            className="hidden"
+          />
+        </label>
+        <div className="flex-1" />
+        <Button onClick={run} disabled={busy || !text.trim()}>
+          {busy ? (
+            <Loader2 className="h-4 w-4 animate-spin" />
+          ) : (
+            <Check className="h-4 w-4" />
+          )}
+          Match against Tidal
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Match review + create (shared)
+// ---------------------------------------------------------------------------
+
+function MatchReview({
+  rows,
+  defaultName,
+  defaultDescription,
+  onBack,
+  onDone,
+}: {
+  rows: MatchRow[];
+  defaultName: string;
+  defaultDescription: string;
+  onBack: () => void;
+  onDone: () => void;
+}) {
+  const toast = useToast();
+  const [name, setName] = useState(defaultName);
+  const [selected, setSelected] = useState<Set<string>>(() => {
+    // Auto-select high-confidence matches (ISRC or fuzzy ≥ 0.7).
+    const auto = new Set<string>();
+    for (const row of rows) {
+      if (row.match && row.match.confidence >= 0.7) {
+        auto.add(row.match.tidal_id);
+      }
+    }
+    return auto;
+  });
+  const [creating, setCreating] = useState(false);
 
   const toggle = (id: string) => {
     setSelected((cur) => {
@@ -398,19 +625,19 @@ function MatchReview({
     });
   };
 
+  const matched = rows.filter((r) => r.match !== null).length;
+  const unmatched = rows.length - matched;
+
   const create = async () => {
     if (selected.size === 0) {
-      toast.show({
-        kind: "info",
-        title: "Pick at least one track",
-      });
+      toast.show({ kind: "info", title: "Pick at least one track" });
       return;
     }
     setCreating(true);
     try {
-      const res = await api.import.spotify.create(
-        playlist.name,
-        playlist.description || "Imported from Spotify",
+      const res = await api.import.create(
+        name,
+        defaultDescription,
         Array.from(selected),
       );
       toast.show({
@@ -430,42 +657,50 @@ function MatchReview({
     }
   };
 
-  const unmatched = result.rows.filter((r) => r.match === null).length;
-
   return (
     <div>
       <div className="mb-4 flex items-center justify-between gap-3">
         <Button size="sm" variant="ghost" onClick={onBack} disabled={creating}>
           <ChevronLeft className="h-4 w-4" /> Back
         </Button>
-        <Button onClick={create} disabled={creating}>
+        <Button onClick={create} disabled={creating || selected.size === 0}>
           {creating ? (
             <Loader2 className="h-4 w-4 animate-spin" />
           ) : (
             <Check className="h-4 w-4" />
           )}
-          Create "{playlist.name}" with {selected.size} tracks
+          Create "{name}" with {selected.size} tracks
         </Button>
       </div>
 
-      <div className="mb-4 rounded-lg border border-border/50 bg-card/40 p-4 text-sm">
-        <div className="font-semibold">
-          Matched {result.matched} of {result.total} tracks
+      <div className="mb-4 flex flex-col gap-3 rounded-lg border border-border/50 bg-card/40 p-4">
+        <div className="text-sm font-semibold">
+          Matched {matched} of {rows.length} tracks
           {unmatched > 0 && (
             <span className="ml-2 text-amber-300">
               · {unmatched} couldn't be found on Tidal
             </span>
           )}
         </div>
-        <div className="mt-1 text-xs text-muted-foreground">
-          Rows with high-confidence matches (ISRC or strong fuzzy match) are
+        <div className="flex flex-col gap-1">
+          <label className="text-xs font-semibold text-muted-foreground">
+            Playlist name
+          </label>
+          <Input
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder="Playlist name"
+          />
+        </div>
+        <div className="text-xs text-muted-foreground">
+          High-confidence matches (ISRC or strong fuzzy match) are
           pre-selected. Uncheck any you'd rather skip.
         </div>
       </div>
 
       <div className="flex flex-col divide-y divide-border/40 rounded-lg border border-border/50 bg-card/40">
-        {result.rows.map((row, i) => (
-          <MatchRow
+        {rows.map((row, i) => (
+          <MatchRowView
             key={i}
             row={row}
             checked={row.match ? selected.has(row.match.tidal_id) : false}
@@ -477,16 +712,16 @@ function MatchReview({
   );
 }
 
-function MatchRow({
+function MatchRowView({
   row,
   checked,
   onToggle,
 }: {
-  row: MatchResult["rows"][number];
+  row: MatchRow;
   checked: boolean;
   onToggle?: () => void;
 }) {
-  const spotify = row.spotify;
+  const source = row.spotify;
   const match = row.match;
   return (
     <div className="flex items-center gap-3 px-4 py-2.5 text-sm">
@@ -498,21 +733,22 @@ function MatchRow({
         className="h-4 w-4 accent-primary disabled:opacity-30"
       />
       <div className="min-w-0 flex-1">
-        <div className="truncate font-medium">{spotify.name}</div>
+        <div className="truncate font-medium">{source.name}</div>
         <div className="truncate text-xs text-muted-foreground">
-          {spotify.artists.join(", ")}
+          {source.artists.join(", ") || "(no artist)"}
         </div>
       </div>
       {match ? (
         <div className="flex min-w-0 items-center gap-2">
           <div
-            className={
+            className={cn(
+              "text-xs font-semibold uppercase tracking-wider",
               match.confidence >= 0.85
-                ? "text-xs font-semibold uppercase tracking-wider text-primary"
+                ? "text-primary"
                 : match.confidence >= 0.7
-                  ? "text-xs font-semibold uppercase tracking-wider text-muted-foreground"
-                  : "text-xs font-semibold uppercase tracking-wider text-amber-400"
-            }
+                  ? "text-muted-foreground"
+                  : "text-amber-400",
+            )}
           >
             {match.reason === "isrc"
               ? "ISRC"

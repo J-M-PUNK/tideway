@@ -40,6 +40,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from app import global_keys as global_keys_mod
 from app import player as native_player
+from app import playlist_import
 from app import spotify_import
 from app.downloader import DownloadItem, DownloadStatus, Downloader
 from app.http import SESSION
@@ -998,20 +999,43 @@ def spotify_match(req: _SpotifyMatchRequest) -> dict:
     }
 
 
-class _SpotifyCreateRequest(BaseModel):
+class _CreatePlaylistRequest(BaseModel):
     name: str
     description: Optional[str] = ""
     track_ids: list[str]
 
 
-@app.post("/api/import/spotify/create")
-def spotify_create(req: _SpotifyCreateRequest) -> dict:
-    """Create a Tidal playlist from a set of Tidal track ids — the
-    ones the frontend kept after reviewing matches. Uses the same
-    /api/playlists create + add-tracks endpoints the rest of the app
-    uses so we're not reimplementing playlist mutation."""
+class _TextImportRequest(BaseModel):
+    text: str
+
+
+@app.post("/api/import/text/parse")
+def text_import_parse(req: _TextImportRequest) -> dict:
+    """Parse an M3U / M3U8 / plain-text playlist blob + match each
+    parsed row against Tidal. Returns the same {rows, total, matched}
+    shape the Spotify matcher uses so the frontend's MatchReview UI
+    can render both sources identically."""
     _require_auth()
-    name = (req.name or "").strip() or "Imported from Spotify"
+    parsed = playlist_import.parse(req.text or "")
+    rows = playlist_import.match_each(tidal.session, parsed)
+    matched = sum(1 for r in rows if r["match"] is not None)
+    return {"rows": rows, "total": len(rows), "matched": matched}
+
+
+@app.post("/api/import/create")
+@app.post("/api/import/spotify/create")
+def import_create(req: _CreatePlaylistRequest) -> dict:
+    """Create a Tidal playlist from a set of Tidal track ids — the
+    ones the frontend kept after reviewing matches. Generic across
+    every import source (Spotify OAuth, M3U, Deezer once it lands)
+    since by this point we're just looking at Tidal track ids.
+
+    Two routes point at this handler: /api/import/create is the new
+    generic path, /api/import/spotify/create is the legacy alias.
+    Keep both for now so older frontends that ship pointing at the
+    original path don't 404."""
+    _require_auth()
+    name = (req.name or "").strip() or "Imported playlist"
     try:
         created = tidal.create_playlist(name, req.description or "")
     except Exception as exc:
