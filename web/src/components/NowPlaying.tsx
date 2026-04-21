@@ -130,7 +130,7 @@ export function NowPlaying({
             </div>
           </div>
           <div className="flex items-center">
-            <HeartButton kind="track" id={track.id} size="sm" />
+            <HeartButton kind="track" id={track.id} size="sm" tone="foreground" />
             <DownloadButton kind="track" id={track.id} onPick={onDownload} iconOnly variant="ghost" />
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
