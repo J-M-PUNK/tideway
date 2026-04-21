@@ -1,6 +1,6 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { Folder, FolderMinus, Loader2, Pencil, Trash2 } from "lucide-react";
+import { AlertTriangle, Folder, FolderMinus, Loader2, Pencil, Trash2 } from "lucide-react";
 import { api } from "@/api/client";
 import type { OnDownload } from "@/api/download";
 import type { PlaylistFolder, Track } from "@/api/types";
@@ -34,6 +34,10 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { HeroSkeleton, TrackListSkeleton } from "@/components/Skeletons";
+import {
+  computeDuplicateGroups,
+  DuplicatesPanel,
+} from "@/components/DuplicatesPanel";
 import { formatDuration } from "@/lib/utils";
 
 export function PlaylistDetail({ onDownload }: { onDownload: OnDownload }) {
@@ -50,6 +54,20 @@ export function PlaylistDetail({ onDownload }: { onDownload: OnDownload }) {
   const toast = useToast();
 
   const tracks = localTracks ?? playlist?.tracks ?? [];
+
+  // Content-keyed duplicate detection. Only meaningful on playlists
+  // the user owns (others' playlists aren't editable). We recompute
+  // on every `tracks` change; it's O(n) and playlists rarely exceed a
+  // few hundred rows.
+  const duplicates = useMemo(
+    () => (playlist?.owned ? computeDuplicateGroups(tracks) : []),
+    [tracks, playlist?.owned],
+  );
+  const [duplicatesOpen, setDuplicatesOpen] = useState(false);
+  const dupeTrackCount = duplicates.reduce(
+    (s, g) => s + (g.indices.length - 1),
+    0,
+  );
 
   // Serialize reorder/remove mutations. Every operation sends a
   // 0-based index that refers to the server's live list — firing two in
@@ -190,6 +208,24 @@ export function PlaylistDetail({ onDownload }: { onDownload: OnDownload }) {
           </>
         }
       />
+      {dupeTrackCount > 0 && (
+        <button
+          type="button"
+          onClick={() => setDuplicatesOpen(true)}
+          className="mt-6 flex w-full items-center gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-left text-sm text-amber-200 transition-colors hover:bg-amber-500/15"
+        >
+          <AlertTriangle className="h-4 w-4 flex-shrink-0" />
+          <span className="flex-1">
+            This playlist has {dupeTrackCount} duplicate{" "}
+            {dupeTrackCount === 1 ? "track" : "tracks"} across{" "}
+            {duplicates.length} song{duplicates.length === 1 ? "" : "s"}.
+          </span>
+          <span className="text-xs font-semibold uppercase tracking-wider">
+            Review
+          </span>
+        </button>
+      )}
+
       <div className="mt-8">
         <TrackList
           tracks={tracks}
@@ -198,6 +234,17 @@ export function PlaylistDetail({ onDownload }: { onDownload: OnDownload }) {
           onReorder={playlist.owned ? onReorder : undefined}
         />
       </div>
+
+      <DuplicatesPanel
+        open={duplicatesOpen}
+        onOpenChange={setDuplicatesOpen}
+        playlistId={playlist.id}
+        groups={duplicates}
+        onRemoved={() => {
+          setLocalTracks(null);
+          setRefreshTick((n) => n + 1);
+        }}
+      />
     </div>
   );
 }
