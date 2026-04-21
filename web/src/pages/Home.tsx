@@ -11,6 +11,7 @@ import { useToast } from "@/components/toast";
 import { PageView } from "@/components/PageView";
 import { ErrorView } from "@/components/ErrorView";
 import { GridSkeleton } from "@/components/Skeletons";
+import { LastfmConnectNudge } from "@/components/LastfmConnectNudge";
 import { imageProxy } from "@/lib/utils";
 import { findBestMatch } from "@/lib/match";
 import { useTidalArtistId } from "@/hooks/useTidalResolve";
@@ -48,6 +49,7 @@ export function Home({ onDownload }: { onDownload: OnDownload }) {
   return (
     <div>
       <h1 className="mb-8 text-4xl font-bold tracking-tight">{greeting}</h1>
+      <LastfmConnectNudge />
       {history.items.length > 0 && <JumpBackIn items={history.items} />}
       {mixes && mixes.length > 0 && <MadeForYou mixes={mixes} />}
       <PageView page={data} onDownload={onDownload} forceSingleRow />

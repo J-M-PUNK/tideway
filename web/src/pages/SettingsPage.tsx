@@ -311,11 +311,17 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
         icon={Keyboard}
         description="Window must be focused for these to fire. Media keys (Play/Pause/Next/Prev) also work globally — the app listens for them even when minimized."
       >
-        <ShortcutRow keys={["⌘", "K"]} label="Focus search" />
+        <ShortcutRow keys={["⌘", "K"]} label="Search / command palette" />
+        <ShortcutRow keys={["⌘", ","]} label="Open Settings" />
         <ShortcutRow keys={["Space"]} label="Play / pause" />
         <ShortcutRow keys={["Shift", "→"]} label="Next track" />
         <ShortcutRow keys={["Shift", "←"]} label="Previous track" />
+        <ShortcutRow keys={["↑"]} label="Volume up" />
+        <ShortcutRow keys={["↓"]} label="Volume down" />
         <ShortcutRow keys={["M"]} label="Mute / unmute" />
+        <ShortcutRow keys={["S"]} label="Toggle shuffle" />
+        <ShortcutRow keys={["R"]} label="Cycle repeat" />
+        <ShortcutRow keys={["L"]} label="Like / unlike current track" />
       </Section>
 
       <div className="mt-8 flex items-center gap-3">
