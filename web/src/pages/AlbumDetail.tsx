@@ -18,8 +18,9 @@ import { ErrorView } from "@/components/ErrorView";
 import { SectionHeader } from "@/components/Grid";
 import { MediaCard } from "@/components/MediaCard";
 import { HeroSkeleton, TrackListSkeleton } from "@/components/Skeletons";
+import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { useLastfmAlbumPlaycount } from "@/hooks/useLastfmPlaycount";
-import { formatDuration } from "@/lib/utils";
+import { formatDuration, imageProxy } from "@/lib/utils";
 
 export function AlbumDetail({ onDownload }: { onDownload: OnDownload }) {
   const { id = "" } = useParams();
@@ -27,6 +28,10 @@ export function AlbumDetail({ onDownload }: { onDownload: OnDownload }) {
   // Tidal-style Credits "tab": toggling the Credits button swaps the
   // normal TrackList body for a 2-column grid of per-track credits.
   const [showingCredits, setShowingCredits] = useState(false);
+  // Album-cover lightbox. Clicking the cover in the hero opens this;
+  // no separate surface to open credits — that's what the Credits
+  // button is for.
+  const [coverOpen, setCoverOpen] = useState(false);
 
   if (loading) {
     return (
@@ -56,8 +61,8 @@ export function AlbumDetail({ onDownload }: { onDownload: OnDownload }) {
         cover={album.cover}
         blurredBackdrop
         byArtist={artistForPill}
-        onCoverClick={() => setShowingCredits((v) => !v)}
-        coverHint={showingCredits ? "Back to tracklist" : "Show credits"}
+        onCoverClick={() => setCoverOpen(true)}
+        coverHint="Expand cover"
         meta={
           <div className="flex flex-col gap-1.5">
             <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
@@ -148,7 +153,47 @@ export function AlbumDetail({ onDownload }: { onDownload: OnDownload }) {
           onDownload={onDownload}
         />
       )}
+
+      <CoverLightbox
+        open={coverOpen}
+        onOpenChange={setCoverOpen}
+        cover={album.cover}
+        title={album.name}
+      />
     </div>
+  );
+}
+
+/**
+ * Full-size album-cover lightbox. Opened by clicking the cover in
+ * the hero; closes on ESC / overlay click / the Dialog's built-in
+ * close button. Matches how Tidal / Spotify / Apple Music surface the
+ * "make the art bigger" affordance without committing to a separate
+ * page. Uses the widest size the image proxy can serve.
+ */
+function CoverLightbox({
+  open,
+  onOpenChange,
+  cover,
+  title,
+}: {
+  open: boolean;
+  onOpenChange: (o: boolean) => void;
+  cover: string | null;
+  title: string;
+}) {
+  const src = imageProxy(cover);
+  if (!src) return null;
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-[min(90vw,90vh)] border-0 bg-transparent p-0 shadow-none">
+        <img
+          src={src}
+          alt={title}
+          className="block h-auto w-full rounded-md shadow-2xl"
+        />
+      </DialogContent>
+    </Dialog>
   );
 }
 
