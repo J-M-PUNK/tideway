@@ -28,6 +28,12 @@ export interface Track {
    *  the composite cover art. Null when Tidal hasn't minted a mix
    *  for this track (rare — new releases, obscure catalog entries). */
   track_mix_id?: string | null;
+  /** Spatial / mode tags from Tidal's raw payload: e.g. ["STEREO"],
+   *  ["DOLBY_ATMOS"], ["SONY_360RA"]. */
+  audio_modes?: string[];
+  /** Quality / codec tags: e.g. ["HIRES_LOSSLESS"], ["LOSSLESS"],
+   *  ["MQA"]. Frontend format-filter chip row reads these. */
+  media_tags?: string[];
 }
 
 export interface Album {
@@ -43,6 +49,8 @@ export interface Album {
   share_url?: string | null;
   release_date?: string | null;
   copyright?: string | null;
+  audio_modes?: string[];
+  media_tags?: string[];
 }
 
 export interface Artist {

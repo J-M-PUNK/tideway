@@ -11,6 +11,12 @@ import { CreateFolderDialog } from "@/components/CreateFolderDialog";
 import { CreatePlaylistDialog } from "@/components/CreatePlaylistDialog";
 import { MediaCard } from "@/components/MediaCard";
 import { MediaListRow } from "@/components/MediaListRow";
+import {
+  FormatFilter,
+  type AudioFormat,
+  hasAnyFormatTags,
+  matchesFormat,
+} from "@/components/FormatFilter";
 import { TrackList } from "@/components/TrackList";
 import { EmptyState } from "@/components/EmptyState";
 import { GridSkeleton, TrackListSkeleton } from "@/components/Skeletons";
@@ -90,6 +96,13 @@ export function Library({ onDownload }: { onDownload: OnDownload }) {
   const [filter, setFilter] = useState("");
   const [sort, setSort] = useState<Sort>("recent");
   const [view, setView] = useState<View>(() => loadView(type));
+  // Format filter is ephemeral (per session), not persisted — it acts
+  // like a sort, not a hard preference. Resets to "all" when the user
+  // changes sections.
+  const [format, setFormat] = useState<AudioFormat>("all");
+  useEffect(() => {
+    setFormat("all");
+  }, [type]);
 
   // Rehydrate the view pref when switching sections — each section has
   // its own persisted preference (albums can be grid while playlists
@@ -151,7 +164,7 @@ export function Library({ onDownload }: { onDownload: OnDownload }) {
   const filtered = useMemo(() => {
     if (!data) return [];
     const q = filter.trim().toLowerCase();
-    const base = q
+    let base = q
       ? data.filter((item) =>
           [
             "name" in item ? item.name : "",
@@ -163,11 +176,31 @@ export function Library({ onDownload }: { onDownload: OnDownload }) {
             .includes(q),
         )
       : data;
+    // Audio-format filter. Only applies to sections whose items have
+    // format tags (albums + tracks); artists / playlists ignore it
+    // because the tags aren't meaningful at their level.
+    if (format !== "all" && (type === "albums" || type === "tracks")) {
+      base = base.filter((item) =>
+        matchesFormat(
+          item as { audio_modes?: string[]; media_tags?: string[] },
+          format,
+        ),
+      );
+    }
     if (sort === "alpha") {
       return [...base].sort((a, b) => ("name" in a ? a.name : "").localeCompare("name" in b ? b.name : ""));
     }
     return base; // "recent" — backend already returns newest-first
-  }, [data, filter, sort]);
+  }, [data, filter, sort, format, type]);
+
+  // Hide the format filter entirely when the dataset has no tagged
+  // items — otherwise it'd be a dead row of chips.
+  const showFormatFilter =
+    (type === "albums" || type === "tracks") &&
+    data != null &&
+    hasAnyFormatTags(
+      data as Array<{ audio_modes?: string[]; media_tags?: string[] }>,
+    );
 
   return (
     <div>
@@ -208,6 +241,12 @@ export function Library({ onDownload }: { onDownload: OnDownload }) {
           {type !== "tracks" && <ViewToggle view={view} onChange={changeView} />}
         </div>
       </div>
+
+      {showFormatFilter && (
+        <div className="mb-4">
+          <FormatFilter value={format} onChange={setFormat} />
+        </div>
+      )}
 
       {loadError && (
         <div className="rounded-lg border border-destructive/30 bg-destructive/5 p-6 text-sm text-destructive">
