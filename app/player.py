@@ -257,6 +257,127 @@ class VLCPlayer:
             self._bump_seq()
         return self.snapshot()
 
+    # -- equalizer ----------------------------------------------------------
+
+    @staticmethod
+    def eq_presets() -> list[dict]:
+        """Static list of libvlc's built-in presets. Not per-session so
+        we expose it as a class-level helper. Each entry carries the
+        index (used by libvlc) + the human-readable name."""
+        if vlc is None:
+            return []
+        out: list[dict] = []
+        count = vlc.libvlc_audio_equalizer_get_preset_count()
+        for i in range(count):
+            name = vlc.libvlc_audio_equalizer_get_preset_name(i)
+            out.append({
+                "index": i,
+                "name": name.decode() if name else f"Preset {i}",
+            })
+        return out
+
+    @staticmethod
+    def eq_bands_count() -> int:
+        if vlc is None:
+            return 0
+        return int(vlc.libvlc_audio_equalizer_get_band_count())
+
+    @staticmethod
+    def eq_band_frequencies() -> list[float]:
+        """Center frequency (Hz) for each band — for slider labels."""
+        if vlc is None:
+            return []
+        count = VLCPlayer.eq_bands_count()
+        return [
+            float(vlc.libvlc_audio_equalizer_get_band_frequency(i))
+            for i in range(count)
+        ]
+
+    def apply_equalizer(
+        self, bands: list[float], preamp: Optional[float] = None
+    ) -> None:
+        """Apply a manual EQ. `bands` must be length `eq_bands_count()`;
+        values are amplitudes in dB, clamped to [-20, 20]. Empty list
+        disables the EQ entirely."""
+        with self._lock:
+            if not bands:
+                # Empty list = disable EQ entirely. libvlc's API says
+                # passing a null AudioEqualizer disables filtering.
+                self._player.set_equalizer(None)
+                return
+            eq = vlc.AudioEqualizer()
+            if preamp is not None:
+                eq.set_preamp(max(-20.0, min(20.0, float(preamp))))
+            count = vlc.libvlc_audio_equalizer_get_band_count()
+            for i in range(min(count, len(bands))):
+                v = max(-20.0, min(20.0, float(bands[i])))
+                eq.set_amp_at_index(v, i)
+            self._player.set_equalizer(eq)
+
+    def apply_equalizer_preset(self, preset_index: int) -> list[float]:
+        """Apply one of libvlc's built-in presets. Returns the band
+        amplitudes that ended up active so the frontend's sliders can
+        render the preset curve.
+
+        python-vlc's class-level helpers (`AudioEqualizer.new_from_preset`)
+        don't exist in every version; use the module-level C bindings
+        which are stable across libvlc 3.x."""
+        with self._lock:
+            eq = vlc.libvlc_audio_equalizer_new_from_preset(int(preset_index))
+            self._player.set_equalizer(eq)
+            count = vlc.libvlc_audio_equalizer_get_band_count()
+            bands = [
+                float(vlc.libvlc_audio_equalizer_get_amp_at_index(eq, i))
+                for i in range(count)
+            ]
+            # libvlc's equalizer object belongs to us until we release
+            # it. MediaPlayer.set_equalizer internally retains a copy,
+            # so dropping our handle here is safe.
+            vlc.libvlc_audio_equalizer_release(eq)
+            return bands
+
+    # -- output device ------------------------------------------------------
+
+    def list_output_devices(self) -> list[dict]:
+        """Enumerate libvlc's audio output devices (USB DACs,
+        Bluetooth, built-in speakers, etc.). Returns
+        [{"id": "<opaque>", "name": "<human>"}...]. An empty id means
+        "system default" — always the first entry."""
+        with self._lock:
+            head = self._player.audio_output_device_enum()
+            out: list[dict] = [{"id": "", "name": "System default"}]
+            node = head
+            seen: set[str] = set()
+            try:
+                while node:
+                    ref = node.contents
+                    did_raw = ref.device
+                    name_raw = ref.description
+                    did = did_raw.decode() if did_raw else ""
+                    name = name_raw.decode() if name_raw else ""
+                    # libvlc's "0" / empty id is the system default —
+                    # we always include it as the first entry; skip
+                    # here to avoid duplicating it.
+                    if did and did != "0" and did not in seen:
+                        seen.add(did)
+                        out.append({"id": did, "name": name or did})
+                    node = ref.next
+            finally:
+                if head:
+                    vlc.libvlc_audio_output_device_list_release(head)
+            return out
+
+    def set_output_device(self, device_id: str) -> None:
+        """Switch output device. Empty string routes to the system
+        default. libvlc handles the handoff while playback continues
+        (a small gap is expected)."""
+        with self._lock:
+            # Passing None for module + device_id uses the currently-
+            # active module. On macOS this is "auhal"; on Linux it'd
+            # be "pulse" / "alsa". Passing None lets libvlc keep
+            # whatever it's already using.
+            self._player.audio_output_device_set(None, device_id or None)
+
     def snapshot(self) -> PlayerSnapshot:
         with self._lock:
             # In idle state there's no current media; asking libvlc for

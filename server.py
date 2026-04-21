@@ -1657,18 +1657,51 @@ class _PlayerMutedRequest(BaseModel):
     muted: bool
 
 
+class _PlayerEqRequest(BaseModel):
+    # Empty list disables EQ entirely.
+    bands: list[float]
+    preamp: Optional[float] = None
+
+
+class _PlayerEqPresetRequest(BaseModel):
+    preset: int
+
+
+class _PlayerOutputDeviceRequest(BaseModel):
+    # Empty string routes to the system default.
+    device_id: str
+
+
+_player_bootstrapped = False
+
+
 def _native_player():
     if not native_player.is_available():
         raise HTTPException(
             status_code=503,
             detail="Native audio engine unavailable (libvlc not loaded)",
         )
-    return native_player.get_player(
+    player = native_player.get_player(
         lambda: tidal.session,
         local_lookup=lambda tid: str(local_index.get(str(tid)))
         if local_index.get(str(tid))
         else None,
     )
+    # One-shot: re-apply persisted EQ + output device so users who
+    # set a USB-DAC preference or an EQ preset keep it across restart.
+    global _player_bootstrapped
+    if not _player_bootstrapped:
+        _player_bootstrapped = True
+        try:
+            if settings.eq_bands:
+                player.apply_equalizer(
+                    settings.eq_bands, preamp=settings.eq_preamp
+                )
+            if settings.audio_output_device:
+                player.set_output_device(settings.audio_output_device)
+        except Exception as exc:
+            print(f"[player] bootstrap failed: {exc}", flush=True)
+    return player
 
 
 def _snapshot_dict(snap: native_player.PlayerSnapshot) -> dict:
@@ -1748,6 +1781,65 @@ def player_volume(req: _PlayerVolumeRequest) -> dict:
 def player_muted(req: _PlayerMutedRequest) -> dict:
     _require_local_access()
     return _snapshot_dict(_native_player().set_muted(req.muted))
+
+
+@app.get("/api/player/eq")
+def player_eq_state() -> dict:
+    """Current EQ: persisted bands + preamp + the static list of
+    presets + band frequencies so the frontend can render sliders."""
+    _require_local_access()
+    return {
+        "bands": list(settings.eq_bands),
+        "preamp": settings.eq_preamp,
+        "band_count": native_player.VLCPlayer.eq_bands_count(),
+        "frequencies": native_player.VLCPlayer.eq_band_frequencies(),
+        "presets": native_player.VLCPlayer.eq_presets(),
+    }
+
+
+@app.post("/api/player/eq")
+def player_eq_set(req: _PlayerEqRequest) -> dict:
+    _require_local_access()
+    player = _native_player()
+    player.apply_equalizer(req.bands, preamp=req.preamp)
+    settings.eq_bands = list(req.bands)
+    settings.eq_preamp = req.preamp
+    save_settings(settings)
+    return {"ok": True, "bands": settings.eq_bands, "preamp": settings.eq_preamp}
+
+
+@app.post("/api/player/eq/preset")
+def player_eq_preset(req: _PlayerEqPresetRequest) -> dict:
+    """Apply a libvlc built-in preset. Returns the resolved bands so
+    the frontend's sliders can snap to the preset curve. Also persists
+    the resolved bands — so a relaunch keeps the same sound even if
+    libvlc's preset list were to change."""
+    _require_local_access()
+    player = _native_player()
+    bands = player.apply_equalizer_preset(req.preset)
+    settings.eq_bands = bands
+    settings.eq_preamp = None
+    save_settings(settings)
+    return {"ok": True, "bands": bands}
+
+
+@app.get("/api/player/output-devices")
+def player_output_devices() -> dict:
+    _require_local_access()
+    devices = _native_player().list_output_devices()
+    return {
+        "devices": devices,
+        "current": settings.audio_output_device,
+    }
+
+
+@app.post("/api/player/output-device")
+def player_set_output_device(req: _PlayerOutputDeviceRequest) -> dict:
+    _require_local_access()
+    _native_player().set_output_device(req.device_id)
+    settings.audio_output_device = req.device_id
+    save_settings(settings)
+    return {"ok": True, "device_id": settings.audio_output_device}
 
 
 @app.get("/api/player/events")

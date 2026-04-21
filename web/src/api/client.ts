@@ -379,6 +379,34 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ muted }),
       }),
+    eq: () =>
+      req<{
+        bands: number[];
+        preamp: number | null;
+        band_count: number;
+        frequencies: number[];
+        presets: { index: number; name: string }[];
+      }>("/api/player/eq"),
+    setEq: (bands: number[], preamp: number | null) =>
+      req<{ ok: boolean; bands: number[]; preamp: number | null }>(
+        "/api/player/eq",
+        { method: "POST", body: JSON.stringify({ bands, preamp }) },
+      ),
+    setEqPreset: (preset: number) =>
+      req<{ ok: boolean; bands: number[] }>("/api/player/eq/preset", {
+        method: "POST",
+        body: JSON.stringify({ preset }),
+      }),
+    outputDevices: () =>
+      req<{
+        devices: { id: string; name: string }[];
+        current: string;
+      }>("/api/player/output-devices"),
+    setOutputDevice: (deviceId: string) =>
+      req<{ ok: boolean; device_id: string }>("/api/player/output-device", {
+        method: "POST",
+        body: JSON.stringify({ device_id: deviceId }),
+      }),
   },
   downloads: {
     list: () => req<DownloadItem[]>("/api/downloads"),
