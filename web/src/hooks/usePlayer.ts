@@ -420,19 +420,43 @@ export function usePlayer() {
   }, [toggle, next, prev]);
 
   useEffect(() => {
-    const es = new EventSource("/api/hotkey/events");
-    es.onmessage = (event) => {
-      try {
-        const { action } = JSON.parse(event.data) as { action?: string };
-        if (action === "play_pause") toggleRef.current?.();
-        else if (action === "next") nextRef.current?.();
-        else if (action === "previous") prevRef.current?.();
-      } catch {
-        /* malformed frame */
-      }
+    let es: EventSource | null = null;
+    let cancelled = false;
+    let retryTimer: number | null = null;
+
+    const connect = () => {
+      if (cancelled) return;
+      es = new EventSource("/api/hotkey/events");
+      es.onmessage = (event) => {
+        try {
+          const { action } = JSON.parse(event.data) as { action?: string };
+          if (action === "play_pause") toggleRef.current?.();
+          else if (action === "next") nextRef.current?.();
+          else if (action === "previous") prevRef.current?.();
+        } catch {
+          /* malformed frame */
+        }
+      };
+      es.onerror = () => {
+        // Same pattern the /api/player/events subscription uses: if
+        // the browser decides the connection is truly closed (not
+        // just reconnecting), tear down and retry after a short
+        // delay. Keeps the listener alive across transient backend
+        // restarts without piling up dangling connections.
+        if (es && es.readyState === EventSource.CLOSED) {
+          es.close();
+          es = null;
+          if (cancelled) return;
+          retryTimer = window.setTimeout(connect, 1500);
+        }
+      };
     };
+
+    connect();
     return () => {
-      es.close();
+      cancelled = true;
+      if (retryTimer !== null) window.clearTimeout(retryTimer);
+      if (es) es.close();
     };
   }, []);
 
