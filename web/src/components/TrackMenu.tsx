@@ -138,12 +138,14 @@ export function TrackMenuItems({
   const playQueue = context && context.length ? context : [track];
 
   const startRadio = () => {
-    // Navigate to a dedicated radio page — matches how every major
-    // streaming service surfaces "radio" (Tidal / Spotify / Apple
-    // Music all route you to a page-level queue you can see and
-    // interact with, not an invisible background queue). The page
-    // autoplays on mount. Pass seed metadata via router state so
-    // the hero renders correctly without a second fetch.
+    // Prefer Tidal's canonical TRACK_MIX page — it comes with the
+    // composite cover, "Track Radio" subtitle, and any other entities
+    // Tidal renders on a real mix. Fall back to our generic radio
+    // page when Tidal hasn't minted a mix for this track.
+    if (track.track_mix_id) {
+      navigate(`/mix/${encodeURIComponent(track.track_mix_id)}`);
+      return;
+    }
     const seed = {
       name: track.name,
       cover: track.album?.cover ?? null,

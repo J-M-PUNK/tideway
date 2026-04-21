@@ -69,6 +69,7 @@ export function ArtistDetail({ onDownload }: { onDownload: OnDownload }) {
         allAlbums={fullCatalog}
         shareUrl={artist.share_url}
         onDownload={onDownload}
+        artistMixId={artist.artist_mix_id}
       />
 
       {artist.top_tracks.length > 0 && (

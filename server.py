@@ -565,6 +565,15 @@ def _artists(obj) -> list[dict]:
 
 def track_to_dict(t) -> dict:
     album = _first(lambda: t.album)
+    # tidalapi populates `mixes` from the raw track payload — it's a
+    # dict keyed by mix type ("TRACK_MIX" for the per-track radio).
+    # Pass the id through so the frontend can navigate straight to
+    # Tidal's proper mix page (with composite cover + metadata) from
+    # any track menu, no extra API round-trip needed.
+    mixes = _first(lambda: t.mixes) or {}
+    track_mix_id = (
+        mixes.get("TRACK_MIX") if isinstance(mixes, dict) else None
+    )
     return {
         "kind": "track",
         "id": str(t.id),
@@ -579,6 +588,7 @@ def track_to_dict(t) -> dict:
             "cover": _image_url(album, 320),
         } if album else None,
         "share_url": _first(lambda: t.share_url),
+        "track_mix_id": track_mix_id,
     }
 
 
@@ -2250,6 +2260,17 @@ def artist_detail(artist_id: int) -> dict:
     ep_singles_objs = _dedupe(raw_eps)
     appears_on_objs = _dedupe(raw_appears)
 
+    # Resolve Tidal's ARTIST_MIX id — the proper "Artist Radio" mix
+    # with a composite cover and the "Artist Radio" subtitle. One extra
+    # Tidal call per artist page load; cheap. When present, the
+    # frontend routes the Artist Radio button to /mix/{id} so it gets
+    # the full Tidal treatment. Falls back to our generic radio page
+    # when the artist has no mix (rare — most do).
+    try:
+        artist_mix_id = str(artist.get_radio_mix().id)
+    except Exception:
+        artist_mix_id = None
+
     return {
         **artist_to_dict(artist),
         "top_tracks": [track_to_dict(t) for t in tidal.get_artist_top_tracks(artist)],
@@ -2258,6 +2279,7 @@ def artist_detail(artist_id: int) -> dict:
         "appears_on": [album_to_dict(a) for a in appears_on_objs],
         "bio": bio,
         "similar": similar,
+        "artist_mix_id": artist_mix_id,
         # Stable share URL for the copy/open-in-Tidal actions in the UI.
         "share_url": getattr(artist, "share_url", None)
         or f"https://tidal.com/browse/artist/{artist.id}",

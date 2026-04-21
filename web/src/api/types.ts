@@ -19,6 +19,11 @@ export interface Track {
     cover: string | null;
   } | null;
   share_url?: string | null;
+  /** Tidal's per-track radio mix id (from raw `mixes.TRACK_MIX`).
+   *  When present, "Go to track radio" routes to /mix/:id which has
+   *  the composite cover art. Null when Tidal hasn't minted a mix
+   *  for this track (rare — new releases, obscure catalog entries). */
+  track_mix_id?: string | null;
 }
 
 export interface Album {
@@ -127,6 +132,9 @@ export interface ArtistDetail extends Artist {
   bio: string | null;
   similar: Artist[];
   share_url: string;
+  /** Tidal's ARTIST_MIX id — the proper "Artist Radio" mix with
+   *  composite cover. Null when no mix is available. */
+  artist_mix_id: string | null;
 }
 
 export interface MixDetail {
