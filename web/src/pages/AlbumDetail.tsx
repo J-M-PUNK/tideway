@@ -56,6 +56,8 @@ export function AlbumDetail({ onDownload }: { onDownload: OnDownload }) {
         cover={album.cover}
         blurredBackdrop
         byArtist={artistForPill}
+        onCoverClick={() => setShowingCredits((v) => !v)}
+        coverHint={showingCredits ? "Back to tracklist" : "Show credits"}
         meta={
           <div className="flex flex-col gap-1.5">
             <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">

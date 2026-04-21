@@ -25,6 +25,14 @@ interface Props {
    * without crowding the meta row with link markup.
    */
   byArtist?: { id: string; name: string; picture: string | null };
+  /**
+   * If provided, the cover becomes clickable and fires this handler.
+   * Tidal uses this on the album page to toggle the credits view —
+   * the caller decides what the click does.
+   */
+  onCoverClick?: () => void;
+  /** Tooltip shown when hovering a clickable cover. */
+  coverHint?: string;
 }
 
 /**
@@ -42,6 +50,8 @@ export function DetailHero({
   actions,
   blurredBackdrop = false,
   byArtist,
+  onCoverClick,
+  coverHint,
 }: Props) {
   const src = imageProxy(cover);
   const dominant = useCoverColor(src);
@@ -91,21 +101,34 @@ export function DetailHero({
           blurredBackdrop ? "gap-5" : "gap-6",
         )}
       >
-        <div
-          className={cn(
+        {(() => {
+          const cls = cn(
             "flex-shrink-0 overflow-hidden bg-secondary shadow-2xl",
             blurredBackdrop ? "h-60 w-60" : "h-56 w-56",
             round ? "rounded-full" : "rounded-md",
-          )}
-        >
-          {src ? (
+            onCoverClick && "cursor-pointer transition-transform hover:scale-[1.02]",
+          );
+          const inner = src ? (
             <img src={src} alt={title} className="h-full w-full object-cover" />
           ) : (
             <div className="flex h-full w-full items-center justify-center text-muted-foreground">
               <Music className="h-10 w-10" />
             </div>
-          )}
-        </div>
+          );
+          return onCoverClick ? (
+            <button
+              type="button"
+              onClick={onCoverClick}
+              title={coverHint}
+              aria-label={coverHint}
+              className={cls}
+            >
+              {inner}
+            </button>
+          ) : (
+            <div className={cls}>{inner}</div>
+          );
+        })()}
         <div className="min-w-0 flex-1 pb-2">
           {eyebrow && (
             <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
