@@ -1,5 +1,18 @@
 import { useEffect, useRef, useState } from "react";
-import { Check, Loader2, LogOut, Moon, Settings as SettingsIcon, Sun } from "lucide-react";
+import {
+  Bell,
+  Check,
+  Download,
+  Headphones,
+  Keyboard,
+  Library as LibraryIcon,
+  Loader2,
+  LogOut,
+  Moon,
+  Palette,
+  Settings as SettingsIcon,
+  Sun,
+} from "lucide-react";
 import { api } from "@/api/client";
 import type { QualityOption, Settings } from "@/api/types";
 import { Button } from "@/components/ui/button";
@@ -150,7 +163,44 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
         <SettingsIcon className="h-7 w-7" /> Settings
       </h1>
 
-      <Section title="Downloads" description="Where and how your music is saved.">
+      <Section
+        title="Playback"
+        icon={Headphones}
+        description="Streaming quality, output device, and the equalizer all run through the native audio engine."
+      >
+        <Field
+          label="Streaming quality"
+          hint="Used when playing a track that isn't downloaded. Only tiers your subscription supports appear."
+        >
+          <select
+            value={
+              // Clamp the stored value against the filtered list so a
+              // stale "hi_res_lossless" pref doesn't show an off-list
+              // value after a subscription downgrade.
+              qualities.some((q) => q.value === ui.streamingQuality)
+                ? ui.streamingQuality
+                : qualities[0]?.value ?? "low_320k"
+            }
+            onChange={(e) =>
+              ui.set({ streamingQuality: e.target.value as StreamingQuality })
+            }
+            className="h-10 rounded-md border border-input bg-secondary px-3 text-sm"
+          >
+            {qualities.map((q) => (
+              <option key={q.value} value={q.value}>
+                {q.label} — {q.bitrate}
+              </option>
+            ))}
+          </select>
+        </Field>
+        <AudioEngineFields />
+      </Section>
+
+      <Section
+        title="Downloads"
+        icon={Download}
+        description="Where and how your music is saved to disk."
+      >
         <Field label="Output folder">
           <Input
             value={settings.output_dir}
@@ -161,7 +211,7 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
 
         <Field
           label="Default quality"
-          hint="Used for any download that doesn't override it. Your account must support the selected quality."
+          hint="Used for any download that doesn't override it. Your subscription must support the selected quality."
         >
           <select
             value={settings.quality}
@@ -220,62 +270,32 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
       </Section>
 
       <Section
-        title="Display"
-        description="Local-only preferences — stored on this device, not synced to Tidal."
+        title="Library"
+        icon={LibraryIcon}
+        description="What shows up in your library and whether the app talks to Tidal."
       >
-        <Field label="Theme">
-          <ThemePicker value={ui.theme} onChange={(t) => ui.set({ theme: t })} />
-        </Field>
-        <Field
-          label="Streaming quality"
-          hint="Quality used when playing a track that isn't downloaded. Only tiers your subscription supports appear here."
-        >
-          <select
-            value={
-              // Clamp the stored value against the filtered list so a
-              // stale "hi_res_lossless" pref doesn't show an off-list
-              // value after a subscription downgrade.
-              qualities.some((q) => q.value === ui.streamingQuality)
-                ? ui.streamingQuality
-                : qualities[0]?.value ?? "low_320k"
-            }
-            onChange={(e) =>
-              ui.set({ streamingQuality: e.target.value as StreamingQuality })
-            }
-            className="h-10 rounded-md border border-input bg-secondary px-3 text-sm"
-          >
-            {qualities.map((q) => (
-              <option key={q.value} value={q.value}>
-                {q.label} — {q.bitrate}
-              </option>
-            ))}
-          </select>
-        </Field>
         <Toggle
           checked={ui.offlineOnly}
           onChange={(v) => ui.set({ offlineOnly: v })}
           label="Show only downloaded tracks in lists"
         />
-      </Section>
-
-
-
-      <Section
-        title="Offline mode"
-        description="Browse and play music already on this device without signing in to Tidal. Search, explore, and anything that needs a live session are hidden while offline mode is on."
-      >
         <Toggle
           checked={settings.offline_mode}
           onChange={(v) => patch({ offline_mode: v })}
-          label="Work offline"
+          label="Work offline (hide search, explore, anything needing Tidal)"
         />
       </Section>
 
-      <AudioEngineSection />
+      <Section title="Appearance" icon={Palette}>
+        <Field label="Theme">
+          <ThemePicker value={ui.theme} onChange={(t) => ui.set({ theme: t })} />
+        </Field>
+      </Section>
 
       <Section
         title="Notifications"
-        description="Show a desktop notification when a batch of downloads finishes. Your browser will prompt for permission the first time a download completes after this is on."
+        icon={Bell}
+        description="Desktop notification when a batch of downloads finishes. The browser will prompt for permission the first time it fires."
       >
         <Toggle
           checked={settings.notify_on_complete}
@@ -286,9 +306,13 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
 
       <LastFmSection />
 
-      <Section title="Keyboard shortcuts" description="Speed up your navigation.">
+      <Section
+        title="Keyboard shortcuts"
+        icon={Keyboard}
+        description="Window must be focused for these to fire. Media keys (Play/Pause/Next/Prev) also work globally — the app listens for them even when minimized."
+      >
         <ShortcutRow keys={["⌘", "K"]} label="Focus search" />
-        <ShortcutRow keys={["Space"]} label="Play / pause preview" />
+        <ShortcutRow keys={["Space"]} label="Play / pause" />
         <ShortcutRow keys={["Shift", "→"]} label="Next track" />
         <ShortcutRow keys={["Shift", "←"]} label="Previous track" />
         <ShortcutRow keys={["M"]} label="Mute / unmute" />
@@ -324,17 +348,22 @@ function SaveStatus({ status }: { status: SaveStatus }) {
 function Section({
   title,
   description,
+  icon: Icon,
   children,
 }: {
   title: string;
   description?: string;
+  icon?: typeof Bell;
   children: React.ReactNode;
 }) {
   return (
-    <section className="mb-10 flex flex-col gap-5 rounded-lg border border-border/50 bg-card/40 p-6">
+    <section className="mb-6 flex flex-col gap-5 rounded-lg border border-border/50 bg-card/40 p-6">
       <div>
-        <h2 className="text-lg font-semibold">{title}</h2>
-        {description && <p className="text-sm text-muted-foreground">{description}</p>}
+        <h2 className="flex items-center gap-2 text-lg font-semibold">
+          {Icon && <Icon className="h-4 w-4 text-muted-foreground" />}
+          {title}
+        </h2>
+        {description && <p className="mt-0.5 text-sm text-muted-foreground">{description}</p>}
       </div>
       {children}
     </section>
@@ -423,13 +452,16 @@ function ThemePicker({
  * and both are persisted in the backend settings.json so a relaunch
  * keeps the user's sound + device.
  *
- * Preset dropdown just picks one of libvlc's 18 built-ins and lets
- * the backend resolve to per-band amplitudes (so "Rock" renders the
+ * Rendered as Fields (no outer Section) so they compose into the
+ * parent Playback section alongside the streaming-quality picker.
+ *
+ * Preset dropdown picks one of libvlc's 18 built-ins and lets the
+ * backend resolve to per-band amplitudes (so "Rock" renders the
  * matching slider curve immediately). Manual slider changes POST the
- * full band array with `preamp` = null — `null` means "leave preamp
- * at libvlc's default" vs. an explicit number.
+ * full band array with `preamp` = null ("leave preamp at libvlc's
+ * default" vs. an explicit number).
  */
-function AudioEngineSection() {
+function AudioEngineFields() {
   const toast = useToast();
   const [eq, setEq] = useState<{
     bands: number[];
@@ -455,7 +487,7 @@ function AudioEngineSection() {
         setEq(e);
         setDevices(d);
       } catch {
-        /* libvlc not available — section just stays empty */
+        /* libvlc not available — fields stay hidden */
       }
     })();
     return () => {
@@ -517,10 +549,7 @@ function AudioEngineSection() {
   };
 
   return (
-    <Section
-      title="Audio"
-      description="Equalizer and output device run through the native audio engine. Tidal's own app has neither."
-    >
+    <>
       <Field label="Output device">
         <select
           value={devices.current}
@@ -582,7 +611,7 @@ function AudioEngineSection() {
           </div>
         </div>
       </Field>
-    </Section>
+    </>
   );
 }
 
