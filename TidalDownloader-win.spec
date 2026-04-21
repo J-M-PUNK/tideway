@@ -37,6 +37,11 @@ datas = [
 if _version_file.is_file():
     datas.append((str(_version_file), "."))
 
+# Tray icon asset.
+_tray_icon = repo_root / "assets" / "tray-icon.png"
+if _tray_icon.is_file():
+    datas.append((str(_tray_icon), "assets"))
+
 binaries = []
 
 # Bundle libvlc + plugins so the native audio engine (Atmos / MQA /
@@ -103,6 +108,10 @@ hiddenimports = [
     "pynput",
     "pynput.keyboard",
     "pynput.keyboard._win32",
+    # Tray icon (Shell_NotifyIcon on Windows).
+    "pystray",
+    "pystray._win32",
+    "PIL.Image",
 ]
 
 a = Analysis(

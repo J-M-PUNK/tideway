@@ -46,6 +46,12 @@ datas = [
 if _version_file.is_file():
     datas.append((str(_version_file), "."))
 
+# Tray icon asset — desktop.py's _find_tray_icon() probes
+# <_MEIPASS>/assets/tray-icon.png first.
+_tray_icon = repo_root / "assets" / "tray-icon.png"
+if _tray_icon.is_file():
+    datas.append((str(_tray_icon), "assets"))
+
 binaries = []
 
 # Bundle libvlc so the native audio engine works on machines without
@@ -100,6 +106,11 @@ hiddenimports = [
     "Quartz",
     "AppKit",
     "Foundation",
+    # Tray icon (NSStatusItem on macOS). pystray's darwin backend
+    # pulls AppKit + pyobjc bridges via dynamic import.
+    "pystray",
+    "pystray._darwin",
+    "PIL.Image",
 ]
 
 a = Analysis(
