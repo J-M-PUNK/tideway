@@ -23,6 +23,13 @@ block_cipher = None
 repo_root = Path(SPECPATH).resolve()
 dist_dir = repo_root / "web" / "dist"
 
+# Single-source version read from the repo-root VERSION file so the
+# spec's Info.plist, the FastAPI /api/version endpoint, and the
+# frontend update-check banner all agree. Defaults to "0.0.0" if the
+# file is missing (keeps the build running on a fresh checkout).
+_version_file = repo_root / "VERSION"
+APP_VERSION = _version_file.read_text().strip() if _version_file.is_file() else "0.0.0"
+
 if not dist_dir.is_dir():
     raise SystemExit(
         f"web/dist not found at {dist_dir}. Run "
@@ -32,6 +39,12 @@ if not dist_dir.is_dir():
 datas = [
     (str(dist_dir), "web/dist"),
 ]
+
+# Ship the VERSION file so server.py's _read_app_version() can find it
+# when running frozen. Lives at the bundle root; spec path "." stages
+# into <bundle>/Contents/Frameworks at runtime (that's _MEIPASS).
+if _version_file.is_file():
+    datas.append((str(_version_file), "."))
 
 binaries = []
 
@@ -154,8 +167,8 @@ app = BUNDLE(
         "LSUIElement": False,
         "CFBundleName": "Tidal Downloader",
         "CFBundleDisplayName": "Tidal Downloader",
-        "CFBundleShortVersionString": "1.0.0",
-        "CFBundleVersion": "1.0.0",
+        "CFBundleShortVersionString": APP_VERSION,
+        "CFBundleVersion": APP_VERSION,
         # Required by pywebview's WKWebView backend on modern macOS.
         "NSHighResolutionCapable": True,
     },

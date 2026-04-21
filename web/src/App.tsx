@@ -3,6 +3,7 @@ import { BrowserRouter, Navigate, Route, Routes, useLocation } from "react-route
 import { Loader2 } from "lucide-react";
 import { Sidebar } from "@/components/Sidebar";
 import { NavBar } from "@/components/NavBar";
+import { UpdateBanner } from "@/components/UpdateBanner";
 import { NowPlaying } from "@/components/NowPlaying";
 import { QueuePanel } from "@/components/QueuePanel";
 import { LyricsPanel } from "@/components/LyricsPanel";
@@ -348,6 +349,7 @@ function Shell({
             offline={offline}
             onSignInRequested={onSignInRequested}
           />
+          <UpdateBanner />
           <div ref={fadeRef} className="animate-route px-8 py-6">
           <ErrorBoundary resetKey={location.pathname}>
           <Routes>

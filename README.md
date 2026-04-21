@@ -1,8 +1,37 @@
 # Tidal Downloader
 
-A Spotify-style web UI for downloading music from Tidal. FastAPI backend wraps
-the existing Python download pipeline; a Vite + React + Tailwind + shadcn/ui
-frontend provides the UI.
+A Spotify-style desktop client for Tidal with downloads, Last.fm scrobbling,
+listening stats, native audio engine (libvlc), equalizer, output-device picker,
+global media keys, and more. FastAPI backend wraps the download pipeline +
+libvlc playback; a Vite + React + Tailwind frontend provides the UI inside a
+pywebview window.
+
+## Install (released builds)
+
+Head to [Releases](https://github.com/YOUR_USERNAME/tidal-downloader/releases)
+and grab the latest:
+
+- **macOS** — `TidalDownloader-macOS.zip`. Unzip, drag the .app to
+  `/Applications`.
+- **Windows** — `TidalDownloader-Windows.zip`. Unzip anywhere, run
+  `TidalDownloader.exe` from the folder.
+
+### Why does the OS warn me on first launch?
+
+The builds aren't code-signed — signing requires paid developer certificates
+(Apple $99/yr, Microsoft $200+/yr) that aren't worth it for an open-source
+hobby project. Both OSes show a scary-looking warning once; after you open
+the app the first time, you won't see it again.
+
+- **macOS Gatekeeper** — first launch: right-click (or Control-click) the
+  `.app` → **Open** → confirm **Open** in the dialog. After that, normal
+  double-click works forever.
+- **Windows SmartScreen** — on first run: click **More info** in the blue
+  dialog, then **Run anyway**.
+
+If you prefer to verify the build yourself, clone the repo and follow
+**Run it from source** below — PyInstaller produces the same bundle you'd
+download from Releases.
 
 ## Stack
 
@@ -12,7 +41,7 @@ frontend provides the UI.
   primitives + React Router.
 - **Realtime:** Server-Sent Events for download progress.
 
-## Run it
+## Run it from source
 
 First time only:
 

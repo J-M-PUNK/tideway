@@ -1,0 +1,166 @@
+name: Release
+
+# Trigger on any pushed tag that looks like a version (v0.2.0, v1.0.0-rc1,
+# etc). Manual dispatch is also supported so you can rebuild without
+# cutting a new tag — useful when CI flaked.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to build (e.g. v0.2.0). Leave blank to build HEAD."
+        required: false
+
+jobs:
+  # -------------------------------------------------------------------
+  # macOS .app bundle. Produces TidalDownloader-macOS.zip containing
+  # the .app — users drag it to /Applications. Unsigned / unnotarized
+  # so first-launch shows Gatekeeper's "cannot be verified" warning;
+  # README tells them to right-click → Open.
+  # -------------------------------------------------------------------
+  build-macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Install VLC
+        # spec file copies libvlc.dylib + plugins out of /Applications/VLC.app
+        # at build time. `--cask` because VLC ships as a .app, not a brew
+        # formula.
+        run: brew install --cask vlc
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build web bundle
+        working-directory: web
+        run: |
+          npm ci
+          npm run build
+
+      - name: Run PyInstaller
+        run: pyinstaller TidalDownloader-mac.spec --noconfirm
+
+      - name: Zip .app
+        # `ditto` preserves HFS resource forks / symlinks that the
+        # .app bundle relies on. `zip -r` would corrupt plugin
+        # symlinks inside libvlc's dylib tree.
+        run: |
+          cd dist
+          ditto -c -k --sequesterRsrc --keepParent TidalDownloader.app \
+            TidalDownloader-macOS.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TidalDownloader-macOS
+          path: dist/TidalDownloader-macOS.zip
+          if-no-files-found: error
+
+  # -------------------------------------------------------------------
+  # Windows onedir bundle. Produces TidalDownloader-Windows.zip with
+  # the full dist/TidalDownloader/ folder inside. Users unzip and run
+  # TidalDownloader.exe. SmartScreen warning on first launch; README
+  # covers "More info → Run anyway."
+  # -------------------------------------------------------------------
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Install VLC
+        # Chocolatey already preinstalled on GitHub's Windows runners.
+        # Defaults to C:\Program Files\VideoLAN\VLC — matches the
+        # lookup order in TidalDownloader-win.spec.
+        run: choco install vlc -y --no-progress
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build web bundle
+        working-directory: web
+        shell: bash
+        run: |
+          npm ci
+          npm run build
+
+      - name: Run PyInstaller
+        run: pyinstaller TidalDownloader-win.spec --noconfirm
+
+      - name: Zip dist folder
+        # Compress-Archive is built-in on windows-latest — no need to
+        # shell out to 7zip. `-CompressionLevel Optimal` trims ~20% off
+        # the archive vs. the default Fastest.
+        shell: pwsh
+        run: |
+          Compress-Archive -Path dist/TidalDownloader/* `
+            -DestinationPath dist/TidalDownloader-Windows.zip `
+            -CompressionLevel Optimal
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: TidalDownloader-Windows
+          path: dist/TidalDownloader-Windows.zip
+          if-no-files-found: error
+
+  # -------------------------------------------------------------------
+  # Attach the artifacts to the GitHub Release. Only runs on a real
+  # tag push — manual dispatch still produces the zips as workflow
+  # artifacts but doesn't create a release.
+  # -------------------------------------------------------------------
+  publish:
+    needs: [build-macos, build-windows]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: TidalDownloader-macOS
+          path: artifacts
+      - uses: actions/download-artifact@v4
+        with:
+          name: TidalDownloader-Windows
+          path: artifacts
+
+      - name: Create / update release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            artifacts/TidalDownloader-macOS.zip
+            artifacts/TidalDownloader-Windows.zip
+          generate_release_notes: true
+          draft: false
+          # Mark tags containing a hyphen (v0.2.0-rc1 etc.) as
+          # prereleases automatically.
+          prerelease: ${{ contains(github.ref_name, '-') }}

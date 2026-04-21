@@ -735,6 +735,116 @@ def register_focus_callback(fn: Callable[[], None]) -> None:
     _focus_callback = fn
 
 
+# ---------------------------------------------------------------------------
+# App version + update check
+# ---------------------------------------------------------------------------
+
+# Read from repo-root VERSION at startup. Same file the mac spec's
+# Info.plist reads from, so everything agrees. When running frozen
+# (packaged), _MEIPASS is the Resources root — VERSION lives at the
+# bundle root via the spec's datas entry.
+def _read_app_version() -> str:
+    candidates = []
+    if getattr(sys, "frozen", False):
+        meipass = Path(getattr(sys, "_MEIPASS", ""))
+        if meipass.is_dir():
+            candidates.append(meipass / "VERSION")
+    candidates.append(Path(__file__).resolve().parent / "VERSION")
+    for p in candidates:
+        try:
+            if p.is_file():
+                v = p.read_text().strip()
+                if v:
+                    return v
+        except Exception:
+            continue
+    return "0.0.0"
+
+
+APP_VERSION = _read_app_version()
+
+# GitHub repo we check for the newest release. Public, unauthenticated —
+# rate limit is 60/hour per IP which is plenty for a startup-time probe.
+_UPDATE_REPO = "YOUR_USERNAME/tidal-downloader"
+
+# Cache the latest-release lookup so mashing F5 in the frontend doesn't
+# burn the GitHub rate limit. 1 hour TTL — update checks don't need to
+# be realtime.
+_update_cache: dict = {}
+_update_cache_lock = threading.Lock()
+_UPDATE_CACHE_TTL_SEC = 3600.0
+
+
+def _parse_semver(v: str) -> tuple[int, ...]:
+    """Parse 'v1.2.3' / '1.2.3' / '1.2.3-beta' → (1, 2, 3). Tags that
+    don't parse get (0,) so they always compare as older than a real
+    version — intentional; lets us ignore dev / pre-release tags."""
+    s = v.strip().lstrip("vV")
+    # Strip any pre-release / build-metadata suffix for the comparison.
+    for sep in ("-", "+"):
+        idx = s.find(sep)
+        if idx >= 0:
+            s = s[:idx]
+    parts: list[int] = []
+    for chunk in s.split("."):
+        try:
+            parts.append(int(chunk))
+        except ValueError:
+            return (0,)
+    return tuple(parts) if parts else (0,)
+
+
+@app.get("/api/version")
+def app_version() -> dict:
+    return {"version": APP_VERSION}
+
+
+@app.get("/api/update-check")
+def update_check() -> dict:
+    """Compare the running app's version against the latest GitHub
+    Release. Returns {available, latest, url, notes} for the UI banner.
+    Cached so repeated frontend probes don't spam GitHub's API."""
+    now = time.monotonic()
+    with _update_cache_lock:
+        cached = _update_cache.get("latest")
+        if cached and now - cached[0] < _UPDATE_CACHE_TTL_SEC:
+            return cached[1]
+
+    payload: dict = {
+        "available": False,
+        "current": APP_VERSION,
+        "latest": None,
+        "url": None,
+        "notes": None,
+    }
+    try:
+        import urllib.request
+
+        req = urllib.request.Request(
+            f"https://api.github.com/repos/{_UPDATE_REPO}/releases/latest",
+            headers={"Accept": "application/vnd.github+json"},
+        )
+        with urllib.request.urlopen(req, timeout=4) as resp:  # noqa: S310
+            data = json.load(resp)
+        latest_tag = (data.get("tag_name") or "").strip()
+        latest_url = data.get("html_url") or None
+        latest_notes = data.get("body") or None
+        if latest_tag:
+            payload["latest"] = latest_tag
+            payload["url"] = latest_url
+            payload["notes"] = latest_notes
+            if _parse_semver(latest_tag) > _parse_semver(APP_VERSION):
+                payload["available"] = True
+    except Exception:
+        # Offline / rate-limited / repo private — silently report no
+        # update so the UI doesn't flash an error on every startup.
+        pass
+
+    with _update_cache_lock:
+        _update_cache["latest"] = (now, payload)
+    return payload
+
+
 @app.get("/api/health")
 def health() -> dict:
     """Liveness probe AND single-instance detection marker.
