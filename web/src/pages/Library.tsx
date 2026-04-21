@@ -181,10 +181,7 @@ export function Library({ onDownload }: { onDownload: OnDownload }) {
     // because the tags aren't meaningful at their level.
     if (format !== "all" && (type === "albums" || type === "tracks")) {
       base = base.filter((item) =>
-        matchesFormat(
-          item as { audio_modes?: string[]; media_tags?: string[] },
-          format,
-        ),
+        matchesFormat(item as { media_tags?: string[] }, format),
       );
     }
     if (sort === "alpha") {
@@ -198,9 +195,7 @@ export function Library({ onDownload }: { onDownload: OnDownload }) {
   const showFormatFilter =
     (type === "albums" || type === "tracks") &&
     data != null &&
-    hasAnyFormatTags(
-      data as Array<{ audio_modes?: string[]; media_tags?: string[] }>,
-    );
+    hasAnyFormatTags(data as Array<{ media_tags?: string[] }>);
 
   return (
     <div>

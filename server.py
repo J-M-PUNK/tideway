@@ -610,10 +610,11 @@ def track_to_dict(t) -> dict:
     track_mix_id = (
         mixes.get("TRACK_MIX") if isinstance(mixes, dict) else None
     )
-    # `audio_modes` — e.g. ['DOLBY_ATMOS'], ['SONY_360RA'], ['STEREO'].
-    # `media_metadata_tags` — e.g. ['HIRES_LOSSLESS'], ['LOSSLESS'],
-    # ['MQA']. Library / search filter chips read these directly.
-    audio_modes = _first(lambda: t.audio_modes) or []
+    # media_metadata_tags — e.g. ['HIRES_LOSSLESS'] or ['LOSSLESS']. The
+    # Library / search format filter + download-dropdown badge use this
+    # to tell hi-res releases from CD-res. We don't surface audio_modes
+    # (DOLBY_ATMOS / SONY_360RA) — Tidal won't serve those streams to
+    # our client_id anyway.
     media_tags = _first(lambda: t.media_metadata_tags) or []
     return {
         "kind": "track",
@@ -630,14 +631,12 @@ def track_to_dict(t) -> dict:
         } if album else None,
         "share_url": _first(lambda: t.share_url),
         "track_mix_id": track_mix_id,
-        "audio_modes": [m for m in audio_modes if m] if audio_modes else [],
         "media_tags": [m for m in media_tags if m] if media_tags else [],
     }
 
 
 def album_to_dict(a) -> dict:
     release_date = _first(lambda: a.release_date)
-    audio_modes = _first(lambda: a.audio_modes) or []
     media_tags = _first(lambda: a.media_metadata_tags) or []
     return {
         "kind": "album",
@@ -656,8 +655,8 @@ def album_to_dict(a) -> dict:
         # Copyright line, usually "℗ 2024 <Label>" — we show it at the
         # bottom of the album page the way Tidal does.
         "copyright": _first(lambda: a.copyright) or None,
-        # Format tags for the library / search filter chip row.
-        "audio_modes": [m for m in audio_modes if m] if audio_modes else [],
+        # Format tags for the library / search filter chip row +
+        # download-dropdown Max/Lossless annotation.
         "media_tags": [m for m in media_tags if m] if media_tags else [],
     }
 

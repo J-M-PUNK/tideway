@@ -66,46 +66,32 @@ interface Props {
   iconOnly?: boolean;
   className?: string;
   onOpenChange?: (open: boolean) => void;
-  /** Optional — when supplied, each quality option gets a small
-   *  annotation showing what codec the user will actually get for
-   *  THIS track at that tier. Removes the "Max" ambiguity (Max could
-   *  mean Dolby Atmos, MQA, hi-res FLAC, or plain lossless depending
-   *  on the track). */
-  audioModes?: string[];
+  /** Optional — when supplied, the Max tier shows a small badge
+   *  saying whether the user will actually get hi-res FLAC for THIS
+   *  track or a duplicate of the Lossless stream. */
   mediaTags?: string[];
 }
 
 /**
- * Map a quality tier + this track's Tidal format tags → what the
- * user will actually receive FROM OUR CLIENT. Returns null when the
- * tier is unambiguous (Low / Normal are always AAC).
+ * Does this track benefit from the Max tier? Returns a short tag —
+ *   "Hi-Res FLAC"      track actually ships at 24-bit → Max gives you it
+ *   "Same as Lossless" CD-res only → no reason to pick Max
+ * null for all other quality tiers.
  *
- * Immersive-audio tags (Dolby Atmos / Sony 360 RA / MQA) exist on the
- * catalog metadata, but Tidal only serves those streams to client_ids
- * on their authorized-partner list. Our PKCE session gets a stereo
- * FLAC downmix regardless of what the track is tagged as. The labels
- * below reflect what we actually get back, not what Tidal advertises.
+ * Immersive audio (Dolby Atmos / Sony 360 / MQA) isn't surfaced: Tidal
+ * only streams those to authorized-partner client_ids, and our PKCE
+ * session always gets a stereo FLAC downmix. Exposing the distinction
+ * would just mislead users.
  */
 function effectiveFormatLabel(
   quality: string,
-  modes: string[] | undefined,
   tags: string[] | undefined,
 ): string | null {
-  if (!modes && !tags) return null;
-  const M = new Set((modes ?? []).map((x) => x.toUpperCase()));
-  const T = new Set((tags ?? []).map((x) => x.toUpperCase()));
-  const immersive =
-    M.has("DOLBY_ATMOS") || M.has("SONY_360RA") || T.has("MQA");
-  if (quality === "hi_res_lossless") {
-    if (immersive) return "Stereo downmix";
-    if (T.has("HIRES_LOSSLESS")) return "Hi-Res FLAC";
-    if (T.has("LOSSLESS")) return "Same as Lossless";
-    return null;
-  }
-  if (quality === "high_lossless") {
-    if (T.has("LOSSLESS") || T.has("HIRES_LOSSLESS") || immersive) return "FLAC CD";
-    return null;
-  }
+  if (quality !== "hi_res_lossless") return null;
+  if (!tags || tags.length === 0) return null;
+  const T = new Set(tags.map((x) => x.toUpperCase()));
+  if (T.has("HIRES_LOSSLESS")) return "Hi-Res FLAC";
+  if (T.has("LOSSLESS")) return "Same as Lossless";
   return null;
 }
 
@@ -119,7 +105,6 @@ export function DownloadButton({
   iconOnly,
   className,
   onOpenChange,
-  audioModes,
   mediaTags,
 }: Props) {
   const qualities = useQualities() ?? [];
@@ -168,7 +153,7 @@ export function DownloadButton({
         <DropdownMenuSeparator />
         {qualities.map((q) => {
           const isDefault = defaultQuality === q.value;
-          const effective = effectiveFormatLabel(q.value, audioModes, mediaTags);
+          const effective = effectiveFormatLabel(q.value, mediaTags);
           return (
             <DropdownMenuItem
               key={q.value}

@@ -198,7 +198,6 @@ export function TrackMenuItems({
       <DownloadSubmenu
         parts={parts}
         onPick={(quality) => onDownload("track", track.id, quality)}
-        audioModes={track.audio_modes}
         mediaTags={track.media_tags}
       />
       {track.album && !onAlbumPage && (
@@ -358,12 +357,10 @@ function AddToPlaylistSubmenu({
 function DownloadSubmenu({
   parts,
   onPick,
-  audioModes,
   mediaTags,
 }: {
   parts: MenuParts;
   onPick: (quality?: string) => void;
-  audioModes?: string[];
   mediaTags?: string[];
 }) {
   const { Item, Separator, Sub, SubTrigger, SubContent } = parts;
@@ -377,7 +374,7 @@ function DownloadSubmenu({
         <Item onSelect={() => onPick()}>Use default quality</Item>
         <Separator />
         {qualities.map((q) => {
-          const effective = trackEffectiveFormat(q.value, audioModes, mediaTags);
+          const effective = trackEffectiveFormat(q.value, mediaTags);
           return (
             <Item key={q.value} onSelect={() => onPick(q.value)}>
               <div className="flex flex-col">
@@ -409,27 +406,16 @@ function DownloadSubmenu({
  */
 function trackEffectiveFormat(
   quality: string,
-  modes: string[] | undefined,
   tags: string[] | undefined,
 ): string | null {
-  // Keep this in sync with DownloadButton.effectiveFormatLabel — the
-  // TrackMenu lives inside a Radix submenu that unmounts with its
-  // parent, so sharing the helper across files isn't worth the
-  // module-boundary juggling.
-  if (!modes && !tags) return null;
-  const M = new Set((modes ?? []).map((x) => x.toUpperCase()));
-  const T = new Set((tags ?? []).map((x) => x.toUpperCase()));
-  const immersive =
-    M.has("DOLBY_ATMOS") || M.has("SONY_360RA") || T.has("MQA");
-  if (quality === "hi_res_lossless") {
-    if (immersive) return "Stereo downmix";
-    if (T.has("HIRES_LOSSLESS")) return "Hi-Res FLAC";
-    if (T.has("LOSSLESS")) return "Same as Lossless";
-    return null;
-  }
-  if (quality === "high_lossless") {
-    if (T.has("LOSSLESS") || T.has("HIRES_LOSSLESS") || immersive) return "FLAC CD";
-    return null;
-  }
+  // Keep in sync with DownloadButton.effectiveFormatLabel. Only Max
+  // gets annotated; only tracks that actually ship as hi-res FLAC
+  // benefit from it. Immersive-audio tags aren't surfaced — see the
+  // note on the DownloadButton helper.
+  if (quality !== "hi_res_lossless") return null;
+  if (!tags || tags.length === 0) return null;
+  const T = new Set(tags.map((x) => x.toUpperCase()));
+  if (T.has("HIRES_LOSSLESS")) return "Hi-Res FLAC";
+  if (T.has("LOSSLESS")) return "Same as Lossless";
   return null;
 }
