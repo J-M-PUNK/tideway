@@ -8,7 +8,11 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/components/toast";
 import { useOfflineMode } from "@/hooks/useOfflineMode";
-import { useUiPreferences, type ThemeMode } from "@/hooks/useUiPreferences";
+import {
+  useUiPreferences,
+  type StreamingQuality,
+  type ThemeMode,
+} from "@/hooks/useUiPreferences";
 import { Skeleton } from "@/components/Skeletons";
 import { cn } from "@/lib/utils";
 
@@ -221,6 +225,23 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
       >
         <Field label="Theme">
           <ThemePicker value={ui.theme} onChange={(t) => ui.set({ theme: t })} />
+        </Field>
+        <Field
+          label="Streaming quality"
+          hint="Quality used when playing a track that isn't downloaded. Higher tiers use more bandwidth and need a subscription that supports them."
+        >
+          <select
+            value={ui.streamingQuality}
+            onChange={(e) =>
+              ui.set({ streamingQuality: e.target.value as StreamingQuality })
+            }
+            className="h-10 rounded-md border border-input bg-secondary px-3 text-sm"
+          >
+            <option value="low_96k">Low — 96 kbps AAC</option>
+            <option value="low_320k">Normal — 320 kbps AAC</option>
+            <option value="high_lossless">Lossless — FLAC CD</option>
+            <option value="hi_res_lossless">Max — FLAC up to 24-bit</option>
+          </select>
         </Field>
         <Toggle
           checked={ui.offlineOnly}
