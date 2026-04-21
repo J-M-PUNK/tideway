@@ -56,6 +56,7 @@ import { StatsPage } from "@/pages/StatsPage";
 import { AlbumDetail } from "@/pages/AlbumDetail";
 import { ArtistDetail } from "@/pages/ArtistDetail";
 import { MixDetail } from "@/pages/MixDetail";
+import { RadioPage } from "@/pages/RadioPage";
 import { PlaylistDetail } from "@/pages/PlaylistDetail";
 import { Downloads } from "@/pages/Downloads";
 import { SettingsPage } from "@/pages/SettingsPage";
@@ -382,6 +383,14 @@ function Shell({
                 <Route path="/artist/:id" element={<ArtistDetail onDownload={enqueue} />} />
                 <Route path="/playlist/:id" element={<PlaylistDetail onDownload={enqueue} />} />
                 <Route path="/mix/:id" element={<MixDetail onDownload={enqueue} />} />
+                <Route
+                  path="/radio/artist/:id"
+                  element={<RadioPage kind="artist" onDownload={enqueue} />}
+                />
+                <Route
+                  path="/radio/track/:id"
+                  element={<RadioPage kind="track" onDownload={enqueue} />}
+                />
                 <Route path="/feed" element={<FeedPage onDownload={enqueue} />} />
                 <Route path="/history" element={<HistoryPage onDownload={enqueue} />} />
                 <Route path="/stats" element={<StatsPage />} />

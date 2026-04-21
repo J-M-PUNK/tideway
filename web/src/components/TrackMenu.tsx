@@ -1,5 +1,5 @@
 import type { ComponentType, ReactNode } from "react";
-import { Link, useLocation } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import {
   CheckSquare,
   Disc3,
@@ -128,6 +128,7 @@ export function TrackMenuItems({
   // do nothing, which is noise. Match by pathname since useParams
   // isn't available when TrackMenu is rendered outside a Route.
   const { pathname } = useLocation();
+  const navigate = useNavigate();
   const onAlbumPage =
     !!track.album && pathname === `/album/${encodeURIComponent(track.album.id)}`;
   const onArtistPage =
@@ -136,31 +137,18 @@ export function TrackMenuItems({
 
   const playQueue = context && context.length ? context : [track];
 
-  const startRadio = async () => {
-    try {
-      const radio = await api.trackRadio(track.id);
-      if (!radio.length) {
-        toast.show({
-          kind: "info",
-          title: "No radio",
-          description: "Tidal doesn't have a radio for this track.",
-        });
-        return;
-      }
-      // Seed first so the user keeps hearing what they were on.
-      actions.play(track, [track, ...radio]);
-      toast.show({
-        kind: "success",
-        title: "Radio started",
-        description: `${radio.length} tracks queued`,
-      });
-    } catch (err) {
-      toast.show({
-        kind: "error",
-        title: "Couldn't start radio",
-        description: err instanceof Error ? err.message : String(err),
-      });
-    }
+  const startRadio = () => {
+    // Navigate to a dedicated radio page — matches how every major
+    // streaming service surfaces "radio" (Tidal / Spotify / Apple
+    // Music all route you to a page-level queue you can see and
+    // interact with, not an invisible background queue). The page
+    // autoplays on mount. Pass seed metadata via router state so
+    // the hero renders correctly without a second fetch.
+    const seed = {
+      name: track.name,
+      cover: track.album?.cover ?? null,
+    };
+    navigate(`/radio/track/${track.id}`, { state: { seed } });
   };
 
   const shareUrl = track.share_url || `https://tidal.com/browse/track/${track.id}`;
