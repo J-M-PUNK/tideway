@@ -7,6 +7,7 @@ export function useAuth() {
     logged_in: false,
     username: null,
     avatar: null,
+    user_id: null,
     loading: true,
   });
 
@@ -15,7 +16,13 @@ export function useAuth() {
       const s = await api.auth.status();
       setState({ ...s, loading: false });
     } catch {
-      setState({ logged_in: false, username: null, avatar: null, loading: false });
+      setState({
+        logged_in: false,
+        username: null,
+        avatar: null,
+        user_id: null,
+        loading: false,
+      });
     }
   }, []);
 

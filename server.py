@@ -606,7 +606,15 @@ def artist_to_dict(a) -> dict:
 
 
 def playlist_to_dict(p) -> dict:
-    creator_name = _first(lambda: p.creator.name) if _first(lambda: p.creator) else None
+    creator_obj = _first(lambda: p.creator)
+    creator_name = _first(lambda: creator_obj.name) if creator_obj else None
+    # Pass creator_id through even when it's 0 so the frontend can
+    # inspect it; the frontend filters out the 0-sentinel (Tidal
+    # editorial accounts) before rendering a profile link. Kept raw
+    # so future debugging can tell "no creator" from "editorial
+    # creator".
+    creator_id_raw = getattr(creator_obj, "id", None) if creator_obj else None
+    creator_id = str(creator_id_raw) if creator_id_raw is not None else None
     return {
         "kind": "playlist",
         "id": str(p.id),
@@ -616,6 +624,7 @@ def playlist_to_dict(p) -> dict:
         "duration": _first(lambda: p.duration) or 0,
         "cover": _image_url(p, 750),
         "creator": creator_name,
+        "creator_id": creator_id,
         "owned": tidal.owns_playlist(p),
         "share_url": _first(lambda: p.share_url),
     }
@@ -697,10 +706,24 @@ def focus_window(request: Request) -> dict:
 @app.get("/api/auth/status")
 def auth_status() -> dict:
     logged_in = _is_logged_in()
+    user_id: Optional[str] = None
+    if logged_in:
+        try:
+            u = getattr(tidal.session, "user", None)
+            if u is not None:
+                raw = getattr(u, "id", None)
+                # 0 is Tidal's sentinel for non-user creators; treat
+                # as "unknown" so the profile link / self-compare
+                # logic doesn't try to resolve it.
+                if raw is not None and int(raw) > 0:
+                    user_id = str(raw)
+        except Exception:
+            user_id = None
     return {
         "logged_in": logged_in,
         "username": tidal.get_user_info() if logged_in else None,
         "avatar": tidal.get_user_avatar_url() if logged_in else None,
+        "user_id": user_id,
     }
 
 
@@ -1148,6 +1171,399 @@ def auth_logout() -> dict:
     except Exception:
         pass
     return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# User profiles + follow graph
+#
+# tidalapi only wraps `session.get_user(id)` and the logged-in user's
+# own playlists. The rest of the social surface (arbitrary-user
+# playlists, follow/unfollow, followers/following) isn't in the
+# library, so we hit Tidal's v2 REST directly. These endpoints are
+# undocumented — we keep every call in a try/except and return empty
+# lists on error so the UI can degrade gracefully.
+# ---------------------------------------------------------------------------
+
+
+def _user_image_url(user) -> Optional[str]:
+    """Best-available profile picture URL for a tidalapi User. The
+    `image()` helper requires one of a fixed set of sizes; pick the
+    mid-large one and fall back to smaller if the larger 404s."""
+    for size in (600, 210, 100):
+        try:
+            return user.image(size)
+        except Exception:
+            continue
+    return None
+
+
+def user_to_dict(u) -> dict:
+    first = getattr(u, "first_name", None) or ""
+    last = getattr(u, "last_name", None) or ""
+    full = (first + " " + last).strip() or getattr(u, "username", None) or ""
+    return {
+        "id": str(u.id),
+        "name": full,
+        "first_name": first,
+        "last_name": last,
+        "picture": _user_image_url(u),
+    }
+
+
+@app.get("/api/user/{user_id}")
+def user_profile(user_id: int) -> dict:
+    """Fetch a user's profile. Tries multiple endpoints because
+    Tidal's v1 `/users/{id}` 404s for users who've restricted their
+    top-level profile visibility — even when their public playlists
+    and follower graph are still exposed via separate endpoints.
+
+    When every path fails, we still return a stub with the numeric
+    id + empty fields so the frontend can render the profile page
+    with its playlists / followers / following sections (which use
+    their own endpoints and often succeed when the top-level one
+    doesn't). Better UX than blanking the whole page.
+    """
+    _require_auth()
+    # Path 1: tidalapi's v1 `/users/{id}` — works for most profiles.
+    try:
+        u = tidal.session.get_user(user_id)
+        return user_to_dict(u)
+    except Exception:
+        pass
+    # Path 2: v2 profile endpoint — some users only expose metadata
+    # via the newer profile surface. Shape differs; parse defensively.
+    try:
+        resp = tidal.session.request.request(
+            "GET",
+            f"user-profiles/{user_id}",
+            base_url=tidal.session.config.api_v2_location,
+        )
+        if resp.status_code < 400:
+            data = resp.json()
+            attrs = (
+                data.get("data", {}).get("attributes")
+                if isinstance(data, dict)
+                else None
+            ) or (data if isinstance(data, dict) else {})
+            name = (
+                attrs.get("name")
+                or f"{attrs.get('firstName') or ''} {attrs.get('lastName') or ''}".strip()
+            )
+            picture = attrs.get("pictureUrl") or attrs.get("picture")
+            if name or picture:
+                return {
+                    "id": str(user_id),
+                    "name": name or f"User {user_id}",
+                    "first_name": attrs.get("firstName") or "",
+                    "last_name": attrs.get("lastName") or "",
+                    "picture": picture,
+                }
+    except Exception:
+        pass
+    # Path 3: harvest profile info from the user's public playlists.
+    # Tidal embeds the full creator object (firstName, lastName,
+    # picture uuid) on every playlist in the public-playlists
+    # response, so we can synthesize a profile even when both direct
+    # user endpoints have refused us. Worst case (no playlists) we
+    # fall through to a numeric-only stub.
+    try:
+        resp = tidal.session.request.request(
+            "GET",
+            f"user-playlists/{user_id}/public",
+            params={"limit": 1, "offset": 0},
+        )
+        if resp.status_code < 400:
+            payload = resp.json()
+            items = payload.get("items") if isinstance(payload, dict) else None
+            if isinstance(items, list) and items:
+                first_item = items[0] if isinstance(items[0], dict) else {}
+                pl = first_item.get("playlist") or first_item
+                creator_data = pl.get("creator") if isinstance(pl, dict) else None
+                if isinstance(creator_data, dict):
+                    fn = creator_data.get("firstName") or ""
+                    ln = creator_data.get("lastName") or ""
+                    name = (f"{fn} {ln}").strip() or creator_data.get("name")
+                    # Picture UUIDs follow the same pattern as every
+                    # other Tidal image — hyphens → slashes, size
+                    # suffix. tidalapi's User.image() helper uses
+                    # 100/210/600 as valid sizes; 600 gives a clean
+                    # avatar without being huge.
+                    pic_uuid = creator_data.get("picture")
+                    picture = (
+                        f"https://resources.tidal.com/images/{pic_uuid.replace('-', '/')}/600x600.jpg"
+                        if pic_uuid
+                        else None
+                    )
+                    return {
+                        "id": str(user_id),
+                        "name": name or f"User {user_id}",
+                        "first_name": fn,
+                        "last_name": ln,
+                        "picture": picture,
+                    }
+    except Exception:
+        pass
+    # Final fallback: numeric-only stub. Follower / following /
+    # playlist sections still populate on the frontend.
+    return {
+        "id": str(user_id),
+        "name": f"User {user_id}",
+        "first_name": "",
+        "last_name": "",
+        "picture": None,
+    }
+
+
+@app.get("/api/user/{user_id}/playlists")
+def user_playlists(user_id: int, limit: int = 50) -> list[dict]:
+    """Public playlists created by a user. Works for both the logged-
+    in user (goes via tidalapi) and arbitrary users (v2 REST). Returns
+    an empty list rather than 4xx when the user has no public
+    playlists so the UI doesn't have to special-case it."""
+    _require_auth()
+    try:
+        me = getattr(tidal.session, "user", None)
+        if me is not None and int(getattr(me, "id", 0) or 0) == int(user_id):
+            # Logged-in user — use the tidalapi helper, which also
+            # returns private playlists (fine for your own profile).
+            playlists = me.public_playlists(limit=limit, offset=0)
+            return [playlist_to_dict(p) for p in playlists or []]
+    except Exception:
+        pass
+    # Arbitrary user — v2 REST.
+    try:
+        resp = tidal.session.request.request(
+            "GET",
+            f"user-playlists/{user_id}/public",
+            params={"limit": limit, "offset": 0},
+        )
+        if resp.status_code == 404:
+            return []
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception:
+        return []
+    items = payload.get("items") if isinstance(payload, dict) else payload
+    if not isinstance(items, list):
+        return []
+    out: list[dict] = []
+    for row in items:
+        if not isinstance(row, dict):
+            continue
+        # Tidal nests the playlist under `playlist` in some response
+        # shapes and not others; try both.
+        pl = row.get("playlist") if isinstance(row.get("playlist"), dict) else row
+        if not isinstance(pl, dict):
+            continue
+        pid = pl.get("uuid") or pl.get("id")
+        if not pid:
+            continue
+        # Parse inline — the response already carries everything we
+        # display on a card (name, track count, duration, cover UUID,
+        # creator). Avoids N network calls to `session.playlist(pid)`.
+        creator_data = pl.get("creator") if isinstance(pl.get("creator"), dict) else None
+        creator_name = None
+        creator_id = None
+        if creator_data:
+            first = creator_data.get("firstName") or ""
+            last = creator_data.get("lastName") or ""
+            creator_name = (first + " " + last).strip() or creator_data.get("name")
+            cid = creator_data.get("id")
+            if cid is not None:
+                creator_id = str(cid)
+        cover_uuid = (
+            pl.get("squareImage")
+            or pl.get("image")
+            or (pl.get("imageCover") or [{}])[0].get("url") if isinstance(pl.get("imageCover"), list) else None
+        )
+        cover = (
+            _cover_url_from_uuid(cover_uuid, 750)
+            if isinstance(cover_uuid, str)
+            else None
+        )
+        out.append(
+            {
+                "kind": "playlist",
+                "id": str(pid),
+                "name": pl.get("title") or pl.get("name") or "",
+                "description": pl.get("description") or "",
+                "num_tracks": pl.get("numberOfTracks") or pl.get("num_tracks") or 0,
+                "duration": pl.get("duration") or 0,
+                "cover": cover,
+                "creator": creator_name,
+                "creator_id": creator_id,
+                "owned": False,
+                "share_url": pl.get("url")
+                or (
+                    f"https://tidal.com/browse/playlist/{pid}"
+                    if pid
+                    else None
+                ),
+            }
+        )
+    return out
+
+
+def _picture_url_from_uuid(uuid: Optional[str], size: int = 210) -> Optional[str]:
+    """Turn a raw Tidal picture UUID into a CDN URL. Matches the
+    format `tidalapi.User.image()` builds (hyphens → slashes, size
+    suffix)."""
+    if not uuid or not isinstance(uuid, str):
+        return None
+    return f"https://resources.tidal.com/images/{uuid.replace('-', '/')}/{size}x{size}.jpg"
+
+
+def _follow_list(path: str, limit: int) -> list[dict]:
+    """Parse a followers/following response into user_to_dict rows.
+
+    Critical perf fix: the v1/v2 response already embeds `firstName`,
+    `lastName`, and `picture` UUID on every row, so we build the row
+    directly instead of round-tripping `session.get_user(id)` for each
+    one. For a popular profile the old path did ~200 serial Tidal
+    calls just to render the list.
+    """
+    try:
+        resp = tidal.session.request.request(
+            "GET", path, params={"limit": limit, "offset": 0}
+        )
+        if resp.status_code == 404:
+            return []
+        resp.raise_for_status()
+        payload = resp.json()
+    except Exception:
+        return []
+    items = payload.get("items") if isinstance(payload, dict) else payload
+    if not isinstance(items, list):
+        return []
+    out: list[dict] = []
+    for row in items:
+        if not isinstance(row, dict):
+            continue
+        user_data = row.get("profile") or row.get("user") or row
+        if not isinstance(user_data, dict):
+            continue
+        user_id = user_data.get("userId") or user_data.get("id")
+        if not user_id:
+            continue
+        first = user_data.get("firstName") or ""
+        last = user_data.get("lastName") or ""
+        name = (first + " " + last).strip()
+        out.append(
+            {
+                "id": str(user_id),
+                "name": name or f"User {user_id}",
+                "first_name": first,
+                "last_name": last,
+                "picture": _picture_url_from_uuid(user_data.get("picture")),
+            }
+        )
+    return out
+
+
+@app.get("/api/user/{user_id}/counts")
+def user_social_counts(user_id: int) -> dict:
+    """Cheap two-count endpoint for profile headers — fetch the raw
+    payloads in parallel threads and read `totalNumberOfItems` off
+    each instead of materializing two full user lists just to call
+    `.length` on them.
+    """
+    _require_auth()
+
+    def _count(path: str) -> int:
+        try:
+            resp = tidal.session.request.request(
+                "GET", path, params={"limit": 1, "offset": 0}
+            )
+            if resp.status_code >= 400:
+                return 0
+            data = resp.json()
+            total = (
+                data.get("totalNumberOfItems")
+                if isinstance(data, dict)
+                else None
+            )
+            if isinstance(total, int):
+                return total
+            items = data.get("items") if isinstance(data, dict) else None
+            return len(items) if isinstance(items, list) else 0
+        except Exception:
+            return 0
+
+    return {
+        "followers": _count(f"users/{user_id}/followers"),
+        "following": _count(f"users/{user_id}/following"),
+    }
+
+
+@app.get("/api/user/{user_id}/followers")
+def user_followers(user_id: int, limit: int = 50) -> list[dict]:
+    _require_auth()
+    return _follow_list(f"users/{user_id}/followers", limit)
+
+
+@app.get("/api/user/{user_id}/following")
+def user_following(user_id: int, limit: int = 50) -> list[dict]:
+    _require_auth()
+    return _follow_list(f"users/{user_id}/following", limit)
+
+
+@app.post("/api/user/{user_id}/follow")
+def follow_user(user_id: int) -> dict:
+    """Follow a user. Endpoint is undocumented — we try the pattern
+    Tidal's own web client uses. Returns `{ok: bool, error?: str}`."""
+    _require_auth()
+    try:
+        resp = tidal.session.request.request(
+            "PUT", f"users/{user_id}/follow", params={}
+        )
+        if resp.status_code >= 400:
+            # Try the POST form — some tenants use one, some the other.
+            resp = tidal.session.request.request(
+                "POST", f"users/{user_id}/follow", params={}
+            )
+        if resp.status_code >= 400:
+            return {
+                "ok": False,
+                "error": f"Tidal returned HTTP {resp.status_code}",
+            }
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True}
+
+
+@app.delete("/api/user/{user_id}/follow")
+def unfollow_user(user_id: int) -> dict:
+    _require_auth()
+    try:
+        resp = tidal.session.request.request(
+            "DELETE", f"users/{user_id}/follow", params={}
+        )
+        if resp.status_code >= 400:
+            return {
+                "ok": False,
+                "error": f"Tidal returned HTTP {resp.status_code}",
+            }
+    except Exception as exc:
+        return {"ok": False, "error": str(exc)}
+    return {"ok": True}
+
+
+@app.get("/api/me/following/status/{user_id}")
+def is_following(user_id: int) -> dict:
+    """Whether the logged-in user is following `user_id`. We check by
+    paginating through the first page of /me/following — cheap enough
+    for a profile page load."""
+    _require_auth()
+    try:
+        me = tidal.session.user
+        my_id = int(getattr(me, "id", 0) or 0)
+        if not my_id:
+            return {"following": False}
+        followers = _follow_list(f"users/{my_id}/following", 200)
+        target = str(user_id)
+        return {"following": any(u.get("id") == target for u in followers)}
+    except Exception:
+        return {"following": False}
 
 
 # ---------------------------------------------------------------------------
