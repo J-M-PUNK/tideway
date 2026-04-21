@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Compass, Disc3, Download, Folder, Heart, Library as LibraryIcon, List, ListMusic, Loader2, Plus, User } from "lucide-react";
+import { Compass, Disc3, Download, Folder, Heart, LayoutGrid, Library as LibraryIcon, List, ListMusic, Loader2, Menu, Plus, User } from "lucide-react";
 import { Link, Navigate, useParams } from "react-router-dom";
 import { api } from "@/api/client";
 import type { Album, Artist, Playlist, PlaylistFolder, Track } from "@/api/types";
@@ -10,6 +10,7 @@ import { Button } from "@/components/ui/button";
 import { CreateFolderDialog } from "@/components/CreateFolderDialog";
 import { CreatePlaylistDialog } from "@/components/CreatePlaylistDialog";
 import { MediaCard } from "@/components/MediaCard";
+import { MediaListRow } from "@/components/MediaListRow";
 import { TrackList } from "@/components/TrackList";
 import { EmptyState } from "@/components/EmptyState";
 import { GridSkeleton, TrackListSkeleton } from "@/components/Skeletons";
@@ -26,6 +27,26 @@ import { cn } from "@/lib/utils";
 
 type Section = "albums" | "artists" | "playlists" | "tracks";
 type Sort = "recent" | "alpha";
+type View = "grid" | "list";
+
+const VIEW_KEY_PREFIX = "tidal-downloader:library-view:";
+
+function loadView(section: Section): View {
+  try {
+    const v = localStorage.getItem(VIEW_KEY_PREFIX + section);
+    return v === "list" ? "list" : "grid";
+  } catch {
+    return "grid";
+  }
+}
+
+function saveView(section: Section, view: View): void {
+  try {
+    localStorage.setItem(VIEW_KEY_PREFIX + section, view);
+  } catch {
+    /* storage full or disabled */
+  }
+}
 
 const META: Record<Section, { title: string; icon: typeof Disc3; emptyHint: string }> = {
   albums: {
@@ -68,6 +89,19 @@ export function Library({ onDownload }: { onDownload: OnDownload }) {
   const [loadError, setLoadError] = useState<Error | null>(null);
   const [filter, setFilter] = useState("");
   const [sort, setSort] = useState<Sort>("recent");
+  const [view, setView] = useState<View>(() => loadView(type));
+
+  // Rehydrate the view pref when switching sections — each section has
+  // its own persisted preference (albums can be grid while playlists
+  // is list, matching streaming-service UX).
+  useEffect(() => {
+    setView(loadView(type));
+  }, [type]);
+
+  const changeView = (v: View) => {
+    setView(v);
+    saveView(type, v);
+  };
 
   useEffect(() => {
     setData(null);
@@ -171,6 +205,7 @@ export function Library({ onDownload }: { onDownload: OnDownload }) {
             className="h-9 max-w-xs"
           />
           <SortMenu sort={sort} onSort={setSort} />
+          {type !== "tracks" && <ViewToggle view={view} onChange={changeView} />}
         </div>
       </div>
 
@@ -238,11 +273,23 @@ export function Library({ onDownload }: { onDownload: OnDownload }) {
               </Grid>
             </div>
           )}
-          <Grid>
-            {(filtered as (Album | Artist | Playlist)[]).map((item) => (
-              <MediaCard key={item.id} item={item} onDownload={onDownload} />
-            ))}
-          </Grid>
+          {view === "grid" ? (
+            <Grid>
+              {(filtered as (Album | Artist | Playlist)[]).map((item) => (
+                <MediaCard key={item.id} item={item} onDownload={onDownload} />
+              ))}
+            </Grid>
+          ) : (
+            <div className="flex flex-col gap-0.5">
+              {(filtered as (Album | Artist | Playlist)[]).map((item) => (
+                <MediaListRow
+                  key={item.id}
+                  item={item}
+                  onDownload={onDownload}
+                />
+              ))}
+            </div>
+          )}
         </>
       )}
     </div>
@@ -298,6 +345,49 @@ function DownloadAllTracks({ tracks }: { tracks: Track[] }) {
       {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
       Download all
     </Button>
+  );
+}
+
+function ViewToggle({
+  view,
+  onChange,
+}: {
+  view: View;
+  onChange: (v: View) => void;
+}) {
+  return (
+    <div className="inline-flex rounded-md border border-border bg-secondary p-0.5">
+      <button
+        type="button"
+        onClick={() => onChange("grid")}
+        title="Grid view"
+        aria-label="Grid view"
+        aria-pressed={view === "grid"}
+        className={cn(
+          "flex h-8 w-8 items-center justify-center rounded-sm transition-colors",
+          view === "grid"
+            ? "bg-background text-foreground"
+            : "text-muted-foreground hover:text-foreground",
+        )}
+      >
+        <LayoutGrid className="h-4 w-4" />
+      </button>
+      <button
+        type="button"
+        onClick={() => onChange("list")}
+        title="List view"
+        aria-label="List view"
+        aria-pressed={view === "list"}
+        className={cn(
+          "flex h-8 w-8 items-center justify-center rounded-sm transition-colors",
+          view === "list"
+            ? "bg-background text-foreground"
+            : "text-muted-foreground hover:text-foreground",
+        )}
+      >
+        <Menu className="h-4 w-4" />
+      </button>
+    </div>
   );
 }
 
