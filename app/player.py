@@ -1,0 +1,444 @@
+"""Native audio engine backed by libvlc.
+
+The frontend HTML `<audio>` element can't decode Dolby Atmos (E-AC-3 JOC),
+MQA, or Sony 360 Reality Audio — so users with HiFi Plus / Max tier
+subscriptions silently get stereo downmixes through the old path.
+
+This module owns a single VLCPlayer singleton that:
+
+- Accepts a track (by Tidal id + quality preference) and resolves a
+  DASH MPD manifest through tidalapi, writes it to a temp file, and
+  loads it into libvlc.
+- Exposes play / pause / resume / stop / seek / volume via thin methods.
+- Emits state-change and position events that the HTTP layer streams
+  over SSE to the frontend.
+
+Queue / shuffle / repeat / sleep-timer all stay on the frontend — the
+backend only plays the single track it was told to. When a track ends
+naturally, we fire `track_ended` and the frontend picks the next one.
+For gapless, the frontend pre-loads the next track's manifest ahead of
+time; VLC's media swap on track-end is effectively instant (low-ms)
+because the next media has already been resolved.
+"""
+from __future__ import annotations
+
+import base64
+import logging
+import os
+import tempfile
+import threading
+import time
+from dataclasses import dataclass, field
+from typing import Callable, Optional
+
+import tidalapi
+
+log = logging.getLogger(__name__)
+
+# Lazy import so the rest of the app can import this module even on
+# machines where libvlc isn't installed yet (e.g. dev containers).
+# `is_available()` tells callers whether to actually use the engine.
+try:
+    import vlc  # type: ignore
+
+    _VLC_IMPORT_ERROR: Optional[str] = None
+except Exception as exc:  # pragma: no cover - env-dependent
+    vlc = None  # type: ignore
+    _VLC_IMPORT_ERROR = str(exc)
+
+
+def is_available() -> bool:
+    return vlc is not None
+
+
+# ---------------------------------------------------------------------------
+# State types
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PlayerSnapshot:
+    """Plain-JSON view of the player, sent to the frontend over SSE."""
+    state: str  # "idle" | "loading" | "playing" | "paused" | "ended" | "error"
+    track_id: Optional[str]
+    position_ms: int
+    duration_ms: int
+    volume: int  # 0..100
+    muted: bool
+    error: Optional[str] = None
+    # Echoed back for the frontend to reconcile async commands with the
+    # version of state they apply to. Bumped on every state-changing
+    # method call.
+    seq: int = 0
+
+
+# ---------------------------------------------------------------------------
+# Engine
+# ---------------------------------------------------------------------------
+
+
+class VLCPlayer:
+    """Thread-safe libvlc wrapper.
+
+    Thread safety: libvlc callbacks fire on its own threads. All state
+    mutations go through `_lock`. Public methods are HTTP-handler-safe.
+    Listeners (`subscribe`) are called on the mutation thread — the SSE
+    layer should queue snapshots rather than do anything heavy in-line.
+    """
+
+    def __init__(self, session_getter: Callable[[], tidalapi.Session]):
+        if vlc is None:
+            raise RuntimeError(
+                f"libvlc not available: {_VLC_IMPORT_ERROR}"
+            )
+        self._session_getter = session_getter
+        # --no-video: we don't have a window. --quiet: libvlc's stderr
+        # is chatty. --intf dummy: prevent it opening its own UI.
+        self._instance = vlc.Instance("--no-video", "--quiet", "--intf", "dummy")
+        self._player = self._instance.media_player_new()
+        self._lock = threading.RLock()
+        self._listeners: list[Callable[[PlayerSnapshot], None]] = []
+        self._seq = 0
+
+        self._current_track_id: Optional[str] = None
+        self._current_duration_ms: int = 0
+        self._current_mpd_path: Optional[str] = None
+        self._state: str = "idle"
+        self._last_error: Optional[str] = None
+
+        # Attach event manager. VLC fires these on its worker threads.
+        em = self._player.event_manager()
+        em.event_attach(vlc.EventType.MediaPlayerPlaying, self._on_playing)
+        em.event_attach(vlc.EventType.MediaPlayerPaused, self._on_paused)
+        em.event_attach(vlc.EventType.MediaPlayerStopped, self._on_stopped)
+        em.event_attach(vlc.EventType.MediaPlayerEndReached, self._on_ended)
+        em.event_attach(vlc.EventType.MediaPlayerEncounteredError, self._on_error)
+        em.event_attach(vlc.EventType.MediaPlayerTimeChanged, self._on_time)
+
+    # --- public API --------------------------------------------------------
+
+    def subscribe(self, listener: Callable[[PlayerSnapshot], None]) -> Callable[[], None]:
+        """Register a snapshot listener. Returns an unsubscribe fn."""
+        with self._lock:
+            self._listeners.append(listener)
+
+        def _unsub() -> None:
+            with self._lock:
+                try:
+                    self._listeners.remove(listener)
+                except ValueError:
+                    pass
+
+        return _unsub
+
+    def load(self, track_id: str, quality: Optional[str] = None) -> PlayerSnapshot:
+        """Resolve a stream for `track_id` and load it into the player.
+
+        Does NOT start playback; the caller must call `play()` after.
+        Splitting load and play lets the frontend pre-resolve the next
+        track during the tail of the current one (gapless).
+        """
+        with self._lock:
+            self._transition("loading", track_id=track_id)
+        try:
+            mpd_path, duration_s = self._resolve_stream(track_id, quality)
+        except Exception as exc:
+            log.exception("stream resolution failed for %s", track_id)
+            with self._lock:
+                self._last_error = str(exc)
+                self._transition("error")
+            return self.snapshot()
+        with self._lock:
+            # Clean up the previous temp file now that a new one is ready.
+            old = self._current_mpd_path
+            self._current_track_id = track_id
+            self._current_duration_ms = int(duration_s * 1000) if duration_s else 0
+            self._current_mpd_path = mpd_path
+            self._last_error = None
+            media = self._instance.media_new(mpd_path)
+            self._player.set_media(media)
+            # VLC keeps its own ref; free ours.
+            media.release()
+            self._bump_seq()
+        _safe_unlink(old)
+        return self.snapshot()
+
+    def play(self) -> PlayerSnapshot:
+        with self._lock:
+            self._player.play()
+            self._bump_seq()
+        return self.snapshot()
+
+    def pause(self) -> PlayerSnapshot:
+        with self._lock:
+            self._player.set_pause(1)
+            self._bump_seq()
+        return self.snapshot()
+
+    def resume(self) -> PlayerSnapshot:
+        with self._lock:
+            self._player.set_pause(0)
+            self._bump_seq()
+        return self.snapshot()
+
+    def stop(self) -> PlayerSnapshot:
+        """Pause + clear current-track state.
+
+        We intentionally do NOT call libvlc's `media_player_stop()`.
+        On macOS (libvlc 3.x) stop() blocks for multiple seconds on
+        network streams while the demuxer unwinds, and during that
+        window any other call into the player (even `get_time()`)
+        deadlocks. Pausing instead releases the audio device
+        immediately and gets us the user-visible behavior we want —
+        silence + "nothing playing." When a new track loads next,
+        `set_media()` replaces the old media cleanly.
+        """
+        with self._lock:
+            try:
+                self._player.set_pause(1)
+            except Exception:
+                pass
+            vol = 0
+            muted = False
+            try:
+                vol = int(self._player.audio_get_volume() or 0)
+                muted = bool(self._player.audio_get_mute())
+            except Exception:
+                pass
+            self._transition("idle")
+            self._current_track_id = None
+            old = self._current_mpd_path
+            self._current_mpd_path = None
+            self._current_duration_ms = 0
+            self._bump_seq()
+            snap = PlayerSnapshot(
+                state="idle",
+                track_id=None,
+                position_ms=0,
+                duration_ms=0,
+                volume=vol,
+                muted=muted,
+                error=None,
+                seq=self._seq,
+            )
+        # Temp-file cleanup happens outside the lock — unlink is cheap
+        # and VLC may still hold the file briefly, which is fine on
+        # macOS (unlinked-but-open files stay alive until close).
+        _safe_unlink(old)
+        return snap
+
+    def seek(self, fraction: float) -> PlayerSnapshot:
+        """Seek to `fraction` (0..1) of the track."""
+        fraction = max(0.0, min(1.0, float(fraction)))
+        with self._lock:
+            self._player.set_position(fraction)
+            self._bump_seq()
+        return self.snapshot()
+
+    def set_volume(self, volume: int) -> PlayerSnapshot:
+        volume = max(0, min(100, int(volume)))
+        with self._lock:
+            self._player.audio_set_volume(volume)
+            self._bump_seq()
+        return self.snapshot()
+
+    def set_muted(self, muted: bool) -> PlayerSnapshot:
+        with self._lock:
+            self._player.audio_set_mute(1 if muted else 0)
+            self._bump_seq()
+        return self.snapshot()
+
+    def snapshot(self) -> PlayerSnapshot:
+        with self._lock:
+            # In idle state there's no current media; asking libvlc for
+            # position / duration returns -1 (or sometimes faults) —
+            # return zeros instead of poking the player.
+            if self._state == "idle":
+                pos_ms = 0
+            else:
+                try:
+                    t = self._player.get_time()
+                    pos_ms = int(t) if t is not None and t >= 0 else 0
+                except Exception:
+                    pos_ms = 0
+            try:
+                vol = int(self._player.audio_get_volume() or 0)
+            except Exception:
+                vol = 0
+            try:
+                muted = bool(self._player.audio_get_mute())
+            except Exception:
+                muted = False
+            return PlayerSnapshot(
+                state=self._state,
+                track_id=self._current_track_id,
+                position_ms=pos_ms,
+                duration_ms=self._current_duration_ms,
+                volume=vol,
+                muted=muted,
+                error=self._last_error,
+                seq=self._seq,
+            )
+
+    # --- VLC callbacks (fire on VLC worker threads) ------------------------
+
+    def _on_playing(self, _event: object) -> None:
+        with self._lock:
+            # "idle" means our stop() already tore things down — ignore
+            # late Playing echoes from the previous media. Every other
+            # state (including "loading") is a legitimate predecessor
+            # to "playing".
+            if self._state == "idle":
+                return
+            self._transition("playing")
+        self._emit()
+
+    def _on_paused(self, _event: object) -> None:
+        with self._lock:
+            if self._state == "idle":
+                return
+            self._transition("paused")
+        self._emit()
+
+    def _on_stopped(self, _event: object) -> None:
+        with self._lock:
+            # Only our own stop() moves us to idle; VLC's own stopped
+            # echoes are noise once we've already acted.
+            if self._state == "idle":
+                return
+            self._transition("idle")
+        self._emit()
+
+    def _on_ended(self, _event: object) -> None:
+        with self._lock:
+            if self._state == "idle":
+                return
+            self._transition("ended")
+        self._emit()
+
+    def _on_error(self, _event: object) -> None:
+        with self._lock:
+            if self._state == "idle":
+                return
+            self._last_error = self._last_error or "playback error"
+            self._transition("error")
+        self._emit()
+
+    def _on_time(self, _event: object) -> None:
+        # Position changed. We don't actually emit on every tick —
+        # the HTTP SSE layer polls snapshot() at 4Hz and compares seq.
+        # But we bump seq so the SSE layer notices movement.
+        with self._lock:
+            self._seq += 1
+
+    # --- internals ---------------------------------------------------------
+
+    def _transition(self, state: str, track_id: Optional[str] = None) -> None:
+        self._state = state
+        if track_id is not None:
+            self._current_track_id = track_id
+        self._seq += 1
+
+    def _bump_seq(self) -> None:
+        self._seq += 1
+
+    def _emit(self) -> None:
+        snap = self.snapshot()
+        # Copy the list so a mid-iteration unsubscribe is safe.
+        with self._lock:
+            listeners = list(self._listeners)
+        for listener in listeners:
+            try:
+                listener(snap)
+            except Exception:
+                log.exception("player listener raised")
+
+    def _resolve_stream(
+        self, track_id: str, quality: Optional[str]
+    ) -> tuple[str, Optional[float]]:
+        """Resolve a Tidal track id to a playable local MPD file path.
+
+        Reuses the same code path the downloader uses for PKCE sessions:
+        `track.get_stream().get_stream_manifest()` yields a DASH manifest
+        whose raw content we decode and write to a temp file. libvlc
+        natively parses DASH and will fetch segments as it plays.
+
+        Returns (mpd_path, duration_seconds).
+        """
+        session = self._session_getter()
+        override = None
+        if quality:
+            try:
+                override = tidalapi.Quality[quality]
+            except KeyError:
+                log.warning("unknown quality %r, using session default", quality)
+        original = session.config.quality
+        if override is not None:
+            session.config.quality = override
+        try:
+            track = session.track(int(track_id))
+            stream = track.get_stream()
+            manifest = stream.get_stream_manifest()
+            if getattr(manifest, "is_encrypted", False):
+                raise RuntimeError("encrypted stream — can't decode")
+            raw = getattr(manifest, "manifest", None)
+            if not raw:
+                raise RuntimeError("empty manifest from Tidal")
+            mpd_bytes = (
+                base64.b64decode(raw) if isinstance(raw, str) else raw
+            )
+            fd, mpd_path = tempfile.mkstemp(suffix=".mpd", prefix="tdl-vlc-")
+            try:
+                with os.fdopen(fd, "wb") as f:
+                    f.write(mpd_bytes)
+            except Exception:
+                _safe_unlink(mpd_path)
+                raise
+            duration = getattr(track, "duration", None)
+            return mpd_path, float(duration) if duration else None
+        finally:
+            if override is not None:
+                session.config.quality = original
+
+
+# ---------------------------------------------------------------------------
+# Singleton helpers
+# ---------------------------------------------------------------------------
+
+
+_singleton: Optional[VLCPlayer] = None
+_singleton_lock = threading.Lock()
+
+
+def get_player(session_getter: Callable[[], tidalapi.Session]) -> VLCPlayer:
+    """Lazy singleton. Constructed on first call so importing the module
+    is free even when VLC isn't in use."""
+    global _singleton
+    with _singleton_lock:
+        if _singleton is None:
+            _singleton = VLCPlayer(session_getter)
+        return _singleton
+
+
+def shutdown() -> None:
+    """Stop playback and release the singleton. Safe to call multiple
+    times. Used at process shutdown."""
+    global _singleton
+    with _singleton_lock:
+        if _singleton is not None:
+            try:
+                _singleton.stop()
+            except Exception:
+                pass
+            _singleton = None
+
+
+def _safe_unlink(path: Optional[str]) -> None:
+    if not path:
+        return
+    try:
+        os.unlink(path)
+    except Exception:
+        pass
+
+
