@@ -95,7 +95,7 @@ const INITIAL: PlayerState = {
  * `repeat: "one"` loops the same index. When the user hits Next manually
  * we always advance regardless of repeat mode.
  */
-function pickNextIndex(state: PlayerState, onEnded = false): number | null {
+export function pickNextIndex(state: PlayerState, onEnded = false): number | null {
   if (state.queue.length === 0) return null;
   if (onEnded && state.repeat === "one") return state.queueIndex;
   // Single-track queue gets its own branch: a natural end shouldn't loop
@@ -118,7 +118,7 @@ function pickNextIndex(state: PlayerState, onEnded = false): number | null {
   return null;
 }
 
-function pickPrevIndex(state: PlayerState): number | null {
+export function pickPrevIndex(state: PlayerState): number | null {
   if (state.queue.length === 0) return null;
   if (state.shuffle) {
     if (state.queue.length === 1) return 0;
