@@ -1371,11 +1371,7 @@ def user_playlists(user_id: int, limit: int = 50) -> list[dict]:
             cid = creator_data.get("id")
             if cid is not None:
                 creator_id = str(cid)
-        cover_uuid = (
-            pl.get("squareImage")
-            or pl.get("image")
-            or (pl.get("imageCover") or [{}])[0].get("url") if isinstance(pl.get("imageCover"), list) else None
-        )
+        cover_uuid = pl.get("squareImage") or pl.get("image")
         cover = (
             _cover_url_from_uuid(cover_uuid, 750)
             if isinstance(cover_uuid, str)
@@ -1413,8 +1409,9 @@ def _picture_url_from_uuid(uuid: Optional[str], size: int = 210) -> Optional[str
     return f"https://resources.tidal.com/images/{uuid.replace('-', '/')}/{size}x{size}.jpg"
 
 
-def _follow_list(path: str, limit: int) -> list[dict]:
-    """Parse a followers/following response into user_to_dict rows.
+def _follow_list_page(path: str, limit: int, offset: int = 0) -> list[dict]:
+    """Parse one page of a followers/following response into
+    user_to_dict rows.
 
     Critical perf fix: the v1/v2 response already embeds `firstName`,
     `lastName`, and `picture` UUID on every row, so we build the row
@@ -1424,7 +1421,7 @@ def _follow_list(path: str, limit: int) -> list[dict]:
     """
     try:
         resp = tidal.session.request.request(
-            "GET", path, params={"limit": limit, "offset": 0}
+            "GET", path, params={"limit": limit, "offset": offset}
         )
         if resp.status_code == 404:
             return []
@@ -1458,6 +1455,11 @@ def _follow_list(path: str, limit: int) -> list[dict]:
             }
         )
     return out
+
+
+def _follow_list(path: str, limit: int) -> list[dict]:
+    """Back-compat wrapper for callers that only need the first page."""
+    return _follow_list_page(path, limit=limit, offset=0)
 
 
 @app.get("/api/user/{user_id}/counts")
@@ -1550,18 +1552,35 @@ def unfollow_user(user_id: int) -> dict:
 
 @app.get("/api/me/following/status/{user_id}")
 def is_following(user_id: int) -> dict:
-    """Whether the logged-in user is following `user_id`. We check by
-    paginating through the first page of /me/following — cheap enough
-    for a profile page load."""
+    """Whether the logged-in user is following `user_id`.
+
+    Tidal has no direct "am-I-following" endpoint (probed every plausible
+    shape — 404 on each), so we scan the logged-in user's `following`
+    list. Page through in chunks of 200 with early-exit when we find a
+    match; cap at 2000 entries (10 pages) to bound worst-case latency.
+    False negative above that cap is acceptable — the follow button
+    will just show "Follow" and clicking it silently no-ops the server
+    side (already-following is idempotent on Tidal's end).
+    """
     _require_auth()
     try:
         me = tidal.session.user
         my_id = int(getattr(me, "id", 0) or 0)
         if not my_id:
             return {"following": False}
-        followers = _follow_list(f"users/{my_id}/following", 200)
         target = str(user_id)
-        return {"following": any(u.get("id") == target for u in followers)}
+        page_size = 200
+        hard_cap_pages = 10
+        for page in range(hard_cap_pages):
+            offset = page * page_size
+            rows = _follow_list_page(
+                f"users/{my_id}/following", limit=page_size, offset=offset
+            )
+            if any(u.get("id") == target for u in rows):
+                return {"following": True}
+            if len(rows) < page_size:
+                return {"following": False}
+        return {"following": False}
     except Exception:
         return {"following": False}
 
