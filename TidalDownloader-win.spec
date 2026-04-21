@@ -92,6 +92,11 @@ hiddenimports = [
     "uvicorn.lifespan.on",
     "sse_starlette",
     "webview.platforms.edgechromium",
+    # Global media-key listener. pynput's Windows backend pulls Win32
+    # APIs dynamically; declare the submodule explicitly.
+    "pynput",
+    "pynput.keyboard",
+    "pynput.keyboard._win32",
 ]
 
 a = Analysis(

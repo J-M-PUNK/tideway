@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import subprocess
 import webbrowser
 import sys
@@ -37,6 +38,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
+from app import global_keys as global_keys_mod
 from app import player as native_player
 from app.downloader import DownloadItem, DownloadStatus, Downloader
 from app.http import SESSION
@@ -475,12 +477,32 @@ def _cleanup_part_files(root: Path) -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     broker.bind_loop(asyncio.get_running_loop())
+    _hotkey_bus.bind_loop(asyncio.get_running_loop())
     output_root = Path(settings.output_dir).expanduser()
     _cleanup_part_files(output_root)
     local_index.start_scan(output_root)
+
+    # Start the global media-key listener. Publishes events to
+    # _hotkey_bus → /api/hotkey/events SSE → frontend maps to
+    # usePlayer actions. On macOS, pynput needs Accessibility
+    # permission; when it doesn't have it, start() succeeds but no
+    # events arrive. The user can grant permission later without a
+    # restart (the listener picks it up automatically).
+    stop_hotkeys = None
+    try:
+        port = int(os.environ.get("TIDAL_DL_PORT", "47823"))
+        stop_hotkeys = global_keys_mod.start_global_hotkeys(port)
+    except Exception as exc:
+        print(f"[global-keys] startup failed: {exc}", flush=True)
+
     try:
         yield
     finally:
+        if stop_hotkeys is not None:
+            try:
+                stop_hotkeys()
+            except Exception:
+                pass
         # Close the shared requests session so sockets in its connection pool
         # are released cleanly on reload/shutdown.
         try:
@@ -1840,6 +1862,115 @@ def player_set_output_device(req: _PlayerOutputDeviceRequest) -> dict:
     settings.audio_output_device = req.device_id
     save_settings(settings)
     return {"ok": True, "device_id": settings.audio_output_device}
+
+
+# ---------------------------------------------------------------------------
+# Global media-key event bus
+#
+# Global hotkeys (play-pause / next / previous) fire on a pynput thread
+# in the backend. We publish each to this bus; the frontend subscribes
+# via SSE and runs the corresponding action through its player hook —
+# that way queue/shuffle/repeat decisions stay in the frontend instead
+# of being re-implemented server-side.
+# ---------------------------------------------------------------------------
+
+
+class _HotkeyBus:
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._subscribers: list[asyncio.Queue] = []
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+
+    def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
+        with self._lock:
+            self._loop = loop
+
+    def publish(self, action: str) -> None:
+        """Safe to call from any thread (including pynput's listener
+        thread). Schedules the payload put on the FastAPI event loop."""
+        with self._lock:
+            loop = self._loop
+            subs = list(self._subscribers)
+        if loop is None:
+            return
+        for q in subs:
+            try:
+                loop.call_soon_threadsafe(q.put_nowait, action)
+            except Exception:
+                pass
+
+    def subscribe(self) -> asyncio.Queue:
+        q: asyncio.Queue = asyncio.Queue(maxsize=32)
+        with self._lock:
+            self._subscribers.append(q)
+        return q
+
+    def unsubscribe(self, q: asyncio.Queue) -> None:
+        with self._lock:
+            try:
+                self._subscribers.remove(q)
+            except ValueError:
+                pass
+
+
+_hotkey_bus = _HotkeyBus()
+
+
+def _emit_hotkey(action: str) -> dict:
+    _hotkey_bus.publish(action)
+    return {"ok": True, "action": action}
+
+
+@app.post("/api/hotkey/play_pause")
+def hotkey_play_pause() -> dict:
+    _require_local_access()
+    return _emit_hotkey("play_pause")
+
+
+@app.post("/api/hotkey/next")
+def hotkey_next() -> dict:
+    _require_local_access()
+    return _emit_hotkey("next")
+
+
+@app.post("/api/hotkey/previous")
+def hotkey_previous() -> dict:
+    _require_local_access()
+    return _emit_hotkey("previous")
+
+
+@app.get("/api/hotkey/events")
+async def hotkey_events(request: Request):
+    """SSE stream of hotkey events. The frontend's usePlayer hook
+    subscribes and maps each action onto its own toggle/next/prev
+    so queue state + advance logic stay in one place."""
+    _require_local_access()
+    _hotkey_bus.bind_loop(asyncio.get_running_loop())
+    q = _hotkey_bus.subscribe()
+
+    async def _gen():
+        try:
+            # Initial ping so the frontend knows the subscription is up.
+            yield "data: {\"action\": \"_ready\"}\n\n"
+            while True:
+                if await request.is_disconnected():
+                    break
+                try:
+                    action = await asyncio.wait_for(q.get(), timeout=20.0)
+                except asyncio.TimeoutError:
+                    # Keepalive comment — prevents proxies from closing
+                    # a silent connection.
+                    yield ": keepalive\n\n"
+                    continue
+                yield f"data: {json.dumps({'action': action})}\n\n"
+        finally:
+            _hotkey_bus.unsubscribe(q)
+
+    return StreamingResponse(
+        _gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
 @app.get("/api/player/events")
