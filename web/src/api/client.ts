@@ -216,6 +216,50 @@ export const api = {
       notes: string | null;
     }>("/api/update-check"),
   import: {
+    // Shared across every import source — Spotify / M3U / Deezer all
+    // funnel into this after their own match step. The older
+    // /api/import/spotify/create path still works as a legacy alias.
+    create: (name: string, description: string, trackIds: string[]) =>
+      req<{
+        playlist_id: string;
+        added: number;
+        failed: number;
+        name: string;
+      }>("/api/import/create", {
+        method: "POST",
+        body: JSON.stringify({
+          name,
+          description,
+          track_ids: trackIds,
+        }),
+      }),
+    text: {
+      parse: (text: string) =>
+        req<{
+          rows: {
+            spotify: {
+              name: string;
+              artists: string[];
+              duration_ms: number;
+              isrc: string | null;
+            };
+            match: {
+              tidal_id: string;
+              name: string;
+              artists: string[];
+              duration: number;
+              cover: string | null;
+              confidence: number;
+              reason: string;
+            } | null;
+          }[];
+          total: number;
+          matched: number;
+        }>("/api/import/text/parse", {
+          method: "POST",
+          body: JSON.stringify({ text }),
+        }),
+    },
     spotify: {
       status: () =>
         req<{
