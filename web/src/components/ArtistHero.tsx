@@ -36,6 +36,10 @@ interface Props {
   allAlbums: Album[];
   shareUrl: string;
   onDownload: OnDownload;
+  /** Tidal's ARTIST_MIX id for this artist. When present, the "Artist
+   *  radio" button routes straight to /mix/:id — that's Tidal's
+   *  canonical artist-radio page with composite cover + metadata. */
+  artistMixId?: string | null;
 }
 
 /**
@@ -55,6 +59,7 @@ export function ArtistHero({
   allAlbums,
   shareUrl,
   onDownload,
+  artistMixId,
 }: Props) {
   const cover = imageProxy(picture);
   const { track, playing } = usePlayerMeta();
@@ -127,7 +132,7 @@ export function ArtistHero({
 
           <div className="flex flex-1 items-center justify-end gap-6">
             <FollowToggle artistId={artistId} />
-            <ArtistRadioButton artistId={artistId} />
+            <ArtistRadioButton artistId={artistId} mixId={artistMixId ?? null} />
             <ShareButton shareUrl={shareUrl} />
             <ArtistMoreMenu
               artistId={artistId}
@@ -186,11 +191,24 @@ function FollowToggle({ artistId }: { artistId: string }) {
   );
 }
 
-function ArtistRadioButton({ artistId }: { artistId: string }) {
+function ArtistRadioButton({
+  artistId,
+  mixId,
+}: {
+  artistId: string;
+  mixId: string | null;
+}) {
   const navigate = useNavigate();
+  // Prefer Tidal's canonical mix page when we have a mix id — it
+  // ships with the composite cover art, "Artist Radio" subtitle,
+  // and any other entities Tidal decorates its mixes with. Fall back
+  // to our generic radio page for the rare artist without a mix.
+  const target = mixId
+    ? `/mix/${encodeURIComponent(mixId)}`
+    : `/radio/artist/${artistId}`;
   return (
     <button
-      onClick={() => navigate(`/radio/artist/${artistId}`)}
+      onClick={() => navigate(target)}
       className="flex flex-col items-center gap-1 text-muted-foreground transition-colors hover:text-foreground"
       title="Open artist radio"
     >
