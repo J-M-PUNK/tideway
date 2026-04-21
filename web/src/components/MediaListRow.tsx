@@ -5,6 +5,7 @@ import type { Album, Artist, Playlist } from "@/api/types";
 import type { OnDownload } from "@/api/download";
 import { imageProxy, formatDuration } from "@/lib/utils";
 import { DownloadButton } from "@/components/DownloadButton";
+import { PlayMediaButton } from "@/components/PlayMediaButton";
 
 type Item = Album | Artist | Playlist;
 
@@ -62,21 +63,29 @@ export function MediaListRow({
         </div>
       </div>
       <Trailing item={item} />
-      {onDownload && item.kind !== "artist" && (
+      {item.kind !== "artist" && (
         <div
-          className={`flex-shrink-0 transition-opacity ${
+          className={`flex flex-shrink-0 items-center gap-1 transition-opacity ${
             menuOpen ? "opacity-100" : "opacity-0 group-hover:opacity-100"
           }`}
         >
-          <DownloadButton
+          <PlayMediaButton
             kind={item.kind}
             id={item.id}
-            onPick={onDownload}
-            iconOnly
-            variant="ghost"
-            size="sm"
+            className="h-8 w-8"
             onOpenChange={setMenuOpen}
           />
+          {onDownload && (
+            <DownloadButton
+              kind={item.kind}
+              id={item.id}
+              onPick={onDownload}
+              iconOnly
+              variant="ghost"
+              size="sm"
+              onOpenChange={setMenuOpen}
+            />
+          )}
         </div>
       )}
     </Link>
@@ -91,7 +100,25 @@ function Subtitle({
   onNavigate: (path: string) => void;
 }) {
   if (item.kind === "album") {
-    return <>{item.artists.map((a) => a.name).join(", ")}</>;
+    return (
+      <>
+        {item.artists.map((a, i) => (
+          <span key={a.id}>
+            {i > 0 && ", "}
+            <button
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                onNavigate(`/artist/${a.id}`);
+              }}
+              className="hover:text-foreground hover:underline"
+            >
+              {a.name}
+            </button>
+          </span>
+        ))}
+      </>
+    );
   }
   if (item.kind === "artist") return <>Artist</>;
   const hasCreatorLink =

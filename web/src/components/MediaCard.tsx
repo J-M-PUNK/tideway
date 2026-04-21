@@ -5,6 +5,7 @@ import type { Album, Artist, Playlist } from "@/api/types";
 import type { OnDownload } from "@/api/download";
 import { imageProxy } from "@/lib/utils";
 import { DownloadButton } from "@/components/DownloadButton";
+import { PlayMediaButton } from "@/components/PlayMediaButton";
 
 type Item = Album | Artist | Playlist;
 
@@ -46,22 +47,30 @@ export function MediaCard({
             <Music className="h-10 w-10" />
           </div>
         )}
-        {onDownload && item.kind !== "artist" && (
+        {item.kind !== "artist" && (
           <div
-            className={`absolute bottom-2 right-2 transition-all ${
+            className={`absolute bottom-2 right-2 flex items-center gap-2 transition-all ${
               menuOpen
                 ? "translate-y-0 opacity-100"
                 : "translate-y-2 opacity-0 group-hover:translate-y-0 group-hover:opacity-100"
             }`}
           >
-            <DownloadButton
+            <PlayMediaButton
               kind={item.kind}
               id={item.id}
-              onPick={onDownload}
-              iconOnly
-              className="h-10 w-10 shadow-lg"
+              className="h-10 w-10"
               onOpenChange={setMenuOpen}
             />
+            {onDownload && (
+              <DownloadButton
+                kind={item.kind}
+                id={item.id}
+                onPick={onDownload}
+                iconOnly
+                className="h-10 w-10 shadow-lg"
+                onOpenChange={setMenuOpen}
+              />
+            )}
           </div>
         )}
       </div>
@@ -90,10 +99,29 @@ function Subtitle({
   onNavigate: (path: string) => void;
 }) {
   if (item.kind === "album") {
-    const artists = item.artists.map((a) => a.name).join(", ");
-    const parts = [artists];
-    if (item.year) parts.push(String(item.year));
-    return <>{parts.filter(Boolean).join(" · ")}</>;
+    // Each artist is a button (same pattern the playlist creator uses
+    // below) so clicking navigates to /artist/:id without the outer
+    // card Link swallowing the click.
+    return (
+      <>
+        {item.artists.map((a, i) => (
+          <span key={a.id}>
+            {i > 0 && ", "}
+            <button
+              onClick={(e) => {
+                e.preventDefault();
+                e.stopPropagation();
+                onNavigate(`/artist/${a.id}`);
+              }}
+              className="hover:text-foreground hover:underline"
+            >
+              {a.name}
+            </button>
+          </span>
+        ))}
+        {item.year && <span> · {item.year}</span>}
+      </>
+    );
   }
   if (item.kind === "artist") return <>Artist</>;
   // Playlist — creator may be clickable.
