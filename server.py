@@ -38,6 +38,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
+from app import deezer_import
 from app import global_keys as global_keys_mod
 from app import player as native_player
 from app import playlist_import
@@ -1007,6 +1008,40 @@ class _CreatePlaylistRequest(BaseModel):
 
 class _TextImportRequest(BaseModel):
     text: str
+
+
+class _DeezerImportRequest(BaseModel):
+    source: str  # playlist id OR full Deezer URL
+
+
+@app.post("/api/import/deezer/match")
+def deezer_match(req: _DeezerImportRequest) -> dict:
+    """Fetch a public Deezer playlist by id / URL + match its tracks
+    against Tidal. No OAuth — Deezer's public API serves any playlist
+    that's marked public, which covers 95%+ of what users want to
+    import without the friction of a registered dev app."""
+    _require_auth()
+    pid = deezer_import.parse_playlist_id(req.source)
+    if not pid:
+        raise HTTPException(
+            status_code=400,
+            detail="Couldn't find a Deezer playlist id in the input",
+        )
+    try:
+        playlist = deezer_import.fetch_playlist(pid)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    rows = deezer_import.match_each(tidal.session, playlist["tracks"])
+    matched = sum(1 for r in rows if r["match"] is not None)
+    return {
+        "rows": rows,
+        "total": len(rows),
+        "matched": matched,
+        "playlist": {
+            "name": playlist["name"],
+            "description": playlist["description"],
+        },
+    }
 
 
 @app.post("/api/import/text/parse")
