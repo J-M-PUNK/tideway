@@ -415,7 +415,7 @@ function trackEffectiveFormat(
   if (quality !== "hi_res_lossless") return null;
   if (!tags || tags.length === 0) return null;
   const T = new Set(tags.map((x) => x.toUpperCase()));
-  if (T.has("HIRES_LOSSLESS")) return "Hi-Res FLAC";
-  if (T.has("LOSSLESS")) return "Same as Lossless";
+  if (T.has("HIRES_LOSSLESS")) return "Hi-Res";
+  if (T.has("LOSSLESS")) return "Same as High";
   return null;
 }
