@@ -25,6 +25,7 @@ import type {
   LocalFile,
   Lyrics,
   MixDetail,
+  PlayerSnapshot,
   Playlist,
   PlaylistFolder,
   PlaylistDetail,
@@ -345,6 +346,40 @@ export const api = {
       items: (Album & { released_at: string })[];
       editorial: TidalPage | null;
     }>("/api/feed"),
+  player: {
+    available: () =>
+      req<{ available: boolean }>("/api/player/available"),
+    state: () =>
+      req<PlayerSnapshot>("/api/player/state"),
+    load: (trackId: string, quality?: string) =>
+      req<PlayerSnapshot>("/api/player/load", {
+        method: "POST",
+        body: JSON.stringify({ track_id: trackId, quality }),
+      }),
+    play: () =>
+      req<PlayerSnapshot>("/api/player/play", { method: "POST" }),
+    pause: () =>
+      req<PlayerSnapshot>("/api/player/pause", { method: "POST" }),
+    resume: () =>
+      req<PlayerSnapshot>("/api/player/resume", { method: "POST" }),
+    stop: () =>
+      req<PlayerSnapshot>("/api/player/stop", { method: "POST" }),
+    seek: (fraction: number) =>
+      req<PlayerSnapshot>("/api/player/seek", {
+        method: "POST",
+        body: JSON.stringify({ fraction }),
+      }),
+    volume: (volume: number) =>
+      req<PlayerSnapshot>("/api/player/volume", {
+        method: "POST",
+        body: JSON.stringify({ volume }),
+      }),
+    muted: (muted: boolean) =>
+      req<PlayerSnapshot>("/api/player/muted", {
+        method: "POST",
+        body: JSON.stringify({ muted }),
+      }),
+  },
   downloads: {
     list: () => req<DownloadItem[]>("/api/downloads"),
     enqueue: (kind: ContentKind, id: string, quality?: string) =>

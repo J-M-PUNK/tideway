@@ -85,6 +85,23 @@ export interface PlaylistFolder {
 
 export type LibraryItem = Track | Album | Artist | Playlist;
 
+/**
+ * Snapshot of the native (libvlc) player. The frontend's usePlayer
+ * hook mirrors this into its own React state when the native engine
+ * is on, so the rest of the UI doesn't have to care which engine is
+ * actually driving audio.
+ */
+export interface PlayerSnapshot {
+  state: "idle" | "loading" | "playing" | "paused" | "ended" | "error";
+  track_id: string | null;
+  position_ms: number;
+  duration_ms: number;
+  volume: number;
+  muted: boolean;
+  error: string | null;
+  seq: number;
+}
+
 export interface SearchResponse {
   tracks: Track[];
   albums: Album[];

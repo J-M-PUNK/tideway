@@ -37,6 +37,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
+from app import player as native_player
 from app.downloader import DownloadItem, DownloadStatus, Downloader
 from app.http import SESSION
 from app.lastfm import LastFmClient
@@ -1583,6 +1584,180 @@ def is_following(user_id: int) -> dict:
         return {"following": False}
     except Exception:
         return {"following": False}
+
+
+# ---------------------------------------------------------------------------
+# Native audio player (libvlc backend)
+#
+# The browser `<audio>` element can't decode Atmos / MQA / 360, so this
+# route surface exposes a parallel playback engine driven by libvlc on
+# the server. The frontend is a remote control: it POSTs commands and
+# reads state via GET /api/player/state (one-shot) or subscribes to
+# GET /api/player/events (SSE at ~4Hz during playback).
+# ---------------------------------------------------------------------------
+
+
+class _PlayerLoadRequest(BaseModel):
+    track_id: str
+    quality: Optional[str] = None
+
+
+class _PlayerSeekRequest(BaseModel):
+    fraction: float  # 0..1
+
+
+class _PlayerVolumeRequest(BaseModel):
+    volume: int  # 0..100
+
+
+class _PlayerMutedRequest(BaseModel):
+    muted: bool
+
+
+def _native_player():
+    if not native_player.is_available():
+        raise HTTPException(
+            status_code=503,
+            detail="Native audio engine unavailable (libvlc not loaded)",
+        )
+    return native_player.get_player(lambda: tidal.session)
+
+
+def _snapshot_dict(snap: native_player.PlayerSnapshot) -> dict:
+    return {
+        "state": snap.state,
+        "track_id": snap.track_id,
+        "position_ms": snap.position_ms,
+        "duration_ms": snap.duration_ms,
+        "volume": snap.volume,
+        "muted": snap.muted,
+        "error": snap.error,
+        "seq": snap.seq,
+    }
+
+
+@app.get("/api/player/available")
+def player_available() -> dict:
+    """Feature-probe endpoint. Frontend reads this once at startup to
+    decide whether to offer the native-engine toggle in settings."""
+    return {"available": native_player.is_available()}
+
+
+@app.get("/api/player/state")
+def player_state() -> dict:
+    _require_auth()
+    return _snapshot_dict(_native_player().snapshot())
+
+
+@app.post("/api/player/load")
+def player_load(req: _PlayerLoadRequest) -> dict:
+    _require_auth()
+    snap = _native_player().load(req.track_id, quality=req.quality)
+    return _snapshot_dict(snap)
+
+
+@app.post("/api/player/play")
+def player_play() -> dict:
+    _require_auth()
+    return _snapshot_dict(_native_player().play())
+
+
+@app.post("/api/player/pause")
+def player_pause() -> dict:
+    _require_auth()
+    return _snapshot_dict(_native_player().pause())
+
+
+@app.post("/api/player/resume")
+def player_resume() -> dict:
+    _require_auth()
+    return _snapshot_dict(_native_player().resume())
+
+
+@app.post("/api/player/stop")
+def player_stop() -> dict:
+    _require_auth()
+    return _snapshot_dict(_native_player().stop())
+
+
+@app.post("/api/player/seek")
+def player_seek(req: _PlayerSeekRequest) -> dict:
+    _require_auth()
+    return _snapshot_dict(_native_player().seek(req.fraction))
+
+
+@app.post("/api/player/volume")
+def player_volume(req: _PlayerVolumeRequest) -> dict:
+    _require_auth()
+    return _snapshot_dict(_native_player().set_volume(req.volume))
+
+
+@app.post("/api/player/muted")
+def player_muted(req: _PlayerMutedRequest) -> dict:
+    _require_auth()
+    return _snapshot_dict(_native_player().set_muted(req.muted))
+
+
+@app.get("/api/player/events")
+async def player_events(request: Request):
+    """SSE stream of player snapshots.
+
+    libvlc fires state-change callbacks immediately (play/pause/ended);
+    position has to be polled because libvlc doesn't emit a
+    time-changed callback synchronously. We combine both: every
+    subscribe-fired snapshot is sent right away, and in between we poll
+    at 4Hz so the frontend gets smooth position updates during
+    playback. When paused/idle we drop to a 1Hz heartbeat to keep the
+    connection alive without wasting cycles.
+    """
+    _require_auth()
+    player = _native_player()
+    queue: asyncio.Queue[Optional[dict]] = asyncio.Queue(maxsize=32)
+    loop = asyncio.get_running_loop()
+
+    def _on_snapshot(snap: native_player.PlayerSnapshot) -> None:
+        payload = _snapshot_dict(snap)
+        try:
+            loop.call_soon_threadsafe(queue.put_nowait, payload)
+        except Exception:
+            pass
+
+    unsubscribe = player.subscribe(_on_snapshot)
+
+    async def _gen():
+        try:
+            # Send the current state immediately so the client has a
+            # snapshot without waiting for the first change event.
+            yield f"data: {json.dumps(_snapshot_dict(player.snapshot()))}\n\n"
+            last_seq = -1
+            while True:
+                if await request.is_disconnected():
+                    break
+                active = player.snapshot().state == "playing"
+                timeout = 0.25 if active else 1.0
+                try:
+                    payload = await asyncio.wait_for(queue.get(), timeout=timeout)
+                except asyncio.TimeoutError:
+                    payload = _snapshot_dict(player.snapshot())
+                if payload is None:
+                    break
+                seq = payload.get("seq", 0)
+                if seq == last_seq and payload.get("state") != "playing":
+                    # Dedupe keepalive ticks while nothing is happening.
+                    continue
+                last_seq = seq
+                yield f"data: {json.dumps(payload)}\n\n"
+        finally:
+            unsubscribe()
+
+    return StreamingResponse(
+        _gen(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
