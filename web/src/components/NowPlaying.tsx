@@ -305,10 +305,10 @@ const QUALITY_OPTIONS: {
   label: string;
   sublabel: string;
 }[] = [
-  { value: "low_96k", label: "Low", sublabel: "~96 kbps AAC" },
-  { value: "low_320k", label: "High", sublabel: "~320 kbps AAC" },
-  { value: "high_lossless", label: "Lossless", sublabel: "16-bit FLAC" },
-  { value: "hi_res_lossless", label: "Max", sublabel: "24-bit FLAC, hi-res" },
+  { value: "low_96k", label: "Low", sublabel: "96 kbps" },
+  { value: "low_320k", label: "Medium", sublabel: "320 kbps" },
+  { value: "high_lossless", label: "High", sublabel: "Lossless (16-bit)" },
+  { value: "hi_res_lossless", label: "Max", sublabel: "Up to 24-bit, 192 kHz" },
 ];
 
 /**

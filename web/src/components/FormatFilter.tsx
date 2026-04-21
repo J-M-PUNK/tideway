@@ -17,7 +17,7 @@ export type AudioFormat = "all" | "hires" | "lossless";
 const LABELS: Record<AudioFormat, string> = {
   all: "All",
   hires: "Max",
-  lossless: "Lossless",
+  lossless: "High",
 };
 
 export function matchesFormat(
