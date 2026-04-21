@@ -9,6 +9,12 @@ import { Grid, SectionHeader } from "@/components/Grid";
 import { MediaCard } from "@/components/MediaCard";
 import { TrackList } from "@/components/TrackList";
 import { EmptyState } from "@/components/EmptyState";
+import {
+  FormatFilter,
+  type AudioFormat,
+  hasAnyFormatTags,
+  matchesFormat,
+} from "@/components/FormatFilter";
 
 type Filter = "all" | "tracks" | "albums" | "artists" | "playlists";
 
@@ -17,6 +23,7 @@ export function Search({ onDownload }: { onDownload: OnDownload }) {
   const [results, setResults] = useState<SearchResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [filter, setFilter] = useState<Filter>("all");
+  const [format, setFormat] = useState<AudioFormat>("all");
   const debounceRef = useRef<number | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
 
@@ -58,11 +65,26 @@ export function Search({ onDownload }: { onDownload: OnDownload }) {
       results.artists.length > 0 ||
       results.playlists.length > 0);
 
-  const showTracks = results && (filter === "all" || filter === "tracks") && results.tracks.length > 0;
-  const showAlbums = results && (filter === "all" || filter === "albums") && results.albums.length > 0;
-  const showArtists = results && (filter === "all" || filter === "artists") && results.artists.length > 0;
+  const filteredTracks =
+    results && format !== "all"
+      ? results.tracks.filter((t) => matchesFormat(t, format))
+      : results?.tracks ?? [];
+  const filteredAlbums =
+    results && format !== "all"
+      ? results.albums.filter((a) => matchesFormat(a, format))
+      : results?.albums ?? [];
+  const showTracks =
+    results && (filter === "all" || filter === "tracks") && filteredTracks.length > 0;
+  const showAlbums =
+    results && (filter === "all" || filter === "albums") && filteredAlbums.length > 0;
+  const showArtists =
+    results && (filter === "all" || filter === "artists") && results.artists.length > 0;
   const showPlaylists =
     results && (filter === "all" || filter === "playlists") && results.playlists.length > 0;
+  const showFormatFilter =
+    !!results &&
+    (filter === "all" || filter === "tracks" || filter === "albums") &&
+    hasAnyFormatTags([...results.tracks, ...results.albums]);
 
   return (
     <div>
@@ -81,15 +103,20 @@ export function Search({ onDownload }: { onDownload: OnDownload }) {
       </div>
 
       {results && hasAny && (
-        <Tabs value={filter} onValueChange={(v) => setFilter(v as Filter)} className="mb-6">
-          <TabsList>
-            <TabsTrigger value="all">All</TabsTrigger>
-            <TabsTrigger value="tracks">Tracks</TabsTrigger>
-            <TabsTrigger value="albums">Albums</TabsTrigger>
-            <TabsTrigger value="artists">Artists</TabsTrigger>
-            <TabsTrigger value="playlists">Playlists</TabsTrigger>
-          </TabsList>
-        </Tabs>
+        <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
+          <Tabs value={filter} onValueChange={(v) => setFilter(v as Filter)}>
+            <TabsList>
+              <TabsTrigger value="all">All</TabsTrigger>
+              <TabsTrigger value="tracks">Tracks</TabsTrigger>
+              <TabsTrigger value="albums">Albums</TabsTrigger>
+              <TabsTrigger value="artists">Artists</TabsTrigger>
+              <TabsTrigger value="playlists">Playlists</TabsTrigger>
+            </TabsList>
+          </Tabs>
+          {showFormatFilter && (
+            <FormatFilter value={format} onChange={setFormat} />
+          )}
+        </div>
       )}
 
       {!results && !q && (
@@ -108,9 +135,8 @@ export function Search({ onDownload }: { onDownload: OnDownload }) {
         <>
           <SectionHeader title="Tracks" />
           <TrackList
-            tracks={results!.tracks.slice(0, filter === "tracks" ? 999 : 6)}
+            tracks={filteredTracks.slice(0, filter === "tracks" ? 999 : 6)}
             onDownload={onDownload}
-           
           />
         </>
       )}
@@ -118,7 +144,7 @@ export function Search({ onDownload }: { onDownload: OnDownload }) {
         <>
           <SectionHeader title="Albums" />
           <Grid>
-            {results!.albums.map((a) => (
+            {filteredAlbums.map((a) => (
               <MediaCard key={a.id} item={a} onDownload={onDownload} />
             ))}
           </Grid>
