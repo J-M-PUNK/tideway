@@ -430,6 +430,32 @@ class TidalClient:
             self._sub_cache = (now, mapped)
         return mapped
 
+    def clamp_quality_to_subscription(
+        self, requested: Optional[str]
+    ) -> Optional[str]:
+        """Downgrade `requested` to the highest tier the account can
+        actually stream. Callers shove this in front of any code path
+        that sets `session.config.quality` before a stream / download
+        fetch — without it, picking e.g. "hi_res_lossless" on a HiFi
+        account generates inevitable 401s from Tidal's playbackinfo
+        endpoint. When the subscription lookup fails (network / stale
+        token), pass the value through unchanged — better a 401 than
+        silently downgrading the user for a transient lookup miss.
+        """
+        if not requested:
+            return requested
+        max_q = self.get_max_quality()
+        if not max_q:
+            return requested
+        try:
+            req_idx = _SUB_QUALITY_ORDER.index(requested)
+            max_idx = _SUB_QUALITY_ORDER.index(max_q)
+        except ValueError:
+            return requested
+        if req_idx <= max_idx:
+            return requested
+        return max_q
+
     def save_session(self):
         """Persist the session atomically and with 0600 perms.
 

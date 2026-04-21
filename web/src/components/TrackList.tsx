@@ -521,6 +521,8 @@ function TrackRow({
               iconOnly
               variant="ghost"
               className="h-8 w-8 opacity-0 transition-opacity group-hover:opacity-100 data-[state=open]:opacity-100"
+              audioModes={track.audio_modes}
+              mediaTags={track.media_tags}
             />
             <DropdownMenu>
               <DropdownMenuTrigger asChild>

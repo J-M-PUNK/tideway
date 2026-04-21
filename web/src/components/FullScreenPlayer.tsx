@@ -163,7 +163,15 @@ export function FullScreenPlayer({
               </div>
             </div>
             <HeartButton kind="track" id={track.id} size="sm" />
-            <DownloadButton kind="track" id={track.id} onPick={onDownload} iconOnly variant="ghost" />
+            <DownloadButton
+              kind="track"
+              id={track.id}
+              onPick={onDownload}
+              iconOnly
+              variant="ghost"
+              audioModes={track.audio_modes}
+              mediaTags={track.media_tags}
+            />
           </div>
 
           <div className="flex flex-1 flex-col items-center gap-2">

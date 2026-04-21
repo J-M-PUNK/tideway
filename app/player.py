@@ -90,6 +90,7 @@ class VLCPlayer:
         self,
         session_getter: Callable[[], tidalapi.Session],
         local_lookup: Optional[Callable[[str], Optional[str]]] = None,
+        quality_clamp: Optional[Callable[[str], Optional[str]]] = None,
     ):
         if vlc is None:
             raise RuntimeError(
@@ -101,6 +102,11 @@ class VLCPlayer:
         # entirely in that case — faster, bandwidth-free, and works in
         # offline mode without a live session.
         self._local_lookup = local_lookup
+        # Optional: given a requested quality ("hi_res_lossless" etc),
+        # returns the highest tier the user's subscription allows.
+        # Saves us from 401s when the user's saved preference exceeds
+        # their tier (possible after a subscription downgrade).
+        self._quality_clamp = quality_clamp
         # --no-video: we don't have a window. --quiet: libvlc's stderr
         # is chatty. --intf dummy: prevent it opening its own UI.
         self._instance = vlc.Instance("--no-video", "--quiet", "--intf", "dummy")
@@ -503,6 +509,23 @@ class VLCPlayer:
             if local_path:
                 return local_path, None
         session = self._session_getter()
+        # Clamp the requested quality to whatever the user's
+        # subscription allows — otherwise a user who's saved "Max"
+        # from the settings picker but only has the HiFi tier would
+        # 401 on every stream. The downloader path does the same
+        # clamping upstream; the player path used to skip it.
+        if quality and self._quality_clamp is not None:
+            try:
+                clamped = self._quality_clamp(quality)
+                if clamped and clamped != quality:
+                    log.info(
+                        "clamping streaming quality %r -> %r (subscription ceiling)",
+                        quality,
+                        clamped,
+                    )
+                    quality = clamped
+            except Exception:
+                pass
         override = None
         if quality:
             try:
@@ -550,13 +573,18 @@ _singleton_lock = threading.Lock()
 def get_player(
     session_getter: Callable[[], tidalapi.Session],
     local_lookup: Optional[Callable[[str], Optional[str]]] = None,
+    quality_clamp: Optional[Callable[[str], Optional[str]]] = None,
 ) -> VLCPlayer:
     """Lazy singleton. Constructed on first call so importing the module
     is free even when VLC isn't in use."""
     global _singleton
     with _singleton_lock:
         if _singleton is None:
-            _singleton = VLCPlayer(session_getter, local_lookup=local_lookup)
+            _singleton = VLCPlayer(
+                session_getter,
+                local_lookup=local_lookup,
+                quality_clamp=quality_clamp,
+            )
         return _singleton
 
 
