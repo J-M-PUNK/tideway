@@ -169,7 +169,6 @@ export function FullScreenPlayer({
               onPick={onDownload}
               iconOnly
               variant="ghost"
-              audioModes={track.audio_modes}
               mediaTags={track.media_tags}
             />
           </div>
