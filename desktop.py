@@ -132,6 +132,75 @@ def _graceful_shutdown(server: "uvicorn.Server") -> None:  # type: ignore[name-d
         pass
 
 
+def _enable_webview_media_prefs() -> None:
+    """Patch the Cocoa backend with the WKWebView config pywebview 6.2
+    ships without: private `fullScreenEnabled` pref so HTML
+    Fullscreen works on macOS; inline-media playback; PiP media
+    playback; and — critically — an autoresizing mask on the WKWebView
+    so zooming the window actually grows the content instead of
+    leaving the web view stranded at its initial size while the OS
+    window background (white) fills the gap.
+
+    Best-effort: any import / attribute failure falls through silently
+    — we'd rather ship with one tweak disabled than crash at startup
+    if Apple renames a key.
+    """
+    if sys.platform != "darwin":
+        return
+    try:
+        from webview.platforms.cocoa import BrowserView
+        import AppKit
+    except Exception:
+        return
+    original_init = BrowserView.__init__
+
+    def patched_init(self, window):  # type: ignore[no-untyped-def]
+        original_init(self, window)
+        try:
+            config = self.webview.configuration()
+            prefs = config.preferences()
+            # Private WKPreferences SPI — all addressed via KVC using
+            # the underscore-stripped key (KVC strips the leading `_`
+            # when mapping to the `_setXxx:` selector). Names verified
+            # against WebKit source in WKPreferencesPrivate.h.
+            for key in (
+                "fullScreenEnabled",
+                "allowsPictureInPictureMediaPlayback",
+                "allowsInlineMediaPlayback",
+                "inlineMediaPlaybackRequiresPlaysInlineAttribute",
+                "mediaSourceEnabled",
+            ):
+                try:
+                    prefs.setValue_forKey_(
+                        False if key == "inlineMediaPlaybackRequiresPlaysInlineAttribute" else True,
+                        key,
+                    )
+                except Exception:
+                    # New SDKs have started throwing on certain
+                    # private keys — keep going so one-off rejections
+                    # don't stop the others from applying.
+                    pass
+            # Public API — explicit belt-and-suspenders even though
+            # it's also handled via the pref above on macOS.
+            try:
+                config.setAllowsInlineMediaPlayback_(True)
+            except Exception:
+                pass
+        except Exception:
+            pass
+        # Window resize fix — without this mask, the WKWebView keeps
+        # its initial 1280x800 frame and the OS window chrome (white)
+        # shows around it whenever the user zooms or drags the edge.
+        try:
+            self.webview.setAutoresizingMask_(
+                AppKit.NSViewWidthSizable | AppKit.NSViewHeightSizable
+            )
+        except Exception:
+            pass
+
+    BrowserView.__init__ = patched_init
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Tidal Downloader desktop app")
     parser.add_argument(
@@ -164,6 +233,7 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     try:
         import webview  # pywebview
+        _enable_webview_media_prefs()
     except ImportError:
         print(
             "[desktop] pywebview not installed; falling back to default browser. "

@@ -17,11 +17,17 @@ import type {
 import type { OnDownload } from "@/api/download";
 import { MediaCard } from "@/components/MediaCard";
 import { TrackList } from "@/components/TrackList";
+import { useColumnCount } from "@/hooks/useColumnCount";
 import { cn, imageProxy } from "@/lib/utils";
 
 interface Props {
   page: TidalPage;
   onDownload: OnDownload;
+  /** When true, every row is capped to one row of cards (the same
+   *  treatment normally reserved for "Because you liked X" and
+   *  viewAll-bearing rows). Used on the Home page where scanning
+   *  beats completeness. */
+  forceSingleRow?: boolean;
 }
 
 /**
@@ -31,7 +37,7 @@ interface Props {
  *   - TrackList → TrackList component
  *   - PageLinks → pill-grid of clickable category tiles
  */
-export function PageView({ page, onDownload }: Props) {
+export function PageView({ page, onDownload, forceSingleRow = false }: Props) {
   if (page.categories.length === 0) {
     return (
       <EmptyState
@@ -46,10 +52,21 @@ export function PageView({ page, onDownload }: Props) {
       />
     );
   }
+  // Tidal's "Shortcuts" row is their own quick-access guess (aggregated
+  // from their backend analytics). It's redundant with our "Jump back
+  // in" on Home — which uses our local history and is more accurate for
+  // this client — so we drop the row everywhere rather than show two
+  // near-identical grids stacked.
+  const categories = page.categories.filter((cat) => cat.type !== "ShortcutList");
   return (
     <div className="flex flex-col gap-8">
-      {page.categories.map((cat, i) => (
-        <Section key={`${cat.type}-${i}`} category={cat} onDownload={onDownload} />
+      {categories.map((cat, i) => (
+        <Section
+          key={`${cat.type}-${i}`}
+          category={cat}
+          onDownload={onDownload}
+          forceSingleRow={forceSingleRow}
+        />
       ))}
     </div>
   );
@@ -58,11 +75,14 @@ export function PageView({ page, onDownload }: Props) {
 function Section({
   category,
   onDownload,
+  forceSingleRow = false,
 }: {
   category: PageCategory;
   onDownload: OnDownload;
+  forceSingleRow?: boolean;
 }) {
   const { type, title, subtitle, items, context, viewAllPath } = category;
+  const columnCount = useColumnCount();
 
   if (type === "TrackList") {
     return (
@@ -102,9 +122,14 @@ function Section({
   // "Because you liked X" rows (context present) and any row with a
   // viewAll get capped to a single row of cards — the rest live behind
   // the "View more" link in the header. Everything else keeps the
-  // full responsive grid.
-  const singleRow = Boolean(context || viewAllPath);
-  const visible = singleRow ? items.slice(0, ROW_ITEM_CAP) : items;
+  // full responsive grid. Home passes forceSingleRow so scanning all
+  // sections is quick; the only cost is some rows lose their "view
+  // more" affordance when Tidal didn't send a viewAllPath for them.
+  const singleRow = forceSingleRow || Boolean(context || viewAllPath);
+  // Cap to actual visible column count so the row never wraps. Without
+  // this, at lg (5 cols) a 6-item cap leaves one card orphaned on a
+  // partial second row — the exact visual glitch we're trying to avoid.
+  const visible = singleRow ? items.slice(0, columnCount) : items;
   return (
     <div>
       {title && (
@@ -134,9 +159,6 @@ function Section({
     </div>
   );
 }
-
-// Matches the widest breakpoint so a 2xl viewport still fills its row.
-const ROW_ITEM_CAP = 6;
 
 function itemKey(i: PageItem): string {
   return "id" in i ? i.id : i.kind === "pagelink" ? i.path : "";

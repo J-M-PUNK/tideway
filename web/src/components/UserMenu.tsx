@@ -1,5 +1,6 @@
 import { useNavigate } from "react-router-dom";
 import { LogIn, LogOut, Settings, User as UserIcon, WifiOff } from "lucide-react";
+import { api } from "@/api/client";
 import { useOfflineMode } from "@/hooks/useOfflineMode";
 import {
   DropdownMenu,
@@ -113,15 +114,20 @@ export function UserMenu({
         </DropdownMenuItem>
         {!offline && (
           <DropdownMenuItem
-            onSelect={() =>
-              window.open(
-                `https://listen.tidal.com${
-                  username ? "/my-collection" : ""
-                }`,
-                "_blank",
-                "noopener",
-              )
-            }
+            onSelect={async () => {
+              const url = `https://listen.tidal.com${
+                username ? "/my-collection" : ""
+              }`;
+              try {
+                // Go through the backend — pywebview's embedded WebView
+                // doesn't honor `window.open` for external URLs on any
+                // platform. Fallback to window.open covers plain browser
+                // dev mode.
+                await api.openExternal(url);
+              } catch {
+                window.open(url, "_blank", "noopener");
+              }
+            }}
           >
             <UserIcon className="h-4 w-4" /> Open in Tidal
           </DropdownMenuItem>

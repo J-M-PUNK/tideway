@@ -9,10 +9,17 @@ const ContextMenuPortal = ContextMenuPrimitive.Portal;
 const ContextMenuContent = React.forwardRef<
   React.ElementRef<typeof ContextMenuPrimitive.Content>,
   React.ComponentPropsWithoutRef<typeof ContextMenuPrimitive.Content>
->(({ className, ...props }, ref) => (
+>(({ className, onCloseAutoFocus, ...props }, ref) => (
   <ContextMenuPortal>
     <ContextMenuPrimitive.Content
       ref={ref}
+      // See DropdownMenuContent for the rationale — prevents the
+      // trigger's row from staying focused/highlighted after the user
+      // picks a menu item via mouse click.
+      onCloseAutoFocus={(e) => {
+        e.preventDefault();
+        onCloseAutoFocus?.(e);
+      }}
       className={cn(
         "z-50 min-w-[14rem] overflow-hidden rounded-md border border-border bg-popover p-1 text-popover-foreground shadow-xl",
         className,
@@ -30,7 +37,7 @@ const ContextMenuItem = React.forwardRef<
   <ContextMenuPrimitive.Item
     ref={ref}
     className={cn(
-      "relative flex cursor-pointer select-none items-center gap-2 rounded-sm px-3 py-2 text-sm outline-none transition-colors focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50",
+      "relative flex cursor-pointer select-none items-center gap-2 rounded-sm px-3 py-2 text-sm outline-none transition-colors focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&>svg]:h-3.5 [&>svg]:w-3.5 [&>svg]:flex-shrink-0",
       className,
     )}
     {...props}
@@ -46,7 +53,7 @@ const ContextMenuSubTrigger = React.forwardRef<
   <ContextMenuPrimitive.SubTrigger
     ref={ref}
     className={cn(
-      "relative flex cursor-pointer select-none items-center gap-2 rounded-sm px-3 py-2 text-sm outline-none transition-colors focus:bg-accent data-[state=open]:bg-accent",
+      "relative flex cursor-pointer select-none items-center gap-2 rounded-sm px-3 py-2 text-sm outline-none transition-colors focus:bg-accent data-[state=open]:bg-accent [&>svg]:h-3.5 [&>svg]:w-3.5 [&>svg]:flex-shrink-0",
       className,
     )}
     {...props}

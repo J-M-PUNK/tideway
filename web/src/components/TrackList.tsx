@@ -1,20 +1,12 @@
 import { Link } from "react-router-dom";
 import {
   Check,
-  CheckSquare,
   Clock,
-  Copy,
-  Disc3,
-  FileText,
-  ListPlus,
   Loader2,
+  MoreHorizontal,
   Music,
   Pause,
   Play,
-  Plus,
-  Radio,
-  Trash2,
-  User,
 } from "lucide-react";
 import type { Track } from "@/api/types";
 import type { OnDownload } from "@/api/download";
@@ -23,26 +15,28 @@ import { DownloadButton } from "@/components/DownloadButton";
 import { EmptyState } from "@/components/EmptyState";
 import { usePlayerActions, usePlayerMeta } from "@/hooks/PlayerContext";
 import { useDownloadedIds, useIsDownloaded } from "@/hooks/useDownloadedSet";
-import { useMyPlaylists } from "@/hooks/useMyPlaylists";
-import { useFavorites } from "@/hooks/useFavorites";
+import { useLastfmTrackPlaycount } from "@/hooks/useLastfmPlaycount";
 import { useTrackSelection } from "@/hooks/useTrackSelection";
 import { useUiPreferences } from "@/hooks/useUiPreferences";
 import { HeartButton } from "@/components/HeartButton";
-import { CreatePlaylistDialog } from "@/components/CreatePlaylistDialog";
 import { CreditsDialog } from "@/components/CreditsDialog";
-import { useToast } from "@/components/toast";
 import { cn } from "@/lib/utils";
+import {
+  CONTEXT_MENU_PARTS,
+  DROPDOWN_MENU_PARTS,
+  TrackMenuItems,
+} from "@/components/TrackMenu";
 import {
   ContextMenu,
   ContextMenuContent,
-  ContextMenuItem,
-  ContextMenuSeparator,
-  ContextMenuSub,
-  ContextMenuSubContent,
-  ContextMenuSubTrigger,
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   DndContext,
   closestCenter,
@@ -61,8 +55,6 @@ import {
   verticalListSortingStrategy,
 } from "@dnd-kit/sortable";
 import { CSS } from "@dnd-kit/utilities";
-import { api } from "@/api/client";
-import type { QualityOption } from "@/api/types";
 
 interface Props {
   tracks: Track[];
@@ -81,6 +73,14 @@ interface Props {
    * optimistically.
    */
   onReorder?: (mediaId: string, fromIndex: number, toIndex: number) => void;
+  /**
+   * When true, each row fetches its Last.fm global playcount and shows
+   * it in its own column (right-aligned, before duration). Off by
+   * default — only worth enabling on album + artist-popular views
+   * where the extra per-row request is meaningful context. A 50-track
+   * album will fire 50 calls, throttled server-side to 4 concurrent.
+   */
+  showPlaycount?: boolean;
 }
 
 export function TrackList({
@@ -90,6 +90,7 @@ export function TrackList({
   numbered = true,
   onRemove,
   onReorder,
+  showPlaycount = false,
 }: Props) {
   const { offlineOnly } = useUiPreferences();
   // Optional offline-only filter — hides tracks Tidal knows about but that
@@ -112,14 +113,45 @@ export function TrackList({
       />
     );
   }
+  // Column order: [# | Title | Plays | Album/Artist | action-cluster].
+  // The action cluster (heart + duration + download + menu) lives in a
+  // single `auto`-sized cell so the buttons can be tightly grouped with
+  // their own gap — the parent grid's `gap-4` is too airy for icons
+  // meant to read as one related control set.
+  // The header grid template MUST match the body row's template — any
+  // mismatch lets the flex columns absorb different amounts of space
+  // and the icons drift out of alignment between header and body.
+  // Plays column gets a FIXED width, not `auto`. The header is one
+  // grid and each virtualized body row is its own grid — an `auto`
+  // column would size to each grid's content independently, so the
+  // "PLAYS" label and the values under it would land at different x
+  // positions. A fixed width keeps every grid's column identical so
+  // the header and values stay left-aligned to the same edge.
+  const gridCols = showPlaycount
+    ? "grid-cols-[24px_4fr_56px_3fr_auto]"
+    : "grid-cols-[24px_4fr_3fr_auto]";
   const header = (
-    <div className="grid grid-cols-[24px_4fr_3fr_48px_40px_40px] items-center gap-4 border-b border-border px-4 py-2 text-xs uppercase tracking-wider text-muted-foreground">
+    <div
+      className={cn(
+        "grid items-center gap-4 border-b border-border px-4 py-2 text-xs uppercase tracking-wider text-muted-foreground",
+        gridCols,
+      )}
+    >
       <span className="text-center">#</span>
       <span>Title</span>
+      {showPlaycount && <span>Plays</span>}
       <span>{showAlbum ? "Album" : "Artist"}</span>
-      <Clock className="h-4 w-4 justify-self-end" />
-      <span />
-      <span />
+      {/* Mirror the body cluster exactly — same slot widths and gap so
+          the Clock icon lands directly above the duration text and all
+          four slots read as one evenly-spaced group. */}
+      <div className="flex items-center justify-end gap-2">
+        <span className="h-8 w-8" aria-hidden />
+        <span className="flex w-12 items-center" title="Duration">
+          <Clock className="h-4 w-4" />
+        </span>
+        <span className="h-8 w-8" aria-hidden />
+        <span className="h-8 w-8" aria-hidden />
+      </div>
     </div>
   );
 
@@ -152,6 +184,7 @@ export function TrackList({
       context={visibleTracks}
       numbered={numbered}
       showAlbum={showAlbum}
+      showPlaycount={showPlaycount}
       onDownload={onDownload}
       onRemove={onRemove}
     />
@@ -306,6 +339,7 @@ function TrackRow({
   context,
   numbered,
   showAlbum,
+  showPlaycount,
   onDownload,
   onRemove,
   sortable,
@@ -316,13 +350,12 @@ function TrackRow({
   context: Track[];
   numbered: boolean;
   showAlbum: boolean;
+  showPlaycount: boolean;
   onDownload: OnDownload;
   onRemove?: (index: number) => void;
   sortable?: boolean;
   sortableId?: string;
 }) {
-  const toast = useToast();
-  const favs = useFavorites();
   // Subscribe only to the meta slice — time updates (4Hz) don't re-render
   // rows thanks to the PlayerContext split.
   const meta = usePlayerMeta();
@@ -331,7 +364,6 @@ function TrackRow({
   const isPlaying = isCurrent && meta.playing;
   const isLoading = isCurrent && meta.loading;
   const isDownloaded = useIsDownloaded(track.id);
-  const liked = favs.has("track", track.id);
   const [creditsOpen, setCreditsOpen] = useState(false);
   const selection = useTrackSelection();
   const isSelected = selection.has(track.id);
@@ -359,38 +391,14 @@ function TrackRow({
     }
   };
 
-  const copyTidalLink = async () => {
-    const url = `https://tidal.com/browse/track/${track.id}`;
-    try {
-      await navigator.clipboard.writeText(url);
-      toast.show({ kind: "success", title: "Link copied", description: url });
-    } catch {
-      toast.show({ kind: "error", title: "Copy failed", description: "Clipboard not available." });
-    }
-  };
-
-  const startRadio = async () => {
-    try {
-      const radio = await api.trackRadio(track.id);
-      if (!radio.length) {
-        toast.show({
-          kind: "info",
-          title: "No radio",
-          description: "Tidal doesn't have a radio for this track.",
-        });
-        return;
-      }
-      // Play the seed track first, then append the radio selections so
-      // playback continues organically when the seed ends.
-      actions.play(track, [track, ...radio]);
-      toast.show({ kind: "success", title: "Radio started", description: `${radio.length} tracks queued` });
-    } catch (err) {
-      toast.show({
-        kind: "error",
-        title: "Couldn't start radio",
-        description: err instanceof Error ? err.message : String(err),
-      });
-    }
+  // Shared props for both menu entry points (right-click and three-dots
+  // button) so the two surfaces stay in sync automatically.
+  const menuProps = {
+    track,
+    context,
+    onDownload,
+    onRemove: onRemove ? () => onRemove(index) : undefined,
+    onShowCredits: () => setCreditsOpen(true),
   };
 
   return (
@@ -401,7 +409,10 @@ function TrackRow({
           style={sortableStyle}
           {...dragHandleProps}
           className={cn(
-            "group grid grid-cols-[24px_4fr_3fr_48px_40px_40px] items-center gap-4 rounded-md px-4 py-2 text-sm hover:bg-accent",
+            "group grid select-none items-center gap-4 rounded-md px-4 py-2 text-sm hover:bg-accent",
+            showPlaycount
+              ? "grid-cols-[24px_4fr_56px_3fr_auto]"
+              : "grid-cols-[24px_4fr_3fr_auto]",
             isCurrent && "bg-accent/60",
             isSelected && "bg-primary/10",
             sortable && "cursor-grab touch-none active:cursor-grabbing",
@@ -471,6 +482,12 @@ function TrackRow({
               </div>
             </div>
           </div>
+          {showPlaycount && (
+            <TrackPlaycountCell
+              artist={track.artists[0]?.name ?? ""}
+              title={track.name}
+            />
+          )}
           <div className="truncate text-xs text-muted-foreground">
             {showAlbum && track.album ? (
               <Link to={`/album/${track.album.id}`} className="hover:underline">
@@ -480,79 +497,45 @@ function TrackRow({
               track.artists.map((a) => a.name).join(", ")
             )}
           </div>
-          <span className="justify-self-end text-xs text-muted-foreground">
-            {formatDuration(track.duration)}
-          </span>
-          <HeartButton kind="track" id={track.id} size="sm" visibility="hover" />
-          <DownloadButton
-            kind="track"
-            id={track.id}
-            onPick={onDownload}
-            iconOnly
-            variant="ghost"
-            className="h-8 w-8 opacity-0 transition-opacity group-hover:opacity-100 data-[state=open]:opacity-100"
-          />
+          {/* Right-side action cluster — heart, duration, download, menu
+              sit together with their own tight gap so they read as one
+              related control group instead of four separate columns. */}
+          <div className="flex items-center justify-end gap-2">
+            <div className="flex h-8 w-8 items-center justify-center">
+              <HeartButton kind="track" id={track.id} size="sm" visibility="hover" />
+            </div>
+            <span className="w-12 text-left text-xs tabular-nums text-muted-foreground">
+              {formatDuration(track.duration)}
+            </span>
+            <DownloadButton
+              kind="track"
+              id={track.id}
+              onPick={onDownload}
+              iconOnly
+              variant="ghost"
+              className="h-8 w-8 opacity-0 transition-opacity group-hover:opacity-100 data-[state=open]:opacity-100"
+            />
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <button
+                  onClick={(e) => e.stopPropagation()}
+                  onPointerDown={(e) => e.stopPropagation()}
+                  className="flex h-8 w-8 items-center justify-center rounded-full text-muted-foreground opacity-0 transition-all hover:bg-accent-foreground/10 hover:text-foreground group-hover:opacity-100 data-[state=open]:opacity-100"
+                  title="More"
+                  aria-label="Track actions"
+                >
+                  <MoreHorizontal className="h-4 w-4" />
+                </button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="w-60">
+                <TrackMenuItems parts={DROPDOWN_MENU_PARTS} {...menuProps} />
+              </DropdownMenuContent>
+            </DropdownMenu>
+          </div>
         </div>
       </ContextMenuTrigger>
       <ContextMenuContent>
-        <ContextMenuItem onSelect={() => actions.play(track, context)}>
-          <Play className="h-3.5 w-3.5" /> Play
-        </ContextMenuItem>
-        <ContextMenuItem onSelect={() => actions.playNext(track)}>
-          <ListPlus className="h-3.5 w-3.5" /> Play next
-        </ContextMenuItem>
-        <ContextMenuItem onSelect={startRadio}>
-          <Radio className="h-3.5 w-3.5" /> Start radio
-        </ContextMenuItem>
-        <ContextMenuSeparator />
-        <ContextMenuItem onSelect={() => selection.toggle(track)}>
-          <CheckSquare
-            className={cn("h-3.5 w-3.5", isSelected && "text-primary")}
-          />
-          {isSelected ? "Deselect" : "Select"}
-        </ContextMenuItem>
-        <ContextMenuSeparator />
-        <ContextMenuItem onSelect={() => favs.toggle("track", track.id)}>
-          <Check
-            className={cn("h-3.5 w-3.5", liked ? "text-primary" : "opacity-0")}
-          />
-          {liked ? "Remove from Liked Songs" : "Add to Liked Songs"}
-        </ContextMenuItem>
-        <AddToPlaylistSubmenu trackId={track.id} trackName={track.name} />
-        <ContextMenuSeparator />
-        <DownloadSubmenu
-          onPick={(quality) => onDownload("track", track.id, quality)}
-        />
-        <ContextMenuSeparator />
-        {track.album && (
-          <ContextMenuItem asChild>
-            <Link to={`/album/${track.album.id}`}>
-              <Disc3 className="h-3.5 w-3.5" /> Go to album
-            </Link>
-          </ContextMenuItem>
-        )}
-        {track.artists[0] && (
-          <ContextMenuItem asChild>
-            <Link to={`/artist/${track.artists[0].id}`}>
-              <User className="h-3.5 w-3.5" /> Go to artist
-            </Link>
-          </ContextMenuItem>
-        )}
-        <ContextMenuSeparator />
-        <ContextMenuItem onSelect={() => setCreditsOpen(true)}>
-          <FileText className="h-3.5 w-3.5" /> Credits…
-        </ContextMenuItem>
-        <ContextMenuItem onSelect={copyTidalLink}>
-          <Copy className="h-3.5 w-3.5" /> Copy Tidal link
-        </ContextMenuItem>
-        {onRemove && (
-          <>
-            <ContextMenuSeparator />
-            <ContextMenuItem onSelect={() => onRemove(index)} className="text-destructive">
-              <Trash2 className="h-3.5 w-3.5" /> Remove from playlist
-            </ContextMenuItem>
-          </>
-        )}
+        <TrackMenuItems parts={CONTEXT_MENU_PARTS} {...menuProps} />
       </ContextMenuContent>
       <CreditsDialog
         trackId={track.id}
@@ -661,84 +644,35 @@ function RowLeadCell({
   );
 }
 
-function AddToPlaylistSubmenu({
-  trackId,
-  trackName,
-}: {
-  trackId: string;
-  trackName: string;
-}) {
-  const { playlists } = useMyPlaylists();
-  const toast = useToast();
-
-  const add = async (playlistId: string, playlistName: string) => {
-    try {
-      await api.playlists.addTracks(playlistId, [trackId]);
-      toast.show({
-        kind: "success",
-        title: "Added to playlist",
-        description: `"${trackName}" → ${playlistName}`,
-      });
-    } catch (err) {
-      toast.show({
-        kind: "error",
-        title: "Couldn't add to playlist",
-        description: err instanceof Error ? err.message : String(err),
-      });
-    }
-  };
-
+/**
+ * Right-aligned compact playcount in its own column. Fires a Last.fm
+ * `track.getInfo` via the shared module-level cache so the same track
+ * doesn't refetch across surfaces. Returns an empty cell (to preserve
+ * grid alignment) when Last.fm isn't configured or the track has no
+ * reported plays — we don't want "0 plays" ghost text on every row.
+ */
+function TrackPlaycountCell({ artist, title }: { artist: string; title: string }) {
+  const pc = useLastfmTrackPlaycount(artist, title);
+  const count = pc?.playcount ?? 0;
+  if (count <= 0) {
+    return <span />;
+  }
   return (
-    <ContextMenuSub>
-      <ContextMenuSubTrigger>
-        <Plus className="h-3.5 w-3.5" /> Add to playlist…
-      </ContextMenuSubTrigger>
-      <ContextMenuSubContent className="max-h-96 overflow-y-auto">
-        <CreatePlaylistDialog
-          trigger={
-            <button className="flex w-full cursor-pointer items-center gap-2 rounded-sm px-3 py-2 text-sm hover:bg-accent">
-              <Plus className="h-3.5 w-3.5" /> New playlist…
-            </button>
-          }
-        />
-        {playlists.length > 0 && <ContextMenuSeparator />}
-        {playlists.map((p) => (
-          <ContextMenuItem key={p.id} onSelect={() => add(p.id, p.name)}>
-            <span className="truncate">{p.name}</span>
-          </ContextMenuItem>
-        ))}
-        {playlists.length === 0 && (
-          <div className="px-3 py-2 text-xs text-muted-foreground">
-            No playlists yet. Create one above.
-          </div>
-        )}
-      </ContextMenuSubContent>
-    </ContextMenuSub>
+    <span
+      className="text-xs tabular-nums text-muted-foreground"
+      title={`${count.toLocaleString()} plays on Last.fm${
+        pc?.listeners ? ` · ${pc.listeners.toLocaleString()} listeners` : ""
+      }`}
+    >
+      {formatCompact(count)}
+    </span>
   );
 }
 
-function DownloadSubmenu({ onPick }: { onPick: (quality?: string) => void }) {
-  const [qualities, setQualities] = useState<QualityOption[]>([]);
-  useEffect(() => {
-    api.qualities().then(setQualities).catch(() => setQualities([]));
-  }, []);
-  return (
-    <ContextMenuSub>
-      <ContextMenuSubTrigger>Download…</ContextMenuSubTrigger>
-      <ContextMenuSubContent>
-        <ContextMenuItem onSelect={() => onPick()}>Use default quality</ContextMenuItem>
-        <ContextMenuSeparator />
-        {qualities.map((q) => (
-          <ContextMenuItem key={q.value} onSelect={() => onPick(q.value)}>
-            <div className="flex flex-col">
-              <span>
-                {q.label} · {q.codec}
-              </span>
-              <span className="text-[11px] text-muted-foreground">{q.bitrate}</span>
-            </div>
-          </ContextMenuItem>
-        ))}
-      </ContextMenuSubContent>
-    </ContextMenuSub>
-  );
+function formatCompact(n: number): string {
+  if (n < 1000) return n.toLocaleString();
+  if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}K`;
+  if (n < 1_000_000_000) return `${(n / 1_000_000).toFixed(n < 10_000_000 ? 1 : 0)}M`;
+  return `${(n / 1_000_000_000).toFixed(1)}B`;
 }
+

@@ -9,10 +9,12 @@ import asyncio
 import json
 import logging
 import subprocess
+import webbrowser
 import sys
 import threading
 import time
 import traceback
+import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import asdict
@@ -37,8 +39,10 @@ from sse_starlette.sse import EventSourceResponse
 
 from app.downloader import DownloadItem, DownloadStatus, Downloader
 from app.http import SESSION
+from app.lastfm import LastFmClient
 from app.local_index import LocalIndex
 from app.paths import bundled_resource_dir
+from app.play_reporter import PlayReporter, PlaySession
 from app.settings import Settings, load_settings, save_settings
 from app.tidal_client import TidalClient
 
@@ -100,6 +104,8 @@ _tidal_page.PageCategoryV2._parse_base = _patched_parse_base
 
 
 tidal = TidalClient()
+lastfm = LastFmClient()
+play_reporter = PlayReporter(tidal)
 settings: Settings = load_settings()
 # Guards the `settings` rebind + downloader.settings swap so workers never
 # see a torn state (new global, old downloader field or vice versa).
@@ -119,10 +125,15 @@ _oauth_lock = threading.Lock()
 _oauth_state: dict[str, Any] = {"url": None, "user_code": None, "future": None}
 
 # Hosts we're willing to proxy images from. Keep tight to avoid turning the
-# proxy into a general-purpose SSRF primitive.
+# proxy into a general-purpose SSRF primitive. Last.fm CDN hosts are here
+# because artist/album/user avatars from `user.getRecentTracks` and the
+# stats/popular endpoints come from Fastly/Akamai, not Tidal.
 ALLOWED_IMAGE_HOSTS = {
     "resources.tidal.com",
     "images.tidal.com",
+    "lastfm.freetls.fastly.net",
+    "lastfm-img2.akamaized.net",
+    "lastfm.akamaized.net",
 }
 
 # check_login() hits Tidal over the network. Cache the result briefly so a
@@ -566,6 +577,7 @@ def track_to_dict(t) -> dict:
             "name": album.name,
             "cover": _image_url(album, 320),
         } if album else None,
+        "share_url": _first(lambda: t.share_url),
     }
 
 
@@ -580,6 +592,7 @@ def album_to_dict(a) -> dict:
         "cover": _image_url(a, 640),
         "artists": _artists(a),
         "explicit": bool(_first(lambda: a.explicit)),
+        "share_url": _first(lambda: a.share_url),
     }
 
 
@@ -604,6 +617,7 @@ def playlist_to_dict(p) -> dict:
         "cover": _image_url(p, 750),
         "creator": creator_name,
         "owned": tidal.owns_playlist(p),
+        "share_url": _first(lambda: p.share_url),
     }
 
 
@@ -759,6 +773,54 @@ def auth_pkce_url() -> dict:
     return {"url": tidal.pkce_login_url()}
 
 
+_OPEN_EXTERNAL_HOSTS = {
+    "tidal.com",
+    "www.tidal.com",
+    "listen.tidal.com",
+    "login.tidal.com",
+    "link.tidal.com",
+    "auth.tidal.com",
+    # Last.fm auth + API-account pages — users open these during the
+    # scrobbling setup flow from inside Settings.
+    "last.fm",
+    "www.last.fm",
+}
+
+
+class OpenExternalRequest(BaseModel):
+    url: str
+
+
+@app.post("/api/open-external")
+def open_external(req: OpenExternalRequest) -> dict:
+    """Open a URL in the user's default system browser.
+
+    Exists because pywebview's embedded WKWebView on macOS (and the
+    equivalent WebView2 on Windows) silently drops `window.open(url,
+    "_blank")` for navigations outside the app — the frontend can't
+    break out to the real browser on its own. We do it from Python
+    with `webbrowser.open()` which spawns the system default.
+
+    Host-allowlisted to Tidal domains so a mischievous page on localhost
+    can't weaponize this into a generic URL-opener.
+    """
+    parsed = urlparse(req.url)
+    if parsed.scheme not in ("http", "https"):
+        raise HTTPException(status_code=400, detail="Only http/https URLs allowed")
+    if parsed.hostname not in _OPEN_EXTERNAL_HOSTS:
+        raise HTTPException(
+            status_code=403,
+            detail=f"Host not allowed: {parsed.hostname}",
+        )
+    try:
+        ok = webbrowser.open(req.url, new=2)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    if not ok:
+        raise HTTPException(status_code=500, detail="No browser available")
+    return {"ok": True}
+
+
 class PkceCompleteRequest(BaseModel):
     redirect_url: str
 
@@ -782,6 +844,290 @@ def auth_pkce_complete(req: PkceCompleteRequest) -> dict:
     _invalidate_preview_cache()
     _apply_settings_quality(settings)
     return {"status": "ok", "username": tidal.get_user_info()}
+
+
+# ---------------------------------------------------------------------------
+# Last.fm scrobbling — optional integration. Stores the user's own
+# api_key/api_secret (registered at last.fm/api/account/create), runs the
+# standard desktop auth flow, and exposes scrobble + now-playing calls
+# the frontend player hits on each track.
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/lastfm/status")
+def lastfm_status() -> dict:
+    return lastfm.status()
+
+
+class LastFmCredentialsRequest(BaseModel):
+    api_key: str
+    api_secret: str
+
+
+@app.put("/api/lastfm/credentials")
+def lastfm_set_credentials(req: LastFmCredentialsRequest) -> dict:
+    _require_auth()
+    if not req.api_key.strip() or not req.api_secret.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="Both API key and API secret are required.",
+        )
+    lastfm.set_credentials(req.api_key, req.api_secret)
+    return lastfm.status()
+
+
+@app.post("/api/lastfm/connect/start")
+def lastfm_connect_start() -> dict:
+    _require_auth()
+    try:
+        url, token = lastfm.get_auth_url()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"auth_url": url, "token": token}
+
+
+class LastFmCompleteRequest(BaseModel):
+    token: str
+
+
+@app.post("/api/lastfm/connect/complete")
+def lastfm_connect_complete(req: LastFmCompleteRequest) -> dict:
+    _require_auth()
+    try:
+        username = lastfm.complete_auth(req.token.strip())
+    except Exception as exc:
+        # The most common failure mode is "Unauthorized Token" — user
+        # clicked Continue before actually approving in the browser.
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"connected": True, "username": username}
+
+
+@app.post("/api/lastfm/disconnect")
+def lastfm_disconnect() -> dict:
+    _require_auth()
+    lastfm.disconnect()
+    return lastfm.status()
+
+
+@app.get("/api/lastfm/recent-tracks")
+def lastfm_recent_tracks(limit: int = 100) -> list[dict]:
+    """Proxy ``user.getRecentTracks`` so the frontend can render the
+    user's cross-device listening history on the History page. Public
+    Last.fm endpoint, only needs the username + api_key."""
+    _require_auth()
+    return lastfm.get_recent_tracks(limit=limit)
+
+
+_VALID_LASTFM_PERIODS = {"overall", "7day", "1month", "3month", "6month", "12month"}
+
+
+def _validate_period(period: str) -> str:
+    if period not in _VALID_LASTFM_PERIODS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown period. Valid: {', '.join(sorted(_VALID_LASTFM_PERIODS))}",
+        )
+    return period
+
+
+@app.get("/api/lastfm/user-info")
+def lastfm_user_info() -> dict:
+    """Header profile data for the Stats page — playcount, registered
+    date, avatar. Empty dict if Last.fm isn't connected."""
+    _require_auth()
+    return lastfm.get_user_info()
+
+
+@app.get("/api/lastfm/top-artists")
+def lastfm_top_artists(period: str = "overall", limit: int = 50) -> list[dict]:
+    _require_auth()
+    return lastfm.get_top_artists(period=_validate_period(period), limit=limit)
+
+
+@app.get("/api/lastfm/top-tracks")
+def lastfm_top_tracks(period: str = "overall", limit: int = 50) -> list[dict]:
+    _require_auth()
+    return lastfm.get_top_tracks(period=_validate_period(period), limit=limit)
+
+
+@app.get("/api/lastfm/top-albums")
+def lastfm_top_albums(period: str = "overall", limit: int = 50) -> list[dict]:
+    _require_auth()
+    return lastfm.get_top_albums(period=_validate_period(period), limit=limit)
+
+
+@app.get("/api/lastfm/loved-tracks")
+def lastfm_loved_tracks(limit: int = 50) -> list[dict]:
+    _require_auth()
+    return lastfm.get_loved_tracks(limit=limit)
+
+
+@app.get("/api/lastfm/artist-playcount")
+def lastfm_artist_playcount(artist: str) -> dict:
+    _require_auth()
+    if not artist:
+        raise HTTPException(status_code=400, detail="artist is required")
+    return lastfm.get_artist_playcount(artist)
+
+
+@app.get("/api/lastfm/album-playcount")
+def lastfm_album_playcount(artist: str, album: str) -> dict:
+    _require_auth()
+    if not artist or not album:
+        raise HTTPException(status_code=400, detail="artist and album are required")
+    return lastfm.get_album_playcount(artist, album)
+
+
+@app.get("/api/lastfm/track-playcount")
+def lastfm_track_playcount(artist: str, track: str) -> dict:
+    _require_auth()
+    if not artist or not track:
+        raise HTTPException(status_code=400, detail="artist and track are required")
+    return lastfm.get_track_playcount(artist, track)
+
+
+@app.get("/api/lastfm/chart/top-artists")
+def lastfm_chart_top_artists(limit: int = 50) -> list[dict]:
+    _require_auth()
+    return lastfm.get_chart_top_artists(limit=limit)
+
+
+@app.get("/api/lastfm/chart/top-tracks")
+def lastfm_chart_top_tracks(limit: int = 50) -> list[dict]:
+    _require_auth()
+    return lastfm.get_chart_top_tracks(limit=limit)
+
+
+@app.get("/api/lastfm/chart/top-tags")
+def lastfm_chart_top_tags(limit: int = 50) -> list[dict]:
+    _require_auth()
+    return lastfm.get_chart_top_tags(limit=limit)
+
+
+_weekly_scrobbles_cache: dict[str, tuple[float, list]] = {}
+_weekly_scrobbles_lock = threading.Lock()
+_WEEKLY_SCROBBLES_TTL_SEC = 900.0  # 15 minutes — cheap enough to refresh.
+
+
+@app.get("/api/lastfm/weekly-scrobbles")
+def lastfm_weekly_scrobbles(weeks: int = 52) -> list[dict]:
+    """Scrobble counts per week for the last N weeks. Backs the
+    listening-activity chart on the Stats page. Cached because a 52-week
+    fetch is 52 Last.fm requests — we can't afford to re-run it on
+    every page visit."""
+    _require_auth()
+    weeks = max(1, min(104, weeks))
+    # Cache key: username + weeks count. Username because disconnecting
+    # and reconnecting to a different account should invalidate; weeks
+    # because the caller may request different ranges.
+    status = lastfm.status()
+    username = status.get("username") or ""
+    key = f"{username}:{weeks}"
+    now = time.monotonic()
+    with _weekly_scrobbles_lock:
+        cached = _weekly_scrobbles_cache.get(key)
+        if cached and (now - cached[0]) < _WEEKLY_SCROBBLES_TTL_SEC:
+            return cached[1]
+    data = lastfm.get_weekly_scrobbles(weeks=weeks)
+    with _weekly_scrobbles_lock:
+        _weekly_scrobbles_cache[key] = (now, data)
+    return data
+
+
+class LastFmTrackRequest(BaseModel):
+    artist: str
+    track: str
+    album: str = ""
+    duration: int = 0
+    timestamp: Optional[int] = None
+
+
+@app.post("/api/lastfm/now-playing")
+def lastfm_now_playing(req: LastFmTrackRequest) -> dict:
+    _require_auth()
+    try:
+        lastfm.now_playing(
+            artist=req.artist,
+            track=req.track,
+            album=req.album,
+            duration=req.duration,
+        )
+    except RuntimeError:
+        # Not connected or bad credentials — the frontend fires this
+        # on every track start, so returning a clean 200 with ok=false
+        # avoids spamming toasts / console when scrobbling is simply
+        # disabled.
+        return {"ok": False}
+    return {"ok": True}
+
+
+@app.post("/api/lastfm/scrobble")
+def lastfm_scrobble(req: LastFmTrackRequest) -> dict:
+    _require_auth()
+    try:
+        lastfm.scrobble(
+            artist=req.artist,
+            track=req.track,
+            album=req.album,
+            duration=req.duration,
+            timestamp=req.timestamp,
+        )
+    except RuntimeError:
+        return {"ok": False}
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------------
+# Play reporting to Tidal's Event Producer
+#
+# Without this, plays through our client don't count for Tidal's Recently
+# Played, recommendations, or royalty accounting. `tidalapi` doesn't wrap
+# the event-producer endpoint, so `app/play_reporter.py` does it directly.
+# Frontend calls /start at track-play time, /stop when the track ends or is
+# skipped. A single `playback_session` event captures both actions.
+# ---------------------------------------------------------------------------
+
+
+class PlayReportStopRequest(BaseModel):
+    session_id: str
+    track_id: str
+    quality: str
+    source_type: Optional[str] = None
+    source_id: Optional[str] = None
+    start_ts_ms: int
+    end_ts_ms: int
+    start_position_s: float
+    end_position_s: float
+
+
+@app.post("/api/play-report/start")
+def play_report_start(req: dict) -> dict:
+    """Hand the caller a session_id for a new play. No network traffic.
+
+    The real event is sent at /stop time so it contains both actions in
+    one message — that's how Tidal's own SDKs structure `playback_session`.
+    """
+    _require_auth()
+    return {"session_id": str(uuid.uuid4()), "ts_ms": int(time.time() * 1000)}
+
+
+@app.post("/api/play-report/stop")
+def play_report_stop(req: PlayReportStopRequest) -> dict:
+    _require_auth()
+    play_reporter.record(
+        PlaySession(
+            session_id=req.session_id,
+            track_id=str(req.track_id),
+            quality=req.quality,
+            source_type=req.source_type,
+            source_id=req.source_id,
+            start_ts_ms=req.start_ts_ms,
+            end_ts_ms=req.end_ts_ms,
+            start_position_s=req.start_position_s,
+            end_position_s=req.end_position_s,
+        )
+    )
+    return {"ok": True}
 
 
 @app.post("/api/auth/logout")
@@ -863,6 +1209,163 @@ def library_playlists() -> list[dict]:
             seen.add(pid)
             out.append(playlist_to_dict(p))
     return out
+
+
+# ---------------------------------------------------------------------------
+# Playlist folders
+#
+# `tidalapi` exposes folder support via `session.user.playlist_folders()`,
+# `session.user.create_folder()`, and the Folder class (rename, remove,
+# move_items_to_folder). Folder IDs are UUIDs; the special ID "root" is
+# the top-level container. Playlist IDs become `trn:playlist:<id>` when
+# used in move calls — we handle the prefixing here so the frontend can
+# work with plain IDs.
+# ---------------------------------------------------------------------------
+
+
+def folder_to_dict(f) -> dict:
+    return {
+        "id": str(getattr(f, "id", "") or ""),
+        "name": getattr(f, "name", "") or "",
+        "parent_id": getattr(f, "parent_folder_id", "root") or "root",
+        "num_items": int(getattr(f, "total_number_of_items", 0) or 0),
+    }
+
+
+def _ensure_playlist_trns(ids: list[str]) -> list[str]:
+    """Tidal's folder-move endpoint wants `trn:playlist:<id>` TRNs. The
+    frontend sends bare IDs, so prefix them here when missing."""
+    out: list[str] = []
+    for pid in ids:
+        if not pid:
+            continue
+        out.append(pid if pid.startswith("trn:playlist:") else f"trn:playlist:{pid}")
+    return out
+
+
+@app.get("/api/library/folders")
+def list_folders(parent_id: str = "root") -> list[dict]:
+    _require_auth()
+    try:
+        folders = tidal.session.user.playlist_folders(
+            limit=50, parent_folder_id=parent_id
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    return [folder_to_dict(f) for f in folders]
+
+
+@app.get("/api/library/folders/{folder_id}/playlists")
+def list_folder_playlists(folder_id: str) -> list[dict]:
+    _require_auth()
+    try:
+        folder = _get_folder(folder_id)
+        items = folder.items(offset=0, limit=50)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    return [playlist_to_dict(p) for p in items]
+
+
+class CreateFolderRequest(BaseModel):
+    name: str
+    parent_id: str = "root"
+
+
+@app.post("/api/library/folders")
+def create_folder(req: CreateFolderRequest) -> dict:
+    _require_auth()
+    if not req.name.strip():
+        raise HTTPException(status_code=400, detail="Folder name is required")
+    try:
+        folder = tidal.session.user.create_folder(
+            title=req.name.strip(), parent_id=req.parent_id or "root"
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    return folder_to_dict(folder)
+
+
+class RenameFolderRequest(BaseModel):
+    name: str
+
+
+@app.patch("/api/library/folders/{folder_id}")
+def rename_folder(folder_id: str, req: RenameFolderRequest) -> dict:
+    _require_auth()
+    if not req.name.strip():
+        raise HTTPException(status_code=400, detail="Folder name is required")
+    try:
+        folder = _get_folder(folder_id)
+        folder.rename(req.name.strip())
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    return {"ok": True}
+
+
+@app.delete("/api/library/folders/{folder_id}")
+def delete_folder(folder_id: str) -> dict:
+    _require_auth()
+    try:
+        folder = _get_folder(folder_id)
+        folder.remove()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    return {"ok": True}
+
+
+class MovePlaylistsRequest(BaseModel):
+    playlist_ids: list[str]
+
+
+@app.post("/api/library/folders/{folder_id}/playlists")
+def add_playlists_to_folder(folder_id: str, req: MovePlaylistsRequest) -> dict:
+    """Move one or more playlists into `folder_id`. Use "root" to move
+    them out of any folder back to the top level."""
+    _require_auth()
+    trns = _ensure_playlist_trns(req.playlist_ids)
+    if not trns:
+        return {"ok": True}
+    try:
+        # `tidalapi.Folder.move_items_to_folder` needs an instance, but
+        # we only need one to call the method — "root" has no real
+        # instance to load, so we find any existing folder and call
+        # from there. If none exist, create a throwaway instance.
+        any_folder = _first_folder_or_throwaway()
+        any_folder.move_items_to_folder(trns, folder=folder_id or "root")
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    return {"ok": True}
+
+
+def _get_folder(folder_id: str):
+    """Load a Folder instance by ID. tidalapi doesn't expose a direct
+    getter, so we list the user's folders and find the match."""
+    import tidalapi
+
+    if folder_id == "root":
+        raise HTTPException(status_code=400, detail="'root' is not a real folder")
+    for f in tidal.session.user.playlist_folders(limit=50, parent_folder_id="root"):
+        if str(getattr(f, "id", "")) == folder_id:
+            return f
+    # Nested — fall back to instantiating directly. tidalapi's Folder
+    # constructor triggers a fetch that populates the rest of the fields.
+    return tidalapi.Folder(session=tidal.session, folder_id=folder_id)
+
+
+def _first_folder_or_throwaway():
+    """Return any Folder instance we can call move/rename methods on.
+    We don't actually care which — the instance is just the receiver
+    for the REST call; the target folder is passed as an argument."""
+    import tidalapi
+
+    existing = tidal.session.user.playlist_folders(limit=1, parent_folder_id="root")
+    if existing:
+        return existing[0]
+    # No user folders yet. Construct a bare instance pointing at "root"
+    # so the method resolves — tidalapi's Folder methods post to fixed
+    # endpoints and only use `self.trn` for a couple of operations, not
+    # move_items_to_folder.
+    return tidalapi.Folder(session=tidal.session, folder_id="root")
 
 
 # Cache of (path, mtime_ns, size) -> tags dict, shared across /api/library/local
@@ -1055,6 +1558,199 @@ def artist_radio(artist_id: int) -> list[dict]:
     return [track_to_dict(t) for t in tracks]
 
 
+# ---------------------------------------------------------------------------
+# Videos — music videos on an artist page, played via HLS in a modal.
+#
+# tidalapi exposes Video metadata + `Video.get_url()` which returns an HLS
+# `.m3u8` manifest URL (not a JSON envelope, not a direct MP4). We pass
+# that URL straight through to the frontend; WKWebView plays HLS
+# natively on macOS, and hls.js can pick up the slack on other hosts.
+# ---------------------------------------------------------------------------
+
+
+def _video_image_url(video, size: tuple[int, int] = (750, 500)) -> Optional[str]:
+    """Build a cover URL for a Video. tidalapi's `.image(w,h)` helper
+    requires one of the supported dims; we pick the sensible
+    medium-large default and let any errors collapse to None."""
+    try:
+        return video.image(size[0], size[1])
+    except Exception:
+        return None
+
+
+def video_to_dict(v) -> dict:
+    """Serializer mirroring track_to_dict / album_to_dict shapes so the
+    frontend can render videos in the same card grids as other media."""
+    artist = _first(lambda: v.artist)
+    return {
+        "kind": "video",
+        "id": str(v.id),
+        "name": getattr(v, "title", None) or getattr(v, "name", "") or "",
+        "duration": _first(lambda: v.duration) or 0,
+        "cover": _video_image_url(v, (750, 500)) or _video_image_url(v, (480, 320)),
+        "artist": (
+            {"id": str(artist.id), "name": artist.name} if artist else None
+        ),
+        "release_date": _first(lambda: str(v.release_date) if v.release_date else None),
+        "explicit": bool(_first(lambda: v.explicit)),
+        "quality": _first(lambda: getattr(v, "video_quality", None)) or "",
+        "share_url": _first(lambda: v.share_url),
+    }
+
+
+@app.get("/api/artist/{artist_id}/videos")
+def artist_videos(artist_id: int, limit: int = 50) -> list[dict]:
+    """Music videos an artist has released. Returns an empty list if
+    the artist has no videos rather than 404'ing — keeps the UI
+    simple (the Videos section just hides itself)."""
+    _require_auth()
+    try:
+        artist = tidal.session.artist(artist_id)
+        videos = artist.get_videos(limit=limit)
+    except Exception:
+        return []
+    return [video_to_dict(v) for v in videos or []]
+
+
+@app.get("/api/video/{video_id}")
+def video_detail(video_id: int) -> dict:
+    _require_auth()
+    try:
+        video = tidal.session.video(video_id)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return video_to_dict(video)
+
+
+@app.get("/api/video/{video_id}/credits")
+def video_credits(video_id: int) -> list[dict]:
+    """Credits for a music video. Tries Tidal's private REST endpoint;
+    falls back to empty on 404 / error so the UI hides the section."""
+    _require_auth()
+    try:
+        resp = tidal.session.request.request(
+            "GET", f"videos/{video_id}/credits", params={"limit": 50}
+        )
+        if resp.status_code == 404:
+            return []
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception:
+        return []
+    out: list[dict] = []
+    for row in data if isinstance(data, list) else []:
+        if not isinstance(row, dict):
+            continue
+        contributors = row.get("contributors") or []
+        role = row.get("type") or ""
+        if not role:
+            continue
+        out.append(
+            {
+                "role": role,
+                "contributors": [
+                    {
+                        "name": c.get("name") or "",
+                        "id": str(c["id"]) if c.get("id") is not None else None,
+                    }
+                    for c in contributors
+                    if isinstance(c, dict) and c.get("name")
+                ],
+            }
+        )
+    return out
+
+
+@app.get("/api/video/{video_id}/similar")
+def video_similar(video_id: int, limit: int = 20) -> list[dict]:
+    """Videos similar to a given one. Prefers Tidal's undocumented
+    `videos/{id}/recommendations` endpoint; when that's unavailable we
+    fall back to the artist's other videos (minus the current one) so
+    the "Similar videos" panel is never empty for a valid video."""
+    _require_auth()
+    try:
+        resp = tidal.session.request.request(
+            "GET",
+            f"videos/{video_id}/recommendations",
+            params={"limit": limit, "offset": 0},
+        )
+        if resp.status_code != 404:
+            resp.raise_for_status()
+            data = resp.json()
+            items = data.get("items") if isinstance(data, dict) else data
+            if isinstance(items, list) and items:
+                out: list[dict] = []
+                for row in items:
+                    if not isinstance(row, dict):
+                        continue
+                    vid = row.get("id") or (row.get("item") or {}).get("id")
+                    if not vid:
+                        continue
+                    try:
+                        v = tidal.session.video(vid)
+                        out.append(video_to_dict(v))
+                    except Exception:
+                        continue
+                if out:
+                    return out
+    except Exception:
+        pass
+
+    # Fallback: other videos from the same artist.
+    try:
+        video = tidal.session.video(video_id)
+        artist = getattr(video, "artist", None)
+        if artist is None:
+            return []
+        siblings = tidal.session.artist(artist.id).get_videos(limit=limit + 5)
+    except Exception:
+        return []
+    current_id = str(video_id)
+    return [video_to_dict(v) for v in (siblings or []) if str(v.id) != current_id][:limit]
+
+
+_VALID_VIDEO_QUALITIES = {"HIGH", "MEDIUM", "LOW", "AUDIO_ONLY"}
+
+
+@app.get("/api/video/{video_id}/stream")
+def video_stream(video_id: int, quality: Optional[str] = None) -> dict:
+    """Return the HLS manifest URL for a video. The frontend feeds this
+    into a `<video>` element — WKWebView (macOS) plays HLS natively.
+
+    When `quality` is omitted we use the user's default from session
+    config (what tidalapi's `video.get_url()` does). When passed, we
+    hit the underlying `/videos/{id}/urlpostpaywall` endpoint directly
+    with the requested quality so the quality-picker dropdown can swap
+    streams without changing global session state.
+    """
+    _require_auth()
+    if quality and quality.upper() not in _VALID_VIDEO_QUALITIES:
+        raise HTTPException(status_code=400, detail=f"Invalid quality: {quality}")
+    try:
+        if quality:
+            resp = tidal.session.request.request(
+                "GET",
+                f"videos/{video_id}/urlpostpaywall",
+                params={
+                    "urlusagemode": "STREAM",
+                    "videoquality": quality.upper(),
+                    "assetpresentation": "FULL",
+                },
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            urls = payload.get("urls") if isinstance(payload, dict) else None
+            url = urls[0] if isinstance(urls, list) and urls else None
+        else:
+            video = tidal.session.video(video_id)
+            url = video.get_url()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    if not url:
+        raise HTTPException(status_code=404, detail="No playback URL available")
+    return {"url": url}
+
+
 @app.get("/api/track/{track_id}/credits")
 def track_credits(track_id: int) -> list[dict]:
     """List songwriter / producer / engineer / etc. credits for a track.
@@ -1090,6 +1786,151 @@ def track_credits(track_id: int) -> list[dict]:
             }
         )
     return result
+
+
+@app.get("/api/album/{album_id}/credits")
+def album_credits(album_id: int) -> list[dict]:
+    """Per-track credits for every track on an album — the shape
+    Tidal's own Album Credits view uses (a card per track, each card
+    listing roles + contributors). We page through
+    `/albums/{id}/items/credits?includeContributors=true` and return
+    one entry per track:
+
+        [{track_id, track_num, title, artists:[{id,name}],
+          credits:[{role, contributors:[{name,id}]}]}]
+
+    Graceful fallback: 404 / unexpected shape → `[]`, the UI hides
+    the Credits button entirely.
+    """
+    _require_auth()
+    out: list[dict] = []
+    try:
+        offset = 0
+        limit = 100
+        while True:
+            resp = tidal.session.request.request(
+                "GET",
+                f"albums/{album_id}/items/credits",
+                params={
+                    "offset": offset,
+                    "limit": limit,
+                    "includeContributors": "true",
+                    "replace": "true",
+                },
+            )
+            if resp.status_code == 404:
+                return []
+            resp.raise_for_status()
+            payload = resp.json()
+            items = payload.get("items") if isinstance(payload, dict) else None
+            if not isinstance(items, list) or len(items) == 0:
+                break
+            for entry in items:
+                if not isinstance(entry, dict):
+                    continue
+                inner = entry.get("item") if isinstance(entry.get("item"), dict) else {}
+                track_id = inner.get("id") or entry.get("id")
+                if not track_id:
+                    continue
+                title = inner.get("title") or entry.get("title") or ""
+                track_num = inner.get("trackNumber") or entry.get("trackNumber") or 0
+                artists_raw = inner.get("artists") or entry.get("artists") or []
+                artists = [
+                    {
+                        "id": str(a.get("id")) if a.get("id") is not None else None,
+                        "name": a.get("name") or "",
+                    }
+                    for a in artists_raw
+                    if isinstance(a, dict)
+                ]
+                credits_raw = entry.get("credits") or inner.get("credits") or []
+                credits: list[dict] = []
+                for row in credits_raw:
+                    if not isinstance(row, dict):
+                        continue
+                    role = row.get("type") or ""
+                    if not role:
+                        continue
+                    contributors = [
+                        {
+                            "name": c.get("name") or "",
+                            "id": str(c["id"]) if c.get("id") is not None else None,
+                        }
+                        for c in (row.get("contributors") or [])
+                        if isinstance(c, dict) and c.get("name")
+                    ]
+                    if contributors:
+                        credits.append({"role": role, "contributors": contributors})
+                out.append(
+                    {
+                        "track_id": str(track_id),
+                        "track_num": int(track_num or 0),
+                        "title": title,
+                        "artists": artists,
+                        "credits": credits,
+                    }
+                )
+            total = payload.get("totalNumberOfItems") if isinstance(payload, dict) else None
+            offset += limit
+            if isinstance(total, int) and offset >= total:
+                break
+            if offset >= 2000:  # safety cap
+                break
+    except Exception:
+        return []
+
+    # Preserve track order — Tidal returns items in album order already,
+    # but a client could reasonably expect trackNumber-sorted output.
+    out.sort(key=lambda x: x.get("track_num") or 0)
+    return out
+
+
+@app.get("/api/artist/{artist_id}/credits")
+def artist_credits(artist_id: int, limit: int = 20) -> list[dict]:
+    """List tracks where this artist is credited in any role — the
+    equivalent of Tidal's artist-page "Credits" section (writer,
+    producer, engineer, featured, etc.). Returns serialized Track rows
+    with their role annotated so the frontend can group by role.
+
+    Graceful fallback: Tidal's `/artists/{id}/credits` endpoint is
+    undocumented. If it 404s or the response is unexpected, we return
+    an empty list and the section simply won't render.
+    """
+    _require_auth()
+    try:
+        resp = tidal.session.request.request(
+            "GET", f"artists/{artist_id}/credits", params={"limit": limit, "offset": 0}
+        )
+        if resp.status_code == 404:
+            return []
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception:
+        # Endpoint not available for this artist / region / account tier.
+        # Return empty rather than 500 — the section hides itself.
+        return []
+
+    # Tidal's response shape here isn't officially documented. From the
+    # observed envelope, `items` is a list of {role, track, contributors}
+    # dicts. We be defensive about every field.
+    raw_items = data.get("items") if isinstance(data, dict) else None
+    if not isinstance(raw_items, list):
+        return []
+    out: list[dict] = []
+    for row in raw_items:
+        if not isinstance(row, dict):
+            continue
+        role = row.get("role") or row.get("type") or ""
+        track_data = row.get("track") or row.get("item") or {}
+        track_id = track_data.get("id") if isinstance(track_data, dict) else None
+        if not track_id:
+            continue
+        try:
+            track = tidal.session.track(track_id)
+        except Exception:
+            continue
+        out.append({**track_to_dict(track), "role": role})
+    return out
 
 
 @app.get("/api/track/{track_id}/lyrics")
@@ -1153,6 +1994,35 @@ def track_radio(track_id: int) -> list[dict]:
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc))
     return [track_to_dict(t) for t in radio]
+
+
+@app.get("/api/mixes")
+def my_mixes() -> list[dict]:
+    """The user's personalized mixes (Daily Mix 1/2/3, Discovery Mix, etc.).
+
+    `session.mixes()` returns a Page object whose categories each contain
+    a list of Mix items. We flatten into a single list so the Home row
+    doesn't have to care about Tidal's category grouping.
+    """
+    _require_auth()
+    try:
+        page = tidal.session.mixes()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    out: list[dict] = []
+    seen: set[str] = set()
+    for category in getattr(page, "categories", []) or []:
+        items = getattr(category, "items", None) or []
+        for item in items:
+            serialized = _serialize_page_item(item)
+            if not serialized or serialized.get("kind") != "mix":
+                continue
+            mix_id = serialized.get("id") or ""
+            if not mix_id or mix_id in seen:
+                continue
+            seen.add(mix_id)
+            out.append(serialized)
+    return out
 
 
 @app.get("/api/mix/{mix_id}")

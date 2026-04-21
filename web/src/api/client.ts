@@ -9,16 +9,31 @@ import type {
   DownloadItem,
   FavoriteKind,
   FavoritesSnapshot,
+  LastFmChartArtist,
+  LastFmChartTag,
+  LastFmChartTrack,
+  LastFmLovedTrack,
+  LastFmPeriod,
+  LastFmPlaycount,
+  LastFmRecentTrack,
+  LastFmStatus,
+  LastFmTopAlbum,
+  LastFmTopArtist,
+  LastFmTopTrack,
+  LastFmUserInfo,
+  LastFmWeeklyScrobble,
   LocalFile,
   Lyrics,
   MixDetail,
   Playlist,
+  PlaylistFolder,
   PlaylistDetail,
   QualityOption,
   SearchResponse,
   Settings,
   TidalPage,
   Track,
+  Video,
 } from "./types";
 
 // Upper bound on how long any JSON request is allowed to hang before
@@ -85,7 +100,139 @@ export const api = {
         body: JSON.stringify({ redirect_url }),
       }),
   },
+  /** Open a Tidal URL in the user's default system browser. Exists
+   *  because `window.open` for external URLs is silently dropped in
+   *  pywebview's embedded WebView on every platform; the server opens
+   *  it via Python's `webbrowser` module instead. */
+  openExternal: (url: string) =>
+    req<{ ok: true }>("/api/open-external", {
+      method: "POST",
+      body: JSON.stringify({ url }),
+    }),
+  lastfm: {
+    status: () => req<LastFmStatus>("/api/lastfm/status"),
+    setCredentials: (api_key: string, api_secret: string) =>
+      req<LastFmStatus>("/api/lastfm/credentials", {
+        method: "PUT",
+        body: JSON.stringify({ api_key, api_secret }),
+      }),
+    connectStart: () =>
+      req<{ auth_url: string; token: string }>("/api/lastfm/connect/start", {
+        method: "POST",
+      }),
+    connectComplete: (token: string) =>
+      req<{ connected: true; username: string }>(
+        "/api/lastfm/connect/complete",
+        { method: "POST", body: JSON.stringify({ token }) },
+      ),
+    disconnect: () =>
+      req<LastFmStatus>("/api/lastfm/disconnect", { method: "POST" }),
+    recentTracks: (limit = 100) =>
+      req<LastFmRecentTrack[]>(`/api/lastfm/recent-tracks?limit=${limit}`),
+    userInfo: () => req<LastFmUserInfo>("/api/lastfm/user-info"),
+    topArtists: (period: LastFmPeriod, limit = 50) =>
+      req<LastFmTopArtist[]>(
+        `/api/lastfm/top-artists?period=${period}&limit=${limit}`,
+      ),
+    topTracks: (period: LastFmPeriod, limit = 50) =>
+      req<LastFmTopTrack[]>(
+        `/api/lastfm/top-tracks?period=${period}&limit=${limit}`,
+      ),
+    topAlbums: (period: LastFmPeriod, limit = 50) =>
+      req<LastFmTopAlbum[]>(
+        `/api/lastfm/top-albums?period=${period}&limit=${limit}`,
+      ),
+    lovedTracks: (limit = 50) =>
+      req<LastFmLovedTrack[]>(`/api/lastfm/loved-tracks?limit=${limit}`),
+    artistPlaycount: (artist: string) =>
+      req<LastFmPlaycount>(
+        `/api/lastfm/artist-playcount?artist=${encodeURIComponent(artist)}`,
+      ),
+    albumPlaycount: (artist: string, album: string) =>
+      req<LastFmPlaycount>(
+        `/api/lastfm/album-playcount?artist=${encodeURIComponent(artist)}&album=${encodeURIComponent(album)}`,
+      ),
+    trackPlaycount: (artist: string, track: string) =>
+      req<LastFmPlaycount>(
+        `/api/lastfm/track-playcount?artist=${encodeURIComponent(artist)}&track=${encodeURIComponent(track)}`,
+      ),
+    weeklyScrobbles: (weeks = 52) =>
+      req<LastFmWeeklyScrobble[]>(
+        `/api/lastfm/weekly-scrobbles?weeks=${weeks}`,
+      ),
+    chartTopArtists: (limit = 50) =>
+      req<LastFmChartArtist[]>(
+        `/api/lastfm/chart/top-artists?limit=${limit}`,
+      ),
+    chartTopTracks: (limit = 50) =>
+      req<LastFmChartTrack[]>(
+        `/api/lastfm/chart/top-tracks?limit=${limit}`,
+      ),
+    chartTopTags: (limit = 50) =>
+      req<LastFmChartTag[]>(`/api/lastfm/chart/top-tags?limit=${limit}`),
+    nowPlaying: (track: {
+      artist: string;
+      title: string;
+      album?: string;
+      duration?: number;
+    }) =>
+      req<{ ok: boolean }>("/api/lastfm/now-playing", {
+        method: "POST",
+        body: JSON.stringify({
+          artist: track.artist,
+          track: track.title,
+          album: track.album ?? "",
+          duration: track.duration ?? 0,
+        }),
+      }),
+    scrobble: (track: {
+      artist: string;
+      title: string;
+      album?: string;
+      duration?: number;
+      timestamp?: number;
+    }) =>
+      req<{ ok: boolean }>("/api/lastfm/scrobble", {
+        method: "POST",
+        body: JSON.stringify({
+          artist: track.artist,
+          track: track.title,
+          album: track.album ?? "",
+          duration: track.duration ?? 0,
+          timestamp: track.timestamp ?? null,
+        }),
+      }),
+  },
   me: () => req<{ username: string }>("/api/me"),
+  // Tidal's "event producer" — play reporting so tracks count for
+  // Recently Played, recommendations, and artist royalties. Fire-and-
+  // forget from the caller's perspective; the server queues and sends.
+  playReport: {
+    start: () =>
+      req<{ session_id: string; ts_ms: number }>("/api/play-report/start", {
+        method: "POST",
+        body: JSON.stringify({}),
+      }),
+    stop: (body: {
+      session_id: string;
+      track_id: string;
+      quality: string;
+      source_type?: string | null;
+      source_id?: string | null;
+      start_ts_ms: number;
+      end_ts_ms: number;
+      start_position_s: number;
+      end_position_s: number;
+    }) =>
+      req<{ ok: boolean }>("/api/play-report/stop", {
+        method: "POST",
+        body: JSON.stringify(body),
+      }),
+  },
+  mixes: () =>
+    req<{ kind: "mix"; id: string; name: string; subtitle: string; cover: string | null }[]>(
+      "/api/mixes",
+    ),
   search: (q: string, limit = 20) =>
     req<SearchResponse>(`/api/search?q=${encodeURIComponent(q)}&limit=${limit}`),
   library: {
@@ -95,10 +242,62 @@ export const api = {
     playlists: () => req<Playlist[]>("/api/library/playlists"),
     local: () =>
       req<{ output_dir: string; files: LocalFile[] }>("/api/library/local"),
+    folders: {
+      list: (parentId: string = "root") =>
+        req<PlaylistFolder[]>(
+          `/api/library/folders?parent_id=${encodeURIComponent(parentId)}`,
+        ),
+      playlists: (folderId: string) =>
+        req<Playlist[]>(
+          `/api/library/folders/${encodeURIComponent(folderId)}/playlists`,
+        ),
+      create: (name: string, parentId: string = "root") =>
+        req<PlaylistFolder>("/api/library/folders", {
+          method: "POST",
+          body: JSON.stringify({ name, parent_id: parentId }),
+        }),
+      rename: (folderId: string, name: string) =>
+        req<{ ok: boolean }>(
+          `/api/library/folders/${encodeURIComponent(folderId)}`,
+          { method: "PATCH", body: JSON.stringify({ name }) },
+        ),
+      delete: (folderId: string) =>
+        req<{ ok: boolean }>(
+          `/api/library/folders/${encodeURIComponent(folderId)}`,
+          { method: "DELETE" },
+        ),
+      movePlaylists: (folderId: string, playlistIds: string[]) =>
+        req<{ ok: boolean }>(
+          `/api/library/folders/${encodeURIComponent(folderId)}/playlists`,
+          { method: "POST", body: JSON.stringify({ playlist_ids: playlistIds }) },
+        ),
+    },
   },
   album: (id: string) => req<AlbumDetail>(`/api/album/${id}`),
+  albumCredits: (id: string) =>
+    req<
+      {
+        track_id: string;
+        track_num: number;
+        title: string;
+        artists: { id: string | null; name: string }[];
+        credits: CreditEntry[];
+      }[]
+    >(`/api/album/${id}/credits`),
   artist: (id: string) => req<ArtistDetail>(`/api/artist/${id}`),
   artistRadio: (id: string) => req<Track[]>(`/api/artist/${id}/radio`),
+  artistCredits: (id: string) =>
+    req<(Track & { role: string })[]>(`/api/artist/${id}/credits`),
+  artistVideos: (id: string) => req<Video[]>(`/api/artist/${id}/videos`),
+  video: (id: string) => req<Video>(`/api/video/${id}`),
+  videoStream: (id: string, quality?: string) =>
+    req<{ url: string }>(
+      quality
+        ? `/api/video/${id}/stream?quality=${encodeURIComponent(quality)}`
+        : `/api/video/${id}/stream`,
+    ),
+  videoCredits: (id: string) => req<CreditEntry[]>(`/api/video/${id}/credits`),
+  videoSimilar: (id: string) => req<Video[]>(`/api/video/${id}/similar`),
   playlist: (id: string) => req<PlaylistDetail>(`/api/playlist/${id}`),
   mix: (id: string) => req<MixDetail>(`/api/mix/${encodeURIComponent(id)}`),
   trackLyrics: (id: string) => req<Lyrics>(`/api/track/${id}/lyrics`),

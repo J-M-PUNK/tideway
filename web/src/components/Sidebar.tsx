@@ -1,15 +1,16 @@
 import { NavLink } from "react-router-dom";
 import {
+  BarChart3,
   Compass,
   Disc3,
   Download,
-  Flame,
   HardDrive,
   Heart,
   History,
   Home,
   Library,
   Link2,
+  ListMusic,
   Newspaper,
   Plus,
   Rss,
@@ -19,6 +20,7 @@ import {
 } from "lucide-react";
 import { AddUrlDialog } from "@/components/AddUrlDialog";
 import { CreatePlaylistDialog } from "@/components/CreatePlaylistDialog";
+import { useFeedUnreadCount } from "@/hooks/useFeedUnread";
 import { cn } from "@/lib/utils";
 
 const primary = [
@@ -28,19 +30,29 @@ const primary = [
   { to: "/explore", label: "Explore", icon: Compass },
 ];
 
+// Charts (Popular, Top, Rising) live behind a single entry — the
+// destination renders a tab strip so the sidebar doesn't have to.
+// Popular is the default since that's the first tab on the page.
+// Genres/Moods used to live here but they're already reachable from
+// Explore, so keeping them in the sidebar was noise.
 const discover = [
   { to: "/charts/new", label: "New Releases", icon: Newspaper },
-  { to: "/charts/rising", label: "Rising", icon: Flame },
-  { to: "/charts/top", label: "Top Charts", icon: TrendingUp },
+  { to: "/popular", label: "Charts", icon: TrendingUp },
 ];
 
+// Library order: the things the user curates (Liked Songs → Albums →
+// Artists → Playlists) come first, then derived/supporting surfaces
+// (local files, history, stats). `ListMusic` — not `Library` — for
+// Playlists because the section header already uses the `Library`
+// icon; two rows with the same glyph looks like a bug at a glance.
 const library = [
-  { to: "/library/playlists", label: "Playlists", icon: Library },
+  { to: "/library/tracks", label: "Liked Songs", icon: Heart },
   { to: "/library/albums", label: "Albums", icon: Disc3 },
   { to: "/library/artists", label: "Artists", icon: User },
-  { to: "/library/tracks", label: "Liked Songs", icon: Heart },
+  { to: "/library/playlists", label: "Playlists", icon: ListMusic },
   { to: "/library/local", label: "On this device", icon: HardDrive },
   { to: "/history", label: "History", icon: History },
+  { to: "/stats", label: "Stats", icon: BarChart3 },
 ];
 
 // In offline mode the only link we keep in the "Your Library" section
@@ -62,39 +74,59 @@ export function Sidebar({
   offline?: boolean;
 }) {
   const libraryLinks = offline ? offlineLibrary : library;
+  const feedUnread = useFeedUnreadCount();
   return (
     <aside className="flex h-full w-64 flex-col gap-2 bg-background p-2 text-sm">
       {!offline && (
         <nav className="rounded-lg bg-card p-2">
-          {primary.map(({ to, label, icon: Icon, end }) => (
-            <NavLink
-              key={to}
-              to={to}
-              end={end}
-              className={({ isActive }) =>
-                cn(
-                  "flex items-center gap-4 rounded-md px-3 py-2 font-semibold text-muted-foreground transition-colors hover:text-foreground",
-                  isActive && "text-foreground",
-                )
-              }
-            >
-              <Icon className="h-5 w-5" />
-              {label}
-            </NavLink>
-          ))}
-          <div className="mt-1 border-t border-border/50 pt-1">
+          {primary.map(({ to, label, icon: Icon, end }) => {
+            const badge = to === "/feed" && feedUnread > 0 ? feedUnread : 0;
+            return (
+              <NavLink
+                key={to}
+                to={to}
+                end={end}
+                className={({ isActive }) =>
+                  cn(
+                    "flex items-center gap-4 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground",
+                    isActive && "text-foreground",
+                  )
+                }
+              >
+                <Icon className="h-5 w-5" />
+                <span className="flex-1">{label}</span>
+                {badge > 0 && (
+                  <span
+                    className="rounded-full bg-primary/20 px-2 py-0.5 text-[10px] font-bold text-primary"
+                    title={`${badge} new release${badge === 1 ? "" : "s"}`}
+                  >
+                    {badge > 99 ? "99+" : badge}
+                  </span>
+                )}
+              </NavLink>
+            );
+          })}
+          {/* Visual break between the primary tabs and the editorial
+              charts — same text treatment, small uppercase label above
+              to establish the group. Using a heading instead of just a
+              border avoids the "three font sizes" feel the first pass
+              had. */}
+          <div className="mt-2 border-t border-border/50 pt-2">
+            <div className="px-3 pb-1 text-[10px] font-bold uppercase tracking-wider text-muted-foreground/70">
+              Discover
+            </div>
             {discover.map(({ to, label, icon: Icon }) => (
               <NavLink
                 key={to}
                 to={to}
                 className={({ isActive }) =>
                   cn(
-                    "flex items-center gap-4 rounded-md px-3 py-1.5 text-[13px] font-medium text-muted-foreground transition-colors hover:text-foreground",
+                    "flex items-center gap-4 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground",
                     isActive && "text-foreground",
                   )
                 }
               >
-                <Icon className="h-4 w-4" />
+                <Icon className="h-5 w-5" />
                 {label}
               </NavLink>
             ))}
@@ -104,15 +136,20 @@ export function Sidebar({
 
       <div className="flex min-h-0 flex-1 flex-col rounded-lg bg-card p-2">
         <div className="flex items-center justify-between px-3 py-2 text-muted-foreground">
-          <span className="flex items-center gap-3 font-semibold">
+          <span className="flex items-center gap-3 text-sm font-semibold">
             <Library className="h-5 w-5" /> Your Library
           </span>
           {!offline && (
             <CreatePlaylistDialog
               trigger={
                 <button
-                  className="rounded-full p-1.5 hover:bg-accent hover:text-foreground"
-                  title="Create playlist"
+                  // A bit bigger + filled-on-hover so the primary action
+                  // (create a playlist) reads as an action, not a
+                  // decoration. Tooltip hints at what "+" means since
+                  // the icon alone is ambiguous next to a library label.
+                  className="flex h-7 w-7 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+                  title="New playlist"
+                  aria-label="Create a new playlist"
                 >
                   <Plus className="h-4 w-4" />
                 </button>
@@ -127,7 +164,7 @@ export function Sidebar({
               to={to}
               className={({ isActive }) =>
                 cn(
-                  "flex items-center gap-4 rounded-md px-3 py-2 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground",
+                  "flex items-center gap-4 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground",
                   isActive && "bg-accent text-foreground",
                 )
               }

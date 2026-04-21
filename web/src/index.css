@@ -2,6 +2,19 @@
 @tailwind components;
 @tailwind utilities;
 
+/* Fullscreen defaults — WebKit's ::backdrop and :fullscreen pseudo
+ * elements default to white, which shows through as a flash behind
+ * the video while exiting fullscreen. Force both to black so the
+ * transition stays dark. */
+:fullscreen,
+:-webkit-full-screen {
+  background: #000;
+}
+::backdrop,
+::-webkit-backdrop {
+  background: #000;
+}
+
 @layer base {
   /* Default (dark) palette — lives on :root so components work without
    *  a theme class. The `.light` override below flips the same variables

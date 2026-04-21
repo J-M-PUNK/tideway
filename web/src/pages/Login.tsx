@@ -68,8 +68,19 @@ function PkceLogin({
     };
   }, []);
 
-  const openLogin = () => {
-    if (loginUrl) window.open(loginUrl, "_blank", "noopener");
+  const openLogin = async () => {
+    if (!loginUrl) return;
+    // Ask the backend to launch the system browser. pywebview's embedded
+    // WebView silently drops `window.open` for external URLs, so the
+    // server runs Python's `webbrowser.open()` to reach the default
+    // browser. Falls back to window.open for plain-browser dev mode
+    // where the backend call might be blocked (or for manual debugging).
+    try {
+      await api.openExternal(loginUrl);
+      return;
+    } catch {
+      window.open(loginUrl, "_blank", "noopener");
+    }
   };
 
   const submit = async () => {
@@ -175,7 +186,14 @@ function DeviceLogin({
       const res = await api.auth.loginStart();
       setInfo(res);
       setStatus("waiting");
-      window.open(res.url, "_blank", "noopener");
+      // Backend-initiated browser open; window.open is silently ignored
+      // when the app runs inside pywebview. Fallback preserves plain
+      // browser-mode UX.
+      try {
+        await api.openExternal(res.url);
+      } catch {
+        window.open(res.url, "_blank", "noopener");
+      }
     } catch {
       setStatus("failed");
     }

@@ -22,12 +22,17 @@ import { UiPreferencesProvider } from "@/hooks/useUiPreferences";
 import { OfflineProvider, useOfflineMode } from "@/hooks/useOfflineMode";
 import { useNetworkStatus } from "@/hooks/useNetworkStatus";
 import { PlayerProvider } from "@/hooks/PlayerContext";
+import { VideoPlayerProvider } from "@/hooks/useVideoPlayer";
+import { VideoPlayerModal } from "@/components/VideoPlayerModal";
 import { SelectionBar } from "@/components/SelectionBar";
 import { useAuth } from "@/hooks/useAuth";
 import { useDownloads } from "@/hooks/useDownloads";
 import { useDownloadNotifications } from "@/hooks/useDownloadNotifications";
 import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
+import { setLastfmEnabled } from "@/hooks/useLastfmPlaycount";
+import { useLastfmScrobbler } from "@/hooks/useLastfmScrobbler";
 import { useMediaSession } from "@/hooks/useMediaSession";
+import { useTidalPlayReporter } from "@/hooks/useTidalPlayReporter";
 import { api } from "@/api/client";
 import type { OnDownload } from "@/api/download";
 import { Login } from "@/pages/Login";
@@ -36,10 +41,16 @@ import { Search } from "@/pages/Search";
 import { Library } from "@/pages/Library";
 import { LocalLibrary } from "@/pages/LocalLibrary";
 import { Explore } from "@/pages/Explore";
+import { FolderDetail } from "@/pages/FolderDetail";
+import { GenresPage } from "@/pages/GenresPage";
+import { MixesPage } from "@/pages/MixesPage";
+import { MoodsPage } from "@/pages/MoodsPage";
 import { BrowsePage } from "@/pages/BrowsePage";
 import { ChartsPage } from "@/pages/ChartsPage";
 import { FeedPage } from "@/pages/FeedPage";
 import { HistoryPage } from "@/pages/HistoryPage";
+import { PopularPage } from "@/pages/PopularPage";
+import { StatsPage } from "@/pages/StatsPage";
 import { AlbumDetail } from "@/pages/AlbumDetail";
 import { ArtistDetail } from "@/pages/ArtistDetail";
 import { MixDetail } from "@/pages/MixDetail";
@@ -119,15 +130,18 @@ function AppInner() {
           TrackSelectionProvider uses useLocation() to clear selection on
           route change. Keeping them colocated here for clarity. */}
       <PlayerProvider>
-        <TrackSelectionProvider>
-          <Shell
-            username={auth.username}
-            avatar={auth.avatar}
-            onLogout={auth.logout}
-            offline={isOffline}
-            onSignInRequested={auth.refresh}
-          />
-        </TrackSelectionProvider>
+        <VideoPlayerProvider>
+          <TrackSelectionProvider>
+            <Shell
+              username={auth.username}
+              avatar={auth.avatar}
+              onLogout={auth.logout}
+              offline={isOffline}
+              onSignInRequested={auth.refresh}
+            />
+            <VideoPlayerModal />
+          </TrackSelectionProvider>
+        </VideoPlayerProvider>
       </PlayerProvider>
     </BrowserRouter>
   );
@@ -192,6 +206,33 @@ function Shell({
 
   useKeyboardShortcuts({ onOpenPalette: () => setPaletteOpen(true) });
   useMediaSession();
+  useLastfmScrobbler();
+  useTidalPlayReporter();
+
+  // Gate the playcount hooks on whether api credentials exist (not on
+  // whether the user has completed the auth flow). Global listener /
+  // playcount numbers from artist.getInfo / album.getInfo come back
+  // with just an api_key; per-user playcount is optional. Settings
+  // page emits "tidal-settings-updated" on save so switching from
+  // baked-in → user creds or finishing Connect propagates instantly.
+  useEffect(() => {
+    let cancelled = false;
+    const sync = async () => {
+      try {
+        const s = await api.lastfm.status();
+        if (!cancelled) setLastfmEnabled(s.has_credentials);
+      } catch {
+        if (!cancelled) setLastfmEnabled(false);
+      }
+    };
+    sync();
+    const onUpdate = () => sync();
+    window.addEventListener("tidal-settings-updated", onUpdate);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("tidal-settings-updated", onUpdate);
+    };
+  }, []);
 
   // Track unseen completed downloads so the sidebar can badge "X new
   // finished" when the user hasn't looked at /downloads yet. When the
@@ -321,11 +362,15 @@ function Shell({
                 <Route path="/" element={<Home onDownload={enqueue} />} />
                 <Route path="/search" element={<Search onDownload={enqueue} />} />
                 <Route path="/explore" element={<Explore onDownload={enqueue} />} />
+                <Route path="/genres" element={<GenresPage onDownload={enqueue} />} />
+                <Route path="/moods" element={<MoodsPage onDownload={enqueue} />} />
+                <Route path="/mixes" element={<MixesPage />} />
                 <Route path="/charts" element={<Navigate to="/charts/new" replace />} />
                 <Route path="/charts/:chart" element={<ChartsPage onDownload={enqueue} />} />
                 <Route path="/browse/:path" element={<BrowsePage onDownload={enqueue} />} />
                 <Route path="/library" element={<Navigate to="/library/albums" replace />} />
                 <Route path="/library/local" element={<LocalLibrary onDownload={enqueue} />} />
+                <Route path="/library/folder/:id" element={<FolderDetail onDownload={enqueue} />} />
                 <Route path="/library/:section" element={<Library onDownload={enqueue} />} />
                 <Route path="/album/:id" element={<AlbumDetail onDownload={enqueue} />} />
                 <Route path="/artist/:id" element={<ArtistDetail onDownload={enqueue} />} />
@@ -333,6 +378,8 @@ function Shell({
                 <Route path="/mix/:id" element={<MixDetail onDownload={enqueue} />} />
                 <Route path="/feed" element={<FeedPage onDownload={enqueue} />} />
                 <Route path="/history" element={<HistoryPage onDownload={enqueue} />} />
+                <Route path="/stats" element={<StatsPage />} />
+                <Route path="/popular" element={<PopularPage onDownload={enqueue} />} />
                 <Route path="/downloads" element={<Downloads items={downloads.items} offline={offline} />} />
                 <Route path="/settings" element={<SettingsPage onLogout={onLogout} />} />
                 <Route path="*" element={<Navigate to="/" replace />} />

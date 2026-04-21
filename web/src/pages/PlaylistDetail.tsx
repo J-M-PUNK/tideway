@@ -1,15 +1,17 @@
-import { useCallback, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useNavigate, useParams } from "react-router-dom";
-import { Loader2, Pencil, Trash2 } from "lucide-react";
+import { Folder, FolderMinus, Loader2, Pencil, Trash2 } from "lucide-react";
 import { api } from "@/api/client";
 import type { OnDownload } from "@/api/download";
-import type { Track } from "@/api/types";
+import type { PlaylistFolder, Track } from "@/api/types";
 import { useApi } from "@/hooks/useApi";
 import { useMyPlaylists } from "@/hooks/useMyPlaylists";
 import { useToast } from "@/components/toast";
+import { AddToLibraryButton } from "@/components/AddToLibraryButton";
+import { CollectionOverflowMenu } from "@/components/CollectionOverflowMenu";
 import { DetailHero } from "@/components/DetailHero";
-import { DownloadButton } from "@/components/DownloadButton";
-import { HeartButton } from "@/components/HeartButton";
+import { ShareButton } from "@/components/ShareButton";
+import { ShuffleButton } from "@/components/ShuffleButton";
 import { PlayAllButton } from "@/components/PlayAllButton";
 import { TrackList } from "@/components/TrackList";
 import { ErrorView } from "@/components/ErrorView";
@@ -23,6 +25,14 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { HeroSkeleton, TrackListSkeleton } from "@/components/Skeletons";
 import { formatDuration } from "@/lib/utils";
 
@@ -138,25 +148,28 @@ export function PlaylistDetail({ onDownload }: { onDownload: OnDownload }) {
         actions={
           <>
             {tracks.length > 0 && <PlayAllButton tracks={tracks} />}
-            <DownloadButton
-              kind="playlist"
-              id={playlist.id}
-              onPick={onDownload}
-              size="lg"
-              label="Download playlist"
-            />
-            {!playlist.owned && <HeartButton kind="playlist" id={playlist.id} />}
-            {playlist.owned && (
-              <>
-                <EditPlaylistButton
-                  playlistId={playlist.id}
-                  initialTitle={playlist.name}
-                  initialDescription={playlist.description}
-                  onSaved={() => setRefreshTick((n) => n + 1)}
-                />
-                <DeletePlaylistButton playlistId={playlist.id} name={playlist.name} />
-              </>
-            )}
+            {tracks.length > 0 && <ShuffleButton tracks={tracks} />}
+            <div className="ml-auto flex items-center gap-6">
+              {!playlist.owned && <AddToLibraryButton kind="playlist" id={playlist.id} />}
+              <ShareButton shareUrl={playlist.share_url} />
+              <CollectionOverflowMenu
+                tracks={tracks}
+                downloadKind="playlist"
+                downloadId={playlist.id}
+              />
+              {playlist.owned && <MoveToFolderButton playlistId={playlist.id} />}
+              {playlist.owned && (
+                <>
+                  <EditPlaylistButton
+                    playlistId={playlist.id}
+                    initialTitle={playlist.name}
+                    initialDescription={playlist.description}
+                    onSaved={() => setRefreshTick((n) => n + 1)}
+                  />
+                  <DeletePlaylistButton playlistId={playlist.id} name={playlist.name} />
+                </>
+              )}
+            </div>
           </>
         }
       />
@@ -169,6 +182,79 @@ export function PlaylistDetail({ onDownload }: { onDownload: OnDownload }) {
         />
       </div>
     </div>
+  );
+}
+
+function MoveToFolderButton({ playlistId }: { playlistId: string }) {
+  const toast = useToast();
+  const [folders, setFolders] = useState<PlaylistFolder[] | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.library.folders
+      .list("root")
+      .then((f) => {
+        if (!cancelled) setFolders(f);
+      })
+      .catch(() => {
+        if (!cancelled) setFolders([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const move = async (folderId: string, folderName: string) => {
+    try {
+      await api.library.folders.movePlaylists(folderId, [playlistId]);
+      toast.show({
+        kind: "success",
+        title: folderId === "root" ? "Moved out of folder" : `Moved to ${folderName}`,
+      });
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: "Couldn't move playlist",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="outline">
+          <Folder className="h-4 w-4" /> Move
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end" className="w-56">
+        <DropdownMenuLabel>Move to folder</DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        {folders === null && (
+          <DropdownMenuItem disabled>
+            <Loader2 className="h-3.5 w-3.5 animate-spin" /> Loading…
+          </DropdownMenuItem>
+        )}
+        {folders && folders.length === 0 && (
+          <DropdownMenuItem disabled>
+            No folders yet. Create one on the Playlists page.
+          </DropdownMenuItem>
+        )}
+        {folders?.map((f) => (
+          <DropdownMenuItem key={f.id} onSelect={() => move(f.id, f.name)}>
+            <Folder className="h-3.5 w-3.5" /> {f.name}
+          </DropdownMenuItem>
+        ))}
+        {folders && folders.length > 0 && (
+          <>
+            <DropdownMenuSeparator />
+            <DropdownMenuItem onSelect={() => move("root", "root")}>
+              <FolderMinus className="h-3.5 w-3.5" /> Remove from folder
+            </DropdownMenuItem>
+          </>
+        )}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 
@@ -213,7 +299,7 @@ function EditPlaylistButton({
 
   return (
     <>
-      <Button variant="outline" size="lg" onClick={() => setOpen(true)}>
+      <Button variant="outline" onClick={() => setOpen(true)}>
         <Pencil className="h-4 w-4" /> Edit
       </Button>
       <Dialog open={open} onOpenChange={setOpen}>
@@ -292,7 +378,7 @@ function DeletePlaylistButton({ playlistId, name }: { playlistId: string; name: 
 
   return (
     <>
-      <Button variant="outline" size="lg" onClick={() => setOpen(true)}>
+      <Button variant="outline" onClick={() => setOpen(true)}>
         <Trash2 className="h-4 w-4" /> Delete
       </Button>
       <Dialog open={open} onOpenChange={setOpen}>

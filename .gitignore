@@ -226,3 +226,6 @@ tidal_session.json
 settings.json
 watchlist.json
 
+
+# macOS
+.DS_Store

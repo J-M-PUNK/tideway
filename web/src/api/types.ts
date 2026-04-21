@@ -18,6 +18,7 @@ export interface Track {
     name: string;
     cover: string | null;
   } | null;
+  share_url?: string | null;
 }
 
 export interface Album {
@@ -30,6 +31,7 @@ export interface Album {
   cover: string | null;
   artists: ArtistRef[];
   explicit: boolean;
+  share_url?: string | null;
 }
 
 export interface Artist {
@@ -37,6 +39,19 @@ export interface Artist {
   id: string;
   name: string;
   picture: string | null;
+}
+
+export interface Video {
+  kind: "video";
+  id: string;
+  name: string;
+  duration: number;
+  cover: string | null;
+  artist: { id: string; name: string } | null;
+  release_date: string | null;
+  explicit: boolean;
+  quality: string;
+  share_url?: string | null;
 }
 
 export interface Playlist {
@@ -49,6 +64,14 @@ export interface Playlist {
   cover: string | null;
   creator: string | null;
   owned: boolean;
+  share_url?: string | null;
+}
+
+export interface PlaylistFolder {
+  id: string;
+  name: string;
+  parent_id: string;
+  num_items: number;
 }
 
 export type LibraryItem = Track | Album | Artist | Playlist;
@@ -134,6 +157,131 @@ export interface AuthStatus {
   logged_in: boolean;
   username: string | null;
   avatar: string | null;
+}
+
+export interface LastFmStatus {
+  /** True once the user has pasted API key + secret from last.fm,
+   *  OR the build ships with baked-in default credentials. */
+  has_credentials: boolean;
+  /** True when the app is running with module-level default credentials
+   *  and the user hasn't overridden them. Used to hide the "Reset
+   *  credentials" affordance — there's nothing personal to reset. */
+  using_default_credentials: boolean;
+  /** True once the user has finished the browser auth flow — scrobbles
+   *  and now-playing will actually go through. */
+  connected: boolean;
+  username: string | null;
+}
+
+/** One entry from Last.fm's `user.getRecentTracks`. `played_at` is a
+ *  UNIX epoch in seconds, null when `now_playing` is true. */
+export interface LastFmRecentTrack {
+  artist: string;
+  track: string;
+  album: string;
+  played_at: number | null;
+  now_playing: boolean;
+  cover: string;
+  url: string;
+}
+
+export type LastFmPeriod =
+  | "overall"
+  | "7day"
+  | "1month"
+  | "3month"
+  | "6month"
+  | "12month";
+
+export interface LastFmUserInfo {
+  username: string;
+  realname: string;
+  playcount: number;
+  track_count: number;
+  artist_count: number;
+  album_count: number;
+  country: string;
+  url: string;
+  registered_at: number | null;
+  image: string;
+}
+
+export interface LastFmTopArtist {
+  name: string;
+  playcount: number;
+  url: string;
+  image: string;
+  mbid: string;
+}
+
+export interface LastFmTopTrack {
+  name: string;
+  artist: string;
+  playcount: number;
+  duration: number;
+  url: string;
+  image: string;
+}
+
+export interface LastFmTopAlbum {
+  name: string;
+  artist: string;
+  playcount: number;
+  url: string;
+  image: string;
+}
+
+export interface LastFmLovedTrack {
+  name: string;
+  artist: string;
+  loved_at: number | null;
+  url: string;
+  image: string;
+}
+
+export interface LastFmPlaycount {
+  /** How many times THIS user has played this entity. Missing / 0
+   *  when the user has never scrobbled it. */
+  userplaycount?: number;
+  /** Only on track.getInfo: 1 if the user has loved it. */
+  userloved?: boolean;
+  /** Global stats for the entity across all Last.fm users. */
+  listeners?: number;
+  playcount?: number;
+  url?: string;
+}
+
+export interface LastFmWeeklyScrobble {
+  /** UNIX epoch (seconds) for the start / end of the 7-day bucket. */
+  from: number;
+  to: number;
+  count: number;
+}
+
+export interface LastFmChartArtist {
+  name: string;
+  playcount: number;
+  listeners: number;
+  url: string;
+  image: string;
+  mbid: string;
+}
+
+export interface LastFmChartTrack {
+  name: string;
+  artist: string;
+  playcount: number;
+  listeners: number;
+  duration: number;
+  url: string;
+  image: string;
+}
+
+export interface LastFmChartTag {
+  name: string;
+  taggings: number;
+  reach: number;
+  url: string;
 }
 
 export interface QualityOption {

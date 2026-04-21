@@ -2,8 +2,12 @@ import { useParams } from "react-router-dom";
 import { api } from "@/api/client";
 import type { OnDownload } from "@/api/download";
 import { useApi } from "@/hooks/useApi";
+import { AddTracksToPlaylistButton } from "@/components/AddTracksToPlaylistButton";
+import { CollectionOverflowMenu } from "@/components/CollectionOverflowMenu";
 import { DetailHero } from "@/components/DetailHero";
 import { PlayAllButton } from "@/components/PlayAllButton";
+import { ShareButton } from "@/components/ShareButton";
+import { ShuffleButton } from "@/components/ShuffleButton";
 import { TrackList } from "@/components/TrackList";
 import { ErrorView } from "@/components/ErrorView";
 import { HeroSkeleton, TrackListSkeleton } from "@/components/Skeletons";
@@ -24,6 +28,11 @@ export function MixDetail({ onDownload }: { onDownload: OnDownload }) {
   }
   if (error || !mix) return <ErrorView error={error ?? "Mix not found"} />;
 
+  // Mixes don't expose their own share URL — synthesize one from the
+  // ID so the share button still works. Matches the `/mix/:id` routes
+  // Tidal itself uses on the web player.
+  const shareUrl = `https://tidal.com/browse/mix/${mix.id}`;
+
   return (
     <div>
       <DetailHero
@@ -36,7 +45,19 @@ export function MixDetail({ onDownload }: { onDownload: OnDownload }) {
             <span>{mix.tracks.length} tracks</span>
           </div>
         }
-        actions={mix.tracks.length > 0 ? <PlayAllButton tracks={mix.tracks} /> : null}
+        actions={
+          mix.tracks.length > 0 ? (
+            <>
+              <PlayAllButton tracks={mix.tracks} />
+              <ShuffleButton tracks={mix.tracks} />
+              <div className="ml-auto flex items-center gap-6">
+                <AddTracksToPlaylistButton tracks={mix.tracks} />
+                <ShareButton shareUrl={shareUrl} />
+                <CollectionOverflowMenu tracks={mix.tracks} />
+              </div>
+            </>
+          ) : null
+        }
       />
       <div className="mt-8">
         <TrackList tracks={mix.tracks} onDownload={onDownload} />
