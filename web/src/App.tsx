@@ -58,6 +58,7 @@ import { AlbumDetail } from "@/pages/AlbumDetail";
 import { ArtistDetail } from "@/pages/ArtistDetail";
 import { MixDetail } from "@/pages/MixDetail";
 import { RadioPage } from "@/pages/RadioPage";
+import { ImportPage } from "@/pages/ImportPage";
 import { PlaylistDetail } from "@/pages/PlaylistDetail";
 import { Downloads } from "@/pages/Downloads";
 import { SettingsPage } from "@/pages/SettingsPage";
@@ -396,6 +397,7 @@ function Shell({
                 <Route path="/feed" element={<FeedPage onDownload={enqueue} />} />
                 <Route path="/history" element={<HistoryPage onDownload={enqueue} />} />
                 <Route path="/stats" element={<StatsPage />} />
+                <Route path="/import" element={<ImportPage />} />
                 <Route path="/user/:id" element={<ProfilePage onDownload={enqueue} />} />
                 <Route path="/user/:id/followers" element={<FollowListPage kind="followers" />} />
                 <Route path="/user/:id/following" element={<FollowListPage kind="following" />} />
