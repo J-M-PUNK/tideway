@@ -494,7 +494,14 @@ function TrackRow({
                 {track.album.name}
               </Link>
             ) : (
-              track.artists.map((a) => a.name).join(", ")
+              track.artists.map((a, i) => (
+                <span key={a.id}>
+                  {i > 0 && ", "}
+                  <Link to={`/artist/${a.id}`} className="hover:underline">
+                    {a.name}
+                  </Link>
+                </span>
+              ))
             )}
           </div>
           {/* Right-side action cluster — heart, duration, download, menu
