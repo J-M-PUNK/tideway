@@ -78,6 +78,15 @@ hiddenimports = [
     "uvicorn.lifespan.on",
     "sse_starlette",
     "webview.platforms.cocoa",
+    # Global media-key listener dependencies. pynput's macOS backend
+    # pulls Quartz via pyobjc; PyInstaller's static analysis misses
+    # the dynamic import.
+    "pynput",
+    "pynput.keyboard",
+    "pynput.keyboard._darwin",
+    "Quartz",
+    "AppKit",
+    "Foundation",
 ]
 
 a = Analysis(

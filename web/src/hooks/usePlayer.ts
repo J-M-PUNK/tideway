@@ -404,6 +404,38 @@ export function usePlayer() {
     }));
   }, []);
 
+  // Global media-key bridge. The backend's pynput listener publishes
+  // hotkey actions (play_pause / next / previous) to /api/hotkey/events
+  // — we subscribe once and map each onto the local hook action.
+  // Queue advance logic stays here; the backend is just the courier.
+  // Mirror the three actions into refs so the subscription effect is
+  // install-once and never re-runs when the callbacks change identity.
+  const toggleRef = useRef(toggle);
+  const nextRef = useRef(next);
+  const prevRef = useRef(prev);
+  useEffect(() => {
+    toggleRef.current = toggle;
+    nextRef.current = next;
+    prevRef.current = prev;
+  }, [toggle, next, prev]);
+
+  useEffect(() => {
+    const es = new EventSource("/api/hotkey/events");
+    es.onmessage = (event) => {
+      try {
+        const { action } = JSON.parse(event.data) as { action?: string };
+        if (action === "play_pause") toggleRef.current?.();
+        else if (action === "next") nextRef.current?.();
+        else if (action === "previous") prevRef.current?.();
+      } catch {
+        /* malformed frame */
+      }
+    };
+    return () => {
+      es.close();
+    };
+  }, []);
+
   const sleepTimeoutRef = useRef<number | null>(null);
   const sleepTickRef = useRef<number | null>(null);
   const [sleepRemaining, setSleepRemaining] = useState<number | null>(null);
