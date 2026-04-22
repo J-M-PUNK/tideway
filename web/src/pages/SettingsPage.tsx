@@ -553,8 +553,8 @@ function AudioEngineFields() {
         title: engine === "pcm" ? "Switched to PCM engine" : "Switched to libvlc engine",
         description:
           engine === "pcm"
-            ? "Gapless playback + bit-perfect output. EQ and live device switching aren't ported yet — toggle back to libvlc if you need them."
-            : "Classic engine with EQ and device switching. No sample-accurate gapless.",
+            ? "Gapless playback + bit-perfect output + EQ + live device switching."
+            : "Classic engine. No sample-accurate gapless on DASH.",
       });
     } catch (err) {
       toast.show({
@@ -641,8 +641,8 @@ function AudioEngineFields() {
           label="Audio engine"
           hint={
             engineInfo.current === "pcm"
-              ? "PyAV + sounddevice. Sample-accurate gapless transitions and bit-perfect output at the track's native sample rate. EQ and live output-device switching aren't implemented on this engine yet — flip back to libvlc if you need them."
-              : "libvlc. Stable and fully featured (EQ + device switching), but inter-track transitions have a small audible gap or clipped transient on DASH streams."
+              ? "PyAV + sounddevice. Sample-accurate gapless transitions and bit-perfect output at the track's native sample rate, 10-band EQ, and live output-device switching."
+              : "libvlc. Long-shipping classic engine. Inter-track transitions have a small audible gap or clipped transient on DASH streams; stays as a fallback."
           }
         >
           <select
@@ -664,7 +664,6 @@ function AudioEngineFields() {
           value={devices.current}
           onChange={(e) => pickDevice(e.target.value)}
           className="h-10 rounded-md border border-input bg-secondary px-3 text-sm"
-          disabled={engineInfo?.current === "pcm"}
         >
           {devices.devices.map((d) => (
             <option key={d.id || "default"} value={d.id}>
