@@ -3744,7 +3744,7 @@ def video_stream(video_id: int, quality: Optional[str] = None) -> dict:
     Browsers (Chrome, Firefox, WebView2 on Windows) enforce CORS on
     hls.js's XHR fetches, and Tidal's CDN doesn't send
     Access-Control-Allow-Origin. So we hand the frontend a loopback
-    URL to our /api/video/proxy endpoint — which fetches from Tidal
+    URL to our /api/video-proxy endpoint — which fetches from Tidal
     server-side and streams bytes through from the same origin as
     the page. WKWebView (packaged macOS .app) decodes HLS natively
     without XHR and would work with the direct URL too, but sending
@@ -3781,14 +3781,14 @@ def video_stream(video_id: int, quality: Optional[str] = None) -> dict:
         raise HTTPException(status_code=502, detail=str(exc))
     if not url:
         raise HTTPException(status_code=404, detail="No playback URL available")
-    return {"url": f"/api/video/proxy?u={quote(url, safe='')}"}
+    return {"url": f"/api/video-proxy?u={quote(url, safe='')}"}
 
 
 def _is_tidal_video_host(netloc: str) -> bool:
     """Tidal serves HLS from multiple CDN hostnames; match on a
     suffix so `im-cf.manifest.tidal.com`, `vmz-ad-cf.video.tidal.com`,
     etc. all pass without needing an exhaustive allowlist. Guards
-    /api/video/proxy against being used as an open proxy for
+    /api/video-proxy against being used as an open proxy for
     arbitrary URLs.
     """
     n = netloc.lower().split(":", 1)[0]
@@ -3797,7 +3797,7 @@ def _is_tidal_video_host(netloc: str) -> bool:
 
 def _rewrite_m3u8(text: str, base_url: str) -> str:
     """Rewrite every URI in an HLS manifest to loop back through
-    our /api/video/proxy endpoint.
+    our /api/video-proxy endpoint.
 
     Handles:
       - Segment lines (non-#, resolved against the manifest URL).
@@ -3815,7 +3815,7 @@ def _rewrite_m3u8(text: str, base_url: str) -> str:
         abs_url = urljoin(base_url, uri)
         if not _is_tidal_video_host(urlparse(abs_url).netloc):
             return uri
-        return f"/api/video/proxy?u={quote(abs_url, safe='')}"
+        return f"/api/video-proxy?u={quote(abs_url, safe='')}"
 
     out: list[str] = []
     for line in text.splitlines():
@@ -3834,7 +3834,7 @@ def _rewrite_m3u8(text: str, base_url: str) -> str:
     return "\n".join(out)
 
 
-@app.get("/api/video/proxy")
+@app.get("/api/video-proxy")
 def video_proxy(u: str):
     """Server-side fetch + stream for Tidal HLS manifests + media
     segments. Called by hls.js from the browser via same-origin
