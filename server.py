@@ -42,6 +42,7 @@ from sse_starlette.sse import EventSourceResponse
 from app import deezer_import
 from app import global_keys as global_keys_mod
 from app import player as native_player
+from app.audio.player import PCMPlayer
 from app import playlist_import
 from app import spotify_import
 from app.downloader import DownloadItem, DownloadStatus, Downloader
@@ -2534,24 +2535,80 @@ class _PlayerOutputDeviceRequest(BaseModel):
 
 
 _player_bootstrapped = False
+_pcm_player_singleton: Optional[PCMPlayer] = None
+_last_engine: Optional[str] = None
 
 
 def _native_player():
-    if not native_player.is_available():
-        raise HTTPException(
-            status_code=503,
-            detail="Native audio engine unavailable (libvlc not loaded)",
+    """Return the active player singleton.
+
+    The app can run on either of two audio engines:
+      - "vlc" (default): libvlc via app.player.VLCPlayer.
+      - "pcm": PyAV + sounddevice via app.audio.player.PCMPlayer.
+        Gapless + bit-perfect, but EQ and live device switching
+        are stubbed until phases 5 and 6 ship.
+
+    Switching engines via settings tears down the previous singleton
+    (it stops any playback) and builds a new one. Callers shouldn't
+    cache the returned object across a settings change.
+    """
+    global _player_bootstrapped, _pcm_player_singleton, _last_engine
+
+    engine = (settings.audio_engine or "vlc").lower()
+    if engine not in ("vlc", "pcm"):
+        engine = "vlc"
+
+    # Engine change → stop the previous instance cleanly, reset the
+    # bootstrap flag so the new engine gets EQ/device re-applied.
+    if _last_engine is not None and engine != _last_engine:
+        try:
+            if _last_engine == "pcm" and _pcm_player_singleton is not None:
+                _pcm_player_singleton.stop()
+            elif _last_engine == "vlc":
+                native_player.shutdown()
+        except Exception as exc:
+            print(f"[player] engine teardown failed: {exc}", flush=True)
+        _pcm_player_singleton = None
+        _player_bootstrapped = False
+    _last_engine = engine
+
+    if engine == "pcm":
+        try:
+            # Fail fast if PyAV / sounddevice aren't importable —
+            # shouldn't happen on a correctly-installed build, but
+            # the error message if it does is helpful.
+            import av  # noqa: F401
+            import sounddevice  # noqa: F401
+        except Exception as exc:
+            raise HTTPException(
+                status_code=503,
+                detail=f"PCM audio engine unavailable: {exc}",
+            )
+        if _pcm_player_singleton is None:
+            _pcm_player_singleton = PCMPlayer(
+                lambda: tidal.session,
+                local_lookup=lambda tid: str(local_index.get(str(tid)))
+                if local_index.get(str(tid))
+                else None,
+                quality_clamp=tidal.clamp_quality_to_subscription,
+            )
+        player = _pcm_player_singleton
+    else:
+        if not native_player.is_available():
+            raise HTTPException(
+                status_code=503,
+                detail="Native audio engine unavailable (libvlc not loaded)",
+            )
+        player = native_player.get_player(
+            lambda: tidal.session,
+            local_lookup=lambda tid: str(local_index.get(str(tid)))
+            if local_index.get(str(tid))
+            else None,
+            quality_clamp=tidal.clamp_quality_to_subscription,
         )
-    player = native_player.get_player(
-        lambda: tidal.session,
-        local_lookup=lambda tid: str(local_index.get(str(tid)))
-        if local_index.get(str(tid))
-        else None,
-        quality_clamp=tidal.clamp_quality_to_subscription,
-    )
+
     # One-shot: re-apply persisted EQ + output device so users who
     # set a USB-DAC preference or an EQ preset keep it across restart.
-    global _player_bootstrapped
     if not _player_bootstrapped:
         _player_bootstrapped = True
         try:
@@ -2566,7 +2623,10 @@ def _native_player():
     return player
 
 
-def _snapshot_dict(snap: native_player.PlayerSnapshot) -> dict:
+def _snapshot_dict(snap) -> dict:
+    """Serialize a PlayerSnapshot (either VLCPlayer or PCMPlayer —
+    they share the same shape) into a JSON-friendly dict.
+    """
     stream_info = None
     if snap.stream_info is not None:
         si = snap.stream_info
@@ -2593,9 +2653,48 @@ def _snapshot_dict(snap: native_player.PlayerSnapshot) -> dict:
 
 @app.get("/api/player/available")
 def player_available() -> dict:
-    """Feature-probe endpoint. Frontend reads this once at startup to
-    decide whether to offer the native-engine toggle in settings."""
-    return {"available": native_player.is_available()}
+    """Feature-probe endpoint. Reports which audio engines are
+    importable so the Settings page can render the engine picker.
+    """
+    pcm_available = False
+    try:
+        import av  # noqa: F401
+        import sounddevice  # noqa: F401
+        pcm_available = True
+    except Exception:
+        pcm_available = False
+    return {
+        # Kept for backwards compat with the existing frontend
+        # probe: true as long as SOMETHING can play audio.
+        "available": native_player.is_available() or pcm_available,
+        "engines": {
+            "vlc": native_player.is_available(),
+            "pcm": pcm_available,
+        },
+        "current": (settings.audio_engine or "vlc").lower(),
+    }
+
+
+class _PlayerEngineRequest(BaseModel):
+    engine: str
+
+
+@app.post("/api/player/engine")
+def player_engine_set(req: _PlayerEngineRequest) -> dict:
+    """Switch the active audio engine. Any in-progress playback on
+    the old engine is stopped cleanly; the frontend should re-issue
+    play() after calling this.
+    """
+    _require_local_access()
+    engine = (req.engine or "").lower()
+    if engine not in ("vlc", "pcm"):
+        raise HTTPException(
+            status_code=400, detail="engine must be 'vlc' or 'pcm'"
+        )
+    settings.audio_engine = engine
+    save_settings(settings)
+    # Teardown + swap happens lazily on the next _native_player() call.
+    return {"ok": True, "engine": engine}
 
 
 @app.get("/api/player/state")
@@ -2693,15 +2792,31 @@ def player_muted(req: _PlayerMutedRequest) -> dict:
 def player_eq_state() -> dict:
     """Current EQ: persisted bands + preamp + enabled flag + the static
     list of presets + band frequencies so the frontend can render
-    sliders."""
+    sliders.
+
+    The active engine reports its own band layout + presets. The PCM
+    engine's stub matches VLC's 10-band shape so the slider UI keeps
+    rendering; presets will be empty until Phase 5 ships.
+    """
     _require_local_access()
+    engine = (settings.audio_engine or "vlc").lower()
+    if engine == "pcm":
+        from app.audio.player import PCMPlayer as _PCM
+        band_count = _PCM.eq_bands_count()
+        frequencies = _PCM.eq_band_frequencies()
+        presets = _PCM.eq_presets()
+    else:
+        band_count = native_player.VLCPlayer.eq_bands_count()
+        frequencies = native_player.VLCPlayer.eq_band_frequencies()
+        presets = native_player.VLCPlayer.eq_presets()
     return {
         "enabled": settings.eq_enabled,
         "bands": list(settings.eq_bands),
         "preamp": settings.eq_preamp,
-        "band_count": native_player.VLCPlayer.eq_bands_count(),
-        "frequencies": native_player.VLCPlayer.eq_band_frequencies(),
-        "presets": native_player.VLCPlayer.eq_presets(),
+        "band_count": band_count,
+        "frequencies": frequencies,
+        "presets": presets,
+        "engine": engine,
     }
 
 
@@ -2922,7 +3037,7 @@ async def player_events(request: Request):
     queue: asyncio.Queue[Optional[dict]] = asyncio.Queue(maxsize=32)
     loop = asyncio.get_running_loop()
 
-    def _on_snapshot(snap: native_player.PlayerSnapshot) -> None:
+    def _on_snapshot(snap) -> None:
         payload = _snapshot_dict(snap)
         try:
             loop.call_soon_threadsafe(queue.put_nowait, payload)

@@ -86,6 +86,12 @@ class Settings:
     # developer.spotify.com and paste the id here. PKCE OAuth so we
     # don't need a secret. Empty string = import feature hidden in UI.
     spotify_client_id: str = ""
+    # Which audio engine drives playback. "vlc" (default) uses the
+    # long-shipping libvlc path. "pcm" uses the PyAV + sounddevice
+    # engine that supports sample-accurate gapless transitions and
+    # bit-perfect output. Some features (EQ, device selection) are
+    # not yet ported to pcm; the UI surfaces warnings when relevant.
+    audio_engine: str = "vlc"
 
 
 def load_settings() -> Settings:

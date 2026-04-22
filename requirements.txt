@@ -11,10 +11,13 @@ sse-starlette>=2.0.0
 # on Win10 via the Evergreen bootstrapper). On macOS it uses WKWebView,
 # shipped with the OS.
 pywebview>=5.0
-# Native audio engine — libvlc bindings. The app/player.py path drives
-# playback through this when libvlc is available on the system (bundled
-# alongside the .app / .exe by PyInstaller for shipped builds).
-python-vlc>=3.0.20
+# Native audio engine — PyAV (libav/ffmpeg) for demuxing + decoding +
+# sounddevice (PortAudio) for the output stream. This pair replaces the
+# libvlc-backed engine so we can pre-decode the next track into PCM and
+# splice at the sample boundary — true gapless, bit-perfect output.
+av>=12.0.0
+sounddevice>=0.4.6
+numpy>=1.26.0
 # Global media-key listener (play-pause / next / prev work when the
 # window is backgrounded). Has platform-specific backends; pynput picks
 # the right one at import time.
