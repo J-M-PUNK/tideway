@@ -17,7 +17,7 @@
 #define MyAppName "Tideway"
 #define MyAppExeName "Tideway.exe"
 #define MyAppPublisher "Tideway"
-#define MyAppURL "https://github.com/yourname/tidal-downloader"
+#define MyAppURL "https://example.com/tideway"
 
 ; VERSION is read from the repo-root VERSION file.
 #define MyAppVersion ReadIni(SourcePath + "..\VERSION", "", "") == "" ? Trim(ReadFileString(SourcePath + "..\VERSION")) : "0.0.0"
