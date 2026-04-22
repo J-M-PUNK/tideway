@@ -29,7 +29,7 @@ import { useUiPreferences, type StreamingQuality } from "./useUiPreferences";
  * ~50ms reopen blip for cross-rate.
  */
 
-const PERSIST_KEY = "tidal-downloader:player";
+const PERSIST_KEY = "tideway:player";
 const PERSIST_INTERVAL_MS = 5000;
 
 export type RepeatMode = "off" | "all" | "one";
@@ -286,23 +286,34 @@ export function usePlayer() {
       });
       if (snap.state === "ended") advanceRef.current();
 
-      // Gapless preload: when we're within 15s of the end of the
-      // current track, fire /api/player/preload for the next track
-      // in the queue so the auto-advance load() can skip the
-      // ~300-500ms manifest fetch. Gated on:
-      //   - state=playing (not loading/idle/paused/ended)
-      //   - we haven't already preloaded for this track_id
-      //   - there's a next track according to pickNextIndex
-      //   - the next track isn't the current one (repeat: "one"
-      //     would be wasteful)
+      // Preload the next queue item about ten seconds into the
+      // current track. The old rule was fifteen seconds from the
+      // end. That was fine for natural gapless transitions but
+      // left mid track skips cold. If you hit Next forty five
+      // seconds into a four minute track the backend had to fetch
+      // the manifest and prime a decoder from scratch, which took
+      // three to five hundred milliseconds before any audio came
+      // out. Spotify and Apple Music both fire preload early for
+      // exactly this reason.
+      //
+      // This only runs when playback is actually in the playing
+      // state, when we haven't already preloaded for this track,
+      // when there is a next track in the queue, and when the
+      // next track isn't the same as the current one (which
+      // happens under repeat one and wouldn't be worth the work).
+      //
+      // The memory cost is one pre decoded PCM buffer held for
+      // the rest of the current track. A five minute FLAC at
+      // 96 kHz and 32 bit runs about 180 MB. Shorter or lower
+      // resolution tracks cost proportionally less. The buffer is
+      // freed as soon as the swap completes or the queue changes.
       if (
         snap.state === "playing" &&
         snap.track_id !== null &&
         preloadedForTrackIdRef.current !== snap.track_id
       ) {
-        const duration = snap.duration_ms / 1000;
         const currentTime = snap.position_ms / 1000;
-        if (duration > 0 && duration - currentTime <= 15) {
+        if (currentTime >= 10) {
           const s = stateRef.current;
           const nextIdx = pickNextIndex(s, true);
           if (nextIdx !== null && nextIdx !== s.queueIndex) {
@@ -320,7 +331,7 @@ export function usePlayer() {
         }
       }
       // Reset the preload guard when track_id changes so the next
-      // track's own preload fires at its own 15s mark.
+      // track's own preload fires at its own trigger point.
       if (
         snap.track_id !== null &&
         preloadedForTrackIdRef.current !== null &&

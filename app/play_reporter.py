@@ -37,7 +37,7 @@ from typing import Optional
 
 from app.http import SESSION
 
-logger = logging.getLogger("tidal-downloader.play_reporter")
+logger = logging.getLogger("tideway.play_reporter")
 
 _EVENT_URL = "https://ec.tidal.com/api/event-batch"
 _EVENT_NAME = "playback_session"
@@ -48,11 +48,17 @@ _APP_NAME = "TIDAL Desktop"
 _APP_VERSION = "2.47.0"
 _CONSENT_CATEGORY = "NECESSARY"
 
-# Tidal web-SDK equivalents: client.platform is the string the official
-# web player uses too (DESKTOP app is Electron around tidal-sdk-web).
-# deviceType is what distinguishes TV / phone / tablet / desktop.
-_CLIENT_PLATFORM = "web"
-_CLIENT_DEVICE_TYPE = "DESKTOP"
+# Browser attributes reported in the Headers MessageAttribute.
+# Tidal Desktop is an Electron shell sitting on top of the
+# tidal-sdk-web code, so the values it reports are the Chromium
+# engine strings below. The event bus itself doesn't enforce these
+# values. They feed telemetry breakdowns. The reason they're here
+# at all is that an earlier version of this module omitted them,
+# which was a drift from `tidal-sdk-web/utils/headerUtils.ts` and
+# may have been what the play_log consumer's validator was
+# catching on.
+_BROWSER_NAME = "Chrome"
+_BROWSER_VERSION = "120.0.0.0"
 
 
 # Rolling buffer of the most recent report attempts + their outcomes.
@@ -173,55 +179,32 @@ def _playback_session_payload(session: PlaySession) -> dict:
     }
 
 
-def _message_body(
-    session: PlaySession,
-    *,
-    access_token: str,
-    fallback_client_id: str,
-    fallback_user_id: str,
-) -> str:
-    """Wrap the play_log event the way Tidal's SDKs do it.
+def _message_body(session: PlaySession) -> str:
+    """Wrap the play_log event the same way tidal-sdk-web does.
 
-    The raw SQS endpoint returns 200 for any JSON body, but the
-    downstream play_log consumer (which populates Recently Played +
-    royalty accounting) drops events missing the `group: "play_log"`
-    envelope. Matches `tidal-sdk-web`'s
-    `packages/player/src/internal/event-tracking/play-log/index.ts`
-    and `packages/event-producer/src/send/send.ts` — the outer keys
-    are group/name/version/ts/uuid/user/client/payload.
+    The real SDK builds the outer body in
+    `tidal-sdk-web/packages/event-producer/src/send/send.ts`. The
+    `createPayload` function spreads the raw event and appends
+    `ts` and `uuid`, so the body shape is just `group`, `name`,
+    `payload`, `version`, `ts`, and `uuid`. There is no `user` or
+    `client` object. Attribution is done on the server side from
+    the JWT in the `authorization` Headers attribute.
 
-    We pull the numeric `cid` out of the JWT claims for `client.token`
-    and `user.clientId`; Tidal's filters distinguish real desktop/web
-    clients from third-party OAuth apps by that numeric id.
-
-    `user.id` isn't always in the JWT (tidalapi's PKCE token doesn't
-    carry a `sub`), so we accept a fallback from the caller pulled
-    off `tidal.session.user.id`. Without a real user id the event
-    reaches the producer but can't be attributed to the user's
-    history — Recently Played stays empty.
+    An earlier version of this function did include `user` and
+    `client` keys, matching a schema we assumed Tidal used
+    internally. The bus accepted those events and SQS returned
+    200, but the plays never surfaced in Recently Played. The
+    most likely explanation is that the play_log consumer
+    validates the body shape against the real SDK schema and
+    quietly rejects events with unexpected keys.
     """
-    claims = _decode_jwt_claims(access_token)
-    numeric_cid = str(claims.get("cid") or fallback_client_id)
-    user_id = str(claims.get("sub") or fallback_user_id or "")
-    event_ts_ms = int(time.time() * 1000)
     return json.dumps(
         {
             "group": _EVENT_GROUP,
             "name": _EVENT_NAME,
             "version": _EVENT_VERSION,
-            "ts": event_ts_ms,
+            "ts": int(time.time() * 1000),
             "uuid": str(uuid.uuid4()),
-            "user": {
-                "id": user_id,
-                "accessToken": access_token,
-                "clientId": numeric_cid,
-            },
-            "client": {
-                "token": numeric_cid,
-                "version": _APP_VERSION,
-                "platform": _CLIENT_PLATFORM,
-                "deviceType": _CLIENT_DEVICE_TYPE,
-            },
             "payload": _playback_session_payload(session),
         },
         separators=(",", ":"),
@@ -229,18 +212,30 @@ def _message_body(
 
 
 def _headers_attr(access_token: str, client_id: str) -> str:
-    # Tidal's SDK embeds the access token RAW inside the Headers
-    # attribute (no "Bearer " prefix) even though the outer HTTP
-    # Authorization header uses `Bearer <token>`. Mis-prefixing here
-    # causes Tidal to silently discard the event.
+    # Mirrors `tidal-sdk-web/utils/headerUtils.ts` exactly. Every
+    # key the real SDK sets is set here. The `browser-name` and
+    # `browser-version` entries were missing in an earlier version
+    # of this function, which is most likely why the bus accepted
+    # events but Recently Played never surfaced them.
+    #
+    # Two details to watch. The `authorization` value is the raw
+    # token with no `Bearer ` prefix. The outer HTTP Authorization
+    # header is still `Bearer <token>`. The `requested-sent-timestamp`
+    # value is a number, not a string. The SDK types the value as
+    # `Record<string, number | string>`, so either would work at
+    # the JSON level, but sending a number matches what the real
+    # client does and removes one more thing the validator might
+    # care about.
     return json.dumps(
         {
             "app-name": _APP_NAME,
             "app-version": _APP_VERSION,
+            "browser-name": _BROWSER_NAME,
+            "browser-version": _BROWSER_VERSION,
             "client-id": client_id,
             "consent-category": _CONSENT_CATEGORY,
             "os-name": _os_name(),
-            "requested-sent-timestamp": str(int(time.time() * 1000)),
+            "requested-sent-timestamp": int(time.time() * 1000),
             "authorization": access_token,
         },
         separators=(",", ":"),
@@ -314,20 +309,6 @@ class PlayReporter:
         access_token = getattr(tidal_session, "access_token", None)
         config = getattr(tidal_session, "config", None)
         client_id = getattr(config, "client_id", None) if config else None
-        # Tidal user id from the session object. tidalapi populates
-        # `session.user` after a successful login; `.id` is the
-        # numeric user id Tidal uses across its API. This is the
-        # fallback when the access-token JWT doesn't carry a `sub`
-        # claim (PKCE tokens often don't).
-        user_obj = getattr(tidal_session, "user", None)
-        fallback_user_id = ""
-        if user_obj is not None:
-            try:
-                uid = getattr(user_obj, "id", None)
-                if uid is not None and int(uid) > 0:
-                    fallback_user_id = str(uid)
-            except (TypeError, ValueError):
-                pass
         if not access_token:
             _append_log({
                 "phase": "skipped",
@@ -337,12 +318,7 @@ class PlayReporter:
             })
             return
         msg_id = str(uuid.uuid4())
-        body = _message_body(
-            session,
-            access_token=access_token,
-            fallback_client_id=client_id or "unknown",
-            fallback_user_id=fallback_user_id,
-        )
+        body = _message_body(session)
         form = _encode_sqs_batch([
             (msg_id, body, _headers_attr(access_token, client_id or "unknown")),
         ])
@@ -365,16 +341,14 @@ class PlayReporter:
             })
             raise
         listened_s = max(0.0, session.end_position_s - session.start_position_s)
-        # Re-decode the JWT for the log entry so the UI can confirm
-        # the numeric cid / user id we actually sent, which is the
-        # part Tidal filters on for Recently Played aggregation.
-        # user_id reflects the actual value that ended up in the
-        # envelope (JWT's `sub` first, then tidalapi's session.user.id
-        # fallback) so "?" here unambiguously means we sent no user.
+        # The log entry surfaces which numeric cid / user id Tidal will
+        # attribute this play to. Attribution is entirely server-side
+        # from the JWT claims — `uid` (Tidal's non-standard name for
+        # the user id) and `cid` (numeric client id). If either is "?"
+        # in the log, the token itself is missing a claim and Recently
+        # Played won't pick the event up regardless of what we send.
         claims = _decode_jwt_claims(access_token)
-        resolved_user_id = str(
-            claims.get("sub") or fallback_user_id or "?"
-        )
+        resolved_user_id = str(claims.get("uid") or claims.get("sub") or "?")
         entry = {
             "phase": "sent",
             "track_id": session.track_id,
@@ -383,6 +357,15 @@ class PlayReporter:
             "client_id": (client_id[:12] + "…") if client_id else "unknown",
             "numeric_cid": str(claims.get("cid") or "?"),
             "user_id": resolved_user_id,
+            # sourceType/sourceId is the single biggest Recently-Played
+            # attribution knob on the server side: TRACK events count for
+            # "Most Listened" aggregates but don't surface in Recently
+            # Played — only ALBUM / PLAYLIST / MIX / ARTIST container
+            # events do. Surfacing both in the log lets us confirm at a
+            # glance whether the play we're about to fire has a container
+            # context attached, without digging into the raw body.
+            "source_type": session.source_type or "",
+            "source_id": session.source_id or "",
         }
         if resp.status_code >= 400:
             # Tidal's event-producer returns an AWS-style XML error body;
@@ -390,14 +373,25 @@ class PlayReporter:
             # distinguish "bad auth" from "bad payload".
             entry["note"] = resp.text[:300] if resp.text else ""
         else:
-            # On success, surface the ids we actually put into the
-            # envelope so the user can see at a glance whether the
-            # JWT decode + session.user.id fallback worked. "user=?"
-            # means the event went out without a user-id attribution
-            # and almost certainly won't show up in Recently Played.
-            entry["note"] = (
-                f"cid={entry['numeric_cid']} user={entry['user_id']}"
+            # On success, surface the ids Tidal will key this event
+            # off of. "user=?" means the JWT didn't carry a `uid`
+            # claim and Recently Played can't attribute it. "src=TRACK"
+            # is the usual Recently-Played blocker — TRACK plays count
+            # for aggregates but don't surface in Recently Played.
+            src_label = (
+                f"{entry['source_type']}:{entry['source_id']}"
+                if entry["source_type"]
+                else "none"
             )
+            entry["note"] = (
+                f"cid={entry['numeric_cid']} user={entry['user_id']} "
+                f"src={src_label}"
+            )
+        # Stash the full outgoing event body on the log entry so the
+        # user can inspect exactly what we sent when Recently Played
+        # isn't working. Only kept on the most-recent entries because
+        # the buffer is capped at _REPORT_LOG_CAP — no unbounded growth.
+        entry["payload_preview"] = body
         _append_log(entry)
 
     def stop(self) -> None:

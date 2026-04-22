@@ -108,7 +108,7 @@ export function CollectionOverflowMenu({ tracks, downloadKind, downloadId }: Pro
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <button
-          className="flex flex-col items-center gap-1 text-muted-foreground transition-colors hover:text-foreground"
+          className="flex flex-col items-center gap-1 text-muted-foreground transition-colors hover:text-foreground data-[state=open]:text-primary"
           title="More"
           aria-label="More actions"
         >

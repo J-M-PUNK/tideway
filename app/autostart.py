@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 
 LABEL = "com.tidaldownloader.app"
 WIN_REG_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
-WIN_REG_VALUE = "TidalDownloader"
+WIN_REG_VALUE = "Tideway"
 
 
 def _executable_path() -> Optional[str]:
@@ -40,8 +40,8 @@ def _executable_path() -> Optional[str]:
         return None
     # sys.executable inside a PyInstaller bundle points at the binary
     # that macOS / Windows actually launches. On macOS the bundle
-    # structure means we want ..../TidalDownloader.app/Contents/MacOS/
-    # TidalDownloader — which is what sys.executable gives us.
+    # structure means we want ..../Tideway.app/Contents/MacOS/
+    # Tideway — which is what sys.executable gives us.
     exe = sys.executable
     if not exe:
         return None
@@ -162,7 +162,7 @@ def _linux_set_enabled(enabled: bool, exe: str) -> None:
         desktop.write_text(
             f"""[Desktop Entry]
 Type=Application
-Name=Tidal Downloader
+Name=Tideway
 Exec={quoted_exe}
 X-GNOME-Autostart-enabled=true
 """,

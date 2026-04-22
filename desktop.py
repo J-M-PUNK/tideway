@@ -296,7 +296,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     # env var at init time.
     _configure_webview2_autoplay()
 
-    parser = argparse.ArgumentParser(description="Tidal Downloader desktop app")
+    parser = argparse.ArgumentParser(description="Tideway desktop app")
     parser.add_argument(
         "--browser",
         action="store_true",
@@ -346,7 +346,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         return 0
 
     window = webview.create_window(
-        "Tidal Downloader",
+        "Tideway",
         f"http://{HOST}:{PORT}/",
         width=1280,
         height=800,

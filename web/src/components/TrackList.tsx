@@ -545,7 +545,7 @@ function TrackRow({
                 <button
                   onClick={(e) => e.stopPropagation()}
                   onPointerDown={(e) => e.stopPropagation()}
-                  className="flex h-8 w-8 items-center justify-center rounded-full text-muted-foreground opacity-0 transition-all hover:bg-accent-foreground/10 hover:text-foreground group-hover:opacity-100 data-[state=open]:opacity-100"
+                  className="flex h-8 w-8 items-center justify-center rounded-full text-muted-foreground opacity-0 transition-all hover:bg-accent-foreground/10 hover:text-foreground group-hover:opacity-100 data-[state=open]:text-primary data-[state=open]:opacity-100"
                   title="More"
                   aria-label="Track actions"
                 >

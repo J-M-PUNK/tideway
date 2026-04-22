@@ -18,7 +18,7 @@ import { api } from "@/api/client";
  *     historical release as "unread". Only items released AFTER the
  *     first launch will ever show up in the badge count.
  */
-const LAST_SEEN_KEY = "tidal-downloader:feed-last-seen";
+const LAST_SEEN_KEY = "tideway:feed-last-seen";
 const POLL_INTERVAL_MS = 5 * 60 * 1000;
 
 type FeedReleaseDate = { released_at: string };

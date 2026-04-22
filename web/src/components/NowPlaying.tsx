@@ -157,7 +157,7 @@ export function NowPlaying({
                 <Button
                   variant="ghost"
                   size="icon"
-                  className="h-8 w-8"
+                  className="h-8 w-8 data-[state=open]:text-primary"
                   title="More"
                   aria-label="Track actions"
                 >
@@ -324,6 +324,17 @@ const QUALITY_OPTIONS: {
   { value: "hi_res_lossless", label: "Max", sublabel: "Up to 24-bit, 192 kHz" },
 ];
 
+// Per-tier color for the Now Playing quality pill. Pinned Tailwind
+// palette entries read on both dark and light backgrounds without
+// needing a mode-specific override; `primary` is the brand purple,
+// reserved for Max so the top tier is visually distinct.
+const QUALITY_BADGE_CLASS: Record<StreamingQuality, string> = {
+  low_96k: "bg-neutral-500/15 text-neutral-400 hover:bg-neutral-500/25",
+  low_320k: "bg-amber-500/15 text-amber-500 hover:bg-amber-500/25",
+  high_lossless: "bg-sky-500/15 text-sky-500 hover:bg-sky-500/25",
+  hi_res_lossless: "bg-primary/15 text-primary hover:bg-primary/25",
+};
+
 /**
  * Quality picker pill on the Now Playing bar. When the current track is
  * a downloaded local file, this is a no-op badge (playback is already at
@@ -344,11 +355,15 @@ function StreamingQualityPicker({ isLocal }: { isLocal: boolean }) {
       </div>
     );
   }
+  const badgeClass = QUALITY_BADGE_CLASS[streamingQuality];
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <button
-          className="flex items-center gap-1.5 rounded-full bg-secondary px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-foreground transition-colors hover:bg-accent"
+          className={cn(
+            "flex items-center gap-1.5 rounded-full px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider transition-colors",
+            badgeClass,
+          )}
           title="Streaming quality"
         >
           <AudioLines className="h-3 w-3" /> {label}
@@ -384,9 +399,8 @@ function StreamingQualityPicker({ isLocal }: { isLocal: boolean }) {
         ))}
         <DropdownMenuSeparator />
         <div className="px-2 py-1.5 text-[11px] text-muted-foreground">
-          Max uses significantly more bandwidth (a 4-min track is
-          ~70-140 MB depending on sample rate) and requires a PKCE
-          login with a Max-entitled Tidal account.
+          Max uses significantly more bandwidth — a 4-minute track is
+          ~70–140 MB depending on sample rate.
         </div>
       </DropdownMenuContent>
     </DropdownMenu>

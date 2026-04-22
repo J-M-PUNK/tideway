@@ -1,27 +1,23 @@
 import { Shuffle } from "lucide-react";
-import type { Track } from "@/api/types";
 import { usePlayerActions, usePlayerMeta } from "@/hooks/PlayerContext";
-import type { PlaySource } from "@/hooks/usePlayer";
 import { cn } from "@/lib/utils";
 
 /**
- * Shuffle-play a list of tracks — same visual footprint as
- * `PlayAllButton` (big round primary-colored button) so a row of
- * [Play] [Shuffle] reads as two paired CTAs. Enables shuffle mode if
- * it isn't already on and plays a random seed track with the full list
- * as the queue.
+ * Shuffle toggle. This used to be a one tap shuffle-play button
+ * that both flipped the shuffle flag and started playback in the
+ * same click. Now it just flips the flag. The user still has to
+ * press Play, which is how Spotify and Apple Music both handle
+ * this. When shuffle is on the glyph turns brand purple so the
+ * paired Play and Shuffle buttons make the current mode obvious.
+ *
+ * The button has no filled background. If it did, it would look
+ * like another primary action sitting next to Play and would
+ * compete with the real Play button for attention.
  */
 export function ShuffleButton({
-  tracks,
   size = "md",
-  source,
 }: {
-  tracks: Track[];
   size?: "lg" | "md";
-  /** Container that these tracks came from — threaded through to
-   *  play-log events so shuffles from an album/playlist attribute to
-   *  the right container on Tidal Recently Played. */
-  source?: PlaySource;
 }) {
   const { shuffle } = usePlayerMeta();
   const actions = usePlayerActions();
@@ -29,23 +25,19 @@ export function ShuffleButton({
   const dim = size === "lg" ? "h-14 w-14" : "h-12 w-12";
   const icon = size === "lg" ? "h-6 w-6" : "h-5 w-5";
 
-  const onClick = () => {
-    if (tracks.length === 0) return;
-    if (!shuffle) actions.toggleShuffle();
-    const seed = tracks[Math.floor(Math.random() * tracks.length)];
-    actions.play(seed, tracks, source);
-  };
-
   return (
     <button
-      onClick={onClick}
-      disabled={tracks.length === 0}
+      onClick={actions.toggleShuffle}
       className={cn(
         dim,
-        "flex flex-shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-lg transition-all hover:scale-105 active:scale-95 disabled:opacity-40",
+        "flex flex-shrink-0 items-center justify-center rounded-full bg-transparent transition-colors",
+        shuffle
+          ? "text-primary hover:text-primary/80"
+          : "text-muted-foreground hover:text-foreground",
       )}
-      aria-label="Shuffle play"
-      title="Shuffle play"
+      aria-label={shuffle ? "Turn off shuffle" : "Turn on shuffle"}
+      aria-pressed={shuffle}
+      title={shuffle ? "Shuffle on — click to turn off" : "Turn on shuffle"}
     >
       <Shuffle className={icon} />
     </button>

@@ -35,7 +35,7 @@ type Section = "albums" | "artists" | "playlists" | "tracks";
 type Sort = "recent" | "alpha";
 type View = "grid" | "list";
 
-const VIEW_KEY_PREFIX = "tidal-downloader:library-view:";
+const VIEW_KEY_PREFIX = "tideway:library-view:";
 
 function loadView(section: Section): View {
   try {

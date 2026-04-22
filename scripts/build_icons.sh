@@ -5,9 +5,9 @@
 #   scripts/build_icons.sh
 #
 # Outputs:
-#   assets/icon.icns  (macOS — picked up by TidalDownloader-mac.spec)
-#   assets/icon.ico   (Windows — picked up by TidalDownloader-win.spec
-#                      and scripts/TidalDownloader.iss)
+#   assets/icon.icns  (macOS — picked up by Tideway-mac.spec)
+#   assets/icon.ico   (Windows — picked up by Tideway-win.spec
+#                      and scripts/Tideway.iss)
 #
 # Prereqs: `iconutil` (ships with Xcode Command Line Tools) and
 # either ImageMagick (`brew install imagemagick`) or `sips` (ships

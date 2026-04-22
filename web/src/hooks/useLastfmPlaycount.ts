@@ -13,7 +13,7 @@ import type { LastFmPlaycount } from "@/api/types";
  * under localStorage's per-origin quota even with thousands of
  * keys.
  */
-const LS_KEY = "tidal-downloader:lastfm-playcount-cache";
+const LS_KEY = "tideway:lastfm-playcount-cache";
 const LS_TTL_MS = 7 * 24 * 3600 * 1000;
 
 interface CacheEntry {

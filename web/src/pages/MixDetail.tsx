@@ -52,10 +52,7 @@ export function MixDetail({ onDownload }: { onDownload: OnDownload }) {
                 tracks={mix.tracks}
                 source={{ type: "MIX", id: mix.id }}
               />
-              <ShuffleButton
-                tracks={mix.tracks}
-                source={{ type: "MIX", id: mix.id }}
-              />
+              <ShuffleButton />
               <div className="ml-auto flex items-center gap-6">
                 <AddTracksToPlaylistButton tracks={mix.tracks} />
                 <ShareButton shareUrl={shareUrl} />

@@ -27,8 +27,8 @@
     --card-foreground: 0 0% 98%;
     --popover: 0 0% 4%;
     --popover-foreground: 0 0% 98%;
-    --primary: 166 100% 41%;
-    --primary-foreground: 0 0% 2%;
+    --primary: 266 85% 62%;
+    --primary-foreground: 0 0% 98%;
     --secondary: 0 0% 9%;
     --secondary-foreground: 0 0% 98%;
     --muted: 0 0% 9%;
@@ -39,7 +39,7 @@
     --destructive-foreground: 0 0% 98%;
     --border: 0 0% 13%;
     --input: 0 0% 13%;
-    --ring: 166 100% 41%;
+    --ring: 266 85% 62%;
     --radius: 0.5rem;
     /* Theme-specific chrome colors (scrollbar track/thumb, hardcoded
      *  now-playing bar, hero gradient fallback). Defined here as
@@ -61,9 +61,10 @@
     --card-foreground: 220 20% 14%;
     --popover: 0 0% 100%;
     --popover-foreground: 220 20% 14%;
-    /* Teal tuned for contrast on white (≈4.6:1). 100% saturation
-     *  vibrates against a light background, so drop it a bit. */
-    --primary: 166 82% 33%;
+    /* Purple tuned for contrast on white (≈4.6:1). Vibrant enough to
+     *  carry the brand against the cool-tinted light background, dim
+     *  enough that saturated chrome doesn't vibrate. */
+    --primary: 266 70% 48%;
     --primary-foreground: 0 0% 100%;
     --secondary: 220 14% 92%;
     --secondary-foreground: 220 20% 14%;
@@ -75,7 +76,7 @@
     --destructive-foreground: 0 0% 100%;
     --border: 220 13% 86%;
     --input: 220 13% 86%;
-    --ring: 166 82% 33%;
+    --ring: 266 70% 48%;
     --now-playing-bg: 0 0% 100%;
     --scrollbar-thumb: 220 12% 78%;
     --scrollbar-thumb-hover: 220 12% 62%;

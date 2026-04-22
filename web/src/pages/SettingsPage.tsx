@@ -166,15 +166,8 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
         <SettingsIcon className="h-7 w-7" /> Settings
       </h1>
 
-      <Section
-        title="Playback"
-        icon={Headphones}
-        description="Streaming quality, output device, and the equalizer. Playback runs through the native PyAV + sounddevice engine — gapless transitions and bit-perfect output at the track's sample rate."
-      >
-        <Field
-          label="Streaming quality"
-          hint="Used when playing a track that isn't downloaded. Only tiers your subscription supports appear."
-        >
+      <Section title="Playback" icon={Headphones}>
+        <Field label="Streaming quality">
           <select
             value={
               // Clamp the stored value against the filtered list so a
@@ -204,7 +197,7 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
         icon={Download}
         description="Where and how your music is saved to disk."
       >
-        <Field label="Output folder" hint="Audio downloads land here, organized into album subfolders.">
+        <Field label="Output folder">
           <Input
             value={settings.output_dir}
             onChange={(e) => patch({ output_dir: e.target.value })}
@@ -212,7 +205,7 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
           />
         </Field>
 
-        <Field label="Videos folder" hint="Music videos go here — separate so they don't intermix with album folders.">
+        <Field label="Videos folder">
           <Input
             value={settings.videos_dir}
             onChange={(e) => patch({ videos_dir: e.target.value })}
@@ -1018,10 +1011,14 @@ function PlayReportingSection() {
       http_status: number | null;
       listened_s?: number;
       client_id?: string;
+      source_type?: string;
+      source_id?: string;
       note?: string;
+      payload_preview?: string;
     }[]
   >([]);
   const [busy, setBusy] = useState(false);
+  const [expandedIdx, setExpandedIdx] = useState<number | null>(null);
 
   const refresh = async () => {
     try {
@@ -1106,33 +1103,55 @@ function PlayReportingSection() {
             const ok = e.phase === "sent" && e.http_status !== null && e.http_status < 400;
             const skipped = e.phase === "skipped";
             const failed = !ok && !skipped;
+            const expanded = expandedIdx === i;
+            const hasPayload = !!e.payload_preview;
+            // Only reformat when the row is open — the list polls every
+            // 5s and re-renders all rows, so parsing every payload on
+            // every tick adds up once the buffer fills.
+            let prettyPayload = "";
+            if (expanded && e.payload_preview) {
+              try {
+                prettyPayload = JSON.stringify(JSON.parse(e.payload_preview), null, 2);
+              } catch {
+                prettyPayload = e.payload_preview;
+              }
+            }
             return (
-              <div
-                key={i}
-                className={cn(
-                  "flex items-start gap-2 px-2 py-1",
-                  ok && "text-foreground",
-                  skipped && "text-muted-foreground",
-                  failed && "text-destructive",
-                )}
-              >
-                <span className="w-16 tabular-nums text-muted-foreground">
-                  {new Date(e.ts_ms).toLocaleTimeString([], {
-                    hour: "2-digit",
-                    minute: "2-digit",
-                    second: "2-digit",
-                  })}
-                </span>
-                <span className="w-16 font-semibold">
-                  {ok ? `HTTP ${e.http_status}` : skipped ? "SKIP" : failed ? `HTTP ${e.http_status ?? "err"}` : e.phase}
-                </span>
-                <span className="w-24 truncate">track {e.track_id}</span>
-                {e.listened_s != null && (
+              <div key={i} className="flex flex-col">
+                <button
+                  type="button"
+                  onClick={() => hasPayload && setExpandedIdx(expanded ? null : i)}
+                  className={cn(
+                    "flex items-start gap-2 px-2 py-1 text-left",
+                    hasPayload && "cursor-pointer hover:bg-card/60",
+                    ok && "text-foreground",
+                    skipped && "text-muted-foreground",
+                    failed && "text-destructive",
+                  )}
+                >
                   <span className="w-16 tabular-nums text-muted-foreground">
-                    {e.listened_s}s
+                    {new Date(e.ts_ms).toLocaleTimeString([], {
+                      hour: "2-digit",
+                      minute: "2-digit",
+                      second: "2-digit",
+                    })}
                   </span>
+                  <span className="w-16 font-semibold">
+                    {ok ? `HTTP ${e.http_status}` : skipped ? "SKIP" : failed ? `HTTP ${e.http_status ?? "err"}` : e.phase}
+                  </span>
+                  <span className="w-24 truncate">track {e.track_id}</span>
+                  {e.listened_s != null && (
+                    <span className="w-16 tabular-nums text-muted-foreground">
+                      {e.listened_s}s
+                    </span>
+                  )}
+                  {e.note && <span className="min-w-0 flex-1 truncate">{e.note}</span>}
+                </button>
+                {expanded && prettyPayload && (
+                  <pre className="mx-2 mb-2 overflow-x-auto rounded bg-background/50 p-2 text-[10px] leading-tight text-muted-foreground">
+                    {prettyPayload}
+                  </pre>
                 )}
-                {e.note && <span className="min-w-0 flex-1 truncate">{e.note}</span>}
               </div>
             );
           })}
@@ -1193,7 +1212,7 @@ function AutostartSection() {
       icon={Power}
       description={
         status.available
-          ? "Start Tidal Downloader automatically when you log in. Handled by the OS — no background service runs while this is off."
+          ? "Start Tideway automatically when you log in. Handled by the OS — no background service runs while this is off."
           : "Auto-start only works in the packaged app. Run from the built .app / .exe to enable this."
       }
     >
@@ -1205,7 +1224,7 @@ function AutostartSection() {
           disabled={!status.available || busy}
           className="h-4 w-4 accent-primary"
         />
-        Start Tidal Downloader when I log in
+        Start Tideway when I log in
         {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
       </label>
       {status.available && status.path && (

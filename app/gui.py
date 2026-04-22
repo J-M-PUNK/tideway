@@ -1376,7 +1376,7 @@ class MainWindow(ctk.CTkFrame):
         hdr = ctk.CTkFrame(self, fg_color="transparent")
         hdr.pack(fill="x", padx=20, pady=(14, 4))
 
-        ctk.CTkLabel(hdr, text="Tidal Downloader",
+        ctk.CTkLabel(hdr, text="Tideway",
                      font=ctk.CTkFont(size=20, weight="bold")).pack(side="left")
 
         ctk.CTkButton(hdr, text="Logout", width=76, height=28,

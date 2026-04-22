@@ -15,7 +15,7 @@ on:
 
 jobs:
   # -------------------------------------------------------------------
-  # macOS .app bundle. Produces TidalDownloader-macOS.zip containing
+  # macOS .app bundle. Produces Tideway-macOS.zip containing
   # the .app — users drag it to /Applications. Unsigned / unnotarized
   # so first-launch shows Gatekeeper's "cannot be verified" warning;
   # README tells them to right-click → Open.
@@ -49,26 +49,26 @@ jobs:
           npm run build
 
       - name: Run PyInstaller
-        run: pyinstaller TidalDownloader-mac.spec --noconfirm
+        run: pyinstaller Tideway-mac.spec --noconfirm
 
       - name: Zip .app
         # `ditto` preserves HFS resource forks / symlinks that the
         # .app bundle relies on.
         run: |
           cd dist
-          ditto -c -k --sequesterRsrc --keepParent TidalDownloader.app \
-            TidalDownloader-macOS.zip
+          ditto -c -k --sequesterRsrc --keepParent Tideway.app \
+            Tideway-macOS.zip
 
       - uses: actions/upload-artifact@v4
         with:
-          name: TidalDownloader-macOS
-          path: dist/TidalDownloader-macOS.zip
+          name: Tideway-macOS
+          path: dist/Tideway-macOS.zip
           if-no-files-found: error
 
   # -------------------------------------------------------------------
-  # Windows onedir bundle. Produces TidalDownloader-Windows.zip with
-  # the full dist/TidalDownloader/ folder inside. Users unzip and run
-  # TidalDownloader.exe. SmartScreen warning on first launch; README
+  # Windows onedir bundle. Produces Tideway-Windows.zip with
+  # the full dist/Tideway/ folder inside. Users unzip and run
+  # Tideway.exe. SmartScreen warning on first launch; README
   # covers "More info → Run anyway."
   # -------------------------------------------------------------------
   build-windows:
@@ -101,7 +101,7 @@ jobs:
           npm run build
 
       - name: Run PyInstaller
-        run: pyinstaller TidalDownloader-win.spec --noconfirm
+        run: pyinstaller Tideway-win.spec --noconfirm
 
       - name: Zip dist folder
         # Compress-Archive is built-in on windows-latest — no need to
@@ -109,14 +109,14 @@ jobs:
         # the archive vs. the default Fastest.
         shell: pwsh
         run: |
-          Compress-Archive -Path dist/TidalDownloader/* `
-            -DestinationPath dist/TidalDownloader-Windows.zip `
+          Compress-Archive -Path dist/Tideway/* `
+            -DestinationPath dist/Tideway-Windows.zip `
             -CompressionLevel Optimal
 
       - uses: actions/upload-artifact@v4
         with:
-          name: TidalDownloader-Windows
-          path: dist/TidalDownloader-Windows.zip
+          name: Tideway-Windows
+          path: dist/Tideway-Windows.zip
           if-no-files-found: error
 
   # -------------------------------------------------------------------
@@ -133,19 +133,19 @@ jobs:
     steps:
       - uses: actions/download-artifact@v4
         with:
-          name: TidalDownloader-macOS
+          name: Tideway-macOS
           path: artifacts
       - uses: actions/download-artifact@v4
         with:
-          name: TidalDownloader-Windows
+          name: Tideway-Windows
           path: artifacts
 
       - name: Create / update release
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            artifacts/TidalDownloader-macOS.zip
-            artifacts/TidalDownloader-Windows.zip
+            artifacts/Tideway-macOS.zip
+            artifacts/Tideway-Windows.zip
           generate_release_notes: true
           draft: false
           # Mark tags containing a hyphen (v0.2.0-rc1 etc.) as

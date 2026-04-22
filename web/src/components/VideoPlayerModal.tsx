@@ -117,7 +117,7 @@ export function VideoPlayerModal() {
   // Persist volume across sessions.
   useEffect(() => {
     try {
-      localStorage.setItem("tidal-downloader:video-volume", String(volume));
+      localStorage.setItem("tideway:video-volume", String(volume));
     } catch {
       /* ignore quota */
     }
@@ -929,7 +929,7 @@ function VideoOverflowMenu({ video }: { video: Video }) {
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <button
-          className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-white/10 hover:text-foreground"
+          className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-white/10 hover:text-foreground data-[state=open]:text-primary"
           title="More"
           aria-label="More"
         >
@@ -1219,7 +1219,7 @@ function VideoCreditsDialog({
 // Share the saved volume across modal re-opens.
 function readVolume(): number {
   try {
-    const raw = localStorage.getItem("tidal-downloader:video-volume");
+    const raw = localStorage.getItem("tideway:video-volume");
     if (!raw) return 1;
     const parsed = parseFloat(raw);
     if (isNaN(parsed) || parsed < 0 || parsed > 1) return 1;

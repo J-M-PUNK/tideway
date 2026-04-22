@@ -537,7 +537,7 @@ class Downloader:
         """
         import sys as _sys
 
-        # expanduser so a stored `~/Music/Tidal` actually resolves —
+        # expanduser so a stored `~/Music/Tideway` actually resolves —
         # otherwise .exists() returns False and we sweep nothing. The
         # server-level sweep already handles this, but this one should
         # too in case the downloader is used standalone.

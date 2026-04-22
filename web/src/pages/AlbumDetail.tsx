@@ -91,10 +91,7 @@ export function AlbumDetail({ onDownload }: { onDownload: OnDownload }) {
               tracks={album.tracks}
               source={{ type: "ALBUM", id: album.id }}
             />
-            <ShuffleButton
-              tracks={album.tracks}
-              source={{ type: "ALBUM", id: album.id }}
-            />
+            <ShuffleButton />
             <div className="ml-auto flex items-center gap-6">
               <AddToLibraryButton kind="album" id={album.id} />
               <AlbumCreditsButton

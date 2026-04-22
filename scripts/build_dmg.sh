@@ -2,11 +2,11 @@
 # Build a distributable DMG from the PyInstaller .app output.
 #
 # Prereqs:
-#   - pyinstaller TidalDownloader-mac.spec has produced dist/TidalDownloader.app
+#   - pyinstaller Tideway-mac.spec has produced dist/Tideway.app
 #   - hdiutil (ships with macOS)
 #
 # Output:
-#   dist/TidalDownloader-<version>.dmg
+#   dist/Tideway-<version>.dmg
 #
 # Users double-click the DMG, drag the app to the Applications shortcut
 # inside the window, eject. Standard macOS install UX. No Homebrew or
@@ -16,13 +16,13 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
-APP_NAME="TidalDownloader"
+APP_NAME="Tideway"
 APP_PATH="dist/${APP_NAME}.app"
 VERSION_FILE="VERSION"
 
 if [[ ! -d "$APP_PATH" ]]; then
   echo "ERROR: $APP_PATH not found. Run pyinstaller first:" >&2
-  echo "  .venv/bin/pyinstaller TidalDownloader-mac.spec --noconfirm" >&2
+  echo "  .venv/bin/pyinstaller Tideway-mac.spec --noconfirm" >&2
   exit 1
 fi
 

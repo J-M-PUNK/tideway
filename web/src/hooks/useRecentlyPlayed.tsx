@@ -10,7 +10,7 @@ import {
 } from "react";
 import type { Track } from "@/api/types";
 
-const STORAGE_KEY = "tidal-downloader:recents";
+const STORAGE_KEY = "tideway:recents";
 const MAX_ENTRIES = 30;
 
 interface RecentsContextValue {

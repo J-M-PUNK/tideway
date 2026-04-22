@@ -20,7 +20,7 @@ import { useToast } from "@/components/toast";
  * Users can dismiss per-version; a newer release re-triggers the
  * banner on next launch.
  */
-const DISMISSED_KEY = "tidal-downloader:update-dismissed-version";
+const DISMISSED_KEY = "tideway:update-dismissed-version";
 
 export function UpdateBanner() {
   const toast = useToast();

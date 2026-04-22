@@ -1,14 +1,14 @@
 # -*- mode: python ; coding: utf-8 -*-
 #
 # macOS PyInstaller spec. Build with:
-#   pyinstaller TidalDownloader-mac.spec --noconfirm
+#   pyinstaller Tideway-mac.spec --noconfirm
 #
-# Produces dist/TidalDownloader.app — a proper .app bundle. Distributing
+# Produces dist/Tideway.app — a proper .app bundle. Distributing
 # outside the App Store still requires:
 #   1. A Developer ID Application certificate.
-#   2. codesign --deep --options runtime --sign "<Team ID>" dist/TidalDownloader.app
+#   2. codesign --deep --options runtime --sign "<Team ID>" dist/Tideway.app
 #   3. Notarization via `xcrun notarytool submit ... --wait` then
-#      `xcrun stapler staple dist/TidalDownloader.app`.
+#      `xcrun stapler staple dist/Tideway.app`.
 # Without notarization, Gatekeeper blocks the app on a user's first
 # launch and the only bypass is right-click → Open.
 #
@@ -124,7 +124,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="TidalDownloader",
+    name="Tideway",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -146,20 +146,20 @@ coll = COLLECT(
     strip=False,
     upx=False,
     upx_exclude=[],
-    name="TidalDownloader",
+    name="Tideway",
 )
 
 app = BUNDLE(
     coll,
-    name="TidalDownloader.app",
+    name="Tideway.app",
     icon=icon_arg,
     bundle_identifier="com.tidaldownloader.app",
     info_plist={
         # LSUIElement=False means a proper Dock icon + menu bar; the
         # default True would make us a background-only agent.
         "LSUIElement": False,
-        "CFBundleName": "Tidal Downloader",
-        "CFBundleDisplayName": "Tidal Downloader",
+        "CFBundleName": "Tideway",
+        "CFBundleDisplayName": "Tideway",
         "CFBundleShortVersionString": APP_VERSION,
         "CFBundleVersion": APP_VERSION,
         # Required by pywebview's WKWebView backend on modern macOS.
