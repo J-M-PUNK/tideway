@@ -1,6 +1,4 @@
-import { useEffect, useState } from "react";
-import { Check, ChevronDown, Download } from "lucide-react";
-import { api } from "@/api/client";
+import { ChevronDown, Download } from "lucide-react";
 import type { ContentKind } from "@/api/types";
 import { Button, type ButtonProps } from "@/components/ui/button";
 import {
@@ -12,54 +10,16 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useQualities } from "@/hooks/useQualities";
-import { cn, qualityLabel } from "@/lib/utils";
-
-// The user's default quality comes from server settings; we cache it at
-// module level so every DownloadButton mount doesn't re-fetch. A
-// subscriber list lets SettingsPage push a fresh value after Save so
-// open DropdownMenus reflect the new default immediately.
-let _cachedDefaultQuality: string | null = null;
-// In-flight dedup: without this, 20 DownloadButtons rendering in
-// parallel each fire their own api.settings.get() the instant they
-// mount (the cache check returns `null` until the first response lands).
-let _inflight: Promise<void> | null = null;
-type Sub = (q: string | null) => void;
-const _subs = new Set<Sub>();
-
-export function publishDefaultQuality(quality: string | null): void {
-  _cachedDefaultQuality = quality;
-  _subs.forEach((s) => s(quality));
-}
-
-/** Reset the cached default quality so the next DownloadButton mount
- * re-pulls it from the server. Used when auth state changes (e.g. PKCE
- * login) — the server may have clamped or unclamped the saved default
- * after the tier was re-detected under the new client_id. */
-export function resetDefaultQualityCache(): void {
-  _cachedDefaultQuality = null;
-  _inflight = null;
-  _subs.forEach((s) => s(null));
-}
-
-function ensureDefaultQuality(): void {
-  if (_cachedDefaultQuality || _inflight) return;
-  _inflight = api.settings
-    .get()
-    .then((s) => {
-      publishDefaultQuality(s.quality);
-    })
-    .catch(() => {
-      /* Non-critical — falls back to "Use default (session)" */
-    })
-    .finally(() => {
-      _inflight = null;
-    });
-}
+import { cn } from "@/lib/utils";
 
 interface Props {
   kind: Extract<ContentKind, "track" | "album" | "playlist">;
   id: string;
-  onPick: (kind: Extract<ContentKind, "track" | "album" | "playlist">, id: string, quality?: string) => void;
+  onPick: (
+    kind: Extract<ContentKind, "track" | "album" | "playlist">,
+    id: string,
+    quality?: string,
+  ) => void;
   variant?: ButtonProps["variant"];
   size?: ButtonProps["size"];
   label?: string;
@@ -74,8 +34,8 @@ interface Props {
 
 /**
  * Does this track benefit from the Max tier? Returns a short tag —
- *   "Hi-Res FLAC"      track actually ships at 24-bit → Max gives you it
- *   "Same as Lossless" CD-res only → no reason to pick Max
+ *   "Hi-Res"         track actually ships at 24-bit → Max gives you it
+ *   "Same as High"   CD-res only → no reason to pick Max
  * null for all other quality tiers.
  *
  * Immersive audio (Dolby Atmos / Sony 360 / MQA) isn't surfaced: Tidal
@@ -108,18 +68,6 @@ export function DownloadButton({
   mediaTags,
 }: Props) {
   const qualities = useQualities() ?? [];
-  const [defaultQuality, setDefaultQuality] = useState<string | null>(_cachedDefaultQuality);
-
-  useEffect(() => {
-    _subs.add(setDefaultQuality);
-    return () => {
-      _subs.delete(setDefaultQuality);
-    };
-  }, []);
-
-  useEffect(() => {
-    ensureDefaultQuality();
-  }, []);
 
   const stop = (e: React.SyntheticEvent) => {
     e.preventDefault();
@@ -152,16 +100,12 @@ export function DownloadButton({
         <DropdownMenuLabel>Download quality</DropdownMenuLabel>
         <DropdownMenuSeparator />
         {qualities.map((q) => {
-          const isDefault = defaultQuality === q.value;
           const effective = effectiveFormatLabel(q.value, mediaTags);
           return (
             <DropdownMenuItem
               key={q.value}
               onSelect={() => onPick(kind, id, q.value)}
             >
-              <div className="mt-0.5 w-4 flex-shrink-0">
-                {isDefault && <Check className="h-3.5 w-3.5 text-primary" />}
-              </div>
               <div className="flex min-w-0 flex-1 flex-col">
                 <div className="flex items-center gap-2">
                   <span className="font-semibold">{q.label}</span>
@@ -180,19 +124,6 @@ export function DownloadButton({
             </DropdownMenuItem>
           );
         })}
-        <DropdownMenuSeparator />
-        <DropdownMenuItem onSelect={() => onPick(kind, id)}>
-          <div className="w-4 flex-shrink-0" />
-          <div className="flex flex-col">
-            <span className="text-sm font-semibold">Use default</span>
-            <span className="text-xs text-muted-foreground">
-              {defaultQuality
-                ? qualities.find((q) => q.value === defaultQuality)?.label ??
-                  qualityLabel(defaultQuality)
-                : "From Settings"}
-            </span>
-          </div>
-        </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   );

@@ -1,5 +1,13 @@
 import { useNavigate } from "react-router-dom";
-import { LogIn, LogOut, Settings, User as UserIcon, WifiOff } from "lucide-react";
+import {
+  LogIn,
+  LogOut,
+  PictureInPicture2,
+  Power,
+  Settings,
+  User as UserIcon,
+  WifiOff,
+} from "lucide-react";
 import { api } from "@/api/client";
 import { useOfflineMode } from "@/hooks/useOfflineMode";
 import {
@@ -139,6 +147,20 @@ export function UserMenu({
             <UserIcon className="h-4 w-4" /> Open in Tidal
           </DropdownMenuItem>
         )}
+        <DropdownMenuItem
+          onSelect={async () => {
+            // No-ops silently in plain-browser dev mode (no launcher
+            // to create the second window). In the packaged app the
+            // response is {ok: true} and pywebview spawns the window.
+            try {
+              await api.openMiniPlayer();
+            } catch {
+              /* ignore */
+            }
+          }}
+        >
+          <PictureInPicture2 className="h-4 w-4" /> Open mini-player
+        </DropdownMenuItem>
         <DropdownMenuSeparator />
         {signedIn ? (
           <DropdownMenuItem onSelect={onLogout}>
@@ -149,6 +171,21 @@ export function UserMenu({
             <LogIn className="h-4 w-4" /> Sign in
           </DropdownMenuItem>
         )}
+        <DropdownMenuItem
+          onSelect={async () => {
+            // Best-effort: the endpoint only works when running inside
+            // the pywebview launcher (which registers the quit
+            // callback). In plain-browser dev mode it returns
+            // {ok:false,reason:"no launcher"} and we silently no-op.
+            try {
+              await api.quitApp();
+            } catch {
+              /* ignore — fetch errors are expected mid-shutdown */
+            }
+          }}
+        >
+          <Power className="h-4 w-4" /> Quit Tidal Downloader
+        </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   );

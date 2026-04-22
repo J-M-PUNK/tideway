@@ -52,7 +52,26 @@ _tray_icon = repo_root / "assets" / "tray-icon.png"
 if _tray_icon.is_file():
     datas.append((str(_tray_icon), "assets"))
 
-binaries = []
+# Bundled ffmpeg — used by the video downloader for HLS → MP4 remux.
+# Shipping it inside the bundle means end users don't have to install
+# anything (no `brew install ffmpeg` prompt on first video download).
+# Populate vendor/ffmpeg/macos/ffmpeg by running:
+#   scripts/fetch_ffmpeg.sh
+# The spec stages the binary as an executable so subprocess can exec
+# it; app/video_downloader.py's _find_ffmpeg() checks <_MEIPASS>/ffmpeg
+# first so the bundled copy wins over any system install.
+_ffmpeg_bin = repo_root / "vendor" / "ffmpeg" / "macos" / "ffmpeg"
+if _ffmpeg_bin.is_file():
+    binaries_ffmpeg = [(str(_ffmpeg_bin), "ffmpeg")]
+else:
+    binaries_ffmpeg = []
+    print(
+        "[spec] WARNING: vendor/ffmpeg/macos/ffmpeg missing — video "
+        "downloads will require ffmpeg on the user's system. Run "
+        "scripts/fetch_ffmpeg.sh to bundle it."
+    )
+
+binaries = list(binaries_ffmpeg)
 
 # Bundle libvlc so the native audio engine works on machines without
 # VLC installed. We copy the dylibs + plugin directory straight out of

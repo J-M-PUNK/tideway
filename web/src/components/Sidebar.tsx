@@ -18,10 +18,12 @@ import {
   Search,
   TrendingUp,
   User,
+  X,
 } from "lucide-react";
 import { AddUrlDialog } from "@/components/AddUrlDialog";
 import { CreatePlaylistDialog } from "@/components/CreatePlaylistDialog";
 import { useFeedUnreadCount } from "@/hooks/useFeedUnread";
+import { useUiPreferences } from "@/hooks/useUiPreferences";
 import { cn } from "@/lib/utils";
 
 const primary = [
@@ -54,7 +56,6 @@ const library = [
   { to: "/library/local", label: "On this device", icon: HardDrive },
   { to: "/history", label: "History", icon: History },
   { to: "/stats", label: "Stats", icon: BarChart3 },
-  { to: "/import", label: "Import playlists", icon: ImportIcon },
 ];
 
 // In offline mode the only link we keep in the "Your Library" section
@@ -77,6 +78,7 @@ export function Sidebar({
 }) {
   const libraryLinks = offline ? offlineLibrary : library;
   const feedUnread = useFeedUnreadCount();
+  const { importLinkDismissed, set: setPrefs } = useUiPreferences();
   return (
     <aside className="flex h-full w-64 flex-col gap-2 bg-background p-2 text-sm">
       {!offline && (
@@ -175,6 +177,35 @@ export function Sidebar({
               {label}
             </NavLink>
           ))}
+          {!offline && !importLinkDismissed && (
+            <div className="group relative">
+              <NavLink
+                to="/import"
+                className={({ isActive }) =>
+                  cn(
+                    "flex items-center gap-4 rounded-md px-3 py-2 pr-9 text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground",
+                    isActive && "bg-accent text-foreground",
+                  )
+                }
+              >
+                <ImportIcon className="h-5 w-5" />
+                <span className="flex-1">Import</span>
+              </NavLink>
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.preventDefault();
+                  e.stopPropagation();
+                  setPrefs({ importLinkDismissed: true });
+                }}
+                title="Hide from sidebar — you can always reopen from Settings"
+                aria-label="Hide Import from sidebar"
+                className="absolute right-1.5 top-1/2 flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded-full text-muted-foreground opacity-0 transition-opacity hover:bg-background hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
+              >
+                <X className="h-3.5 w-3.5" />
+              </button>
+            </div>
+          )}
         </div>
       </div>
 

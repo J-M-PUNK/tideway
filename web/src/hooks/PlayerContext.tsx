@@ -1,6 +1,11 @@
 import { createContext, useContext, useMemo, type ReactNode } from "react";
-import { usePlayer, type Player, type RepeatMode } from "./usePlayer";
-import type { Track } from "@/api/types";
+import {
+  usePlayer,
+  type Player,
+  type PlaySource,
+  type RepeatMode,
+} from "./usePlayer";
+import type { StreamInfo, Track } from "@/api/types";
 
 /**
  * Splits the unified `Player` value into three contexts so consumers only
@@ -28,6 +33,14 @@ interface PlayerMeta {
   queueIndex: number;
   hasNext: boolean;
   hasPrev: boolean;
+  /** Codec / sample rate of what's actually playing. Drives the
+   *  quality badge in the now-playing bar. */
+  streamInfo: StreamInfo | null;
+  /** What container the user started the queue from (album / playlist
+   *  / mix / etc.). Null when started from a non-container context
+   *  like a single-track search result. Read by the Tidal play-log
+   *  reporter to attribute plays to Recently Played. */
+  source: PlaySource | null;
 }
 
 interface PlayerSleep {
@@ -86,6 +99,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       queueIndex: player.queueIndex,
       hasNext: player.hasNext,
       hasPrev: player.hasPrev,
+      streamInfo: player.streamInfo,
+      source: player.source,
     }),
     [
       player.track,
@@ -99,6 +114,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       player.queueIndex,
       player.hasNext,
       player.hasPrev,
+      player.streamInfo,
+      player.source,
     ],
   );
 

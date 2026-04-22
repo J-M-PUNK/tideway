@@ -1,11 +1,17 @@
 import { Pause, Play } from "lucide-react";
 import type { Track } from "@/api/types";
 import { usePlayerActions, usePlayerMeta } from "@/hooks/PlayerContext";
+import type { PlaySource } from "@/hooks/usePlayer";
 import { cn } from "@/lib/utils";
 
 interface Props {
   tracks: Track[];
   size?: "lg" | "md";
+  /** The container the tracks came from. Passing this makes plays
+   *  attribute to the album/playlist/mix for Tidal Recently Played
+   *  aggregation; without it they get reported as sourceType=TRACK
+   *  which Tidal files under aggregate stats but not Recently Played. */
+  source?: PlaySource;
 }
 
 /**
@@ -15,7 +21,7 @@ interface Props {
  * CTA on a detail page, small enough to pair visually with the other
  * labeled action buttons in the actions row.
  */
-export function PlayAllButton({ tracks, size = "md" }: Props) {
+export function PlayAllButton({ tracks, size = "md", source }: Props) {
   const { track, playing } = usePlayerMeta();
   const actions = usePlayerActions();
 
@@ -29,7 +35,7 @@ export function PlayAllButton({ tracks, size = "md" }: Props) {
       return;
     }
     if (tracks.length === 0) return;
-    actions.play(tracks[0], tracks);
+    actions.play(tracks[0], tracks, source);
   };
 
   const isPlaying = isOurQueue && playing;

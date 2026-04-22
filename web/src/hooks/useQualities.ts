@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { api } from "@/api/client";
 import type { QualityOption } from "@/api/types";
-import { publishDefaultQuality } from "@/components/DownloadButton";
 
 // The quality catalog is static per server version; one fetch per app
 // load is plenty. Shared cache + in-flight dedup so any number of rows
@@ -51,16 +50,6 @@ function fetchOnce(): Promise<QualityOption[]> {
           /* ignore */
         }
       });
-      // The server may have clamped the saved default quality to the
-      // subscription ceiling while computing the filtered list. Pull
-      // settings back so every mounted DownloadButton's "Use default
-      // (X)" label updates without a reload.
-      api.settings
-        .get()
-        .then((s) => publishDefaultQuality(s.quality))
-        .catch(() => {
-          /* non-critical */
-        });
       return qs;
     })
     .finally(() => {

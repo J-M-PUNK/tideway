@@ -20,7 +20,7 @@ import { MediaCard } from "@/components/MediaCard";
 import { HeroSkeleton, TrackListSkeleton } from "@/components/Skeletons";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { useLastfmAlbumPlaycount } from "@/hooks/useLastfmPlaycount";
-import { formatDuration, imageProxy } from "@/lib/utils";
+import { cn, formatDuration, imageProxy } from "@/lib/utils";
 
 export function AlbumDetail({ onDownload }: { onDownload: OnDownload }) {
   const { id = "" } = useParams();
@@ -80,8 +80,14 @@ export function AlbumDetail({ onDownload }: { onDownload: OnDownload }) {
         }
         actions={
           <>
-            <PlayAllButton tracks={album.tracks} />
-            <ShuffleButton tracks={album.tracks} />
+            <PlayAllButton
+              tracks={album.tracks}
+              source={{ type: "ALBUM", id: album.id }}
+            />
+            <ShuffleButton
+              tracks={album.tracks}
+              source={{ type: "ALBUM", id: album.id }}
+            />
             <div className="ml-auto flex items-center gap-6">
               <AddToLibraryButton kind="album" id={album.id} />
               <AlbumCreditsButton
@@ -107,16 +113,10 @@ export function AlbumDetail({ onDownload }: { onDownload: OnDownload }) {
             onDownload={onDownload}
             showAlbum={false}
             showPlaycount
+            source={{ type: "ALBUM", id: album.id }}
           />
         )}
       </div>
-
-      {album.review && (
-        <>
-          <SectionHeader title="About this album" />
-          <AlbumReview review={album.review} />
-        </>
-      )}
 
       {!showingCredits && (
         <AlbumInfoFooter
@@ -125,6 +125,13 @@ export function AlbumDetail({ onDownload }: { onDownload: OnDownload }) {
           duration={album.duration}
           copyright={album.copyright ?? null}
         />
+      )}
+
+      {album.review && (
+        <>
+          <SectionHeader title="About this album" />
+          <AlbumReview review={album.review} />
+        </>
       )}
 
       {album.more_by_artist.length > 0 && (
@@ -229,13 +236,43 @@ function SingleRowSection({
         )}
       </div>
       <div className="grid gap-4 grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 2xl:grid-cols-6">
-        {items.slice(0, 6).map((it) => (
-          <MediaCard key={it.id} item={it} onDownload={onDownload} />
+        {items.slice(0, 6).map((it, i) => (
+          // Hide items past the current breakpoint's column count so
+          // the section is always exactly one row — previously the
+          // grid wrapped 6 items onto 2 rows at lg (5 cols) with 1
+          // orphan item on row 2. Column counts: base=2, sm=3, md=4,
+          // lg=5, 2xl=6, matched by the responsive hide/show classes
+          // on each item.
+          <div
+            key={it.id}
+            className={cn(
+              ROW_ITEM_VISIBILITY[i],
+              "min-w-0",
+            )}
+          >
+            <MediaCard item={it} onDownload={onDownload} />
+          </div>
         ))}
       </div>
     </div>
   );
 }
+
+// Per-index visibility so each item appears only at breakpoints
+// where the grid has enough columns to fit it on the first row.
+//   i=0,1: always visible (base has 2 cols)
+//   i=2: sm and above (3 cols)
+//   i=3: md and above   (4 cols)
+//   i=4: lg and above   (5 cols)
+//   i=5: 2xl and above  (6 cols)
+const ROW_ITEM_VISIBILITY = [
+  "",
+  "",
+  "hidden sm:block",
+  "hidden md:block",
+  "hidden lg:block",
+  "hidden 2xl:block",
+];
 
 /**
  * Footer under the tracklist — release date, track count, runtime,

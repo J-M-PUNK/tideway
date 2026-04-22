@@ -75,6 +75,64 @@ run.sh            one-command dev launcher
 
 ## Notes
 
-- `ffmpeg` is a system dependency — install via Homebrew: `brew install ffmpeg`.
-- Quality, output folder, filename template, etc. are editable under Settings
-  in the UI and persisted to `settings.json`.
+- **Dev runs**: `ffmpeg` is a system dependency — install via Homebrew
+  (`brew install ffmpeg`) and it's picked up from PATH.
+- **Shipped builds** bundle ffmpeg automatically — end users of the
+  packaged app don't install anything. Run `scripts/fetch_ffmpeg.sh`
+  once before building to populate `vendor/ffmpeg/<os>/`.
+- Quality, output folder, filename template, etc. are editable under
+  Settings in the UI and persisted to `settings.json`.
+
+## Building a distributable
+
+### Icons (once)
+
+Drop a 1024×1024 PNG at `assets/icon-source.png`, then:
+
+```
+scripts/build_icons.sh
+```
+
+Produces `assets/icon.icns` (macOS) and `assets/icon.ico` (Windows).
+Both specs already look for these files; without them the build
+ships a generic PyInstaller placeholder icon.
+
+### macOS
+
+```
+scripts/fetch_ffmpeg.sh                # once, populates vendor/ffmpeg/macos/
+npm --prefix web run build             # frontend
+.venv/bin/pyinstaller TidalDownloader-mac.spec --noconfirm
+scripts/build_dmg.sh                   # outputs dist/TidalDownloader-<ver>.dmg
+```
+
+Ship the `.dmg`. Users drag-to-Applications and launch. No Homebrew,
+no ffmpeg install, no VLC install — everything's in the bundle.
+
+### Windows
+
+```
+bash scripts/fetch_ffmpeg.sh           # Git Bash / WSL — populates vendor/ffmpeg/windows/
+npm --prefix web run build
+.venv\Scripts\pyinstaller TidalDownloader-win.spec --noconfirm
+"C:\Program Files (x86)\Inno Setup 6\ISCC.exe" scripts\TidalDownloader.iss
+```
+
+Outputs `dist/TidalDownloader-setup-<ver>.exe`. Users run it, hit
+Next/Next/Install.
+
+### Auto-update
+
+The app polls GitHub's Releases API at `/api/update-check` once on
+launch (result cached for 1 hour). When a newer tag is out, a banner
+surfaces across the top of the UI. "Install now" downloads the
+right asset for the user's OS from the latest release, opens it,
+then quits the app so the installer can replace the bundle. The
+release asset names must match:
+
+- macOS: `TidalDownloader-<version>.dmg`
+- Windows: `TidalDownloader-setup-<version>.exe`
+
+Both of the build scripts above produce files in that format, so a
+release is just `gh release create vX.Y.Z dist/TidalDownloader-X.Y.Z.dmg
+dist/TidalDownloader-setup-X.Y.Z.exe`.

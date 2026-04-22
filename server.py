@@ -10,6 +10,7 @@ import json
 import logging
 import os
 import subprocess
+import tempfile
 import webbrowser
 import sys
 import threading
@@ -48,7 +49,7 @@ from app.http import SESSION
 from app.lastfm import LastFmClient
 from app.local_index import LocalIndex
 from app.paths import bundled_resource_dir
-from app.play_reporter import PlayReporter, PlaySession
+from app.play_reporter import PlayReporter, PlaySession, recent_log as play_report_recent_log
 from app.settings import Settings, load_settings, save_settings
 from app.tidal_client import TidalClient
 
@@ -438,23 +439,6 @@ except Exception as _restore_exc:  # noqa: BLE001
     )
 
 
-def _apply_settings_quality(s: Settings) -> None:
-    """Align the shared tidalapi session with the user's default quality.
-
-    Downloads that don't pass an explicit per-item quality fall back to
-    session.config.quality, so this is how Settings actually takes effect.
-    """
-    try:
-        with downloader.quality_lock:
-            tidal.session.config.quality = tidalapi.Quality[s.quality]
-    except (KeyError, AttributeError):
-        # Invalid saved quality — leave session at its default.
-        pass
-
-
-_apply_settings_quality(settings)
-
-
 def _cleanup_part_files(root: Path) -> None:
     """Remove orphaned *.part files left behind by a crashed process.
 
@@ -732,10 +716,30 @@ _HEALTH_MARKER = "tidal-downloader"
 # nobody registered one (web-only dev run) the endpoint no-ops.
 _focus_callback: Optional[Callable[[], None]] = None
 
+# Set by the desktop launcher so /api/_internal/quit can tear the app
+# down from the UI. Needed because close-to-tray intercepts the red-X
+# button, so Cmd+Q / the in-app Quit menu need a different path to an
+# actual window.destroy().
+_quit_callback: Optional[Callable[[], None]] = None
+
+# Set by the desktop launcher so /api/_internal/mini_player can spawn
+# a second pywebview window. No-op in plain-browser dev mode.
+_mini_player_callback: Optional[Callable[[], None]] = None
+
 
 def register_focus_callback(fn: Callable[[], None]) -> None:
     global _focus_callback
     _focus_callback = fn
+
+
+def register_quit_callback(fn: Callable[[], None]) -> None:
+    global _quit_callback
+    _quit_callback = fn
+
+
+def register_mini_player_callback(fn: Callable[[], None]) -> None:
+    global _mini_player_callback
+    _mini_player_callback = fn
 
 
 # ---------------------------------------------------------------------------
@@ -846,6 +850,124 @@ def update_check() -> dict:
     with _update_cache_lock:
         _update_cache["latest"] = (now, payload)
     return payload
+
+
+def _update_asset_url() -> Optional[str]:
+    """Find the download URL for the current-platform installer in the
+    latest GitHub release. Returns None if the release has no asset
+    matching our naming convention.
+
+    Naming convention (matches scripts/build_dmg.sh and the Inno Setup
+    script):
+      - macOS:   TidalDownloader-<version>.dmg
+      - Windows: TidalDownloader-setup-<version>.exe
+
+    Runs a fresh GitHub fetch rather than reusing the cached update
+    check; the cache stores html_url (release page), not the asset
+    list. Adds ~300ms to the "Install" click — acceptable since it's
+    user-initiated.
+    """
+    try:
+        import urllib.request
+
+        req = urllib.request.Request(
+            f"https://api.github.com/repos/{_UPDATE_REPO}/releases/latest",
+            headers={"Accept": "application/vnd.github+json"},
+        )
+        with urllib.request.urlopen(req, timeout=8) as resp:  # noqa: S310
+            data = json.load(resp)
+    except Exception:
+        return None
+    assets = data.get("assets") or []
+    if sys.platform == "darwin":
+        suffix = ".dmg"
+    elif sys.platform.startswith("win"):
+        suffix = ".exe"
+    else:
+        # Linux: no packaged installer today. Caller falls back to the
+        # release page URL.
+        return None
+    for a in assets:
+        name = (a.get("name") or "").lower()
+        if name.endswith(suffix) and "tidaldownloader" in name.replace("-", ""):
+            return a.get("browser_download_url")
+    return None
+
+
+@app.post("/api/update/install")
+def update_install() -> dict:
+    """Download the latest release's installer for the current OS and
+    open it so the user can run through the install prompt. Doesn't
+    quit the app — the frontend does that after this returns so the
+    old bundle is out of the way when the user drags / runs the new
+    one.
+
+    Returns the filesystem path we staged the download to so the UI
+    can tell the user where to look if something goes sideways.
+    """
+    _require_local_access()
+    url = _update_asset_url()
+    if url is None:
+        raise HTTPException(
+            status_code=404,
+            detail="No installer asset for this platform in the latest release.",
+        )
+    # Stage into ~/Downloads so the user sees it in their usual place
+    # + can re-run it if they cancel the first attempt. Falls back to
+    # a temp dir if Downloads doesn't exist / isn't writable.
+    downloads = Path.home() / "Downloads"
+    try:
+        downloads.mkdir(parents=True, exist_ok=True)
+        target_dir = downloads
+    except OSError:
+        target_dir = Path(tempfile.mkdtemp(prefix="tdl-update-"))
+    filename = url.rsplit("/", 1)[-1] or "TidalDownloader-update"
+    target = target_dir / filename
+    try:
+        import urllib.request
+
+        with urllib.request.urlopen(url, timeout=60) as resp, open(target, "wb") as f:  # noqa: S310
+            # 1 MB chunks — keeps memory flat on 100 MB+ installers.
+            while True:
+                chunk = resp.read(1024 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"Couldn't download installer: {exc}",
+        )
+    # Open the installer in whatever way the OS expects. Detached so
+    # the subprocess doesn't linger as a zombie when the app quits
+    # next.
+    try:
+        if sys.platform == "darwin":
+            subprocess.Popen(
+                ["open", str(target)],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        elif sys.platform.startswith("win"):
+            # os.startfile is the Windows idiom — it hands the file
+            # to the shell the same way double-clicking would.
+            os.startfile(str(target))  # type: ignore[attr-defined]
+        else:
+            subprocess.Popen(
+                ["xdg-open", str(target)],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"Downloaded but couldn't open: {exc}",
+        )
+    return {"ok": True, "downloaded_to": str(target)}
 
 
 # ---------------------------------------------------------------------------
@@ -1232,6 +1354,197 @@ def focus_window(request: Request) -> dict:
         return {"ok": False, "reason": str(exc)}
 
 
+@app.post("/api/_internal/quit", include_in_schema=False)
+def quit_app(request: Request) -> dict:
+    """Force a real app shutdown from the UI.
+
+    The close-to-tray handler swallows the red-X button, so the user
+    needs a dedicated "Quit" path that bypasses it. Restricted to
+    loopback for the same reason as /focus — only legitimate caller is
+    the local UI.
+    """
+    client = request.client
+    host = client.host if client else ""
+    if host not in ("127.0.0.1", "::1", "localhost"):
+        raise HTTPException(status_code=403)
+    if _quit_callback is None:
+        return {"ok": False, "reason": "no launcher"}
+    try:
+        _quit_callback()
+        return {"ok": True}
+    except Exception as exc:
+        return {"ok": False, "reason": str(exc)}
+
+
+@app.post("/api/_internal/mini_player", include_in_schema=False)
+def open_mini_player(request: Request) -> dict:
+    """Spawn a second, always-on-top pywebview window with the compact
+    player UI. Returns {ok: false} in plain-browser dev mode where
+    there's no launcher to create windows — the UI should hide the
+    menu entry in that case.
+    """
+    client = request.client
+    host = client.host if client else ""
+    if host not in ("127.0.0.1", "::1", "localhost"):
+        raise HTTPException(status_code=403)
+    if _mini_player_callback is None:
+        return {"ok": False, "reason": "no launcher"}
+    try:
+        _mini_player_callback()
+        return {"ok": True}
+    except Exception as exc:
+        return {"ok": False, "reason": str(exc)}
+
+
+class _NotifyRequest(BaseModel):
+    title: str
+    body: str
+    subtitle: Optional[str] = None
+
+
+class _AutostartRequest(BaseModel):
+    enabled: bool
+
+
+class _VideoDownloadRequest(BaseModel):
+    quality: Optional[str] = None  # "HIGH" | "MEDIUM" | "LOW"
+
+
+@app.post("/api/video/{video_id}/download")
+def video_download_start(video_id: int, req: _VideoDownloadRequest) -> dict:
+    """Kick off an ffmpeg-based HLS → MP4 remux of a Tidal music video.
+
+    Separate from the track-downloader queue because video downloads
+    are rare and bypass all the DASH / manifest / retry plumbing the
+    audio path needs. We reuse the same output_dir but put files in a
+    `Videos/` subdir so they don't intermix with album folders.
+    """
+    _require_auth()
+    from app import video_downloader
+
+    quality = (req.quality or "").upper() or None
+    if quality and quality not in _VALID_VIDEO_QUALITIES:
+        raise HTTPException(status_code=400, detail=f"Invalid quality: {quality}")
+    # Resolve manifest URL the same way /api/video/{id}/stream does
+    # (kept inline so a single failure point has one place to
+    # diagnose rather than two).
+    try:
+        if quality:
+            resp = tidal.session.request.request(
+                "GET",
+                f"videos/{video_id}/urlpostpaywall",
+                params={
+                    "urlusagemode": "STREAM",
+                    "videoquality": quality,
+                    "assetpresentation": "FULL",
+                },
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            urls = payload.get("urls") if isinstance(payload, dict) else None
+            manifest_url = urls[0] if isinstance(urls, list) and urls else None
+        else:
+            video = tidal.session.video(video_id)
+            manifest_url = video.get_url()
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    if not manifest_url:
+        raise HTTPException(status_code=404, detail="No playback URL available")
+
+    # Fetch metadata for filename + payload. Cheap — one HTTP call via
+    # tidalapi, cached by the server session.
+    try:
+        video = tidal.session.video(video_id)
+        title = getattr(video, "name", None) or f"Video {video_id}"
+        artist = ""
+        artists = getattr(video, "artists", None)
+        if artists:
+            artist = ", ".join(
+                a.name for a in artists if getattr(a, "name", None)
+            )
+        duration = getattr(video, "duration", None)
+    except Exception:
+        title = f"Video {video_id}"
+        artist = ""
+        duration = None
+
+    output_dir = Path(settings.videos_dir)
+    job = video_downloader.start(
+        video_id=video_id,
+        manifest_url=manifest_url,
+        title=title,
+        artist=artist,
+        output_dir=output_dir,
+        duration_s=float(duration) if duration else None,
+    )
+    return video_downloader.status(video_id) or {
+        "video_id": video_id,
+        "state": job.state,
+    }
+
+
+@app.get("/api/video/{video_id}/download")
+def video_download_status(video_id: int) -> dict:
+    _require_local_access()
+    from app import video_downloader
+
+    s = video_downloader.status(video_id)
+    if s is None:
+        return {"video_id": video_id, "state": "idle"}
+    return s
+
+
+@app.get("/api/video/downloads")
+def video_downloads_list() -> list[dict]:
+    _require_local_access()
+    from app import video_downloader
+
+    return video_downloader.list_all()
+
+
+@app.get("/api/autostart")
+def autostart_status() -> dict:
+    """Report whether the app is registered to launch at login.
+
+    `available` is False in dev mode (no frozen exe path); the UI
+    grays out the toggle in that case.
+    """
+    _require_local_access()
+    from app import autostart
+    return autostart.status()
+
+
+@app.put("/api/autostart")
+def autostart_set(req: _AutostartRequest) -> dict:
+    _require_local_access()
+    from app import autostart
+    try:
+        return autostart.set_enabled(req.enabled)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@app.post("/api/notify", include_in_schema=False)
+def fire_notification(req: _NotifyRequest, request: Request) -> dict:
+    """Fire an OS-level notification. Loopback-only.
+
+    The frontend owns the "should I notify?" decision because it has
+    the context the backend doesn't — track title/artist, whether the
+    window is focused, which user preference is set. The server is
+    just a thin shim that exposes the platform-specific notification
+    shell so this can run from inside a sandbox where the browser
+    Notification API isn't available (pywebview's WKWebView doesn't
+    surface it as system-level).
+    """
+    client = request.client
+    host = client.host if client else ""
+    if host not in ("127.0.0.1", "::1", "localhost"):
+        raise HTTPException(status_code=403)
+    from app.notify import notify as _notify
+    _notify(req.title, req.body, req.subtitle)
+    return {"ok": True}
+
+
 @app.get("/api/auth/status")
 def auth_status() -> dict:
     logged_in = _is_logged_in()
@@ -1279,7 +1592,6 @@ def auth_login_start() -> dict:
             # data from the prior session.
             _invalidate_auth_cache()
             _invalidate_preview_cache()
-            _apply_settings_quality(settings)
 
     threading.Thread(target=_wait_and_save, daemon=True).start()
     return {"url": url, "user_code": user_code}
@@ -1304,9 +1616,6 @@ def auth_login_poll() -> dict:
         # New login may be a different user / refreshed tokens; old signed
         # preview URLs are no longer trustworthy.
         _invalidate_preview_cache()
-        # Reapply saved quality to the new session (logout creates a fresh
-        # session with the hardcoded default).
-        _apply_settings_quality(settings)
         return {"status": "ok", "username": tidal.get_user_info()}
     return {"status": "failed"}
 
@@ -1394,7 +1703,6 @@ def auth_pkce_complete(req: PkceCompleteRequest) -> dict:
         )
     _invalidate_auth_cache()
     _invalidate_preview_cache()
-    _apply_settings_quality(settings)
     return {"status": "ok", "username": tidal.get_user_info()}
 
 
@@ -1680,6 +1988,70 @@ def play_report_stop(req: PlayReportStopRequest) -> dict:
         )
     )
     return {"ok": True}
+
+
+@app.get("/api/play-report/log")
+def play_report_log() -> dict:
+    """Return the rolling buffer of recent play-report attempts.
+
+    Used by the Settings "Diagnose play reporting" panel so users can
+    see whether events are reaching Tidal without grepping stderr.
+    Each entry has ts_ms, phase (sent/skipped), track_id, http_status,
+    listened_s, and an optional note (error body or skip reason).
+    """
+    _require_local_access()
+    return {"entries": play_report_recent_log()}
+
+
+class _PlayReportDiagnoseRequest(BaseModel):
+    """Optional track_id to synthesize a play for. Defaults to a known
+    Tidal catalog track (Daft Punk — Get Lucky, track_id 77748546) so
+    the diagnose button works even when the user hasn't played anything
+    yet in this session."""
+    track_id: Optional[int] = None
+
+
+@app.post("/api/play-report/diagnose")
+def play_report_diagnose(req: _PlayReportDiagnoseRequest) -> dict:
+    """Fire a synthetic playback_session event NOW and wait briefly
+    for the reporter to process it. Returns the resulting log entry
+    so the UI can show status / note inline.
+
+    Uses a 30-second fake listen (well above the 30s / 50% threshold
+    Tidal applies before a play counts for Recently Played) and marks
+    it as "user_trigger" source so it stands out from real plays.
+    """
+    _require_auth()
+    track_id = str(req.track_id or 77748546)
+    now_ms = int(time.time() * 1000)
+    # sourceType must be one of Tidal's enum values (ALBUM, ARTIST,
+    # MIX, PLAYLIST, TRACK, etc.) — "user_trigger" was not valid and
+    # likely caused Tidal's aggregation pipeline to silently drop the
+    # event from Recently Played even though HTTP returned 200. "TRACK"
+    # with sourceId = the track itself is what real single-track taps
+    # report, so it's the right fallback for a synthetic diagnose too.
+    synthetic = PlaySession(
+        session_id=str(uuid.uuid4()),
+        track_id=track_id,
+        quality="LOSSLESS",
+        source_type="TRACK",
+        source_id=track_id,
+        start_ts_ms=now_ms - 30_000,
+        end_ts_ms=now_ms,
+        start_position_s=0.0,
+        end_position_s=30.0,
+    )
+    before = len(play_report_recent_log())
+    play_reporter.record(synthetic)
+    # Poll the log for up to 5s for the new entry to land. Background
+    # reporter thread typically processes within a few hundred ms.
+    deadline = time.monotonic() + 5.0
+    while time.monotonic() < deadline:
+        entries = play_report_recent_log()
+        if len(entries) > before:
+            return {"ok": True, "entry": entries[-1]}
+        time.sleep(0.1)
+    return {"ok": False, "reason": "reporter didn't process within 5s"}
 
 
 @app.post("/api/auth/logout")
@@ -2152,6 +2524,10 @@ class _PlayerEqPresetRequest(BaseModel):
     preset: int
 
 
+class _PlayerEqEnabledRequest(BaseModel):
+    enabled: bool
+
+
 class _PlayerOutputDeviceRequest(BaseModel):
     # Empty string routes to the system default.
     device_id: str
@@ -2179,7 +2555,7 @@ def _native_player():
     if not _player_bootstrapped:
         _player_bootstrapped = True
         try:
-            if settings.eq_bands:
+            if settings.eq_enabled and settings.eq_bands:
                 player.apply_equalizer(
                     settings.eq_bands, preamp=settings.eq_preamp
                 )
@@ -2191,6 +2567,17 @@ def _native_player():
 
 
 def _snapshot_dict(snap: native_player.PlayerSnapshot) -> dict:
+    stream_info = None
+    if snap.stream_info is not None:
+        si = snap.stream_info
+        stream_info = {
+            "source": si.source,
+            "codec": si.codec,
+            "bit_depth": si.bit_depth,
+            "sample_rate_hz": si.sample_rate_hz,
+            "audio_quality": si.audio_quality,
+            "audio_mode": si.audio_mode,
+        }
     return {
         "state": snap.state,
         "track_id": snap.track_id,
@@ -2200,6 +2587,7 @@ def _snapshot_dict(snap: native_player.PlayerSnapshot) -> dict:
         "muted": snap.muted,
         "error": snap.error,
         "seq": snap.seq,
+        "stream_info": stream_info,
     }
 
 
@@ -2225,6 +2613,38 @@ def player_load(req: _PlayerLoadRequest) -> dict:
     _require_local_access()
     snap = _native_player().load(req.track_id, quality=req.quality)
     return _snapshot_dict(snap)
+
+
+@app.post("/api/player/play_track")
+def player_play_track(req: _PlayerLoadRequest) -> dict:
+    """Atomic load + play. Used by the auto-advance path so we
+    don't pay two HTTP round-trips + two sequential awaits at
+    track-end. Shorter code path = smaller perceptible gap."""
+    _require_local_access()
+    snap = _native_player().play_track(req.track_id, quality=req.quality)
+    return _snapshot_dict(snap)
+
+
+@app.post("/api/player/preload")
+def player_preload(req: _PlayerLoadRequest) -> dict:
+    """Pre-resolve the next track's manifest so auto-advance can
+    skip the network fetch. Frontend fires this ~15s before the
+    current track ends. Synchronous on the manifest fetch but
+    called well in advance, so it doesn't race track-end.
+    """
+    _require_local_access()
+    return _native_player().preload(req.track_id, quality=req.quality)
+
+
+@app.post("/api/player/preload/clear")
+def player_preload_clear() -> dict:
+    """Drop the preload cache. Used by the frontend on quality
+    changes so a cached-for-old-quality MPD doesn't get consumed
+    by a subsequent load().
+    """
+    _require_local_access()
+    _native_player()._drop_preload()
+    return {"ok": True}
 
 
 @app.post("/api/player/play")
@@ -2271,10 +2691,12 @@ def player_muted(req: _PlayerMutedRequest) -> dict:
 
 @app.get("/api/player/eq")
 def player_eq_state() -> dict:
-    """Current EQ: persisted bands + preamp + the static list of
-    presets + band frequencies so the frontend can render sliders."""
+    """Current EQ: persisted bands + preamp + enabled flag + the static
+    list of presets + band frequencies so the frontend can render
+    sliders."""
     _require_local_access()
     return {
+        "enabled": settings.eq_enabled,
         "bands": list(settings.eq_bands),
         "preamp": settings.eq_preamp,
         "band_count": native_player.VLCPlayer.eq_bands_count(),
@@ -2285,13 +2707,28 @@ def player_eq_state() -> dict:
 
 @app.post("/api/player/eq")
 def player_eq_set(req: _PlayerEqRequest) -> dict:
+    """Persist new band amplitudes. Only pushes them to libvlc when the
+    EQ is enabled — if disabled, the sliders can still move (user
+    previewing a curve) but playback stays flat until they toggle on.
+
+    Save-then-apply order: if libvlc ever throws, persisted state
+    still matches what the UI shows. The reverse ordering could leave
+    a crash-time mismatch between audible filter and the stored
+    setting on next launch.
+    """
     _require_local_access()
     player = _native_player()
-    player.apply_equalizer(req.bands, preamp=req.preamp)
     settings.eq_bands = list(req.bands)
     settings.eq_preamp = req.preamp
     save_settings(settings)
-    return {"ok": True, "bands": settings.eq_bands, "preamp": settings.eq_preamp}
+    if settings.eq_enabled:
+        player.apply_equalizer(req.bands, preamp=req.preamp)
+    return {
+        "ok": True,
+        "enabled": settings.eq_enabled,
+        "bands": settings.eq_bands,
+        "preamp": settings.eq_preamp,
+    }
 
 
 @app.post("/api/player/eq/preset")
@@ -2299,14 +2736,45 @@ def player_eq_preset(req: _PlayerEqPresetRequest) -> dict:
     """Apply a libvlc built-in preset. Returns the resolved bands so
     the frontend's sliders can snap to the preset curve. Also persists
     the resolved bands — so a relaunch keeps the same sound even if
-    libvlc's preset list were to change."""
+    libvlc's preset list were to change. Only pushes to libvlc when
+    the EQ is enabled (matches the setter above).
+
+    `apply_equalizer_preset` has a side effect of pushing the curve
+    into libvlc immediately (it's how it computes the resolved band
+    amplitudes). Sequence here:
+      1. Resolve + apply preset (libvlc now has the curve applied).
+      2. Mirror the bands into `settings` and persist.
+      3. If EQ is disabled, call apply_equalizer([]) to null out libvlc
+         so playback is flat even though we saved the preset bands.
+    Persist BEFORE the conditional override so a crash between the
+    save and the null-out can't leave libvlc audible with disabled
+    settings on next launch.
+    """
     _require_local_access()
     player = _native_player()
     bands = player.apply_equalizer_preset(req.preset)
     settings.eq_bands = bands
     settings.eq_preamp = None
     save_settings(settings)
-    return {"ok": True, "bands": bands}
+    if not settings.eq_enabled:
+        player.apply_equalizer([])
+    return {"ok": True, "enabled": settings.eq_enabled, "bands": bands}
+
+
+@app.post("/api/player/eq/enabled")
+def player_eq_enabled(req: _PlayerEqEnabledRequest) -> dict:
+    """Master EQ on/off switch. Turning off bypasses libvlc's equalizer
+    entirely; turning back on re-applies the stored bands so the user's
+    curve survives the off → on → off cycle."""
+    _require_local_access()
+    player = _native_player()
+    settings.eq_enabled = bool(req.enabled)
+    if settings.eq_enabled and settings.eq_bands:
+        player.apply_equalizer(settings.eq_bands, preamp=settings.eq_preamp)
+    else:
+        player.apply_equalizer([])
+    save_settings(settings)
+    return {"ok": True, "enabled": settings.eq_enabled}
 
 
 @app.get("/api/player/output-devices")
@@ -2742,24 +3210,92 @@ def _read_cached_tags(path: Path, stat_result) -> Optional[dict]:
     return tags
 
 
+_VIDEO_EXTENSIONS = {".mp4", ".m4v", ".mov", ".webm", ".mkv"}
+
+
+def _scan_local_videos(root: Path) -> list[dict]:
+    """Enumerate video files under `root`. Metadata comes from the
+    filename pattern `<Artist> - <Title>.mp4` that video_downloader
+    writes; no tag reading (ffmpeg -c copy doesn't author MP4 tags
+    by default, so there's nothing to read anyway).
+    """
+    import os as _os
+
+    if not root.is_dir():
+        return []
+    out: list[dict] = []
+    stack: list[Path] = [root]
+    while stack:
+        current = stack.pop()
+        try:
+            with _os.scandir(current) as it:
+                for entry in it:
+                    try:
+                        if entry.is_dir(follow_symlinks=False):
+                            stack.append(Path(entry.path))
+                            continue
+                        if not entry.is_file(follow_symlinks=False):
+                            continue
+                        ext = _os.path.splitext(entry.name)[1].lower()
+                        if ext not in _VIDEO_EXTENSIONS:
+                            continue
+                        st = entry.stat()
+                        stem = _os.path.splitext(entry.name)[0]
+                        # "<Artist> - <Title>" is how video_downloader
+                        # names files. Split on the first " - " so
+                        # track titles containing dashes still work.
+                        if " - " in stem:
+                            artist, title = stem.split(" - ", 1)
+                        else:
+                            artist, title = "", stem
+                        path = Path(entry.path)
+                        try:
+                            rel = str(path.relative_to(root))
+                        except ValueError:
+                            rel = entry.name
+                        out.append({
+                            "path": str(path),
+                            "relative_path": rel,
+                            "title": title.strip(),
+                            "artist": artist.strip(),
+                            "size_bytes": st.st_size,
+                            "ext": ext,
+                            "mtime": st.st_mtime,
+                        })
+                    except OSError:
+                        continue
+        except OSError:
+            continue
+    out.sort(key=lambda v: (v["artist"].lower(), v["title"].lower()))
+    return out
+
+
 @app.get("/api/library/local")
 def library_local() -> dict:
-    """List the user's downloaded audio files with their tags. The
-    frontend's Local Library page groups these by artist/album so the
-    user can browse what's actually on disk (as opposed to what they've
-    favorited in Tidal).
+    """List the user's downloaded audio + video files. The frontend's
+    Local Library page groups audio by artist/album and renders videos
+    in a dedicated section so the user can browse what's actually on
+    disk (as opposed to what they've favorited in Tidal).
 
-    Reads tags via mutagen, cached by (path, mtime, size) so a second
-    load is effectively free. Files without usable tags are skipped
-    rather than surfaced as "Unknown Artist" rows.
+    Audio tags come from mutagen, cached by (path, mtime, size) so a
+    second load is effectively free. Videos come from the
+    _scan_local_videos helper which parses the "<Artist> - <Title>"
+    filename the downloader writes.
     """
     _require_local_access()
     import os as _os
 
     root = Path(settings.output_dir).expanduser()
+    videos_root = Path(settings.videos_dir).expanduser()
+    videos = _scan_local_videos(videos_root)
     files: list[dict] = []
     if not root.is_dir():
-        return {"output_dir": str(root), "files": []}
+        return {
+            "output_dir": str(root),
+            "videos_dir": str(videos_root),
+            "files": [],
+            "videos": videos,
+        }
     stack: list[Path] = [root]
     while stack:
         current = stack.pop()
@@ -2803,6 +3339,11 @@ def library_local() -> dict:
                             "duration": tags.get("duration") or 0,
                             "size_bytes": st.st_size,
                             "ext": ext,
+                            # mtime lets the frontend offer a
+                            # "Recent" sort (newest → oldest) without
+                            # needing a second round-trip. Seconds
+                            # since epoch; JSON-clean.
+                            "mtime": st.st_mtime,
                         })
                     except OSError:
                         continue
@@ -2817,7 +3358,12 @@ def library_local() -> dict:
         f["track_num"],
         f["title"].lower(),
     ))
-    return {"output_dir": str(root), "files": files}
+    return {
+        "output_dir": str(root),
+        "videos_dir": str(videos_root),
+        "files": files,
+        "videos": videos,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -3572,10 +4118,19 @@ def reveal_in_finder(req: RevealRequest) -> dict:
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 
-    # Confine reveals to the configured output directory. Prevents the
-    # endpoint from being abused to poke around the user's whole filesystem.
-    output_root = Path(settings.output_dir).expanduser().resolve()
-    if not _is_within(target, output_root):
+    # Confine reveals to the configured output directories. Prevents
+    # the endpoint from being abused to poke around the user's whole
+    # filesystem. Both the audio output_dir and the video videos_dir
+    # are allowed — the latter is often a different path (~/Movies
+    # vs. ~/Music) so we have to include it or video reveals would
+    # 403.
+    allowed_roots: list[Path] = []
+    for _d in (settings.output_dir, settings.videos_dir):
+        try:
+            allowed_roots.append(Path(_d).expanduser().resolve())
+        except (FileNotFoundError, RuntimeError, OSError):
+            continue
+    if not any(_is_within(target, root) for root in allowed_roots):
         raise HTTPException(status_code=403, detail="Path is outside the downloads folder")
 
     # Detach the reveal process so it doesn't leave zombies each time a
@@ -4055,18 +4610,15 @@ def _clamp_quality_to_subscription(requested: Optional[str]) -> Optional[str]:
 def _resolve_quality(req_quality: Optional[str]) -> Optional[str]:
     """Resolve the effective per-item quality.
 
-    Explicit request wins. Otherwise fall back to settings.quality, so the
-    user's Settings choice actually matters when they pick "Use default".
-    Returning None means "use whatever the session has" (safety net).
-
-    Final step clamps to the account's subscription tier.
+    Explicit request wins (clamped to subscription). Otherwise use the
+    highest tier the subscription allows — the UI forces an explicit
+    pick on every download now, so this fallback only fires for
+    callers that genuinely want "just give me the best" (bulk flows
+    like Download-All, folder-level download actions).
     """
     if req_quality:
         return _clamp_quality_to_subscription(req_quality)
-    fallback = getattr(settings, "quality", None)
-    if fallback and fallback in tidalapi.Quality.__members__:
-        return _clamp_quality_to_subscription(fallback)
-    return None
+    return _clamp_quality_to_subscription("hi_res_lossless")
 
 
 def _looks_like_401(exc: Exception) -> bool:
@@ -4384,42 +4936,6 @@ QUALITIES = [
 ]
 
 
-def _clamp_settings_to_subscription(max_quality: Optional[str]) -> None:
-    """If the saved default quality exceeds what the account can stream,
-    downgrade it to the ceiling and persist. Called whenever we freshly
-    learn the subscription tier (on /api/qualities or after login) so a
-    user who had 'Max' selected before their trial ended — or who
-    defaults to hi_res_lossless but is on the Lossless tier — doesn't
-    keep seeing 'Use default (Max)' when Max is unreachable.
-    """
-    global settings
-    if not max_quality:
-        return
-    try:
-        ceiling_idx = _QUALITY_ORDER_SERVER.index(max_quality)
-    except ValueError:
-        return
-    current = getattr(settings, "quality", None)
-    if current not in _QUALITY_ORDER_SERVER:
-        return
-    if _QUALITY_ORDER_SERVER.index(current) <= ceiling_idx:
-        return
-    with _settings_lock:
-        data = asdict(settings)
-        data["quality"] = max_quality
-        new_settings = Settings(**data)
-        save_settings(new_settings)
-        settings = new_settings
-        downloader.settings = new_settings
-    _apply_settings_quality(new_settings)
-    print(
-        f"[settings] clamped default quality {current!r} -> {max_quality!r} "
-        "(was above subscription ceiling)",
-        file=sys.stderr,
-        flush=True,
-    )
-
-
 @app.get("/api/qualities")
 def list_qualities() -> list[dict]:
     _require_local_access()
@@ -4436,9 +4952,6 @@ def list_qualities() -> list[dict]:
             flush=True,
         )
         return QUALITIES
-    # Auto-downgrade the saved default so the UI's "Use default" label
-    # always reflects something the user can actually stream.
-    _clamp_settings_to_subscription(max_quality)
     try:
         ceiling = _QUALITY_ORDER_SERVER.index(max_quality)
     except ValueError:
@@ -4467,13 +4980,14 @@ def list_qualities() -> list[dict]:
 
 class SettingsPayload(BaseModel):
     output_dir: Optional[str] = None
-    quality: Optional[str] = None
+    videos_dir: Optional[str] = None
     filename_template: Optional[str] = None
     create_album_folders: Optional[bool] = None
     skip_existing: Optional[bool] = None
     concurrent_downloads: Optional[int] = None
     offline_mode: Optional[bool] = None
     notify_on_complete: Optional[bool] = None
+    notify_on_track_change: Optional[bool] = None
 
 
 @app.get("/api/settings")
@@ -4488,10 +5002,6 @@ def update_settings(payload: SettingsPayload) -> dict:
     global settings
     patch = payload.model_dump(exclude_unset=True)
 
-    # Validate quality before writing: an unknown value would silently
-    # disable per-item quality resolution later.
-    if "quality" in patch and patch["quality"] not in tidalapi.Quality.__members__:
-        raise HTTPException(status_code=400, detail=f"Unknown quality: {patch['quality']}")
     # Validate output_dir: must be an existing writable directory. Without
     # this, a PUT with `{"output_dir": "/"}` would quietly persist and all
     # future downloads would either fail or escape the intended sandbox.
@@ -4520,6 +5030,21 @@ def update_settings(payload: SettingsPayload) -> dict:
                 status_code=400, detail=f"output_dir is not writable: {resolved}"
             )
         patch["output_dir"] = str(resolved)
+    # videos_dir — same validation as output_dir. The directory need
+    # not exist yet; if it doesn't, we create it on first download
+    # rather than reject the save.
+    if "videos_dir" in patch:
+        raw = patch["videos_dir"]
+        if not isinstance(raw, str) or not raw.strip():
+            raise HTTPException(status_code=400, detail="videos_dir must be a non-empty string")
+        resolved = Path(raw).expanduser()
+        # Reject obviously-dangerous targets even if the path doesn't
+        # yet exist — we create parents on first download.
+        absolute_parent = resolved.parent.resolve()
+        forbidden = {Path("/"), Path("/etc"), Path("/bin"), Path("/usr"), Path("/sbin"), Path("/var")}
+        if resolved.resolve() in forbidden or absolute_parent in forbidden:
+            raise HTTPException(status_code=400, detail=f"videos_dir not allowed: {resolved}")
+        patch["videos_dir"] = str(resolved)
     # Clamp concurrent_downloads to [1, MAX_WORKER_THREADS] so the UI
     # can't push past the worker-pool ceiling.
     if "concurrent_downloads" in patch:
@@ -4542,10 +5067,6 @@ def update_settings(payload: SettingsPayload) -> dict:
         save_settings(new_settings)
         settings = new_settings
         downloader.settings = new_settings
-    # Apply quality outside the settings lock — _apply_settings_quality
-    # takes the downloader.quality_lock, which a worker may currently hold.
-    # Holding both in a different order than workers would risk deadlock.
-    _apply_settings_quality(new_settings)
     downloader.gate.set_limit(new_settings.concurrent_downloads)
     return asdict(new_settings)
 

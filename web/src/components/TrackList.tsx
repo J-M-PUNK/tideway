@@ -14,6 +14,7 @@ import { formatDuration, imageProxy } from "@/lib/utils";
 import { DownloadButton } from "@/components/DownloadButton";
 import { EmptyState } from "@/components/EmptyState";
 import { usePlayerActions, usePlayerMeta } from "@/hooks/PlayerContext";
+import type { PlaySource } from "@/hooks/usePlayer";
 import { useDownloadedIds, useIsDownloaded } from "@/hooks/useDownloadedSet";
 import { useLastfmTrackPlaycount } from "@/hooks/useLastfmPlaycount";
 import { useTrackSelection } from "@/hooks/useTrackSelection";
@@ -81,6 +82,13 @@ interface Props {
    * album will fire 50 calls, throttled server-side to 4 concurrent.
    */
   showPlaycount?: boolean;
+  /**
+   * The container that these tracks came from (album / playlist /
+   * mix / etc.). Threaded through to play-log events so Tidal's
+   * Recently Played surfaces the container, not sourceless track
+   * events. Omit for sourceless contexts (search results, history).
+   */
+  source?: PlaySource;
 }
 
 export function TrackList({
@@ -91,6 +99,7 @@ export function TrackList({
   onRemove,
   onReorder,
   showPlaycount = false,
+  source,
 }: Props) {
   const { offlineOnly } = useUiPreferences();
   // Optional offline-only filter — hides tracks Tidal knows about but that
@@ -182,6 +191,7 @@ export function TrackList({
       track={t}
       index={idx}
       context={visibleTracks}
+      source={source}
       numbered={numbered}
       showAlbum={showAlbum}
       showPlaycount={showPlaycount}
@@ -337,6 +347,7 @@ function TrackRow({
   track,
   index,
   context,
+  source,
   numbered,
   showAlbum,
   showPlaycount,
@@ -348,6 +359,10 @@ function TrackRow({
   track: Track;
   index: number;
   context: Track[];
+  /** Container that owns `context`. Passed through to actions.play so
+   *  the resulting listen attributes to the right album / playlist /
+   *  mix on Tidal's Recently Played. */
+  source?: PlaySource;
   numbered: boolean;
   showAlbum: boolean;
   showPlaycount: boolean;
@@ -387,7 +402,7 @@ function TrackRow({
     } else if (isCurrent) {
       actions.toggle();
     } else {
-      actions.play(track, context);
+      actions.play(track, context, source);
     }
   };
 
@@ -418,7 +433,7 @@ function TrackRow({
             sortable && "cursor-grab touch-none active:cursor-grabbing",
             sort.isDragging && "bg-accent shadow-lg",
           )}
-          onDoubleClick={() => actions.play(track, context)}
+          onDoubleClick={() => actions.play(track, context, source)}
         >
           <RowLeadCell
             index={index}

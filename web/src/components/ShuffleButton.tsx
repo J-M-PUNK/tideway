@@ -1,6 +1,7 @@
 import { Shuffle } from "lucide-react";
 import type { Track } from "@/api/types";
 import { usePlayerActions, usePlayerMeta } from "@/hooks/PlayerContext";
+import type { PlaySource } from "@/hooks/usePlayer";
 import { cn } from "@/lib/utils";
 
 /**
@@ -13,9 +14,14 @@ import { cn } from "@/lib/utils";
 export function ShuffleButton({
   tracks,
   size = "md",
+  source,
 }: {
   tracks: Track[];
   size?: "lg" | "md";
+  /** Container that these tracks came from — threaded through to
+   *  play-log events so shuffles from an album/playlist attribute to
+   *  the right container on Tidal Recently Played. */
+  source?: PlaySource;
 }) {
   const { shuffle } = usePlayerMeta();
   const actions = usePlayerActions();
@@ -27,7 +33,7 @@ export function ShuffleButton({
     if (tracks.length === 0) return;
     if (!shuffle) actions.toggleShuffle();
     const seed = tracks[Math.floor(Math.random() * tracks.length)];
-    actions.play(seed, tracks);
+    actions.play(seed, tracks, source);
   };
 
   return (

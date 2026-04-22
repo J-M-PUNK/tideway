@@ -259,6 +259,60 @@ def _enable_webview_media_prefs() -> None:
     BrowserView.__init__ = patched_init
 
 
+# Held at module scope so the Objective-C runtime keeps a strong ref
+# to the observer for the lifetime of the process.
+_macos_notification_observer: Optional[object] = None
+
+
+def _wire_macos_dock_reopen(window) -> None:  # type: ignore[no-untyped-def]
+    """Restore the window on Dock-icon click after close-to-tray.
+
+    The canonical macOS API for "Dock click on a running app" is
+    `applicationShouldHandleReopen:hasVisibleWindows:` on the app
+    delegate. Empirically it doesn't fire under pywebview's run-loop
+    + pyobjc setup even when the delegate is installed and responds
+    to the selector — diagnosed in session logs from 2026-04-21.
+    `NSApplicationDidBecomeActive` does fire reliably, provided the
+    app is actually deactivated first (see `_on_closing` below,
+    where we call `NSApp.hide_(None)` after `window.hide()`). With
+    that in place, any activation event (Dock click, cmd-tab,
+    launch) routes through the observer and restores the window.
+    Calling `window.show()` on an already-visible window is a no-op,
+    so redundant activations are harmless.
+    """
+    global _macos_notification_observer
+    if sys.platform != "darwin":
+        return
+    try:
+        from PyObjCTools import AppHelper
+        from Foundation import NSObject
+        import AppKit
+    except Exception as exc:
+        print(f"[desktop] dock-reopen imports failed: {exc!r}",
+              file=sys.stderr, flush=True)
+        return
+
+    class _AppActiveObserver(NSObject):
+        def didBecomeActive_(self, _n):  # noqa: N802
+            try:
+                AppHelper.callAfter(window.show)
+            except Exception:
+                pass
+
+    try:
+        observer = _AppActiveObserver.alloc().init()
+        AppKit.NSNotificationCenter.defaultCenter().addObserver_selector_name_object_(
+            observer,
+            "didBecomeActive:",
+            AppKit.NSApplicationDidBecomeActiveNotification,
+            None,
+        )
+        _macos_notification_observer = observer
+    except Exception as exc:
+        print(f"[desktop] dock-reopen observer install failed: {exc!r}",
+              file=sys.stderr, flush=True)
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Tidal Downloader desktop app")
     parser.add_argument(
@@ -318,30 +372,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
 
     # --- Hide-on-close + tray wiring ---------------------------------
-    # The user's red-button close should leave the app running so
-    # playback survives — same behavior Spotify / Tidal / Discord use.
-    # The tray icon gives them a way to raise the window back or quit
-    # deliberately. Guard the closing handler with `actually_quitting`
-    # so the tray's Quit menu item can do a real destroy() after we've
-    # set the flag.
+    # Ordering is load-bearing here. We want close-to-tray behavior
+    # (red-X hides the window so playback keeps running, tray menu
+    # exposes Quit) *only* when the tray is actually up. Otherwise the
+    # window disappears into limbo — playback still running, nothing in
+    # the menu bar, no way to restore or terminate — and the user has
+    # to kill the process from Activity Monitor. So: try the tray
+    # first, and install the hide handler only if it started.
     actually_quitting = {"value": False}
-
-    def _on_closing() -> bool:
-        if actually_quitting["value"]:
-            return True  # let pywebview really close
-        try:
-            window.hide()
-        except Exception:
-            pass
-        return False  # cancel the close
-
-    try:
-        window.events.closing += _on_closing
-    except Exception:
-        # Older pywebview versions used a different hook shape; if the
-        # event API is missing we fall through to legacy close-kills-
-        # everything behavior.
-        pass
 
     def _show_window() -> None:
         try:
@@ -360,33 +398,144 @@ def main(argv: Optional[list[str]] = None) -> int:
         except Exception:
             pass
 
+    # Mini-player state. Held here so a second request doesn't spawn a
+    # duplicate window — we just focus the existing one. We don't try
+    # to share state with the main window beyond URL routing; both
+    # windows subscribe to the same SSE stream and POST to the same
+    # transport endpoints, so playback stays coherent for free.
+    mini_window = {"value": None}
+
+    def _open_mini_player() -> None:
+        w = mini_window.get("value")
+        if w is not None:
+            try:
+                w.show()
+                w.restore()
+                return
+            except Exception:
+                # Stale ref — previous mini-player was destroyed.
+                mini_window["value"] = None
+        try:
+            mw = webview.create_window(
+                "Tidal Mini",
+                f"http://{HOST}:{PORT}/mini",
+                width=360,
+                height=120,
+                min_size=(280, 100),
+                on_top=True,
+                resizable=True,
+                frameless=False,
+            )
+        except Exception as exc:
+            print(
+                f"[desktop] mini-player open failed: {exc!r}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return
+        # Clear the ref when the window closes so a reopen spawns a
+        # fresh one instead of waking a destroyed reference.
+        try:
+            mw.events.closed += lambda: mini_window.__setitem__("value", None)
+        except Exception:
+            pass
+        mini_window["value"] = mw
+
     # Register the focus callback so a second launch can raise us. The
     # callable runs on whatever thread the FastAPI handler lives on, so
     # schedule the actual restore onto the pywebview thread via its
     # event-dispatch mechanism.
     import server as _server
     _server.register_focus_callback(_show_window)
+    # Register the quit callback so the in-app "Quit" menu entry can
+    # force a real shutdown that bypasses close-to-tray.
+    _server.register_quit_callback(_quit_from_tray)
+    # Register the mini-player callback so the in-app "Open mini
+    # player" control can spawn a second pywebview window.
+    _server.register_mini_player_callback(_open_mini_player)
 
-    # Start the tray icon. Non-blocking (run_detached internally) and
-    # survives pystray's absence — tray is None if the platform can't
-    # render it or the deps are missing, in which case the app still
-    # runs just without the menu-bar affordance.
+    # Start the tray icon. Non-blocking (run_detached internally).
+    # `tray is None` when pystray's platform deps are missing, the icon
+    # asset can't be found, or creation raised — in all those cases we
+    # fall back to "close = quit" so the user can always terminate.
+    tray = None
     try:
         from app.tray import start_tray
 
         icon_path = _find_tray_icon()
-        if icon_path is not None:
+        if icon_path is None:
+            print(
+                "[desktop] tray icon asset not found — close button will quit.",
+                file=sys.stderr,
+                flush=True,
+            )
+        else:
             tray = start_tray(
                 icon_path=icon_path,
                 port=PORT,
                 on_show=_show_window,
                 on_quit=_quit_from_tray,
             )
-        else:
-            tray = None
+            if tray is None:
+                print(
+                    "[desktop] tray startup returned None — close button will quit.",
+                    file=sys.stderr,
+                    flush=True,
+                )
     except Exception as exc:
-        print(f"[desktop] tray startup skipped: {exc}", file=sys.stderr, flush=True)
+        print(
+            f"[desktop] tray startup failed ({exc!r}) — close button will quit.",
+            file=sys.stderr,
+            flush=True,
+        )
         tray = None
+
+    # Hide-on-close only if the tray is up to give the user a way back.
+    # Without a tray, leave pywebview's default close-quits behavior so
+    # the X button works as expected.
+    if tray is not None:
+        is_windows = sys.platform.startswith("win")
+
+        def _on_closing() -> bool:
+            if actually_quitting["value"]:
+                return True  # Quit from tray — let pywebview really close
+            try:
+                if is_windows:
+                    # Windows: minimize keeps the taskbar entry, which
+                    # is the native restore affordance.
+                    window.minimize()
+                else:
+                    # macOS: hide the window, then hide the app. The
+                    # second call is load-bearing: without it the app
+                    # stays active with no visible windows and the OS
+                    # never fires a reactivation on Dock click (and
+                    # `applicationShouldHandleReopen:hasVisibleWindows:`
+                    # doesn't fire under pywebview's run loop either).
+                    # Hiding the app at the NSApp level is what the
+                    # standard Cmd+H flow does, which means a Dock
+                    # click reactivates us and our observer in
+                    # `_wire_macos_dock_reopen` calls window.show().
+                    window.hide()
+                    try:
+                        import AppKit  # local to keep Windows deps clean
+                        AppKit.NSApplication.sharedApplication().hide_(None)
+                    except Exception:
+                        pass
+            except Exception as exc:
+                print(f"[desktop] close handler failed: {exc!r}",
+                      file=sys.stderr, flush=True)
+            return False  # cancel the close; app stays up behind the tray
+
+        try:
+            window.events.closing += _on_closing
+        except Exception:
+            # Older pywebview versions used a different hook shape;
+            # fall through to legacy close-kills-everything behavior.
+            pass
+
+        # macOS: wire the Dock-click → window.show() path. No-op on
+        # Windows (minimize handles it natively via the taskbar).
+        _wire_macos_dock_reopen(window)
 
     try:
         # gui=None lets pywebview pick the native backend

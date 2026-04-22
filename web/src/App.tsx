@@ -22,13 +22,19 @@ import { TrackSelectionProvider } from "@/hooks/useTrackSelection";
 import { UiPreferencesProvider } from "@/hooks/useUiPreferences";
 import { OfflineProvider, useOfflineMode } from "@/hooks/useOfflineMode";
 import { useNetworkStatus } from "@/hooks/useNetworkStatus";
-import { PlayerProvider } from "@/hooks/PlayerContext";
+import { PlayerProvider, usePlayerMeta } from "@/hooks/PlayerContext";
+import {
+  VideoDownloadsProvider,
+  useVideoDownloads,
+} from "@/hooks/useVideoDownloads";
+import { TooltipProvider } from "@/components/ui/tooltip";
 import { VideoPlayerProvider } from "@/hooks/useVideoPlayer";
 import { VideoPlayerModal } from "@/components/VideoPlayerModal";
 import { SelectionBar } from "@/components/SelectionBar";
 import { useAuth } from "@/hooks/useAuth";
 import { useDownloads } from "@/hooks/useDownloads";
 import { useDownloadNotifications } from "@/hooks/useDownloadNotifications";
+import { useTrackChangeNotifications } from "@/hooks/useTrackChangeNotifications";
 import { useKeyboardShortcuts } from "@/hooks/useKeyboardShortcuts";
 import { setLastfmEnabled } from "@/hooks/useLastfmPlaycount";
 import { useLastfmScrobbler } from "@/hooks/useLastfmScrobbler";
@@ -61,6 +67,7 @@ import { RadioPage } from "@/pages/RadioPage";
 import { ImportPage } from "@/pages/ImportPage";
 import { PlaylistDetail } from "@/pages/PlaylistDetail";
 import { Downloads } from "@/pages/Downloads";
+import { MiniPlayerPage } from "@/pages/MiniPlayerPage";
 import { SettingsPage } from "@/pages/SettingsPage";
 
 export default function App() {
@@ -73,19 +80,23 @@ export default function App() {
     <ToastProvider>
       <ErrorBoundary fullScreen>
         <UiPreferencesProvider>
-          <OfflineProvider>
-            <DownloadStreamProvider>
-              <DownloadedProvider>
-                <FavoritesProvider>
-                  <MyPlaylistsProvider>
-                    <RecentsProvider>
-                      <AppInner />
-                    </RecentsProvider>
-                  </MyPlaylistsProvider>
-                </FavoritesProvider>
-              </DownloadedProvider>
-            </DownloadStreamProvider>
-          </OfflineProvider>
+          <TooltipProvider delayDuration={250}>
+            <OfflineProvider>
+              <DownloadStreamProvider>
+                <DownloadedProvider>
+                  <FavoritesProvider>
+                    <MyPlaylistsProvider>
+                      <RecentsProvider>
+                        <VideoDownloadsProvider>
+                          <AppInner />
+                        </VideoDownloadsProvider>
+                      </RecentsProvider>
+                    </MyPlaylistsProvider>
+                  </FavoritesProvider>
+                </DownloadedProvider>
+              </DownloadStreamProvider>
+            </OfflineProvider>
+          </TooltipProvider>
         </UiPreferencesProvider>
       </ErrorBoundary>
     </ToastProvider>
@@ -128,6 +139,14 @@ function AppInner() {
   // — when connectivity returns, the OR clears and we're back online.
   const isOffline = offline || !online;
 
+  // The mini-player window loads /mini — a compact transport UI that
+  // shares player state (via backend SSE) with the main window but
+  // doesn't render the Shell. Detect via window.location so the route
+  // is decided before Shell's hooks (and its large component tree)
+  // pay render cost.
+  const isMiniRoute =
+    typeof window !== "undefined" && window.location.pathname.startsWith("/mini");
+
   return (
     <BrowserRouter>
       {/* PlayerProvider and TrackSelectionProvider both mount BELOW
@@ -137,15 +156,21 @@ function AppInner() {
       <PlayerProvider>
         <VideoPlayerProvider>
           <TrackSelectionProvider>
-            <Shell
-              username={auth.username}
-              avatar={auth.avatar}
-              userId={auth.user_id}
-              onLogout={auth.logout}
-              offline={isOffline}
-              onSignInRequested={auth.refresh}
-            />
-            <VideoPlayerModal />
+            {isMiniRoute ? (
+              <MiniPlayerPage />
+            ) : (
+              <>
+                <Shell
+                  username={auth.username}
+                  avatar={auth.avatar}
+                  userId={auth.user_id}
+                  onLogout={auth.logout}
+                  offline={isOffline}
+                  onSignInRequested={auth.refresh}
+                />
+                <VideoPlayerModal />
+              </>
+            )}
           </TrackSelectionProvider>
         </VideoPlayerProvider>
       </PlayerProvider>
@@ -174,19 +199,24 @@ function Shell({
   onSignInRequested: () => void;
 }) {
   const downloads = useDownloads();
+  const videoDownloads = useVideoDownloads();
   const toast = useToast();
   const location = useLocation();
+  const playerMeta = usePlayerMeta();
   // Opt-in desktop notifications when a burst finishes. We pull the
   // pref lazily from settings — Settings is the source of truth and
   // the GET is cheap enough to refetch on mount without plumbing the
   // whole settings object into context just for one boolean.
   const [notifyEnabled, setNotifyEnabled] = useState(false);
+  const [notifyTrackEnabled, setNotifyTrackEnabled] = useState(false);
   useEffect(() => {
     let cancelled = false;
     api.settings
       .get()
       .then((s) => {
-        if (!cancelled) setNotifyEnabled(!!s.notify_on_complete);
+        if (cancelled) return;
+        setNotifyEnabled(!!s.notify_on_complete);
+        setNotifyTrackEnabled(!!s.notify_on_track_change);
       })
       .catch(() => {
         /* ignore — default stays false */
@@ -194,9 +224,16 @@ function Shell({
     // Settings page dispatches this event after every successful save,
     // so toggling the pref there updates the shell in real time.
     const onUpdate = (e: Event) => {
-      const detail = (e as CustomEvent<{ notify_on_complete?: boolean }>).detail;
-      if (detail && typeof detail.notify_on_complete === "boolean") {
+      const detail = (e as CustomEvent<{
+        notify_on_complete?: boolean;
+        notify_on_track_change?: boolean;
+      }>).detail;
+      if (!detail) return;
+      if (typeof detail.notify_on_complete === "boolean") {
         setNotifyEnabled(detail.notify_on_complete);
+      }
+      if (typeof detail.notify_on_track_change === "boolean") {
+        setNotifyTrackEnabled(detail.notify_on_track_change);
       }
     };
     window.addEventListener("tidal-settings-updated", onUpdate);
@@ -206,6 +243,7 @@ function Shell({
     };
   }, []);
   useDownloadNotifications(notifyEnabled, downloads.active, downloads.completed);
+  useTrackChangeNotifications(notifyTrackEnabled, playerMeta.track);
   const [queueOpen, setQueueOpen] = useState(false);
   const [lyricsOpen, setLyricsOpen] = useState(false);
   const [fullOpen, setFullOpen] = useState(false);
@@ -329,7 +367,12 @@ function Shell({
     <div className="flex h-screen flex-col bg-background">
       <div className="flex min-h-0 flex-1 gap-2 p-2 pb-0">
         <Sidebar
-          activeDownloads={downloads.active.length}
+          // Active count = music + video jobs currently downloading.
+          // Both render as rows on the Downloads page now, so the
+          // badge on the sidebar button should reflect the union.
+          activeDownloads={
+            downloads.active.length + videoDownloads.active.length
+          }
           newDownloads={newCompletedCount}
           offline={offline}
         />
