@@ -65,33 +65,28 @@ class Settings:
     # and an unsolicited bezel every 3 minutes would be noise. Users
     # who leave the window minimized will want it on.
     notify_on_track_change: bool = False
-    # --- Audio engine (libvlc) settings ---------------------------------
-    # Master enable for the equalizer. When False, libvlc runs with no
-    # filtering regardless of `eq_bands` — we still keep the stored
-    # bands/preamp so flipping this back on restores the user's curve.
-    # Defaults off so new users aren't unknowingly listening through
-    # a flat-but-present filter chain.
+    # --- Audio engine settings ------------------------------------------
+    # Master enable for the equalizer. When False, the filter chain
+    # is bypassed regardless of `eq_bands` — we still keep the
+    # stored bands/preamp so flipping this back on restores the
+    # user's curve. Defaults off so new users aren't unknowingly
+    # listening through a flat-but-present filter chain.
     eq_enabled: bool = False
-    # 10-band equalizer amplitudes in dB, -20..+20. Empty list = flat /
-    # off. Replaces any prior EQ when re-applied. When `eq_preamp` is
-    # None the equalizer's preamp stays at libvlc's default.
+    # 10-band equalizer amplitudes in dB, -20..+20. Empty list =
+    # flat / off. Replaces any prior EQ when re-applied. When
+    # `eq_preamp` is None no preamp gain is applied.
     eq_bands: list[float] = field(default_factory=list)
     eq_preamp: Optional[float] = None
-    # Libvlc output-device id (from `audio_output_device_enum`). Empty
-    # string means "use the system default". Persisted so USB DAC /
-    # Bluetooth choices survive relaunch.
+    # sounddevice output-device index (stringified, matches what
+    # /api/player/output-devices returns). Empty string means "use
+    # the system default". Persisted so USB DAC / Bluetooth
+    # choices survive relaunch.
     audio_output_device: str = ""
     # Spotify Developer app client_id, used by the Spotify → Tidal
     # playlist importer. Users register their own app at
     # developer.spotify.com and paste the id here. PKCE OAuth so we
     # don't need a secret. Empty string = import feature hidden in UI.
     spotify_client_id: str = ""
-    # Which audio engine drives playback. "vlc" (default) uses the
-    # long-shipping libvlc path. "pcm" uses the PyAV + sounddevice
-    # engine that supports sample-accurate gapless transitions and
-    # bit-perfect output. Some features (EQ, device selection) are
-    # not yet ported to pcm; the UI surfaces warnings when relevant.
-    audio_engine: str = "vlc"
 
 
 def load_settings() -> Settings:

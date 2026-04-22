@@ -4,9 +4,10 @@ import { api } from "@/api/client";
 import { useUiPreferences, type StreamingQuality } from "./useUiPreferences";
 
 /**
- * Player hook. Remote-controls the libvlc backend engine: every
- * play/pause/seek/volume call fires an HTTP request at /api/player/*,
- * and playback state flows back through an SSE stream.
+ * Player hook. Remote-controls the backend PyAV + sounddevice
+ * engine: every play/pause/seek/volume call fires an HTTP request
+ * at /api/player/*, and playback state flows back through an SSE
+ * stream.
  *
  * What this hook owns:
  *   - Queue / shuffle / repeat state
@@ -16,17 +17,16 @@ import { useUiPreferences, type StreamingQuality } from "./useUiPreferences";
  *
  * What the backend owns:
  *   - Stream resolution (local file lookup or Tidal DASH manifest)
- *   - Decoder / audio output (libvlc)
+ *   - Decoder / audio output (PyAV → sounddevice)
  *   - Reported position / duration while playing
  *
  * Gapless: when the current track crosses the 15s-remaining mark
  * (see the preload trigger in `applySnapshot`), we fire
  * /api/player/preload for the next track in the queue. The backend
- * caches its resolved DASH manifest in a one-slot cache. On natural
- * track-end (or manual advance) the subsequent /api/player/load
- * consumes the cache instead of fetching, dropping the transition
- * gap from ~300-500ms to ~50-100ms — subjectively gapless for
- * DASH→DASH swaps.
+ * pre-decodes it into a PCM buffer. On natural track-end the audio
+ * callback splices the preloaded buffer into the live OutputStream
+ * at the sample boundary — true gapless for same-rate transitions,
+ * ~50ms reopen blip for cross-rate.
  */
 
 const PERSIST_KEY = "tidal-downloader:player";
@@ -409,8 +409,8 @@ export function usePlayer() {
         void (async () => {
           try {
             // Single round-trip for load+play — saves ~20-40ms of
-            // await gap between the two HTTP calls and lets libvlc
-            // start priming the DASH demuxer immediately after
+            // await gap between the two HTTP calls and lets the
+            // backend start priming the decoder immediately after
             // set_media, which is where the audible delay lives.
             await api.player.playTrack(track.id, qualityRef.current);
           } catch (err) {

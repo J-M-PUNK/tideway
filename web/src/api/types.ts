@@ -101,10 +101,9 @@ export interface PlaylistFolder {
 export type LibraryItem = Track | Album | Artist | Playlist;
 
 /**
- * Snapshot of the native (libvlc) player. The frontend's usePlayer
- * hook mirrors this into its own React state when the native engine
- * is on, so the rest of the UI doesn't have to care which engine is
- * actually driving audio.
+ * Snapshot of the backend's native audio player (PyAV + sounddevice).
+ * usePlayer mirrors this into its own React state, so the rest of
+ * the UI never touches the SSE stream directly.
  */
 export interface StreamInfo {
   /** Where the audio is coming from. Local means we're reading a file

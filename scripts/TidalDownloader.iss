@@ -52,8 +52,8 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 [Files]
 ; Pull the entire one-folder PyInstaller output. recursesubdirs +
 ; createallsubdirs replicate the staging layout exactly, which
-; matters because libvlc / ffmpeg / plugin trees are sensitive to
-; relative paths.
+; matters because the bundled ffmpeg tree is sensitive to relative
+; paths.
 Source: "..\dist\TidalDownloader\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]

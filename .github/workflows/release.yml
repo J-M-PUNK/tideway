@@ -27,12 +27,6 @@ jobs:
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
-      - name: Install VLC
-        # spec file copies libvlc.dylib + plugins out of /Applications/VLC.app
-        # at build time. `--cask` because VLC ships as a .app, not a brew
-        # formula.
-        run: brew install --cask vlc
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
@@ -59,8 +53,7 @@ jobs:
 
       - name: Zip .app
         # `ditto` preserves HFS resource forks / symlinks that the
-        # .app bundle relies on. `zip -r` would corrupt plugin
-        # symlinks inside libvlc's dylib tree.
+        # .app bundle relies on.
         run: |
           cd dist
           ditto -c -k --sequesterRsrc --keepParent TidalDownloader.app \
@@ -84,12 +77,6 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
-
-      - name: Install VLC
-        # Chocolatey already preinstalled on GitHub's Windows runners.
-        # Defaults to C:\Program Files\VideoLAN\VLC — matches the
-        # lookup order in TidalDownloader-win.spec.
-        run: choco install vlc -y --no-progress
 
       - uses: actions/setup-python@v5
         with:
