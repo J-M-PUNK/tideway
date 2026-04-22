@@ -20,6 +20,7 @@ import { MediaCard } from "@/components/MediaCard";
 import { HeroSkeleton, TrackListSkeleton } from "@/components/Skeletons";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { useLastfmAlbumPlaycount } from "@/hooks/useLastfmPlaycount";
+import { useSpotifyAlbumTotalPlays } from "@/hooks/useSpotifyEnrichment";
 import { cn, formatDuration, imageProxy } from "@/lib/utils";
 
 export function AlbumDetail({ onDownload }: { onDownload: OnDownload }) {
@@ -74,6 +75,9 @@ export function AlbumDetail({ onDownload }: { onDownload: OnDownload }) {
               <AlbumPlaycountBadge
                 artist={album.artists[0]?.name ?? ""}
                 album={album.name}
+                trackIsrcs={album.tracks
+                  .map((t) => t.isrc)
+                  .filter((i): i is string => !!i)}
               />
             </div>
           </div>
@@ -341,25 +345,48 @@ function formatDurationLong(totalSeconds: number): string {
 }
 
 /**
- * Inline Last.fm context appended to the album meta row. Renders up to
- * two parts:
- *   · 24K listeners · 120K plays      (global — always when available)
- *   · You've played 47 times          (personal — when scrobbled)
- * Suppresses itself entirely if both are empty/zero.
+ * Inline stats appended to the album meta row. Shows Spotify's
+ * summed-across-tracks total play count (the headline "this album
+ * has been played X billion times" number) and the user's personal
+ * Last.fm scrobble count. The Last.fm-wide "listeners / plays"
+ * fields are dropped — Last.fm's sample size is too small to make
+ * those numbers useful next to Spotify's.
  */
-function AlbumPlaycountBadge({ artist, album }: { artist: string; album: string }) {
+function AlbumPlaycountBadge({
+  artist,
+  album,
+  trackIsrcs,
+}: {
+  artist: string;
+  album: string;
+  trackIsrcs: string[];
+}) {
   const pc = useLastfmAlbumPlaycount(artist, album);
-  if (!pc) return null;
-  const user = pc.userplaycount ?? 0;
-  const listeners = pc.listeners ?? 0;
-  const plays = pc.playcount ?? 0;
-  if (user <= 0 && listeners <= 0 && plays <= 0) return null;
+  const spotify = useSpotifyAlbumTotalPlays(
+    trackIsrcs.length > 0 ? trackIsrcs : null,
+  );
+
+  const user = pc?.userplaycount ?? 0;
+  const totalPlays = spotify?.total_plays ?? 0;
+  // When some tracks couldn't be resolved, append a "+" to signal
+  // the number is a lower bound rather than the exact total.
+  const partial =
+    spotify != null && spotify.total > 0 && spotify.resolved < spotify.total;
+
+  if (totalPlays <= 0 && user <= 0) return null;
   return (
     <>
-      {listeners > 0 && <span>{formatCompact(listeners)} listeners</span>}
-      {plays > 0 && <span>{formatCompact(plays)} plays</span>}
+      {totalPlays > 0 && (
+        <span title={`Summed Spotify play count across ${spotify?.resolved ?? 0} of ${spotify?.total ?? 0} tracks`}>
+          {formatCompact(totalPlays)}
+          {partial ? "+" : ""} total plays
+        </span>
+      )}
       {user > 0 && (
-        <span className="text-primary">you: {user.toLocaleString()}</span>
+        <span className="text-primary">
+          you've played {user.toLocaleString()}{" "}
+          {user === 1 ? "time" : "times"}
+        </span>
       )}
     </>
   );

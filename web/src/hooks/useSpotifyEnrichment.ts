@@ -129,6 +129,55 @@ export function useSpotifyArtistStats(
   return key ? statsCache.get(key) ?? null : null;
 }
 
+const albumPlaysCache = new Map<string, AlbumPlays>();
+const albumPlaysInflight = new Map<string, Promise<AlbumPlays>>();
+const albumPlaysSubs = new Map<string, Set<() => void>>();
+
+interface AlbumPlays {
+  total_plays: number;
+  resolved: number;
+  total: number;
+}
+
+/**
+ * Sum Spotify play counts across an album, fetched server-side in a
+ * single call. `isrcs` should include every track on the album that
+ * has an ISRC — order doesn't matter (we sort into the cache key so
+ * different call-sites share the cached result). Returns null until
+ * the first fetch resolves; afterwards the summed object until the
+ * user leaves the page.
+ */
+export function useSpotifyAlbumTotalPlays(
+  isrcs: string[] | null,
+): AlbumPlays | null {
+  const [, force] = useState(0);
+  const key =
+    isrcs && isrcs.length > 0
+      ? isrcs
+          .map((i) => i.toUpperCase())
+          .sort()
+          .join(",")
+      : null;
+  useEffect(() => {
+    if (!key || !spotifyEnabled) return;
+    const off = subscribe(albumPlaysSubs, key, () => force((n) => n + 1));
+    if (!albumPlaysCache.has(key) && !albumPlaysInflight.has(key)) {
+      const p = api.spotify
+        .albumTotalPlays(key.split(","))
+        .catch(() => ({ total_plays: 0, resolved: 0, total: 0 }))
+        .then((val) => {
+          albumPlaysCache.set(key, val);
+          notify(albumPlaysSubs, key);
+          return val;
+        })
+        .finally(() => albumPlaysInflight.delete(key));
+      albumPlaysInflight.set(key, p);
+    }
+    return off;
+  }, [key]);
+  return key ? albumPlaysCache.get(key) ?? null : null;
+}
+
 // Gate — flipped by a settings callback or an availability probe
 // later. Default to on since the backend degrades gracefully
 // (returns nulls) when Spotify is unreachable.
@@ -139,5 +188,6 @@ export function setSpotifyEnrichmentEnabled(enabled: boolean): void {
   if (!enabled) {
     playcountCache.clear();
     statsCache.clear();
+    albumPlaysCache.clear();
   }
 }
