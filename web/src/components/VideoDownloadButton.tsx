@@ -27,7 +27,7 @@ const QUALITY_OPTIONS: { value: VideoQuality; label: string; hint: string }[] = 
 ];
 
 /**
- * Starts an ffmpeg HLS → MP4 remux on the backend. Click opens a
+ * Starts an HLS → MP4 remux on the backend. Click opens a
  * quality picker (HIGH / MEDIUM / LOW) before starting — Tidal
  * serves three variants and letting the user pick avoids always
  * hitting "worst" or "largest".
@@ -131,10 +131,10 @@ export function VideoDownloadButton({
   const pct = job?.progress != null ? Math.round(job.progress * 100) : null;
 
   // Running: circular progress ring + inline percent. The ring fills
-  // as ffmpeg reports progress; when progress is null (right at the
-  // start, before the first out_time_us arrives) the ring stays empty
-  // and we render the spinner inside so the affordance is still
-  // obviously "doing something".
+  // as the backend remux reports progress; when progress is null
+  // (right at the start, before the first packet lands) the ring
+  // stays empty and we render the spinner inside so the affordance
+  // is still obviously "doing something".
   if (state === "running") {
     return (
       <Tooltip>

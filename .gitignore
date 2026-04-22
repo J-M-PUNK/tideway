@@ -181,7 +181,9 @@ settings.json
 watchlist.json
 download_queue.json
 
-# Vendored binaries (ffmpeg etc. — fetched on demand via scripts/fetch_ffmpeg.sh)
+# Vendored binaries — unused after the PyAV migration, kept
+# ignored so any old `vendor/ffmpeg/` directories on contributors'
+# checkouts don't accidentally get committed.
 vendor/
 
 # Packaging: our PyInstaller specs are hand-authored, not auto-generated,

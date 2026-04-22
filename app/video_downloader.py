@@ -1,24 +1,22 @@
 """Save a Tidal music video to disk.
 
-Standalone from the main track downloader — videos are rare requests
-and wiring them into the item-status machinery would add complexity
-for a feature most users hit a handful of times. Instead we keep a
-tiny in-memory dict of in-flight jobs keyed by video_id; the UI polls
-`status()` to render busy / done / error.
+Standalone from the main track downloader — videos are rare
+requests and wiring them into the item-status machinery would add
+complexity for a feature most users hit a handful of times.
+Instead we keep a tiny in-memory dict of in-flight jobs keyed by
+video_id; the UI polls `status()` to render busy / done / error.
 
-Mechanism: ffmpeg remux of the HLS manifest. Tidal delivers a master
-.m3u8; ffmpeg picks the highest variant (or whichever `quality` resolves
-to), concatenates the TS segments, and writes an .mp4 with `-c copy`
-(no re-encode, so the output is the pristine stream). Requires ffmpeg
-on PATH — documented in README, same requirement as audio concat.
+Mechanism: HLS → MP4 remux via PyAV (same libav under the hood as
+ffmpeg). Tidal delivers a master .m3u8; libav's HLS demuxer picks
+the highest variant and decodes the segment stream into packets.
+We mux those packets straight into an MP4 with no re-encode — so
+the output is bit-identical to what Tidal sent — after running
+the `aac_adtstoasc` bitstream filter on audio (HLS ships AAC
+with ADTS headers; MP4 needs them stripped).
 """
 from __future__ import annotations
 
 import logging
-import shlex
-import shutil
-import subprocess
-import sys
 import threading
 import time
 import urllib.error
@@ -27,6 +25,9 @@ import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable, Optional
+
+import av  # type: ignore
+from av.bitstream import BitStreamFilterContext  # type: ignore
 
 log = logging.getLogger(__name__)
 
@@ -40,9 +41,8 @@ class VideoJob:
     output_path: Optional[str] = None
     error: Optional[str] = None
     started_at: float = field(default_factory=time.time)
-    # Last-parsed ffmpeg progress (0.0..1.0). Read from stderr's
-    # `out_time_ms=` line in `-progress pipe:2` mode. Null until the
-    # first progress line arrives.
+    # Last computed remux progress (0.0..1.0). Updates as packets
+    # are muxed. Null until the first packet's PTS arrives.
     progress: Optional[float] = None
 
 
@@ -92,16 +92,16 @@ def start(
     duration_s: Optional[float] = None,
     on_done: Optional[Callable[[VideoJob], None]] = None,
 ) -> VideoJob:
-    """Kick off a background ffmpeg job and return the initial state.
+    """Kick off a background remux job and return the initial state.
 
-    Idempotent per `video_id`: if a job is already running or done, we
-    return that existing record rather than starting a second one.
-    Errors on the previous job do NOT block a retry — the user can
-    click again to re-attempt.
+    Idempotent per `video_id`: if a job is already running or done,
+    we return that existing record rather than starting a second
+    one. Errors on the previous job do NOT block a retry — the user
+    can click again to re-attempt.
     """
     # Opportunistic GC — drop terminal jobs older than 24h before
-    # adding a new one. Keeps _jobs bounded over long-running sessions
-    # without a separate reaper thread.
+    # adding a new one. Keeps _jobs bounded over long-running
+    # sessions without a separate reaper thread.
     _prune(24 * 3600)
     with _jobs_lock:
         existing = _jobs.get(video_id)
@@ -139,10 +139,10 @@ def _hls_duration_seconds(
     handle both: for a master, pick the first variant and recurse;
     for a media playlist, sum every `#EXTINF:<seconds>` line.
 
-    `tidalapi.Video` doesn't expose a duration field, so without this
-    the progress fraction can't be computed and the UI stays stuck at
-    an indeterminate spinner. Parsing the manifest is cheap (<10 KB
-    text fetch) and runs before ffmpeg even starts.
+    `tidalapi.Video` doesn't expose a duration field, so without
+    this the progress fraction can't be computed and the UI stays
+    stuck at an indeterminate spinner. Parsing the manifest is
+    cheap (<10 KB text fetch) and runs before remuxing starts.
 
     `_depth` bounds recursion at 3. A legitimate HLS chain is at
     most master → variant (depth 1); anything deeper is a malformed
@@ -170,9 +170,10 @@ def _hls_duration_seconds(
                     variant_url = urllib.parse.urljoin(manifest_url, uri)
                     return _hls_duration_seconds(variant_url, _depth + 1)
         return None
-    # Media playlist — sum segment durations. Negative / zero EXTINFs
-    # are either spec violations or intentional noise; skip them so
-    # a forged playlist can't yield a negative progress fraction.
+    # Media playlist — sum segment durations. Negative / zero
+    # EXTINFs are either spec violations or intentional noise; skip
+    # them so a forged playlist can't yield a negative progress
+    # fraction.
     total = 0.0
     for ln in lines:
         if ln.startswith("#EXTINF:"):
@@ -188,55 +189,89 @@ def _hls_duration_seconds(
     return total if total > 0 else None
 
 
-def _find_ffmpeg() -> Optional[str]:
-    """Locate an ffmpeg executable that this process can actually run.
+def _remux_hls_to_mp4(
+    manifest_url: str,
+    target_path: Path,
+    duration_s: Optional[float],
+    job: VideoJob,
+) -> None:
+    """Remux an HLS manifest into an MP4 without re-encoding.
 
-    Lookup order:
-      1. Bundled binary inside the packaged .app / .exe (written by
-         PyInstaller from `vendor/ffmpeg/<os>/` during build). This
-         is the shipping path — end users never have to install
-         anything.
-      2. `shutil.which("ffmpeg")` — respects PATH. Fast path for
-         dev runs where the terminal's PATH includes Homebrew /
-         system install dirs.
-      3. Known install locations on each platform. Covers GUI-
-         launched .apps on macOS that inherit a minimal PATH
-         (typically just `/usr/bin:/bin:/usr/sbin:/sbin`) and can't
-         see Homebrew's `/opt/homebrew/bin` even when ffmpeg is
-         installed.
+    libav's HLS demuxer handles master / variant resolution + TS
+    segment fetch. We hand it each demuxed packet and mux it into
+    the output container verbatim (packet-level copy — the output
+    is bit-identical to Tidal's stream). Audio runs through the
+    `aac_adtstoasc` bitstream filter so ADTS-headered AAC packets
+    become ASC-headered, which is what MP4 requires.
+
+    Progress is computed from the current DTS relative to the
+    pre-probed manifest duration and updated at 1% granularity to
+    avoid lock contention on every packet.
     """
-    # (1) Bundled binary. PyInstaller sets sys._MEIPASS to the
-    # runtime directory where datas/binaries are extracted.
-    if getattr(sys, "frozen", False):
-        meipass = getattr(sys, "_MEIPASS", None)
-        if meipass:
-            exe_name = "ffmpeg.exe" if sys.platform.startswith("win") else "ffmpeg"
-            bundled = Path(meipass) / "ffmpeg" / exe_name
-            if bundled.is_file():
-                return str(bundled)
-    # (2) PATH.
-    resolved = shutil.which("ffmpeg")
-    if resolved:
-        return resolved
-    # (3) Well-known install dirs.
-    candidates: list[str] = []
-    if sys.platform == "darwin":
-        candidates = [
-            "/opt/homebrew/bin/ffmpeg",  # Apple Silicon Homebrew
-            "/usr/local/bin/ffmpeg",  # Intel Homebrew
-            "/opt/local/bin/ffmpeg",  # MacPorts
-        ]
-    elif sys.platform.startswith("win"):
-        candidates = [
-            r"C:\ffmpeg\bin\ffmpeg.exe",
-            r"C:\Program Files\ffmpeg\bin\ffmpeg.exe",
-        ]
-    else:
-        candidates = ["/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg"]
-    for path in candidates:
-        if Path(path).is_file():
-            return path
-    return None
+    input_container = av.open(manifest_url)
+    output_container = av.open(str(target_path), mode="w", format="mp4")
+
+    # index-in-input → stream-in-output
+    stream_map: dict[int, object] = {}
+    # index-in-input → BSF (only for AAC audio)
+    bsf_map: dict[int, BitStreamFilterContext] = {}
+
+    try:
+        for in_stream in input_container.streams:
+            out_stream = output_container.add_stream_from_template(in_stream)
+            stream_map[in_stream.index] = out_stream
+            codec_name = getattr(
+                getattr(in_stream, "codec_context", None), "name", None
+            )
+            if codec_name == "aac":
+                bsf_map[in_stream.index] = BitStreamFilterContext(
+                    "aac_adtstoasc", in_stream
+                )
+
+        last_reported_progress = 0.0
+        for packet in input_container.demux():
+            if packet.dts is None:
+                # Flush packets from libav — skip.
+                continue
+            idx = packet.stream.index
+            out_stream = stream_map.get(idx)
+            if out_stream is None:
+                continue
+
+            if idx in bsf_map:
+                for filtered in bsf_map[idx].filter(packet):
+                    filtered.stream = out_stream
+                    output_container.mux(filtered)
+            else:
+                packet.stream = out_stream
+                output_container.mux(packet)
+
+            if duration_s and packet.pts is not None:
+                try:
+                    pts_s = float(packet.pts * packet.time_base)
+                except Exception:
+                    pts_s = 0.0
+                fraction = min(1.0, max(0.0, pts_s / duration_s))
+                if fraction - last_reported_progress >= 0.01:
+                    with _jobs_lock:
+                        job.progress = fraction
+                    last_reported_progress = fraction
+
+        # Drain each bitstream filter by sending a None packet.
+        for idx, bsf in bsf_map.items():
+            out_stream = stream_map[idx]
+            for filtered in bsf.filter(None):
+                filtered.stream = out_stream
+                output_container.mux(filtered)
+    finally:
+        try:
+            output_container.close()
+        except Exception:
+            pass
+        try:
+            input_container.close()
+        except Exception:
+            pass
 
 
 def _run_job(
@@ -247,14 +282,6 @@ def _run_job(
     on_done: Optional[Callable[[VideoJob], None]],
 ) -> None:
     try:
-        # Resolve ffmpeg's absolute path up front. Packaged macOS
-        # apps don't inherit the shell's PATH, so "ffmpeg" alone
-        # fails even when Homebrew has installed it at
-        # /opt/homebrew/bin. _find_ffmpeg covers that and the other
-        # common install locations.
-        ffmpeg_path = _find_ffmpeg()
-        if ffmpeg_path is None:
-            raise FileNotFoundError("ffmpeg")
         # Duration from the manifest if tidalapi didn't give us one.
         # Without this, the progress fraction can never compute and
         # the UI stays at an indeterminate spinner.
@@ -271,91 +298,13 @@ def _run_job(
             while (output_dir / f"{stem} ({n}){suffix}").exists():
                 n += 1
             target = output_dir / f"{stem} ({n}){suffix}"
-        # ffmpeg command. -c copy: no re-encode (fastest, lossless).
-        # -bsf:a aac_adtstoasc: fix the AAC container glitch HLS
-        # commonly produces when muxing into MP4 (otherwise QuickTime
-        # may refuse to open the file). -progress pipe:2 sends
-        # machine-readable progress to stderr for us to parse.
-        cmd = [
-            ffmpeg_path,
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-progress",
-            "pipe:2",
-            "-nostats",
-            "-i",
-            manifest_url,
-            "-c",
-            "copy",
-            "-bsf:a",
-            "aac_adtstoasc",
-            "-y",
-            str(target),
-        ]
-        log.info("starting ffmpeg: %s", shlex.join(cmd))
-        proc = subprocess.Popen(
-            cmd,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-        )
-        # Read progress lines. ffmpeg emits blocks like:
-        #   out_time_us=12345000
-        #   out_time_ms=12345           (milliseconds in newer ffmpeg,
-        #                                microseconds in older — the
-        #                                naming has been a long-standing
-        #                                bug, so we prefer out_time_us
-        #                                which is consistently µs.)
-        #   ...
-        #   progress=continue
-        assert proc.stderr is not None
-        for raw in proc.stderr:
-            line = raw.strip()
-            if not line.startswith("out_time_us=") or duration_s is None:
-                continue
-            try:
-                out_us = int(line.split("=", 1)[1])
-                fraction = min(1.0, max(0.0, out_us / 1_000_000 / duration_s))
-            except (ValueError, ZeroDivisionError):
-                continue
-            with _jobs_lock:
-                job.progress = fraction
-        rc = proc.wait()
-        if rc != 0:
-            # Surface a useful error — the generic "ffmpeg failed" is
-            # useless. ffmpeg already printed lines to stderr before
-            # the pipe drained; we don't have a tail here but the
-            # exit code rules out a few common causes.
-            raise RuntimeError(
-                f"ffmpeg exited with code {rc} — check that ffmpeg is "
-                f"installed on PATH"
-            )
+
+        _remux_hls_to_mp4(manifest_url, target, duration_s, job)
+
         with _jobs_lock:
             job.state = "done"
             job.output_path = str(target)
             job.progress = 1.0
-    except FileNotFoundError:
-        with _jobs_lock:
-            job.state = "error"
-            if sys.platform == "darwin":
-                job.error = (
-                    "ffmpeg not installed. Install via Homebrew "
-                    "(`brew install ffmpeg`) and retry — no restart "
-                    "needed."
-                )
-            elif sys.platform.startswith("win"):
-                job.error = (
-                    "ffmpeg not installed. Download from "
-                    "https://ffmpeg.org/download.html, put ffmpeg.exe "
-                    "on your PATH, and retry."
-                )
-            else:
-                job.error = (
-                    "ffmpeg not installed. Install via your package "
-                    "manager (apt: `sudo apt install ffmpeg`) and retry."
-                )
     except Exception as exc:
         log.exception("video download failed")
         with _jobs_lock:
@@ -369,9 +318,9 @@ def _run_job(
                 log.exception("video-download on_done callback raised")
 
 
-# Opportunistic GC called from `start()` — drops terminal jobs older
-# than max_age_s. Keeps _jobs bounded over long app sessions without
-# a dedicated reaper thread.
+# Opportunistic GC called from `start()` — drops terminal jobs
+# older than max_age_s. Keeps _jobs bounded over long app sessions
+# without a dedicated reaper thread.
 def _prune(max_age_s: float = 3600) -> None:
     now = time.time()
     with _jobs_lock:

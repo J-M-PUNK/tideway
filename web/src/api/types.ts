@@ -207,16 +207,17 @@ export interface DownloadItem {
 
 export interface VideoDownloadJob {
   video_id: number;
-  /** "idle" when the server has no record, "running" while ffmpeg is
-   *  working, "done" after success, "error" after a failure. */
+  /** "idle" when the server has no record, "running" while the
+   *  remux is working, "done" after success, "error" after a
+   *  failure. */
   state: "idle" | "running" | "done" | "error";
   title?: string;
   artist?: string;
   output_path?: string | null;
   error?: string | null;
-  /** 0..1 once ffmpeg has emitted its first progress line. Null
-   *  means "no progress yet" — not zero; the UI renders
-   *  indeterminate rather than 0% when null. */
+  /** 0..1 while the remux is in flight. Null means "no progress
+   *  yet" — not zero; the UI renders indeterminate rather than 0%
+   *  when null. */
   progress?: number | null;
 }
 
@@ -449,7 +450,7 @@ export interface LocalFile {
 }
 
 /** A video file the user has downloaded. No album / track_num / tidal_id
- *  fields because ffmpeg remux doesn't author tags; metadata is parsed
+ *  fields because the remux doesn't author tags; metadata is parsed
  *  from the `<Artist> - <Title>` filename the downloader writes. */
 export interface LocalVideo {
   path: string;
