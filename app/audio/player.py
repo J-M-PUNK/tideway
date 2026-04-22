@@ -970,7 +970,9 @@ class PCMPlayer:
 
     def _audio_callback(self, outdata, frames, time_info, status) -> None:
         if status:
-            print(f"[pcm] audio status: {status}", file=sys.stderr, flush=True)
+            # Under/overruns surface here. log.warning rather than
+            # print so it's controllable at runtime.
+            log.warning("sounddevice status: %s", status)
 
         # Rate-limited heartbeat so we can see the callback is
         # actually running + advancing. Logs once per second at
@@ -1146,18 +1148,17 @@ class PCMPlayer:
         self._last_error = None
         self._seq += 1
 
-        # Outside the lock: signal + close the old pipeline's
-        # resources. The old decoder thread will notice its stop
-        # flag and exit on its next iteration.
-        #
-        # Python doesn't let us `.release()` an RLock we're
-        # inside; let the caller drop the lock after this method
-        # returns by keeping cleanup here but short.
+        # Outside the lock (well — RLock held; cleanup stays
+        # short): signal + close the old pipeline's resources.
         old_stop_flag.set()
         if old_thread is not None and old_thread.is_alive():
-            # Non-blocking: if the thread is mid-I/O, let it die
-            # on its own. It's a daemon.
-            pass
+            # Short bounded join: gives the thread a chance to
+            # notice the stop flag and release its PyAV container
+            # + SegmentReader session. If it's blocked in network
+            # I/O past the timeout we give up (it's a daemon and
+            # won't prevent process exit), but we've tried rather
+            # than dropping the ref and guaranteeing a ~30s leak.
+            old_thread.join(timeout=0.5)
         if old_decoder is not None:
             try:
                 old_decoder.close()
@@ -1207,22 +1208,28 @@ class PCMPlayer:
         callback is the sole modifier during the track-boundary
         moment.
         """
-        pre = self._preload
-        if pre is None:
-            return False
-        if (
-            pre.sample_rate != self._stream_sample_rate
-            or pre.sd_dtype != self._stream_sd_dtype
-            or pre.channels != self._stream_channels
-        ):
-            # Incompatible — the stream will need a full reopen.
-            # Let the callback raise CallbackStop; _on_stream_finished
-            # picks up the preload and opens a new stream for it.
-            return False
-        print(
-            f"[pcm] gapless swap (inline) -> track={pre.track_id} "
-            f"same rate={pre.sample_rate}Hz dtype={pre.sd_dtype}",
-            file=sys.stderr, flush=True,
+        # Atomically capture + clear the preload slot so a racing
+        # `_drop_preload` on the HTTP thread can't close the
+        # preload's decoder between our capability check below and
+        # the ref swap. The lock is held only for the pointer grab
+        # (microseconds) — not during the actual swap or emit —
+        # to keep realtime-callback jitter minimal.
+        with self._lock:
+            pre = self._preload
+            if pre is None:
+                return False
+            if (
+                pre.sample_rate != self._stream_sample_rate
+                or pre.sd_dtype != self._stream_sd_dtype
+                or pre.channels != self._stream_channels
+            ):
+                # Incompatible — fall through to CallbackStop and
+                # let _on_stream_finished spawn the bridge thread.
+                return False
+            self._preload = None
+        log.info(
+            "gapless swap (inline) -> track=%s rate=%dHz dtype=%s",
+            pre.track_id, pre.sample_rate, pre.sd_dtype,
         )
         # Phase 1: emit `ended` so the frontend's advance logic
         # wires up expectedTrackIdRef for the new track.
@@ -1243,7 +1250,6 @@ class PCMPlayer:
         self._source_path = pre.source_path
         self._samples_emitted = 0
         self._callback_carry = None
-        self._preload = None
         self._state = "playing"
         self._seq += 1
         self._emit()
@@ -1283,65 +1289,87 @@ class PCMPlayer:
         """Stream re-open + swap for a cross-rate preload. Produces
         ~50ms of silence between tracks — same limitation every
         gapless player has when sample rates change.
-        """
-        print(
-            f"[pcm] gapless bridge (cross-rate) -> track={pre.track_id} "
-            f"rate {self._stream_sample_rate}->{pre.sample_rate}Hz "
-            f"dtype {self._stream_sd_dtype}->{pre.sd_dtype}",
-            file=sys.stderr, flush=True,
-        )
-        # The old stream already fired finished_callback, so it's
-        # stopped. Close it for good measure and release resources.
-        old_stream = self._stream
-        self._stream = None
-        if old_stream is not None:
-            try:
-                old_stream.close()
-            except Exception:
-                pass
-        # Close the old decoder (thread has already exited since
-        # decoder_done fired).
-        old_decoder = self._decoder
-        if old_decoder is not None:
-            try:
-                old_decoder.close()
-            except Exception:
-                pass
 
-        with self._lock:
-            # Clear the preload slot BEFORE opening a new stream so
-            # a racing preload() call (unlikely this early) can't
-            # re-stomp it.
-            self._preload = None
-            self._decoder = pre.decoder
-            self._pcm_queue = pre.queue
-            self._decoder_thread = pre.thread
-            self._stop_flag = pre.stop_flag
-            self._decoder_done = pre.done
-            self._current_track_id = pre.track_id
-            self._current_duration_ms = pre.duration_ms
-            self._current_stream_info = pre.stream_info
-            self._source_urls = pre.source_urls
-            self._source_path = pre.source_path
-            self._stream_sample_rate = pre.sample_rate
-            self._stream_sd_dtype = pre.sd_dtype
-            self._stream_channels = pre.channels
-            self._samples_emitted = 0
-            self._callback_carry = None
-            self._open_output_stream(
-                pre.sample_rate, pre.channels, pre.sd_dtype
-            )
-            self._transition("playing")
-        try:
-            self._stream.start()
-        except Exception:
-            log.exception("bridge: stream.start failed")
+        Serialized on `_pipeline_lock` so a concurrent `stop()` /
+        `load()` on the HTTP thread can't run teardown while we're
+        mid-bridge. If teardown drove us to idle before we acquired
+        the lock, the preload we captured may have been dropped —
+        bail out and let the user-initiated state stand.
+        """
+        with self._pipeline_lock:
             with self._lock:
-                self._last_error = "stream reopen failed"
-                self._transition("error")
+                if self._state == "idle":
+                    # Teardown ran between _on_stream_finished and
+                    # here. Our captured `pre` may have been closed
+                    # by _drop_preload; don't try to adopt it.
+                    try:
+                        pre.stop_flag.set()
+                        pre.decoder.close()
+                    except Exception:
+                        pass
+                    return
+
+            log.info(
+                "gapless bridge (cross-rate) -> track=%s rate %d->%dHz dtype %s->%s",
+                pre.track_id,
+                self._stream_sample_rate or 0,
+                pre.sample_rate,
+                self._stream_sd_dtype,
+                pre.sd_dtype,
+            )
+            # The old stream already fired finished_callback, so it's
+            # stopped. Close it for good measure and release
+            # resources.
+            old_stream = self._stream
+            self._stream = None
+            if old_stream is not None:
+                try:
+                    old_stream.close()
+                except Exception:
+                    pass
+            # Close the old decoder (thread has already exited since
+            # decoder_done fired).
+            old_decoder = self._decoder
+            if old_decoder is not None:
+                try:
+                    old_decoder.close()
+                except Exception:
+                    pass
+
+            with self._lock:
+                # Clear the preload slot BEFORE opening a new
+                # stream so a racing preload() call (unlikely this
+                # early) can't re-stomp it.
+                self._preload = None
+                self._decoder = pre.decoder
+                self._pcm_queue = pre.queue
+                self._decoder_thread = pre.thread
+                self._stop_flag = pre.stop_flag
+                self._decoder_done = pre.done
+                self._current_track_id = pre.track_id
+                self._current_duration_ms = pre.duration_ms
+                self._current_stream_info = pre.stream_info
+                self._source_urls = pre.source_urls
+                self._source_path = pre.source_path
+                self._stream_sample_rate = pre.sample_rate
+                self._stream_sd_dtype = pre.sd_dtype
+                self._stream_channels = pre.channels
+                self._samples_emitted = 0
+                self._callback_carry = None
+                self._open_output_stream(
+                    pre.sample_rate, pre.channels, pre.sd_dtype
+                )
+                self._transition("playing")
+            try:
+                self._stream.start()
+            except Exception:
+                log.exception("bridge: stream.start failed")
+                with self._lock:
+                    self._last_error = "stream reopen failed"
+                    self._transition("error")
+                self._emit()
+                return
             self._emit()
-            return
-        self._emit()
 
     def _drain_queue_locked(self) -> None:
         while not self._pcm_queue.empty():
