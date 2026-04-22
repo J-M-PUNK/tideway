@@ -350,26 +350,19 @@ function ArtistPlaycountLine({
   artistId: string;
   sampleIsrc: string | null;
 }) {
+  // Monthly listeners from Spotify (global popularity) + personal
+  // scrobble count from Last.fm (user's own listening history).
+  // The Last.fm-wide "listeners / plays" fields are dropped — they
+  // under-sample by ~100x relative to Spotify and just add noise.
   const pc = useLastfmArtistPlaycount(artistName);
-  // Spotify's monthly-listener count complements Last.fm's user-
-  // scrobble metrics. We need a track ISRC by this artist to pivot
-  // Tidal → Spotify; if none of the top tracks carry one, skip the
-  // Spotify branch and just show Last.fm data.
   const spotify = useSpotifyArtistStats(artistId, sampleIsrc);
   const monthly = spotify?.monthly_listeners ?? 0;
-
   const user = pc?.userplaycount ?? 0;
-  const listeners = pc?.listeners ?? 0;
-  const global = pc?.playcount ?? 0;
 
-  if (user <= 0 && listeners <= 0 && global <= 0 && monthly <= 0) {
-    return null;
-  }
+  if (monthly <= 0 && user <= 0) return null;
 
-  const parts: string[] = [];
-  if (monthly > 0) parts.push(`${formatCompact(monthly)} monthly listeners`);
-  if (listeners > 0) parts.push(`${formatCompact(listeners)} listeners`);
-  if (global > 0) parts.push(`${formatCompact(global)} plays`);
+  const monthlyLabel =
+    monthly > 0 ? `${formatCompact(monthly)} monthly listeners` : "";
   const personal =
     user > 0
       ? `You've played them ${user.toLocaleString()} ${
@@ -379,8 +372,8 @@ function ArtistPlaycountLine({
 
   return (
     <div className="mt-1 flex flex-wrap items-center gap-x-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground drop-shadow">
-      {parts.length > 0 && <span>{parts.join(" · ")}</span>}
-      {parts.length > 0 && personal && <span aria-hidden>·</span>}
+      {monthlyLabel && <span>{monthlyLabel}</span>}
+      {monthlyLabel && personal && <span aria-hidden>·</span>}
       {personal && <span className="text-primary">{personal}</span>}
     </div>
   );
