@@ -67,7 +67,10 @@ import { cn, formatDuration, imageProxy } from "@/lib/utils";
 export function VideoPlayerModal() {
   const { current, queue, queueIndex, close, next, prev, hasNext, hasPrev, open } =
     useVideoPlayer();
-  const [quality, setQuality] = useState<string | undefined>(undefined);
+  // Default to HIGH (1080p). Chrome/Firefox/Safari all handle a
+  // 1080p HLS manifest fine on modern hardware and this matches
+  // Tidal's own desktop-client default.
+  const [quality, setQuality] = useState<string | undefined>("HIGH");
   const { url, error, loading } = useVideoStream(current?.id ?? null, quality);
   const playerActions = usePlayerActions();
   const { playing: audioPlaying } = usePlayerMeta();
@@ -144,13 +147,24 @@ export function VideoPlayerModal() {
       hls.loadSource(url);
       hls.attachMedia(video);
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        // Try the normal (audible) autoplay first. Works in
+        // Firefox + Safari + the packaged .app regardless of the
+        // user's interaction history.
         video.play().catch(() => {
-          // Autoplay blocked (Chrome's policy for audible media
-          // without sufficient recent user-gesture credit). The
-          // video is loaded and paused; sync the UI state so the
-          // play/pause button shows "play" and a single click
-          // starts playback.
-          setPlaying(false);
+          // Chrome blocked audible autoplay. Retry muted —
+          // browsers uniformly allow muted autoplay — then flip
+          // the local mute state so the UI's speaker icon shows
+          // "muted" and the user can one-click unmute.
+          video.muted = true;
+          video
+            .play()
+            .then(() => setMuted(true))
+            .catch(() => {
+              // Even muted autoplay failed (rare — iOS Low-Power
+              // Mode, strict enterprise policy). Surface the
+              // paused state so the button shows "play".
+              setPlaying(false);
+            });
         });
       });
       return () => {
