@@ -677,9 +677,7 @@ function AudioEngineFields() {
       <Field
         label="Equalizer"
         hint={
-          engineInfo?.current === "pcm"
-            ? "Not yet implemented on the PCM engine — these sliders are persisted but don't shape audio. Switch to libvlc if you need the EQ today."
-            : eq.enabled
+          eq.enabled
             ? "Drag sliders or pick a preset. Reset flattens to zero."
             : "Equalizer is off — toggle it on to hear your changes. Curves are saved either way."
         }

@@ -18,6 +18,11 @@ pywebview>=5.0
 av>=12.0.0
 sounddevice>=0.4.6
 numpy>=1.26.0
+# scipy powers the PCM engine's 10-band parametric EQ. Biquad IIR
+# filtering in a Python loop can't keep up with the audio callback
+# at 48k; scipy.signal.sosfilt drops into C and comfortably runs
+# all 10 bands inside each callback's deadline.
+scipy>=1.11.0
 # Global media-key listener (play-pause / next / prev work when the
 # window is backgrounded). Has platform-specific backends; pynput picks
 # the right one at import time.
