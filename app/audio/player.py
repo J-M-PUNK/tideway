@@ -366,6 +366,11 @@ class PCMPlayer:
                 if duration_ms <= 0:
                     return self.snapshot()
                 target_s = (duration_ms / 1000.0) * fraction
+            self._dbg(
+                f"seek ENTER fraction={fraction} target_s={target_s:.2f} "
+                f"duration_ms={duration_ms} sample_rate={sample_rate} "
+                f"samples_emitted_before={self._samples_emitted}"
+            )
 
             # Suppress CallbackStop during the decoder swap. Without
             # this, the brief window where the queue is empty AND the
@@ -963,6 +968,17 @@ class PCMPlayer:
                 outdata[:] = scaled.astype(outdata.dtype)
 
         self._samples_emitted += frames
+        # Bump seq so the frontend's SSE dedupe lets through the
+        # position update. libvlc bumped seq on every
+        # MediaPlayerTimeChanged (~4Hz); we mirror that here at a
+        # comparable rate. The callback fires ~90Hz at 44.1k /512
+        # frames, so ~every 20th call keeps us close to 4-5Hz —
+        # smooth for a scrubber, cheap on CPU.
+        _cb_counter = getattr(self, "_seq_bump_counter", 0) + 1
+        if _cb_counter >= 20:
+            self._seq += 1
+            _cb_counter = 0
+        self._seq_bump_counter = _cb_counter
 
     def _adopt_preload_locked(self, pre: _Preload) -> PlayerSnapshot:
         """Synchronous version of the callback's gapless swap,
