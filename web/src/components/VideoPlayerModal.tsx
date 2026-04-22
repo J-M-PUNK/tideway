@@ -124,6 +124,14 @@ export function VideoPlayerModal() {
   // macOS WKWebView can decode application/vnd.apple.mpegurl
   // directly; Chrome / Edge / Firefox cannot, so hls.js ships
   // segment-level media via MediaSourceExtensions instead.
+  //
+  // Autoplay: the <video>'s `autoPlay` attribute fires when the
+  // element acquires a playable source. On the Safari path that's
+  // the `src` assignment below. On the hls.js path there's no
+  // `src` — MediaSource is attached via attachMedia — so autoplay
+  // doesn't trigger automatically. The canonical fix is to call
+  // `.play()` from `MANIFEST_PARSED`, which is the earliest point
+  // hls.js has told the <video> about the stream.
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !url) return;
@@ -135,6 +143,13 @@ export function VideoPlayerModal() {
       const hls = new Hls();
       hls.loadSource(url);
       hls.attachMedia(video);
+      hls.on(Hls.Events.MANIFEST_PARSED, () => {
+        video.play().catch(() => {
+          // Autoplay blocked (e.g., browser-level policy against
+          // audio playback without user interaction). The video
+          // is ready; user can hit the play button.
+        });
+      });
       return () => {
         hls.destroy();
       };
