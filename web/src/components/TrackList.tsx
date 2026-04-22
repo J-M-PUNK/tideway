@@ -17,6 +17,7 @@ import { usePlayerActions, usePlayerMeta } from "@/hooks/PlayerContext";
 import type { PlaySource } from "@/hooks/usePlayer";
 import { useDownloadedIds, useIsDownloaded } from "@/hooks/useDownloadedSet";
 import { useLastfmTrackPlaycount } from "@/hooks/useLastfmPlaycount";
+import { useSpotifyTrackPlaycount } from "@/hooks/useSpotifyEnrichment";
 import { useTrackSelection } from "@/hooks/useTrackSelection";
 import { useUiPreferences } from "@/hooks/useUiPreferences";
 import { HeartButton } from "@/components/HeartButton";
@@ -501,6 +502,7 @@ function TrackRow({
             <TrackPlaycountCell
               artist={track.artists[0]?.name ?? ""}
               title={track.name}
+              isrc={track.isrc ?? null}
             />
           )}
           <div className="truncate text-xs text-muted-foreground">
@@ -668,24 +670,43 @@ function RowLeadCell({
 }
 
 /**
- * Right-aligned compact playcount in its own column. Fires a Last.fm
- * `track.getInfo` via the shared module-level cache so the same track
- * doesn't refetch across surfaces. Returns an empty cell (to preserve
- * grid alignment) when Last.fm isn't configured or the track has no
- * reported plays — we don't want "0 plays" ghost text on every row.
+ * Right-aligned compact playcount in its own column. Prefers
+ * Spotify's global play count (the billion-scale numbers shown on
+ * open.spotify.com) when the track has an ISRC we can resolve;
+ * falls back to Last.fm's number when Spotify can't find the
+ * recording or the ISRC is missing. Shows nothing when neither
+ * source has data so we don't ghost the grid with "0 plays".
  */
-function TrackPlaycountCell({ artist, title }: { artist: string; title: string }) {
-  const pc = useLastfmTrackPlaycount(artist, title);
-  const count = pc?.playcount ?? 0;
-  if (count <= 0) {
-    return <span />;
-  }
+function TrackPlaycountCell({
+  artist,
+  title,
+  isrc,
+}: {
+  artist: string;
+  title: string;
+  isrc: string | null;
+}) {
+  const spotify = useSpotifyTrackPlaycount(isrc);
+  const lastfm = useLastfmTrackPlaycount(artist, title);
+
+  const count = spotify ?? lastfm?.playcount ?? 0;
+  if (count <= 0) return <span />;
+
+  const source = spotify != null ? "Spotify" : "Last.fm";
+  const tooltip =
+    spotify != null
+      ? `${count.toLocaleString()} plays on Spotify`
+      : `${count.toLocaleString()} plays on Last.fm${
+          lastfm?.listeners
+            ? ` · ${lastfm.listeners.toLocaleString()} listeners`
+            : ""
+        }`;
+
   return (
     <span
       className="text-xs tabular-nums text-muted-foreground"
-      title={`${count.toLocaleString()} plays on Last.fm${
-        pc?.listeners ? ` · ${pc.listeners.toLocaleString()} listeners` : ""
-      }`}
+      title={tooltip}
+      data-source={source}
     >
       {formatCompact(count)}
     </span>

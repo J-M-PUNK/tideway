@@ -9,6 +9,7 @@ import { useColumnCount } from "@/hooks/useColumnCount";
 import { useVideoPlayer } from "@/hooks/useVideoPlayer";
 import { prefetchVideoStream } from "@/hooks/useVideoStream";
 import { ArtistHero } from "@/components/ArtistHero";
+import { ArtistTopCities } from "@/components/ArtistTopCities";
 import { Grid, SectionHeader } from "@/components/Grid";
 import { MediaCard } from "@/components/MediaCard";
 import { TrackList } from "@/components/TrackList";
@@ -108,6 +109,11 @@ export function ArtistDetail({ onDownload }: { onDownload: OnDownload }) {
           <TrackList tracks={credits} onDownload={onDownload} showAlbum />
         </>
       )}
+
+      <ArtistTopCities
+        artistId={artist.id}
+        sampleIsrc={artist.top_tracks.find((t) => t.isrc)?.isrc ?? null}
+      />
 
       {artist.bio && (
         <>

@@ -244,6 +244,34 @@ export const api = {
         }),
       }),
   },
+  spotify: {
+    /** Spotify's global play count for a recording identified by
+     *  ISRC. Returns `{playcount: null}` when Spotify doesn't know
+     *  the recording or the private API is unreachable — callers
+     *  should degrade the badge silently rather than showing an
+     *  error. */
+    trackPlaycount: (isrc: string) =>
+      req<{ playcount: number | null }>(
+        `/api/spotify/track-playcount?isrc=${encodeURIComponent(isrc)}`,
+      ),
+    /** Artist-level stats from Spotify: monthly listeners, followers,
+     *  world rank, top cities. `sampleIsrc` is any ISRC from a track
+     *  by the artist — used once to resolve Tidal artist → Spotify
+     *  artist, then the mapping is cached indefinitely. */
+    artistStats: (tidalArtistId: string, sampleIsrc: string) =>
+      req<{
+        spotify_artist_id?: string;
+        name?: string;
+        monthly_listeners: number | null;
+        followers: number | null;
+        world_rank: number | null;
+        top_cities: { city: string; country: string; listeners: number }[];
+      }>(
+        `/api/spotify/artist-stats?tidal_artist_id=${encodeURIComponent(
+          tidalArtistId,
+        )}&sample_isrc=${encodeURIComponent(sampleIsrc)}`,
+      ),
+  },
   me: () => req<{ username: string }>("/api/me"),
   version: () => req<{ version: string }>("/api/version"),
   updateCheck: () =>

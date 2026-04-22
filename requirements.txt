@@ -32,6 +32,17 @@ pynput>=1.8.0
 # desktop.py so closing the window doesn't kill playback. Pillow is a
 # hard dep for icon rendering.
 pystray>=0.19.5
+# Spotify public-data enrichment. Wraps Spotify's reverse-engineered
+# GraphQL (the same one the Web Player uses) to pull global play
+# counts + artist monthly listeners. No OAuth — TLS-fingerprinted
+# anonymous requests. Complements Last.fm (which stays the source
+# for per-user stats); spotapi fills in the global-popularity side.
+spotapi>=1.2.7
+# spotapi has unconditional imports of pymongo + redis even when not
+# used. Harmless at runtime (they're just imported, never called),
+# but they need to be installable for spotapi itself to import.
+pymongo>=4.0.0
+redis>=5.0.0
 # Build-only: PyInstaller packages desktop.py + web/dist into a native
 # .exe / .app. Not needed at runtime but bundling keeps the build command
 # documented in a single place.

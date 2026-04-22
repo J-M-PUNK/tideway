@@ -25,6 +25,7 @@ import {
 import { useToast } from "@/components/toast";
 import { useFavorites } from "@/hooks/useFavorites";
 import { useLastfmArtistPlaycount } from "@/hooks/useLastfmPlaycount";
+import { useSpotifyArtistStats } from "@/hooks/useSpotifyEnrichment";
 import { usePlayerActions, usePlayerMeta } from "@/hooks/PlayerContext";
 import { cn, imageProxy } from "@/lib/utils";
 
@@ -112,7 +113,11 @@ export function ArtistHero({
         <h1 className="text-5xl font-black tracking-tight drop-shadow-lg">
           {artistName}
         </h1>
-        <ArtistPlaycountLine artistName={artistName} />
+        <ArtistPlaycountLine
+          artistName={artistName}
+          artistId={artistId}
+          sampleIsrc={topTracks.find((t) => t.isrc)?.isrc ?? null}
+        />
 
         <div className="mt-6 flex flex-wrap items-center gap-4">
           <button
@@ -336,20 +341,41 @@ function ArtistMoreMenu({
  *    connected user has actually scrobbled them.
  * Suppresses itself entirely if neither half has data.
  */
-function ArtistPlaycountLine({ artistName }: { artistName: string }) {
+function ArtistPlaycountLine({
+  artistName,
+  artistId,
+  sampleIsrc,
+}: {
+  artistName: string;
+  artistId: string;
+  sampleIsrc: string | null;
+}) {
   const pc = useLastfmArtistPlaycount(artistName);
-  if (!pc) return null;
-  const user = pc.userplaycount ?? 0;
-  const listeners = pc.listeners ?? 0;
-  const global = pc.playcount ?? 0;
-  if (user <= 0 && listeners <= 0 && global <= 0) return null;
+  // Spotify's monthly-listener count complements Last.fm's user-
+  // scrobble metrics. We need a track ISRC by this artist to pivot
+  // Tidal → Spotify; if none of the top tracks carry one, skip the
+  // Spotify branch and just show Last.fm data.
+  const spotify = useSpotifyArtistStats(artistId, sampleIsrc);
+  const monthly = spotify?.monthly_listeners ?? 0;
+
+  const user = pc?.userplaycount ?? 0;
+  const listeners = pc?.listeners ?? 0;
+  const global = pc?.playcount ?? 0;
+
+  if (user <= 0 && listeners <= 0 && global <= 0 && monthly <= 0) {
+    return null;
+  }
 
   const parts: string[] = [];
+  if (monthly > 0) parts.push(`${formatCompact(monthly)} monthly listeners`);
   if (listeners > 0) parts.push(`${formatCompact(listeners)} listeners`);
   if (global > 0) parts.push(`${formatCompact(global)} plays`);
-  const personal = user > 0
-    ? `You've played them ${user.toLocaleString()} ${user === 1 ? "time" : "times"}`
-    : "";
+  const personal =
+    user > 0
+      ? `You've played them ${user.toLocaleString()} ${
+          user === 1 ? "time" : "times"
+        }`
+      : "";
 
   return (
     <div className="mt-1 flex flex-wrap items-center gap-x-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground drop-shadow">

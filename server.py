@@ -619,6 +619,11 @@ def track_to_dict(t) -> dict:
         "share_url": _first(lambda: t.share_url),
         "track_mix_id": track_mix_id,
         "media_tags": [m for m in media_tags if m] if media_tags else [],
+        # International Standard Recording Code — universal track id
+        # shared across Spotify / Tidal / Apple / etc. Used by the
+        # Spotify-enrichment path to resolve a Tidal track to its
+        # Spotify counterpart (and thus to global play counts).
+        "isrc": _first(lambda: t.isrc),
     }
 
 
@@ -1844,6 +1849,76 @@ def lastfm_track_playcount(artist: str, track: str) -> dict:
     if not artist or not track:
         raise HTTPException(status_code=400, detail="artist and track are required")
     return lastfm.get_track_playcount(artist, track)
+
+
+# ---------------------------------------------------------------------------
+# Spotify public-data enrichment
+#
+# Complements Last.fm rather than replacing it. Last.fm remains the
+# source for personal listening history (user scrobbles, per-user
+# playcounts, stats page, history page). Spotify adds GLOBAL
+# popularity signals Last.fm can't match — billion-scale track
+# play counts and artist monthly-listener counts pulled directly
+# from Spotify's own Web Player GraphQL (via spotapi).
+#
+# All access is ISRC-mediated: Tidal track → ISRC → Spotify track.
+# See app/spotify_public.py for the caching + fallback story.
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/spotify/track-playcount")
+def spotify_track_playcount(isrc: str) -> dict:
+    """Global Spotify play count for the given ISRC. `{playcount: null}`
+    when Spotify doesn't recognize the recording or when the public
+    API is unreachable — callers should degrade silently rather than
+    surface errors."""
+    _require_auth()
+    if not isrc:
+        raise HTTPException(status_code=400, detail="isrc is required")
+    try:
+        from app import spotify_public
+        return {"playcount": spotify_public.playcount_by_isrc(isrc)}
+    except Exception as exc:
+        logger.warning("spotify playcount fetch failed: %s", exc)
+        return {"playcount": None}
+
+
+@app.get("/api/spotify/artist-stats")
+def spotify_artist_stats(tidal_artist_id: str, sample_isrc: str) -> dict:
+    """Spotify artist overview — monthly listeners, followers, world
+    rank, top cities. `tidal_artist_id` keys the cache; `sample_isrc`
+    is only used on the first lookup (any track by the artist works)
+    to pivot from Tidal to Spotify's namespace.
+
+    Returns an empty-ish dict (`{monthly_listeners: null, ...}`) when
+    Spotify can't resolve the artist so the frontend can render the
+    section as "not available" rather than throwing.
+    """
+    _require_auth()
+    if not tidal_artist_id or not sample_isrc:
+        raise HTTPException(
+            status_code=400,
+            detail="tidal_artist_id and sample_isrc are required",
+        )
+    try:
+        from app import spotify_public
+        stats = spotify_public.artist_stats(tidal_artist_id, sample_isrc)
+    except Exception as exc:
+        logger.warning("spotify artist-stats fetch failed: %s", exc)
+        return {
+            "monthly_listeners": None,
+            "followers": None,
+            "world_rank": None,
+            "top_cities": [],
+        }
+    if stats is None:
+        return {
+            "monthly_listeners": None,
+            "followers": None,
+            "world_rank": None,
+            "top_cities": [],
+        }
+    return stats.to_dict()
 
 
 @app.get("/api/lastfm/chart/top-artists")
