@@ -23,7 +23,7 @@ from dataclasses import asdict
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Optional
-from urllib.parse import urlparse
+from urllib.parse import quote, urljoin, urlparse
 
 import tidalapi
 import tidalapi.page as _tidal_page
@@ -3738,14 +3738,23 @@ _VALID_VIDEO_QUALITIES = {"HIGH", "MEDIUM", "LOW", "AUDIO_ONLY"}
 
 @app.get("/api/video/{video_id}/stream")
 def video_stream(video_id: int, quality: Optional[str] = None) -> dict:
-    """Return the HLS manifest URL for a video. The frontend feeds this
-    into a `<video>` element — WKWebView (macOS) plays HLS natively.
+    """Return an HLS manifest URL for a video, routed through our
+    server-side proxy.
 
-    When `quality` is omitted we use the user's default from session
-    config (what tidalapi's `video.get_url()` does). When passed, we
-    hit the underlying `/videos/{id}/urlpostpaywall` endpoint directly
-    with the requested quality so the quality-picker dropdown can swap
-    streams without changing global session state.
+    Browsers (Chrome, Firefox, WebView2 on Windows) enforce CORS on
+    hls.js's XHR fetches, and Tidal's CDN doesn't send
+    Access-Control-Allow-Origin. So we hand the frontend a loopback
+    URL to our /api/video/proxy endpoint — which fetches from Tidal
+    server-side and streams bytes through from the same origin as
+    the page. WKWebView (packaged macOS .app) decodes HLS natively
+    without XHR and would work with the direct URL too, but sending
+    it through the proxy costs one extra localhost hop per segment —
+    negligible, and keeps the frontend code uniform.
+
+    When `quality` is omitted we use the session default (what
+    tidalapi's `video.get_url()` returns). When passed, we hit
+    `/videos/{id}/urlpostpaywall` directly so the quality-picker
+    can swap streams without mutating session state.
     """
     _require_auth()
     if quality and quality.upper() not in _VALID_VIDEO_QUALITIES:
@@ -3772,7 +3781,119 @@ def video_stream(video_id: int, quality: Optional[str] = None) -> dict:
         raise HTTPException(status_code=502, detail=str(exc))
     if not url:
         raise HTTPException(status_code=404, detail="No playback URL available")
-    return {"url": url}
+    return {"url": f"/api/video/proxy?u={quote(url, safe='')}"}
+
+
+def _is_tidal_video_host(netloc: str) -> bool:
+    """Tidal serves HLS from multiple CDN hostnames; match on a
+    suffix so `im-cf.manifest.tidal.com`, `vmz-ad-cf.video.tidal.com`,
+    etc. all pass without needing an exhaustive allowlist. Guards
+    /api/video/proxy against being used as an open proxy for
+    arbitrary URLs.
+    """
+    n = netloc.lower().split(":", 1)[0]
+    return n.endswith(".tidal.com") or n == "tidal.com"
+
+
+def _rewrite_m3u8(text: str, base_url: str) -> str:
+    """Rewrite every URI in an HLS manifest to loop back through
+    our /api/video/proxy endpoint.
+
+    Handles:
+      - Segment lines (non-#, resolved against the manifest URL).
+      - Variant playlists (same shape; hls.js will re-enter this
+        endpoint for each one).
+      - URI attribute inside #EXT-X-KEY / #EXT-X-MAP / etc.
+
+    URIs that don't resolve to a Tidal host are passed through
+    untouched — the browser will fail on those with a CORS error
+    that we'd see in the console.
+    """
+    import re
+
+    def rewrite_uri(uri: str) -> str:
+        abs_url = urljoin(base_url, uri)
+        if not _is_tidal_video_host(urlparse(abs_url).netloc):
+            return uri
+        return f"/api/video/proxy?u={quote(abs_url, safe='')}"
+
+    out: list[str] = []
+    for line in text.splitlines():
+        s = line.strip()
+        if not s or s.startswith("#"):
+            # Tag line: rewrite any embedded URI="..." attribute.
+            if 'URI="' in s:
+                line = re.sub(
+                    r'URI="([^"]+)"',
+                    lambda m: f'URI="{rewrite_uri(m.group(1))}"',
+                    line,
+                )
+            out.append(line)
+            continue
+        out.append(rewrite_uri(s))
+    return "\n".join(out)
+
+
+@app.get("/api/video/proxy")
+def video_proxy(u: str):
+    """Server-side fetch + stream for Tidal HLS manifests + media
+    segments. Called by hls.js from the browser via same-origin
+    URLs rewritten into manifests by `_rewrite_m3u8`.
+
+    Manifest responses (content-type includes `mpegurl`) are
+    parsed and URL-rewritten recursively — a master playlist's
+    variant URLs point back through the proxy, so when hls.js
+    fetches them it stays in-origin.
+
+    Segment responses (`.ts` / `.m4s` / `.mp4`) are streamed through
+    unmodified with their original content-type.
+    """
+    _require_auth()
+    try:
+        parsed = urlparse(u)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Malformed URL")
+    if not _is_tidal_video_host(parsed.netloc):
+        raise HTTPException(
+            status_code=400, detail="Proxy target must be a Tidal host"
+        )
+    try:
+        r = SESSION.get(u, stream=True, timeout=30)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+    if r.status_code >= 400:
+        r.close()
+        raise HTTPException(
+            status_code=r.status_code,
+            detail=f"Upstream returned {r.status_code}",
+        )
+
+    content_type = (r.headers.get("Content-Type") or "").lower()
+    is_manifest = (
+        "mpegurl" in content_type
+        or ".m3u8" in parsed.path.lower()
+    )
+    if is_manifest:
+        try:
+            text = r.text
+        finally:
+            r.close()
+        rewritten = _rewrite_m3u8(text, u)
+        return Response(
+            rewritten, media_type="application/vnd.apple.mpegurl"
+        )
+
+    def _chunks():
+        try:
+            for chunk in r.iter_content(chunk_size=64 * 1024):
+                if chunk:
+                    yield chunk
+        finally:
+            r.close()
+
+    return StreamingResponse(
+        _chunks(), media_type=content_type or "application/octet-stream"
+    )
 
 
 @app.get("/api/track/{track_id}/credits")
