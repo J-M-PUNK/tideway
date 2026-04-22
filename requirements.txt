@@ -37,12 +37,14 @@ pystray>=0.19.5
 # counts + artist monthly listeners. No OAuth — TLS-fingerprinted
 # anonymous requests. Complements Last.fm (which stays the source
 # for per-user stats); spotapi fills in the global-popularity side.
+#
+# spotapi's utils/saver.py has unconditional imports of pymongo +
+# redis at module level (for MongoSaver / RedisSaver classes we
+# never instantiate). app/spotify_public.py._stub_unused_spotapi_deps
+# installs empty-module stubs for both before the first spotapi
+# import, so the actual libs stay off the dependency list — ~15 MB
+# smaller install.
 spotapi>=1.2.7
-# spotapi has unconditional imports of pymongo + redis even when not
-# used. Harmless at runtime (they're just imported, never called),
-# but they need to be installable for spotapi itself to import.
-pymongo>=4.0.0
-redis>=5.0.0
 # Build-only: PyInstaller packages desktop.py + web/dist into a native
 # .exe / .app. Not needed at runtime but bundling keeps the build command
 # documented in a single place.
