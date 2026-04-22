@@ -629,7 +629,16 @@ export const api = {
     }>("/api/feed"),
   player: {
     available: () =>
-      req<{ available: boolean }>("/api/player/available"),
+      req<{
+        available: boolean;
+        engines?: { vlc: boolean; pcm: boolean };
+        current?: "vlc" | "pcm";
+      }>("/api/player/available"),
+    setEngine: (engine: "vlc" | "pcm") =>
+      req<{ ok: boolean; engine: "vlc" | "pcm" }>("/api/player/engine", {
+        method: "POST",
+        body: JSON.stringify({ engine }),
+      }),
     state: () =>
       req<PlayerSnapshot>("/api/player/state"),
     load: (trackId: string, quality?: string) =>

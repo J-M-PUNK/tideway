@@ -169,7 +169,7 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
       <Section
         title="Playback"
         icon={Headphones}
-        description="Streaming quality, output device, and the equalizer all run through the native audio engine."
+        description="Streaming quality, output device, and the equalizer. The audio-engine picker lets you switch between the classic libvlc path and the new PyAV + sounddevice engine that ships gapless transitions."
       >
         <Field
           label="Streaming quality"
@@ -497,6 +497,10 @@ function ThemePicker({
  */
 function AudioEngineFields() {
   const toast = useToast();
+  const [engineInfo, setEngineInfo] = useState<{
+    engines: { vlc: boolean; pcm: boolean };
+    current: "vlc" | "pcm";
+  } | null>(null);
   const [eq, setEq] = useState<{
     enabled: boolean;
     bands: number[];
@@ -510,25 +514,56 @@ function AudioEngineFields() {
     current: string;
   } | null>(null);
 
+  const loadPlaybackState = async () => {
+    try {
+      const [avail, e, d] = await Promise.all([
+        api.player.available(),
+        api.player.eq(),
+        api.player.outputDevices(),
+      ]);
+      setEngineInfo({
+        engines: avail.engines ?? { vlc: avail.available, pcm: false },
+        current: avail.current ?? "vlc",
+      });
+      setEq(e);
+      setDevices(d);
+    } catch {
+      /* audio engine not available — fields stay hidden */
+    }
+  };
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      try {
-        const [e, d] = await Promise.all([
-          api.player.eq(),
-          api.player.outputDevices(),
-        ]);
-        if (cancelled) return;
-        setEq(e);
-        setDevices(d);
-      } catch {
-        /* libvlc not available — fields stay hidden */
-      }
+      await loadPlaybackState();
+      void cancelled;
     })();
-    return () => {
-      cancelled = true;
-    };
+    return () => {};
   }, []);
+
+  const switchEngine = async (engine: "vlc" | "pcm") => {
+    try {
+      await api.player.setEngine(engine);
+      // Re-fetch EQ/devices so the new engine's band layout + device
+      // list (which differs on pcm: sounddevice enumerates separately
+      // from libvlc) replaces the stale data.
+      await loadPlaybackState();
+      toast.show({
+        kind: "success",
+        title: engine === "pcm" ? "Switched to PCM engine" : "Switched to libvlc engine",
+        description:
+          engine === "pcm"
+            ? "Gapless playback + bit-perfect output. EQ and live device switching aren't ported yet — toggle back to libvlc if you need them."
+            : "Classic engine with EQ and device switching. No sample-accurate gapless.",
+      });
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: "Couldn't switch audio engine",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
 
   const toggleEnabled = async (enabled: boolean) => {
     if (!eq) return;
@@ -601,11 +636,35 @@ function AudioEngineFields() {
 
   return (
     <>
+      {engineInfo && engineInfo.engines.pcm && (
+        <Field
+          label="Audio engine"
+          hint={
+            engineInfo.current === "pcm"
+              ? "PyAV + sounddevice. Sample-accurate gapless transitions and bit-perfect output at the track's native sample rate. EQ and live output-device switching aren't implemented on this engine yet — flip back to libvlc if you need them."
+              : "libvlc. Stable and fully featured (EQ + device switching), but inter-track transitions have a small audible gap or clipped transient on DASH streams."
+          }
+        >
+          <select
+            value={engineInfo.current}
+            onChange={(e) => switchEngine(e.target.value as "vlc" | "pcm")}
+            className="h-10 rounded-md border border-input bg-secondary px-3 text-sm"
+          >
+            <option value="vlc" disabled={!engineInfo.engines.vlc}>
+              libvlc (classic){engineInfo.engines.vlc ? "" : " — unavailable"}
+            </option>
+            <option value="pcm" disabled={!engineInfo.engines.pcm}>
+              PyAV + sounddevice (gapless, bit-perfect)
+            </option>
+          </select>
+        </Field>
+      )}
       <Field label="Output device">
         <select
           value={devices.current}
           onChange={(e) => pickDevice(e.target.value)}
           className="h-10 rounded-md border border-input bg-secondary px-3 text-sm"
+          disabled={engineInfo?.current === "pcm"}
         >
           {devices.devices.map((d) => (
             <option key={d.id || "default"} value={d.id}>
@@ -618,7 +677,9 @@ function AudioEngineFields() {
       <Field
         label="Equalizer"
         hint={
-          eq.enabled
+          engineInfo?.current === "pcm"
+            ? "Not yet implemented on the PCM engine — these sliders are persisted but don't shape audio. Switch to libvlc if you need the EQ today."
+            : eq.enabled
             ? "Drag sliders or pick a preset. Reset flattens to zero."
             : "Equalizer is off — toggle it on to hear your changes. Curves are saved either way."
         }
