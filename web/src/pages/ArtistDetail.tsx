@@ -25,6 +25,11 @@ export function ArtistDetail({ onDownload }: { onDownload: OnDownload }) {
   // and hide the section when empty rather than blocking the main view.
   const [credits, setCredits] = useState<(Track & { role: string })[] | null>(null);
   const [videos, setVideos] = useState<Video[] | null>(null);
+  // Default to top-5; reveal the full top-10 on click. Matches
+  // Spotify / Apple Music's "Show more" behavior on artist pages
+  // where the first five tracks are the headline and the rest are
+  // discoverable with one extra interaction.
+  const [popularExpanded, setPopularExpanded] = useState(false);
   useEffect(() => {
     let cancelled = false;
     setCredits(null);
@@ -77,11 +82,23 @@ export function ArtistDetail({ onDownload }: { onDownload: OnDownload }) {
         <>
           <SectionHeader title="Popular" />
           <TrackList
-            tracks={artist.top_tracks}
+            tracks={
+              popularExpanded
+                ? artist.top_tracks
+                : artist.top_tracks.slice(0, 5)
+            }
             onDownload={onDownload}
             numbered
             showPlaycount
           />
+          {artist.top_tracks.length > 5 && (
+            <button
+              onClick={() => setPopularExpanded((v) => !v)}
+              className="mb-8 mt-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground hover:text-foreground"
+            >
+              {popularExpanded ? "Show less" : "Show more"}
+            </button>
+          )}
         </>
       )}
 
