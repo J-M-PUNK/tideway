@@ -24,6 +24,39 @@ from pathlib import Path
 from typing import Optional
 
 
+def _configure_webview2_autoplay() -> None:
+    """Let WebView2 autoplay audible media without a user gesture.
+
+    Windows-only. Music-video playback in the app relies on hls.js
+    (Chromium doesn't decode HLS natively), and Chromium's default
+    autoplay policy blocks audible playback until the Media
+    Engagement Index for the origin is high enough. That makes
+    videos start muted with a one-click-to-unmute.
+
+    For the packaged app, the "origin" is a fresh loopback with no
+    engagement history every launch — the policy never relaxes
+    naturally. Overriding via the Chromium flag matches what every
+    Electron-based music app (Spotify desktop, Tidal desktop,
+    Apple Music Web) does.
+
+    WebView2 reads WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS at startup,
+    so setting it before `webview.start()` is sufficient. No-op on
+    macOS (WKWebView has its own autoplay handling) and on Linux
+    (WebKitGTK uses a different mechanism that users can configure
+    through GNOME / KDE policy).
+    """
+    if not sys.platform.startswith("win"):
+        return
+    # Merge with any pre-existing value — dev builds may already
+    # set other flags we shouldn't stomp on.
+    existing = os.environ.get("WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", "")
+    flag = "--autoplay-policy=no-user-gesture-required"
+    if flag not in existing:
+        os.environ["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = (
+            f"{existing} {flag}".strip()
+        )
+
+
 # Binding 127.0.0.1 (not 0.0.0.0) keeps the server invisible to the LAN —
 # the desktop app is a single-user tool and nothing on it should be
 # reachable from another device.
@@ -259,6 +292,10 @@ def _wire_macos_dock_reopen(window) -> None:  # type: ignore[no-untyped-def]
 
 
 def main(argv: Optional[list[str]] = None) -> int:
+    # Applied before the webview backend loads — WebView2 reads the
+    # env var at init time.
+    _configure_webview2_autoplay()
+
     parser = argparse.ArgumentParser(description="Tidal Downloader desktop app")
     parser.add_argument(
         "--browser",
