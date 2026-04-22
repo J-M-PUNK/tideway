@@ -95,27 +95,26 @@ class SegmentReader(io.RawIOBase):
             elif whence == io.SEEK_CUR:
                 target = self._pos + offset
             elif whence == io.SEEK_END:
-                # libav asks SEEK_END to probe the true stream size.
-                # If we only return current-buffer-end, libav will
-                # think the track ends at the last already-fetched
-                # segment and stop decoding there. Fetch everything
-                # so we can report the real end. (Not great for cold
-                # starts — several seconds of extra fetch up front.
-                # Phase 3 switches to a Content-Length probe via
-                # HEAD requests so we can report size without
-                # buffering.)
-                self._fetch_all_remaining()
-                target = len(self._buf) + offset
+                # libav asks SEEK_END during av.open() probing. We
+                # do NOT fetch every segment to answer it — at
+                # hi-res that's ~100MB of eager download before the
+                # decoder can even start, which added ~5s to every
+                # load(). Instead, report a stable large size; libav
+                # uses this as "end of file far away." When reads
+                # eventually hit the actual tail of the segments,
+                # read() returns empty and libav sees EOF normally.
+                #
+                # The size is a conservative over-estimate: 250MB
+                # covers ~15 minutes of 24-bit/96kHz FLAC or many
+                # hours of lossy. Fine-grained accuracy isn't needed
+                # — libav doesn't use this for the decoder's notion
+                # of track length (that comes from the MP4 moov).
+                _FAKE_END = 250 * 1024 * 1024
+                target = _FAKE_END + offset
             else:
                 raise ValueError(f"unknown whence {whence}")
             if target < 0:
                 target = 0
-            # If the target is past what we've fetched, pull segments
-            # forward until the seek lands inside the buffer. Libav
-            # does timestamp-based seeks as byte-offset seeks under
-            # the hood and we need those bytes present.
-            while target > len(self._buf) and self._next_segment_idx < len(self._urls):
-                self._fetch_next_segment()
             self._pos = target
             return self._pos
 
@@ -136,11 +135,3 @@ class SegmentReader(io.RawIOBase):
         self._buf.extend(r.content)
         self._next_segment_idx += 1
 
-    def _fetch_all_remaining(self) -> None:
-        """Block until every remaining segment is in the buffer.
-        Used when libav does a SEEK_END to probe the total stream
-        size — without knowing the true end, we'd hand libav a
-        truncated view and it'd think the file ends at the last
-        already-fetched segment."""
-        while self._next_segment_idx < len(self._urls):
-            self._fetch_next_segment()

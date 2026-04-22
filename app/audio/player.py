@@ -480,6 +480,7 @@ class PCMPlayer:
         preload first. Serialized on `_pipeline_lock` alongside
         load/stop/seek.
         """
+        self._dbg(f"preload ENTER track={track_id} quality={quality}")
         with self._pipeline_lock:
             with self._lock:
                 existing = self._preload
@@ -488,6 +489,7 @@ class PCMPlayer:
                     and existing.track_id == track_id
                     and existing.quality == quality
                 ):
+                    self._dbg(f"preload already cached for track={track_id}")
                     return {"ok": True, "cached": True, "hit": True}
             # Different track (or no preload) — tear down any stale
             # one before we build the new one.
