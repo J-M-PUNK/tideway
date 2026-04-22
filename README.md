@@ -75,11 +75,9 @@ run.sh            one-command dev launcher
 
 ## Notes
 
-- **Dev runs**: `ffmpeg` is a system dependency — install via Homebrew
-  (`brew install ffmpeg`) and it's picked up from PATH.
-- **Shipped builds** bundle ffmpeg automatically — end users of the
-  packaged app don't install anything. Run `scripts/fetch_ffmpeg.sh`
-  once before building to populate `vendor/ffmpeg/<os>/`.
+- No external binaries required. Audio + video are handled entirely
+  by PyAV (libav bundled inside its Python wheel), so users never
+  need to install ffmpeg / VLC / anything else.
 - Quality, output folder, filename template, etc. are editable under
   Settings in the UI and persisted to `settings.json`.
 
@@ -100,19 +98,16 @@ ships a generic PyInstaller placeholder icon.
 ### macOS
 
 ```
-scripts/fetch_ffmpeg.sh                # once, populates vendor/ffmpeg/macos/
 npm --prefix web run build             # frontend
 .venv/bin/pyinstaller TidalDownloader-mac.spec --noconfirm
 scripts/build_dmg.sh                   # outputs dist/TidalDownloader-<ver>.dmg
 ```
 
-Ship the `.dmg`. Users drag-to-Applications and launch. No Homebrew,
-no ffmpeg install, no VLC install — everything's in the bundle.
+Ship the `.dmg`. Users drag-to-Applications and launch. No prerequisites.
 
 ### Windows
 
 ```
-bash scripts/fetch_ffmpeg.sh           # Git Bash / WSL — populates vendor/ffmpeg/windows/
 npm --prefix web run build
 .venv\Scripts\pyinstaller TidalDownloader-win.spec --noconfirm
 "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" scripts\TidalDownloader.iss

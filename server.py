@@ -1412,7 +1412,7 @@ class _VideoDownloadRequest(BaseModel):
 
 @app.post("/api/video/{video_id}/download")
 def video_download_start(video_id: int, req: _VideoDownloadRequest) -> dict:
-    """Kick off an ffmpeg-based HLS → MP4 remux of a Tidal music video.
+    """Kick off an HLS → MP4 remux of a Tidal music video.
 
     Separate from the track-downloader queue because video downloads
     are rare and bypass all the DASH / manifest / retry plumbing the
@@ -3240,8 +3240,7 @@ _VIDEO_EXTENSIONS = {".mp4", ".m4v", ".mov", ".webm", ".mkv"}
 def _scan_local_videos(root: Path) -> list[dict]:
     """Enumerate video files under `root`. Metadata comes from the
     filename pattern `<Artist> - <Title>.mp4` that video_downloader
-    writes; no tag reading (ffmpeg -c copy doesn't author MP4 tags
-    by default, so there's nothing to read anyway).
+    writes; no MP4 tag reading since the remux doesn't author tags.
     """
     import os as _os
 

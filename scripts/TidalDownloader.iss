@@ -51,9 +51,9 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 
 [Files]
 ; Pull the entire one-folder PyInstaller output. recursesubdirs +
-; createallsubdirs replicate the staging layout exactly, which
-; matters because the bundled ffmpeg tree is sensitive to relative
-; paths.
+; createallsubdirs replicate the staging layout exactly so PyAV's
+; and pystray's dynamic-loaded shared libraries resolve correctly
+; from any install location.
 Source: "..\dist\TidalDownloader\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]

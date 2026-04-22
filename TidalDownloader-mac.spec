@@ -52,26 +52,10 @@ _tray_icon = repo_root / "assets" / "tray-icon.png"
 if _tray_icon.is_file():
     datas.append((str(_tray_icon), "assets"))
 
-# Bundled ffmpeg — used by the video downloader for HLS → MP4 remux.
-# Shipping it inside the bundle means end users don't have to install
-# anything (no `brew install ffmpeg` prompt on first video download).
-# Populate vendor/ffmpeg/macos/ffmpeg by running:
-#   scripts/fetch_ffmpeg.sh
-# The spec stages the binary as an executable so subprocess can exec
-# it; app/video_downloader.py's _find_ffmpeg() checks <_MEIPASS>/ffmpeg
-# first so the bundled copy wins over any system install.
-_ffmpeg_bin = repo_root / "vendor" / "ffmpeg" / "macos" / "ffmpeg"
-if _ffmpeg_bin.is_file():
-    binaries_ffmpeg = [(str(_ffmpeg_bin), "ffmpeg")]
-else:
-    binaries_ffmpeg = []
-    print(
-        "[spec] WARNING: vendor/ffmpeg/macos/ffmpeg missing — video "
-        "downloads will require ffmpeg on the user's system. Run "
-        "scripts/fetch_ffmpeg.sh to bundle it."
-    )
-
-binaries = list(binaries_ffmpeg)
+# Audio + video I/O is handled entirely by PyAV (libav), which
+# ships its own libav binaries in its wheel — no external ffmpeg
+# needed anywhere in the app.
+binaries: list[tuple[str, str]] = []
 
 # Pull pydantic_core's Rust extension in explicitly — default static
 # analysis misses the .so and the app crashes on import at launch.

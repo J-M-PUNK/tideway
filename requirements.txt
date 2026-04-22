@@ -36,4 +36,3 @@ pystray>=0.19.5
 # .exe / .app. Not needed at runtime but bundling keeps the build command
 # documented in a single place.
 pyinstaller>=6.3.0
-# ffmpeg is a system dependency — install separately and ensure it's on PATH

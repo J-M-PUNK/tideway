@@ -42,22 +42,10 @@ _tray_icon = repo_root / "assets" / "tray-icon.png"
 if _tray_icon.is_file():
     datas.append((str(_tray_icon), "assets"))
 
-# Bundled ffmpeg for HLS → MP4 video download. See the matching mac
-# spec for the rationale — we ship the binary so end users aren't
-# asked to install anything. Populate via `scripts/fetch_ffmpeg.sh`
-# (run from Git Bash / WSL on Windows).
-_ffmpeg_bin = repo_root / "vendor" / "ffmpeg" / "windows" / "ffmpeg.exe"
-if _ffmpeg_bin.is_file():
-    binaries_ffmpeg = [(str(_ffmpeg_bin), "ffmpeg")]
-else:
-    binaries_ffmpeg = []
-    print(
-        "[spec] WARNING: vendor/ffmpeg/windows/ffmpeg.exe missing — "
-        "video downloads will require ffmpeg on the user's system. "
-        "Run scripts/fetch_ffmpeg.sh to bundle it."
-    )
-
-binaries = list(binaries_ffmpeg)
+# Audio + video I/O is handled entirely by PyAV (libav), which
+# ships its own libav binaries in its wheel — no external ffmpeg
+# needed anywhere in the app.
+binaries: list[tuple[str, str]] = []
 
 # pydantic v2's core is a Rust extension (`pydantic_core._pydantic_core`)
 # plus a metadata dir. PyInstaller's default static analysis misses the
