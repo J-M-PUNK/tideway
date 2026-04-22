@@ -66,9 +66,12 @@ export function AlbumDetail({ onDownload }: { onDownload: OnDownload }) {
         coverHint="Expand cover"
         meta={
           <div className="flex flex-col gap-1.5">
-            <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-              {album.num_tracks} {album.num_tracks === 1 ? "track" : "tracks"}
-              {album.duration ? ` (${formatDuration(album.duration)})` : ""}
+            <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+              <span>
+                {album.num_tracks} {album.num_tracks === 1 ? "track" : "tracks"}
+                {album.duration ? ` (${formatDuration(album.duration)})` : ""}
+              </span>
+              <AlbumQualityBadge tags={album.media_tags ?? []} />
             </div>
             <div className="flex items-center gap-3 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
               {album.year && <span>{album.year}</span>}
@@ -397,6 +400,53 @@ function formatCompact(n: number): string {
   if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}K`;
   if (n < 1_000_000_000) return `${(n / 1_000_000).toFixed(n < 10_000_000 ? 1 : 0)}M`;
   return `${(n / 1_000_000_000).toFixed(1)}B`;
+}
+
+/**
+ * Quality-tier pill next to the track-count line, matching Tidal's
+ * own album-info badge. Shows the highest tier Tidal advertises for
+ * the album:
+ *   HI_RES_LOSSLESS        → "Max"      (primary color — FLAC 24/96+)
+ *   LOSSLESS / HIRES       → "Lossless" (neutral — FLAC 16/44.1)
+ *   DOLBY_ATMOS            → "Dolby Atmos"
+ *   SONY_360RA             → "360 Reality Audio"
+ *
+ * Anything else (or an empty tags list) suppresses the badge — no
+ * point announcing that a lossy album is lossy.
+ */
+function AlbumQualityBadge({ tags }: { tags: string[] }) {
+  if (!tags || tags.length === 0) return null;
+  const set = new Set(tags.map((t) => t.toUpperCase()));
+  let label: string;
+  let tone: string;
+  let title: string;
+  if (set.has("HIRES_LOSSLESS") || set.has("HI_RES_LOSSLESS")) {
+    label = "Max";
+    tone = "bg-primary/15 text-primary";
+    title = "Hi-Res Lossless (FLAC, 24-bit / up to 192 kHz)";
+  } else if (set.has("LOSSLESS") || set.has("HIRES")) {
+    label = "Lossless";
+    tone = "bg-foreground/10 text-foreground";
+    title = "Lossless (FLAC 16-bit / 44.1 kHz)";
+  } else if (set.has("DOLBY_ATMOS")) {
+    label = "Dolby Atmos";
+    tone = "bg-primary/15 text-primary";
+    title = "Dolby Atmos immersive audio";
+  } else if (set.has("SONY_360RA")) {
+    label = "360 RA";
+    tone = "bg-primary/15 text-primary";
+    title = "Sony 360 Reality Audio";
+  } else {
+    return null;
+  }
+  return (
+    <span
+      className={`rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider ${tone}`}
+      title={title}
+    >
+      {label}
+    </span>
+  );
 }
 
 function AlbumReview({ review }: { review: string }) {
