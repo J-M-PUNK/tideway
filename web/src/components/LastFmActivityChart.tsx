@@ -1,32 +1,61 @@
 import { useEffect, useState } from "react";
 import { api } from "@/api/client";
-import type { LastFmWeeklyScrobble } from "@/api/types";
+import type { LastFmPeriod, LastFmWeeklyScrobble } from "@/api/types";
 import { Skeleton } from "@/components/Skeletons";
 import { cn } from "@/lib/utils";
 
 /**
- * Listening-activity bar chart: one bar per week for the last 52 weeks.
- * Bars scale to the max observed count. Hovering a bar reveals an
- * absolute date range + scrobble count in the header slot above the
- * chart — skipping a full tooltip system since this is the only
- * place we'd need it.
+ * Listening-activity bar chart: one bar per week, width governed by
+ * the `period` picked on the Stats page. Bars scale to the max
+ * observed count. Hovering a bar reveals an absolute date range +
+ * scrobble count in the header slot above the chart.
  *
- * Rendered on top of the Stats page when Last.fm is connected.
+ * The short periods (7 days / 1 month) clamp at 4 weeks because a
+ * single bar doesn't read as a chart. The ranked-items sections on
+ * the Stats page use the exact period for their own filtering; this
+ * chart is the "trend context" strip that sits above them.
  */
-export function LastFmActivityChart() {
+
+// Period → weeks-of-weekly-buckets. 7day rounds up to 4 so the
+// chart stays visually informative; longer periods mirror their
+// literal duration.
+function weeksForPeriod(period: LastFmPeriod): number {
+  switch (period) {
+    case "7day":
+      return 4;
+    case "1month":
+      return 4;
+    case "3month":
+      return 13;
+    case "6month":
+      return 26;
+    case "12month":
+      return 52;
+    case "overall":
+      return 52;
+  }
+}
+
+export function LastFmActivityChart({
+  period = "12month",
+}: {
+  period?: LastFmPeriod;
+}) {
   const [data, setData] = useState<LastFmWeeklyScrobble[] | null>(null);
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
+  const weeks = weeksForPeriod(period);
 
   useEffect(() => {
     let cancelled = false;
+    setData(null);
     api.lastfm
-      .weeklyScrobbles(52)
+      .weeklyScrobbles(weeks)
       .then((d) => !cancelled && setData(d))
       .catch(() => !cancelled && setData([]));
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [weeks]);
 
   if (!data) {
     return (
