@@ -31,6 +31,11 @@ export interface Track {
   /** Quality / codec tags: "HIRES_LOSSLESS" or "LOSSLESS". Frontend
    *  format-filter chip + download-dropdown annotation read these. */
   media_tags?: string[];
+  /** International Standard Recording Code. Lets us look up the
+   *  same recording on Spotify (for global play counts / artist
+   *  monthly listeners). Null/missing for obscure catalog entries
+   *  that lack an ISRC registration. */
+  isrc?: string | null;
 }
 
 export interface Album {
