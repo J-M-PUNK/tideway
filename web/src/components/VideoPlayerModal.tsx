@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import Hls from "hls.js";
 import { Link, useNavigate } from "react-router-dom";
 import {
   ChevronDown,
@@ -51,10 +52,10 @@ import { cn, formatDuration, imageProxy } from "@/lib/utils";
  * Top bar: Similar videos panel toggle, Credits, Picture-in-Picture,
  * Fullscreen, Minimize.
  *
- * Video surface: native HLS via `<video>` (WKWebView plays HLS natively
- * on macOS). Cover art is used as the `poster` so users see the
- * thumbnail instantly while segments load. Vertical volume slider on
- * the right side mimics Tidal's overlay.
+ * Video surface: `<video>` with HLS driven natively (Safari / WKWebView)
+ * or via hls.js (Chrome / Firefox / Edge). Cover art is used as the
+ * `poster` so users see the thumbnail instantly while segments load.
+ * Vertical volume slider on the right side mimics Tidal's overlay.
  *
  * Bottom bar: track info + heart/more on the left, shuffle/prev/play/
  * next/repeat in the center, queue/vol/quality on the right. Full
@@ -118,6 +119,31 @@ export function VideoPlayerModal() {
       /* ignore quota */
     }
   }, [volume]);
+
+  // Attach the HLS manifest to the <video> element. Safari and
+  // macOS WKWebView can decode application/vnd.apple.mpegurl
+  // directly; Chrome / Edge / Firefox cannot, so hls.js ships
+  // segment-level media via MediaSourceExtensions instead.
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video || !url) return;
+    if (video.canPlayType("application/vnd.apple.mpegurl")) {
+      video.src = url;
+      return;
+    }
+    if (Hls.isSupported()) {
+      const hls = new Hls();
+      hls.loadSource(url);
+      hls.attachMedia(video);
+      return () => {
+        hls.destroy();
+      };
+    }
+    // No HLS path available — fall back to the raw URL so the
+    // browser at least renders a Cannot-play error rather than a
+    // silent empty element.
+    video.src = url;
+  }, [url]);
 
   // Apply volume/mute on every render where the video element is
   // mounted. Keyed on `current?.id` too so a remount (new video) also
@@ -354,7 +380,6 @@ export function VideoPlayerModal() {
       <video
         ref={videoRef}
         key={current.id}
-        src={url}
         poster={poster}
         autoPlay
         playsInline
