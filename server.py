@@ -775,9 +775,15 @@ def _read_app_version() -> str:
 
 APP_VERSION = _read_app_version()
 
-# GitHub repo we check for the newest release. Public, unauthenticated —
-# rate limit is 60/hour per IP which is plenty for a startup-time probe.
-_UPDATE_REPO = "YOUR_USERNAME/tidal-downloader"
+# GitHub repo we check for the newest release. Public and
+# unauthenticated, so the rate limit is 60 requests per hour per IP,
+# which is plenty for a startup-time probe.
+#
+# The value can be overridden with the TIDEWAY_UPDATE_REPO env var
+# so forks or private builds can point the update check at their own
+# releases without editing the source. Empty means auto update is
+# disabled.
+_UPDATE_REPO = os.environ.get("TIDEWAY_UPDATE_REPO", "")
 
 # Cache the latest-release lookup so mashing F5 in the frontend doesn't
 # burn the GitHub rate limit. 1 hour TTL — update checks don't need to
@@ -829,6 +835,13 @@ def update_check() -> dict:
         "url": None,
         "notes": None,
     }
+    # Auto update is off unless the fork sets TIDEWAY_UPDATE_REPO to
+    # its own org/repo. Return the idle payload instead of hitting a
+    # 404 on an empty repo path.
+    if not _UPDATE_REPO:
+        with _update_cache_lock:
+            _update_cache["latest"] = (now, payload)
+        return payload
     try:
         import urllib.request
 
@@ -869,9 +882,11 @@ def _update_asset_url() -> Optional[str]:
 
     Runs a fresh GitHub fetch rather than reusing the cached update
     check; the cache stores html_url (release page), not the asset
-    list. Adds ~300ms to the "Install" click — acceptable since it's
-    user-initiated.
+    list. Adds about 300 ms to the "Install" click, which is fine
+    because it is user initiated.
     """
+    if not _UPDATE_REPO:
+        return None
     try:
         import urllib.request
 

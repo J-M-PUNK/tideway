@@ -80,8 +80,8 @@ runs it.
 
 ## Install a released build
 
-Grab the latest from the
-[Releases page](https://github.com/YOUR_USERNAME/tidal-downloader/releases).
+Grab the latest from the Releases page for whichever fork of this
+repo you are installing from.
 
 On macOS, download `Tideway-macOS.zip`, unzip it, and drag the
 `.app` into `/Applications`.
