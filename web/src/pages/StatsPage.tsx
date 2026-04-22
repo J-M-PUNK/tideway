@@ -125,7 +125,7 @@ export function StatsPage() {
   return (
     <div>
       <UserHeader user={user} />
-      <LastFmActivityChart />
+      <LastFmActivityChart period={period} />
       <PeriodPicker period={period} onChange={setPeriod} />
       <div className="mt-8 flex flex-col gap-10">
         <TopArtistsSection period={period} />
