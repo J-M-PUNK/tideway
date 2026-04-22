@@ -62,12 +62,34 @@ _song_mod: Any = None
 _tls_client: Any = None
 
 
+def _stub_unused_spotapi_deps() -> None:
+    """Install empty-module stubs for pymongo + redis before the
+    first spotapi import.
+
+    spotapi/utils/saver.py has unconditional `import pymongo` /
+    `import redis` at module level. Both are only referenced inside
+    `MongoSaver` and `RedisSaver` classes we never instantiate — the
+    imports just need to resolve for spotapi itself to load. Empty
+    `types.ModuleType` objects satisfy that, letting us drop the
+    real libraries (~15 MB combined) from requirements.txt.
+
+    Idempotent — once stubbed, subsequent calls are no-ops.
+    """
+    import sys
+    import types as _types
+
+    for name in ("pymongo", "redis"):
+        if name not in sys.modules:
+            sys.modules[name] = _types.ModuleType(name)
+
+
 def _ensure_client() -> tuple[Any, Any]:
     """Return a (song, artist) pair lazily. Thread-safe singleton."""
     global _artist_mod, _song_mod, _tls_client
     with _client_lock:
         if _artist_mod is not None:
             return _song_mod, _artist_mod
+        _stub_unused_spotapi_deps()
         from spotapi.artist import Artist  # type: ignore
         from spotapi.client import TLSClient  # type: ignore
         from spotapi.song import Song  # type: ignore
