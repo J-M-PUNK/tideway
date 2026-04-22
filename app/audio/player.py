@@ -198,18 +198,33 @@ class PCMPlayer:
         self, track_id: str, quality: Optional[str]
     ) -> PlayerSnapshot:
         with self._lock:
-            # Path 0: already audible on this track. Happens when the
-            # backend's gapless swap already transitioned us to the
-            # next track and the frontend's redundant play_track()
-            # lands here. Don't tear anything down — we're already
-            # playing what the caller asked for.
+            # Path 0: already audible on this track. Happens when
+            # the callback's gapless swap already transitioned us
+            # to the next track and the frontend's redundant
+            # play_track() lands here. Don't tear anything down —
+            # we're already playing what the caller asked for.
             if (
                 self._current_track_id == track_id
                 and self._state in ("playing", "paused")
             ):
                 return self.snapshot()
-        # Clear the old pipeline first so a repeated load doesn't
-        # stack two sounddevice streams.
+            # Path 0b: a preload for this track is already buffering.
+            # Adopt it without tearing down the sounddevice stream.
+            # When rates + dtype match, the active OutputStream just
+            # starts being fed from the preload's queue instead —
+            # which is the whole point of the preload. This is the
+            # path that keeps auto-advance gapless when the frontend
+            # races the callback's swap.
+            pre = self._preload
+            if (
+                pre is not None
+                and pre.track_id == track_id
+                and (quality is None or pre.quality == quality)
+                and self._state in ("playing", "paused", "loading")
+            ):
+                return self._adopt_preload_locked(pre)
+        # Fall through: no matching preload. Full teardown + fresh
+        # resolve. This is the slow path (~300-800ms).
         self._teardown()
         with self._lock:
             self._transition("loading", track_id=track_id)
@@ -901,6 +916,95 @@ class PCMPlayer:
 
         self._samples_emitted += frames
 
+    def _adopt_preload_locked(self, pre: _Preload) -> PlayerSnapshot:
+        """Synchronous version of the callback's gapless swap,
+        triggered from load() when the frontend fires play_track
+        for a track we already have preloaded.
+
+        Must be called with `self._lock` held. Stops the current
+        decoder thread, swaps refs to the preload's pipeline, and
+        either keeps the OutputStream alive (same rate/dtype —
+        gapless) or re-opens it (different rate — small reopen
+        gap). Does not tear the preload's decoder thread: it keeps
+        running against its own queue, which now becomes the
+        primary queue.
+        """
+        # Capture pieces we need to clean up OUTSIDE the lock so we
+        # don't hold it during slow I/O (thread.join, decoder.close).
+        old_thread = self._decoder_thread
+        old_stop_flag = self._stop_flag
+        old_decoder = self._decoder
+        rate_matches = (
+            pre.sample_rate == self._stream_sample_rate
+            and pre.sd_dtype == self._stream_sd_dtype
+            and pre.channels == self._stream_channels
+        )
+        old_stream = None if rate_matches else self._stream
+
+        # Adopt the preload's pipeline. Callback is free to read
+        # from the new queue the instant after these assignments.
+        self._decoder = pre.decoder
+        self._pcm_queue = pre.queue
+        self._decoder_thread = pre.thread
+        self._stop_flag = pre.stop_flag
+        self._decoder_done = pre.done
+        self._current_track_id = pre.track_id
+        self._current_duration_ms = pre.duration_ms
+        self._current_stream_info = pre.stream_info
+        self._source_urls = pre.source_urls
+        self._source_path = pre.source_path
+        if not rate_matches:
+            self._stream_sample_rate = pre.sample_rate
+            self._stream_sd_dtype = pre.sd_dtype
+            self._stream_channels = pre.channels
+        self._samples_emitted = 0
+        self._callback_carry = None
+        self._preload = None
+        self._state = "playing"
+        self._last_error = None
+        self._seq += 1
+
+        # Outside the lock: signal + close the old pipeline's
+        # resources. The old decoder thread will notice its stop
+        # flag and exit on its next iteration.
+        #
+        # Python doesn't let us `.release()` an RLock we're
+        # inside; let the caller drop the lock after this method
+        # returns by keeping cleanup here but short.
+        old_stop_flag.set()
+        if old_thread is not None and old_thread.is_alive():
+            # Non-blocking: if the thread is mid-I/O, let it die
+            # on its own. It's a daemon.
+            pass
+        if old_decoder is not None:
+            try:
+                old_decoder.close()
+            except Exception:
+                pass
+        if old_stream is not None:
+            try:
+                old_stream.stop()
+            except Exception:
+                pass
+            try:
+                old_stream.close()
+            except Exception:
+                pass
+            # Re-open at the new rate.
+            self._open_output_stream(
+                pre.sample_rate, pre.channels, pre.sd_dtype
+            )
+            try:
+                self._stream.start()
+            except Exception as exc:
+                log.exception("adopt_preload: stream.start failed")
+                self._last_error = str(exc)
+                self._state = "error"
+                self._seq += 1
+
+        self._emit()
+        return self.snapshot()
+
     def _try_gapless_swap(self) -> bool:
         """Called from the audio callback when the current queue is
         empty + primary decoder is done. Swaps in the preloaded
@@ -908,9 +1012,18 @@ class PCMPlayer:
         channel count match. Returns True on success; False if
         there's no preload or it's incompatible.
 
-        Assignments are individually atomic under the GIL, and the
+        Emits `ended` BEFORE the swap and `playing` after. This
+        matches the libvlc path's frontend-contract: the frontend's
+        advance logic fires on `ended`, updates its
+        `expectedTrackIdRef` via `playAtIndex`, and the redundant
+        `play_track(next)` that follows lands on Path 0 (no-op
+        because current_track_id already matches). Without the
+        `ended` emit, the frontend's expected-guard drops all new
+        snapshots because its expected is still the previous track.
+
+        Assignments are individually atomic under the GIL; the
         callback is the sole modifier during the track-boundary
-        moment, so no lock is needed here.
+        moment.
         """
         pre = self._preload
         if pre is None:
@@ -929,8 +1042,13 @@ class PCMPlayer:
             f"same rate={pre.sample_rate}Hz dtype={pre.sd_dtype}",
             file=sys.stderr, flush=True,
         )
-        # Swap. The old decoder + thread have already finished
-        # (done event is set). We just replace our references.
+        # Phase 1: emit `ended` so the frontend's advance logic
+        # wires up expectedTrackIdRef for the new track.
+        self._state = "ended"
+        self._seq += 1
+        self._emit()
+        # Phase 2: actual swap. Old decoder + thread have already
+        # finished (done event is set), we just replace refs.
         self._decoder = pre.decoder
         self._pcm_queue = pre.queue
         self._decoder_thread = pre.thread
@@ -944,10 +1062,8 @@ class PCMPlayer:
         self._samples_emitted = 0
         self._callback_carry = None
         self._preload = None
+        self._state = "playing"
         self._seq += 1
-        # Notify listeners — server SSE layer will push the new
-        # snapshot to the frontend. emit() is non-blocking (the SSE
-        # queue.put is fast).
         self._emit()
         return True
 
