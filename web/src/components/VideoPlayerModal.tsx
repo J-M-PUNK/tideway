@@ -147,24 +147,23 @@ export function VideoPlayerModal() {
       hls.loadSource(url);
       hls.attachMedia(video);
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
-        // Try the normal (audible) autoplay first. Works in
-        // Firefox + Safari + the packaged .app regardless of the
-        // user's interaction history.
+        // Start muted on the hls.js path. Chrome's autoplay
+        // policy blocks audible autoplay when it can't verify a
+        // recent user gesture propagated to this async callback,
+        // and the policy is stricter in Chrome than Firefox or
+        // Safari. Rather than trying audible → falling back to
+        // muted (which hits a rejection-chain race that was
+        // failing in practice), we preemptively mute. Muted
+        // autoplay is universally allowed. The speaker icon
+        // renders "muted"; one click unmutes. Matches TikTok /
+        // Twitter / Instagram video UX.
+        video.muted = true;
+        setMuted(true);
         video.play().catch(() => {
-          // Chrome blocked audible autoplay. Retry muted —
-          // browsers uniformly allow muted autoplay — then flip
-          // the local mute state so the UI's speaker icon shows
-          // "muted" and the user can one-click unmute.
-          video.muted = true;
-          video
-            .play()
-            .then(() => setMuted(true))
-            .catch(() => {
-              // Even muted autoplay failed (rare — iOS Low-Power
-              // Mode, strict enterprise policy). Surface the
-              // paused state so the button shows "play".
-              setPlaying(false);
-            });
+          // Even muted autoplay failed (rare — iOS Low-Power
+          // Mode, locked-down enterprise policy). Show play
+          // button; one click starts playback.
+          setPlaying(false);
         });
       });
       return () => {
