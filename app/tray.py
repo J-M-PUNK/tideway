@@ -117,7 +117,7 @@ class TrayIcon:
             icon = pystray.Icon(
                 "tidal-downloader",
                 image,
-                "Tidal Downloader",
+                "Tideway",
                 menu=self._build_menu(),
             )
             self._icon = icon

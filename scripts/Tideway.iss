@@ -1,22 +1,22 @@
 ; Inno Setup script — builds an installer for the Windows PyInstaller
 ; output. Compile with:
-;   "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" scripts\TidalDownloader.iss
+;   "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" scripts\Tideway.iss
 ;
-; Prereq: pyinstaller TidalDownloader-win.spec must have produced
-; dist\TidalDownloader\TidalDownloader.exe (one-folder layout, not
+; Prereq: pyinstaller Tideway-win.spec must have produced
+; dist\Tideway\Tideway.exe (one-folder layout, not
 ; one-file — Inno Setup handles the extraction cost; one-file adds
 ; painful startup delay for the user).
 ;
-; Output: dist\TidalDownloader-setup-<version>.exe
+; Output: dist\Tideway-setup-<version>.exe
 ;
 ; Registers a Start Menu entry and an optional desktop shortcut. The
 ; uninstaller is free from Inno. SmartScreen will still warn on first
 ; launch because the .exe is unsigned — acknowledged tradeoff, signing
 ; is a separate build step.
 
-#define MyAppName "Tidal Downloader"
-#define MyAppExeName "TidalDownloader.exe"
-#define MyAppPublisher "Tidal Downloader"
+#define MyAppName "Tideway"
+#define MyAppExeName "Tideway.exe"
+#define MyAppPublisher "Tideway"
 #define MyAppURL "https://github.com/yourname/tidal-downloader"
 
 ; VERSION is read from the repo-root VERSION file.
@@ -36,7 +36,7 @@ DefaultGroupName={#MyAppName}
 ; If the user opts for AllUsers, Inno elevates automatically.
 PrivilegesRequiredOverridesAllowed=dialog
 OutputDir=..\dist
-OutputBaseFilename=TidalDownloader-setup-{#MyAppVersion}
+OutputBaseFilename=Tideway-setup-{#MyAppVersion}
 SetupIconFile=..\assets\icon.ico
 Compression=lzma2/max
 SolidCompression=yes
@@ -54,7 +54,7 @@ Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription
 ; createallsubdirs replicate the staging layout exactly so PyAV's
 ; and pystray's dynamic-loaded shared libraries resolve correctly
 ; from any install location.
-Source: "..\dist\TidalDownloader\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "..\dist\Tideway\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"

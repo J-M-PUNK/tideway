@@ -1,16 +1,20 @@
-"""Platform-specific paths for persistent app state.
+"""Platform specific paths for persistent app state.
 
-Packaged desktop builds can't reliably write next to the executable —
-macOS .app bundles are readonly once code-signed, and on Windows an
-installer typically lands the exe under Program Files where per-user
-writes require elevation. All mutable state (settings, Tidal session,
-the pending download queue) therefore lives in the OS's standard
-per-user data directory.
+Packaged desktop builds cannot reliably write next to the
+executable. On macOS the .app bundle is read only once it has
+been code signed. On Windows an installer typically lands the
+exe under Program Files, and writes there require elevation. So
+all mutable state lives in the standard per user data directory.
+That includes settings, the Tidal session, the pending download
+queue, and anything else the app persists.
 
-Legacy builds wrote these files to the process cwd. `migrate_legacy_cwd_state()`
-performs a one-shot copy from cwd into the new location so existing dev
-installs don't lose their session on upgrade. Runs implicitly on first
-import — safe to call repeatedly; subsequent calls are no-ops.
+`migrate_legacy_cwd_state()` runs implicitly on first import and
+handles two older layouts. The first is individual state files
+left in the process cwd by pre packaging dev installs. The
+second is the full previous app data directory from before the
+rename, which gets copied forward so the Tidal session and
+settings survive the move to Tideway. The function is safe to
+call more than once. After the first call it is a no-op.
 """
 from __future__ import annotations
 
@@ -20,7 +24,25 @@ import sys
 import threading
 from pathlib import Path
 
-_APP_NAME = "TidalDownloader"
+_APP_NAME = "Tideway"
+# Previous on-disk folder name. Kept so migrate_legacy_cwd_state()
+# can copy the old per-user directory forward across the rename.
+_LEGACY_APP_NAME = "TidalDownloader"
+
+
+def _app_data_root() -> Path:
+    """Platform-specific base dir that holds the per-app data folder.
+
+    Returns the parent — caller appends the app name. Split out so the
+    current-name and legacy-name lookups can't drift (they share the
+    same OS picker logic)."""
+    if sys.platform == "win32":
+        base = os.environ.get("APPDATA")
+        return Path(base) if base else Path.home() / "AppData" / "Roaming"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support"
+    base = os.environ.get("XDG_DATA_HOME")
+    return Path(base) if base else Path.home() / ".local" / "share"
 
 
 def bundled_resource_dir() -> Path:
@@ -45,19 +67,11 @@ _migrated = False
 def user_data_dir() -> Path:
     """Return the OS-appropriate per-user data directory, creating it if missing.
 
-    Windows:  %APPDATA%\\TidalDownloader  (typically C:\\Users\\<u>\\AppData\\Roaming)
-    macOS:    ~/Library/Application Support/TidalDownloader
-    Linux:    $XDG_DATA_HOME/TidalDownloader, else ~/.local/share/TidalDownloader
+    Windows:  %APPDATA%\\Tideway  (typically C:\\Users\\<u>\\AppData\\Roaming)
+    macOS:    ~/Library/Application Support/Tideway
+    Linux:    $XDG_DATA_HOME/Tideway, else ~/.local/share/Tideway
     """
-    if sys.platform == "win32":
-        base = os.environ.get("APPDATA")
-        root = Path(base) if base else Path.home() / "AppData" / "Roaming"
-    elif sys.platform == "darwin":
-        root = Path.home() / "Library" / "Application Support"
-    else:
-        base = os.environ.get("XDG_DATA_HOME")
-        root = Path(base) if base else Path.home() / ".local" / "share"
-    path = root / _APP_NAME
+    path = _app_data_root() / _APP_NAME
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -72,13 +86,27 @@ _LEGACY_FILES = (
 )
 
 
-def migrate_legacy_cwd_state() -> None:
-    """One-shot copy of legacy cwd state files into user_data_dir().
+def _legacy_app_data_root() -> Path:
+    """Sibling directory of user_data_dir() under the previous app
+    name, without creating it. Used by the one-shot rename migration."""
+    return _app_data_root() / _LEGACY_APP_NAME
 
-    Skips any file that already exists at the destination, so a packaged
-    user who happens to launch from a dir with a stray settings.json
-    won't clobber their real settings. Copy errors are swallowed —
-    missing state degrades to first-run defaults, never a boot failure.
+
+def migrate_legacy_cwd_state() -> None:
+    """Copy older state layouts into the current user_data_dir().
+
+    There are two layouts this handles. The first is individual
+    files sitting in the process cwd, which is where pre packaging
+    dev installs used to keep things. The second is a full
+    previous per user data directory under the old `TidalDownloader`
+    name. That one is copied forward so the Tidal session,
+    settings, and download queue survive the rename to Tideway.
+
+    If a file already exists at the destination it is left alone.
+    That way a stray file in the launch cwd cannot clobber real
+    user data. Copy errors are swallowed. Missing state degrades
+    to first run defaults, and a failed copy should never take
+    the app down at boot.
     """
     global _migrated
     with _migration_lock:
@@ -86,6 +114,24 @@ def migrate_legacy_cwd_state() -> None:
             return
         _migrated = True
         dest_root = user_data_dir()
+        # (2) Pull forward a full previous-name app-data directory in
+        # one shot. Done first so individual cwd files (from even
+        # older layouts) can still override specific entries if the
+        # user has newer copies lying around.
+        legacy_root = _legacy_app_data_root()
+        if legacy_root.is_dir() and legacy_root != dest_root:
+            for entry in legacy_root.iterdir():
+                dst = dest_root / entry.name
+                if dst.exists():
+                    continue
+                try:
+                    if entry.is_dir():
+                        shutil.copytree(entry, dst)
+                    else:
+                        shutil.copy2(entry, dst)
+                except Exception:
+                    pass
+        # (1) Pull individual files from the process cwd.
         for name in _LEGACY_FILES:
             src = Path(name)
             dst = dest_root / name

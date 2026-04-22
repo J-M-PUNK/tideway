@@ -188,12 +188,7 @@ export function PlaylistDetail({ onDownload }: { onDownload: OnDownload }) {
                 source={{ type: "PLAYLIST", id: playlist.id }}
               />
             )}
-            {tracks.length > 0 && (
-              <ShuffleButton
-                tracks={tracks}
-                source={{ type: "PLAYLIST", id: playlist.id }}
-              />
-            )}
+            {tracks.length > 0 && <ShuffleButton />}
             <div className="ml-auto flex items-center gap-6">
               {!playlist.owned && <AddToLibraryButton kind="playlist" id={playlist.id} />}
               <ShareButton shareUrl={playlist.share_url} />

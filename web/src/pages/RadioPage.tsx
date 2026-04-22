@@ -132,13 +132,7 @@ export function RadioPage({ kind, onDownload }: Props) {
                   id,
                 }}
               />
-              <ShuffleButton
-                tracks={tracks}
-                source={{
-                  type: kind === "artist" ? "ARTIST" : "TRACK",
-                  id,
-                }}
-              />
+              <ShuffleButton />
               <div className="ml-auto flex items-center gap-6">
                 <AddTracksToPlaylistButton tracks={tracks} />
                 <CollectionOverflowMenu tracks={tracks} />

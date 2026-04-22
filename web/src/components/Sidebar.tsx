@@ -81,6 +81,38 @@ export function Sidebar({
   const { importLinkDismissed, set: setPrefs } = useUiPreferences();
   return (
     <aside className="flex h-full w-64 flex-col gap-2 bg-background p-2 text-sm">
+      {/* Brand mark at the top left of the app. It also works as a
+          Home link, which matters in offline mode where the normal
+          Home nav row further down is hidden.
+
+          The NavLink is sized to exactly the 40 pixel glyph, so the
+          click target matches what the user actually sees and there
+          is no invisible hit area bleeding across the sidebar. The
+          `ml-[10px]` offset lines the icon center up with the same
+          vertical column the smaller nav icons below sit on. Math:
+          8 pixels of aside padding, plus 10 pixels of margin, plus
+          half of the 40 pixel glyph lands at 38, which is where the
+          20 pixel nav icons have their centers.
+
+          On hover the background tints with a soft brand purple via
+          `bg-primary/10` and the glyph scales up to 1.05. That feels
+          like an interactive logo rather than a nav row that happens
+          to be at the top. */}
+      <NavLink
+        to="/"
+        end
+        aria-label="Home"
+        title="Home"
+        className={({ isActive }) =>
+          cn(
+            "ml-[10px] inline-flex h-10 w-10 items-center justify-center rounded-lg transition-all duration-150 hover:scale-105 hover:bg-primary/10",
+            isActive && "bg-primary/10",
+          )
+        }
+      >
+        <img src="/app-icon.svg" alt="" className="h-10 w-10 shrink-0" />
+      </NavLink>
+
       {!offline && (
         <nav className="rounded-lg bg-card p-2">
           {primary.map(({ to, label, icon: Icon, end }) => {

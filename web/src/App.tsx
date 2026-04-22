@@ -364,7 +364,7 @@ function Shell({
   // seen. Persisted so a reload doesn't re-surface old downloads.
   const [seenCompletedIds, setSeenCompletedIds] = useState<Set<string>>(() => {
     try {
-      const raw = localStorage.getItem("tidal-downloader:seen-downloads");
+      const raw = localStorage.getItem("tideway:seen-downloads");
       return raw ? new Set(JSON.parse(raw) as string[]) : new Set();
     } catch {
       return new Set();
@@ -376,7 +376,7 @@ function Shell({
     setSeenCompletedIds(ids);
     try {
       localStorage.setItem(
-        "tidal-downloader:seen-downloads",
+        "tideway:seen-downloads",
         JSON.stringify(Array.from(ids)),
       );
     } catch {

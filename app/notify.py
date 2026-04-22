@@ -78,7 +78,7 @@ def _powershell_escape(s: str) -> str:
 def _notify_windows(title: str, body: str, subtitle: Optional[str]) -> None:
     # Toast XML — built inline so we don't depend on BurntToast. App-id
     # must exist in the Start menu for the toast to surface persistently;
-    # passing "TidalDownloader" is fine for transient "feels like a
+    # passing "Tideway" is fine for transient "feels like a
     # system notification" UX even without AUMID registration.
     text_body = body if not subtitle else f"{subtitle} — {body}"
     ps = f"""\
@@ -90,7 +90,7 @@ $template = @'
 $xml = New-Object Windows.Data.Xml.Dom.XmlDocument
 $xml.LoadXml($template)
 $toast = New-Object Windows.UI.Notifications.ToastNotification $xml
-[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('TidalDownloader').Show($toast)
+[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier('Tideway').Show($toast)
 """
     subprocess.run(
         ["powershell", "-NoProfile", "-Command", ps],

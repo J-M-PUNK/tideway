@@ -309,7 +309,7 @@ function ArtistMoreMenu({
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <button
-          className="flex flex-col items-center gap-1 text-muted-foreground transition-colors hover:text-foreground"
+          className="flex flex-col items-center gap-1 text-muted-foreground transition-colors hover:text-foreground data-[state=open]:text-primary"
           title="More"
         >
           <MoreHorizontal className="h-5 w-5" />

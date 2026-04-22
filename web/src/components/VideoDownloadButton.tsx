@@ -228,7 +228,7 @@ export function VideoDownloadButton({
           aria-label={label}
           title={label}
           className={cn(
-            "flex h-9 w-9 items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground",
+            "flex h-9 w-9 items-center justify-center rounded-full text-muted-foreground transition-colors hover:text-foreground data-[state=open]:text-primary",
             className,
           )}
         >

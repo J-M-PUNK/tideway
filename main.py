@@ -15,7 +15,7 @@ WINDOW_W, WINDOW_H = 520, 440
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("Tidal Downloader")
+        self.title("Tideway")
         self.geometry(f"{WINDOW_W}x{WINDOW_H}")
         self.resizable(False, False)
 
@@ -36,7 +36,7 @@ class App(ctk.CTk):
 
         ctk.CTkLabel(
             self.login_frame,
-            text="Tidal Downloader",
+            text="Tideway",
             font=ctk.CTkFont(size=30, weight="bold"),
         ).pack(pady=(0, 6))
 

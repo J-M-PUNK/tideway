@@ -1,9 +1,9 @@
 # -*- mode: python ; coding: utf-8 -*-
 #
 # Windows PyInstaller spec. Build with:
-#   pyinstaller TidalDownloader-win.spec --noconfirm
+#   pyinstaller Tideway-win.spec --noconfirm
 #
-# Produces dist/TidalDownloader/TidalDownloader.exe (onedir). Onedir is
+# Produces dist/Tideway/Tideway.exe (onedir). Onedir is
 # preferred over onefile here because a user opening 20 tracks in quick
 # succession shouldn't incur the onefile unpack tax on each child
 # process, and AV scanners flag onefile executables more often.
@@ -120,7 +120,7 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="TidalDownloader",
+    name="Tideway",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
@@ -142,5 +142,5 @@ coll = COLLECT(
     strip=False,
     upx=False,
     upx_exclude=[],
-    name="TidalDownloader",
+    name="Tideway",
 )

@@ -14,10 +14,10 @@ SETTINGS_FILE = user_data_dir() / "settings.json"
 def _default_videos_dir() -> str:
     """Reasonable per-OS default for music-video downloads.
 
-    macOS / Linux → ~/Movies/Tidal (macOS convention; Linux also
+    macOS / Linux → ~/Movies/Tideway (macOS convention; Linux also
     uses ~/Movies in recent XDG setups and falls back to ~/Videos
     via the user-dirs config if they're redirected it). Windows →
-    %USERPROFILE%\\Videos\\Tidal.
+    %USERPROFILE%\\Videos\\Tideway.
 
     Kept separate from the audio `output_dir` so video files don't
     intermix with album folders and iTunes-style music libraries that
@@ -27,18 +27,18 @@ def _default_videos_dir() -> str:
     videos = home / "Videos"
     movies = home / "Movies"
     if sys.platform == "darwin":
-        return str(movies / "Tidal")
+        return str(movies / "Tideway")
     if sys.platform.startswith("win"):
-        return str(videos / "Tidal")
+        return str(videos / "Tideway")
     # Linux — pick whichever exists, prefer Videos which is XDG standard.
     if videos.is_dir() or not movies.is_dir():
-        return str(videos / "Tidal")
-    return str(movies / "Tidal")
+        return str(videos / "Tideway")
+    return str(movies / "Tideway")
 
 
 @dataclass
 class Settings:
-    output_dir: str = str(Path.home() / "Music" / "Tidal")
+    output_dir: str = str(Path.home() / "Music" / "Tideway")
     videos_dir: str = field(default_factory=_default_videos_dir)
     filename_template: str = "{artist} - {title}"
     create_album_folders: bool = True

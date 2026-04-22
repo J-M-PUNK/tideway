@@ -184,7 +184,7 @@ export function UserMenu({
             }
           }}
         >
-          <Power className="h-4 w-4" /> Quit Tidal Downloader
+          <Power className="h-4 w-4" /> Quit Tideway
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>

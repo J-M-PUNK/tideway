@@ -46,12 +46,23 @@ export function useTidalPlayReporter(): void {
   } | null>(null);
   const lastKnownPositionRef = useRef(0);
 
-  // Track currentTime without re-triggering the session-lifecycle
-  // effect — that effect only cares about track identity, not the
-  // current time cursor. Keeping them separate avoids spurious
-  // session rotations every position tick.
+  // Track currentTime in a ref so we don't retrigger the
+  // session lifecycle effect on every position tick. That effect
+  // only cares about track identity.
+  //
+  // The ref is a high water mark within a session, not a mirror
+  // of currentTime. When the backend sends its "ended" snapshot
+  // it resets position to 0 right before the track change fires.
+  // If we mirrored that naively, the ref would drop to 0 just in
+  // time for the `[track?.id]` effect to read it. The listen
+  // duration would compute as 0 and the stop event would never
+  // meet threshold on a natural track end. Keeping this as a
+  // monotonic max preserves the real last position. The session
+  // start handler below resets the ref to 0 for the next track.
   useEffect(() => {
-    lastKnownPositionRef.current = currentTime;
+    if (currentTime > lastKnownPositionRef.current) {
+      lastKnownPositionRef.current = currentTime;
+    }
   }, [currentTime]);
 
   useEffect(() => {

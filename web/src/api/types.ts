@@ -230,7 +230,7 @@ export interface Settings {
   output_dir: string;
   /** Where music videos land. Kept separate from output_dir so video
    *  files don't intermix with album folders / iTunes-style music
-   *  libraries. Default is ~/Movies/Tidal (macOS), ~/Videos/Tidal
+   *  libraries. Default is ~/Movies/Tideway (macOS), ~/Videos/Tideway
    *  (Windows), or either on Linux depending on which exists. */
   videos_dir: string;
   filename_template: string;

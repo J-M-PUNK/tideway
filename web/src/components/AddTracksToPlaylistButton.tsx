@@ -50,7 +50,7 @@ export function AddTracksToPlaylistButton({ tracks }: { tracks: Track[] }) {
       <DropdownMenuTrigger asChild>
         <button
           disabled={tracks.length === 0}
-          className="flex flex-col items-center gap-1 text-muted-foreground transition-colors hover:text-foreground disabled:opacity-40"
+          className="flex flex-col items-center gap-1 text-muted-foreground transition-colors hover:text-foreground disabled:opacity-40 data-[state=open]:text-primary"
           title={`Add ${tracks.length} tracks to a playlist`}
           aria-label="Add"
         >

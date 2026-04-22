@@ -28,7 +28,10 @@ export function SleepTimerButton() {
         <Button
           variant="ghost"
           size="icon"
-          className={cn("h-8 w-8 relative", active && "text-primary")}
+          className={cn(
+            "h-8 w-8 relative data-[state=open]:text-primary",
+            active && "text-primary",
+          )}
           title={active ? `Sleep timer: ${label}` : "Sleep timer"}
         >
           <Moon className="h-4 w-4" />

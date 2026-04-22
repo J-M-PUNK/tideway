@@ -1,4 +1,4 @@
-"""FastAPI backend for the Tidal Downloader web UI.
+"""FastAPI backend for the Tideway web UI.
 
 Wraps the existing `app/` package (TidalClient, Downloader, Settings) and
 exposes it over HTTP + SSE so a React frontend can drive it.
@@ -498,7 +498,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             pass
 
 
-app = FastAPI(title="Tidal Downloader", lifespan=lifespan)
+app = FastAPI(title="Tideway", lifespan=lifespan)
 
 # Localhost-only tool: restrict CORS to the Vite dev server origin and list
 # only the methods/headers we actually use. In production (single-origin
@@ -864,8 +864,8 @@ def _update_asset_url() -> Optional[str]:
 
     Naming convention (matches scripts/build_dmg.sh and the Inno Setup
     script):
-      - macOS:   TidalDownloader-<version>.dmg
-      - Windows: TidalDownloader-setup-<version>.exe
+      - macOS:   Tideway-<version>.dmg
+      - Windows: Tideway-setup-<version>.exe
 
     Runs a fresh GitHub fetch rather than reusing the cached update
     check; the cache stores html_url (release page), not the asset
@@ -926,7 +926,7 @@ def update_install() -> dict:
         target_dir = downloads
     except OSError:
         target_dir = Path(tempfile.mkdtemp(prefix="tdl-update-"))
-    filename = url.rsplit("/", 1)[-1] or "TidalDownloader-update"
+    filename = url.rsplit("/", 1)[-1] or "Tideway-update"
     target = target_dir / filename
     try:
         import urllib.request

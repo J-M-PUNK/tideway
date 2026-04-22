@@ -8,7 +8,7 @@ import {
   type ReactNode,
 } from "react";
 
-const STORAGE_KEY = "tidal-downloader:ui-prefs";
+const STORAGE_KEY = "tideway:ui-prefs";
 
 /** Quality values that the browser's `<audio>` element can actually
  *  play. The backend concatenates DASH segments server-side for the

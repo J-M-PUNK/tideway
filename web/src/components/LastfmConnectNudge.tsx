@@ -13,7 +13,7 @@ import { api } from "@/api/client";
  *   - Last.fm is already connected
  *   - the user has dismissed this nudge
  */
-const DISMISSED_KEY = "tidal-downloader:lastfm-nudge-dismissed";
+const DISMISSED_KEY = "tideway:lastfm-nudge-dismissed";
 
 export function LastfmConnectNudge() {
   const [visible, setVisible] = useState(false);

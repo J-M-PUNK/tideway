@@ -188,7 +188,7 @@ vendor/
 
 # Packaging: our PyInstaller specs are hand-authored, not auto-generated,
 # so override the default *.spec exclusion further up in this file.
-!TidalDownloader-*.spec
+!Tideway-*.spec
 
 # Abstra
 # Abstra is an AI-powered process automation framework.
