@@ -137,56 +137,43 @@ export function VideoPlayerModal() {
   // hls.js has told the <video> about the stream.
   useEffect(() => {
     const video = videoRef.current;
-    console.log("[video] url effect fired", {
-      url,
-      hasVideo: !!video,
-      nativeHls: video?.canPlayType("application/vnd.apple.mpegurl"),
-      hlsSupported: Hls.isSupported(),
-    });
     if (!video || !url) return;
-    if (video.canPlayType("application/vnd.apple.mpegurl")) {
-      console.log("[video] native HLS path → setting video.src");
-      video.src = url;
-      return;
-    }
+    // Prefer hls.js when supported. Chrome lies about
+    // `canPlayType('application/vnd.apple.mpegurl')` — returns
+    // 'maybe' when it actually can't decode HLS — so native-first
+    // branching silently breaks Chrome. Safari doesn't support
+    // MediaSource for HLS, so `Hls.isSupported()` returns false
+    // there and we fall through to the native path.
     if (Hls.isSupported()) {
-      console.log("[video] hls.js path → attaching");
       const hls = new Hls();
       hls.loadSource(url);
       hls.attachMedia(video);
-      hls.on(Hls.Events.MEDIA_ATTACHED, () => {
-        console.log("[video] hls MEDIA_ATTACHED");
-      });
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
-        console.log("[video] hls MANIFEST_PARSED", {
-          preMuted: video.muted,
-          preVolume: video.volume,
-          preReadyState: video.readyState,
-        });
+        // Start muted on the hls.js path. Chromium's autoplay
+        // policy blocks audible autoplay without a recent user-
+        // gesture credit propagating to this async callback.
+        // Muted autoplay is universally allowed; one click
+        // unmutes. Same UX TikTok / Twitter / Instagram use.
         video.muted = true;
         setMuted(true);
-        video
-          .play()
-          .then(() => {
-            console.log("[video] play() resolved", {
-              postMuted: video.muted,
-              postPaused: video.paused,
-              postReadyState: video.readyState,
-            });
-          })
-          .catch((err) => {
-            console.log("[video] play() REJECTED", err);
-            setPlaying(false);
-          });
-      });
-      hls.on(Hls.Events.ERROR, (_event, data) => {
-        console.log("[video] hls ERROR", data);
+        video.play().catch(() => {
+          // Even muted autoplay failed (iOS Low-Power Mode,
+          // locked-down enterprise policy). Show play button.
+          setPlaying(false);
+        });
       });
       return () => {
         hls.destroy();
       };
     }
-    console.log("[video] no HLS path — raw src fallback");
+    // Native HLS path (Safari / WKWebView). canPlayType returns
+    // 'probably' or 'maybe' — either is a go.
+    if (video.canPlayType("application/vnd.apple.mpegurl")) {
+      video.src = url;
+      return;
+    }
+    // Truly no HLS path — assign raw URL so the browser surfaces
+    // a concrete error rather than a silent empty element.
     video.src = url;
   }, [url]);
 
