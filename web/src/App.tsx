@@ -42,33 +42,105 @@ import { useMediaSession } from "@/hooks/useMediaSession";
 import { useTidalPlayReporter } from "@/hooks/useTidalPlayReporter";
 import { api } from "@/api/client";
 import type { OnDownload } from "@/api/download";
-import { Login } from "@/pages/Login";
-import { Home } from "@/pages/Home";
-import { Search } from "@/pages/Search";
-import { Library } from "@/pages/Library";
-import { LocalLibrary } from "@/pages/LocalLibrary";
-import { Explore } from "@/pages/Explore";
-import { FolderDetail } from "@/pages/FolderDetail";
-import { FollowListPage } from "@/pages/FollowListPage";
-import { GenresPage } from "@/pages/GenresPage";
-import { MixesPage } from "@/pages/MixesPage";
-import { MoodsPage } from "@/pages/MoodsPage";
-import { ProfilePage } from "@/pages/ProfilePage";
-import { BrowsePage } from "@/pages/BrowsePage";
-import { ChartsPage } from "@/pages/ChartsPage";
-import { FeedPage } from "@/pages/FeedPage";
-import { HistoryPage } from "@/pages/HistoryPage";
-import { PopularPage } from "@/pages/PopularPage";
-import { StatsPage } from "@/pages/StatsPage";
-import { AlbumDetail } from "@/pages/AlbumDetail";
-import { ArtistDetail } from "@/pages/ArtistDetail";
-import { MixDetail } from "@/pages/MixDetail";
-import { RadioPage } from "@/pages/RadioPage";
-import { ImportPage } from "@/pages/ImportPage";
-import { PlaylistDetail } from "@/pages/PlaylistDetail";
-import { Downloads } from "@/pages/Downloads";
-import { MiniPlayerPage } from "@/pages/MiniPlayerPage";
-import { SettingsPage } from "@/pages/SettingsPage";
+// Route components load on demand. Each entry becomes its own chunk
+// in the Vite build — the initial bundle ships only the scaffolding
+// (App, Shell, PlayerProvider, etc.) and the page for the URL the
+// user lands on. Everything else streams in when navigated to. This
+// is the single biggest initial-load win for a pywebview app where
+// the WebView2 / WKWebView cold-start + the giant single-chunk parse
+// used to dominate first paint.
+//
+// React.lazy expects a module with a `default` export; pages here
+// are named exports, so we wrap each import to rename the chosen
+// export into `default` for the lazy loader.
+import { lazy, Suspense } from "react";
+import { HeroSkeleton } from "@/components/Skeletons";
+
+// Inline `lazy(() => import(...).then(m => ({ default: m.Name })))`
+// calls preserve each component's prop types through TypeScript's
+// inference. A generic wrapper around lazy would strip them to
+// ComponentType<any>, which breaks <Home onDownload={...} />.
+const Login = lazy(() =>
+  import("@/pages/Login").then((m) => ({ default: m.Login })),
+);
+const Home = lazy(() =>
+  import("@/pages/Home").then((m) => ({ default: m.Home })),
+);
+const Search = lazy(() =>
+  import("@/pages/Search").then((m) => ({ default: m.Search })),
+);
+const Library = lazy(() =>
+  import("@/pages/Library").then((m) => ({ default: m.Library })),
+);
+const LocalLibrary = lazy(() =>
+  import("@/pages/LocalLibrary").then((m) => ({ default: m.LocalLibrary })),
+);
+const Explore = lazy(() =>
+  import("@/pages/Explore").then((m) => ({ default: m.Explore })),
+);
+const FolderDetail = lazy(() =>
+  import("@/pages/FolderDetail").then((m) => ({ default: m.FolderDetail })),
+);
+const FollowListPage = lazy(() =>
+  import("@/pages/FollowListPage").then((m) => ({ default: m.FollowListPage })),
+);
+const GenresPage = lazy(() =>
+  import("@/pages/GenresPage").then((m) => ({ default: m.GenresPage })),
+);
+const MixesPage = lazy(() =>
+  import("@/pages/MixesPage").then((m) => ({ default: m.MixesPage })),
+);
+const MoodsPage = lazy(() =>
+  import("@/pages/MoodsPage").then((m) => ({ default: m.MoodsPage })),
+);
+const ProfilePage = lazy(() =>
+  import("@/pages/ProfilePage").then((m) => ({ default: m.ProfilePage })),
+);
+const BrowsePage = lazy(() =>
+  import("@/pages/BrowsePage").then((m) => ({ default: m.BrowsePage })),
+);
+const ChartsPage = lazy(() =>
+  import("@/pages/ChartsPage").then((m) => ({ default: m.ChartsPage })),
+);
+const FeedPage = lazy(() =>
+  import("@/pages/FeedPage").then((m) => ({ default: m.FeedPage })),
+);
+const HistoryPage = lazy(() =>
+  import("@/pages/HistoryPage").then((m) => ({ default: m.HistoryPage })),
+);
+const PopularPage = lazy(() =>
+  import("@/pages/PopularPage").then((m) => ({ default: m.PopularPage })),
+);
+const StatsPage = lazy(() =>
+  import("@/pages/StatsPage").then((m) => ({ default: m.StatsPage })),
+);
+const AlbumDetail = lazy(() =>
+  import("@/pages/AlbumDetail").then((m) => ({ default: m.AlbumDetail })),
+);
+const ArtistDetail = lazy(() =>
+  import("@/pages/ArtistDetail").then((m) => ({ default: m.ArtistDetail })),
+);
+const MixDetail = lazy(() =>
+  import("@/pages/MixDetail").then((m) => ({ default: m.MixDetail })),
+);
+const RadioPage = lazy(() =>
+  import("@/pages/RadioPage").then((m) => ({ default: m.RadioPage })),
+);
+const ImportPage = lazy(() =>
+  import("@/pages/ImportPage").then((m) => ({ default: m.ImportPage })),
+);
+const PlaylistDetail = lazy(() =>
+  import("@/pages/PlaylistDetail").then((m) => ({ default: m.PlaylistDetail })),
+);
+const Downloads = lazy(() =>
+  import("@/pages/Downloads").then((m) => ({ default: m.Downloads })),
+);
+const MiniPlayerPage = lazy(() =>
+  import("@/pages/MiniPlayerPage").then((m) => ({ default: m.MiniPlayerPage })),
+);
+const SettingsPage = lazy(() =>
+  import("@/pages/SettingsPage").then((m) => ({ default: m.SettingsPage })),
+);
 
 export default function App() {
   // Outer boundary renders a full-screen fallback for errors that
@@ -125,7 +197,11 @@ function AppInner() {
   // shows when the user is genuinely signed out on an online network,
   // which is the case a first-time user lands in.
   if (!auth.logged_in && !offline && online) {
-    return <Login onLoggedIn={auth.refresh} />;
+    return (
+      <Suspense fallback={<HeroSkeleton />}>
+        <Login onLoggedIn={auth.refresh} />
+      </Suspense>
+    );
   }
 
   // The toggle is the master switch — when it's on, we treat the
@@ -157,7 +233,9 @@ function AppInner() {
         <VideoPlayerProvider>
           <TrackSelectionProvider>
             {isMiniRoute ? (
-              <MiniPlayerPage />
+              <Suspense fallback={null}>
+                <MiniPlayerPage />
+              </Suspense>
             ) : (
               <>
                 <Shell
@@ -396,6 +474,7 @@ function Shell({
           <UpdateBanner />
           <div ref={fadeRef} className="animate-route px-8 py-6">
           <ErrorBoundary resetKey={location.pathname}>
+          <Suspense fallback={<HeroSkeleton />}>
           <Routes>
             {offline ? (
               <>
@@ -451,6 +530,7 @@ function Shell({
               </>
             )}
           </Routes>
+          </Suspense>
           </ErrorBoundary>
           </div>
         </main>
