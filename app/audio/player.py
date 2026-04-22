@@ -197,6 +197,12 @@ class PCMPlayer:
     def _load_locked(
         self, track_id: str, quality: Optional[str]
     ) -> PlayerSnapshot:
+        self._dbg(
+            f"load track={track_id} quality={quality} "
+            f"current_track={self._current_track_id} "
+            f"current_state={self._state} "
+            f"preload={self._preload.track_id if self._preload else 'None'}"
+        )
         with self._lock:
             # Path 0: already audible on this track. Happens when
             # the callback's gapless swap already transitioned us
@@ -207,6 +213,7 @@ class PCMPlayer:
                 self._current_track_id == track_id
                 and self._state in ("playing", "paused")
             ):
+                self._dbg(f"load Path 0: already playing track={track_id}")
                 return self.snapshot()
             # Path 0b: a preload for this track is already buffering.
             # Adopt it without tearing down the sounddevice stream.
@@ -222,9 +229,15 @@ class PCMPlayer:
                 and (quality is None or pre.quality == quality)
                 and self._state in ("playing", "paused", "loading")
             ):
+                self._dbg(
+                    f"load Path 0b: adopting preload track={track_id} "
+                    f"(rate {pre.sample_rate}=={self._stream_sample_rate}? "
+                    f"dtype {pre.sd_dtype}=={self._stream_sd_dtype}?)"
+                )
                 return self._adopt_preload_locked(pre)
         # Fall through: no matching preload. Full teardown + fresh
         # resolve. This is the slow path (~300-800ms).
+        self._dbg(f"load SLOW PATH: full teardown + fresh resolve for {track_id}")
         self._teardown()
         with self._lock:
             self._transition("loading", track_id=track_id)
@@ -448,6 +461,13 @@ class PCMPlayer:
             return self._source_path, None
         raise RuntimeError("no source to seek within")
 
+    _DEBUG = True  # verbose stderr logging — flip off once PCM is
+    # solid enough to stop needing it.
+
+    def _dbg(self, msg: str) -> None:
+        if PCMPlayer._DEBUG:
+            print(f"[pcm] {msg}", file=sys.stderr, flush=True)
+
     def preload(
         self, track_id: str, quality: Optional[str] = None
     ) -> dict:
@@ -500,6 +520,12 @@ class PCMPlayer:
             urls = source_spec if isinstance(source_spec, list) else None
             path = source_spec if isinstance(source_spec, str) else None
 
+            self._dbg(
+                f"preload READY track={track_id} "
+                f"rate={decoder.sample_rate} dtype={decoder.sounddevice_dtype} "
+                f"(current stream rate={self._stream_sample_rate} "
+                f"dtype={self._stream_sd_dtype})"
+            )
             pre = _Preload(
                 track_id=track_id,
                 quality=quality,
@@ -843,6 +869,22 @@ class PCMPlayer:
         if status:
             print(f"[pcm] audio status: {status}", file=sys.stderr, flush=True)
 
+        # Rate-limited heartbeat so we can see the callback is
+        # actually running + advancing. Logs once per second at
+        # typical 44.1k/512-frame cadence.
+        if PCMPlayer._DEBUG:
+            self._callback_counter = getattr(self, "_callback_counter", 0) + 1
+            if self._callback_counter % 100 == 0:
+                qsize = self._pcm_queue.qsize()
+                print(
+                    f"[pcm] callback tick #{self._callback_counter} "
+                    f"samples_emitted={self._samples_emitted} "
+                    f"queue={qsize}/{_PCM_QUEUE_MAX} "
+                    f"state={self._state} "
+                    f"track={self._current_track_id}",
+                    file=sys.stderr, flush=True,
+                )
+
         # Paused → output silence, don't drain queue, don't advance
         # position. Zero-latency resume: on unpause the next call
         # finds the queue exactly where it was.
@@ -879,9 +921,13 @@ class PCMPlayer:
                         outdata[written:] = 0
                         raise sd.CallbackStop
                     # Underrun — decoder hasn't caught up. Silence
-                    # the rest of this callback and return; next
-                    # tick will retry.
+                    # the rest of this callback. Critically we still
+                    # advance samples_emitted below so the scrubber
+                    # keeps moving through the underrun window —
+                    # otherwise position would freeze on every
+                    # hiccup.
                     outdata[written:] = 0
+                    self._samples_emitted += frames
                     return
                 self._callback_carry = chunk
 
