@@ -1883,6 +1883,32 @@ def spotify_track_playcount(isrc: str) -> dict:
         return {"playcount": None}
 
 
+@app.get("/api/spotify/album-total-plays")
+def spotify_album_total_plays(isrcs: str) -> dict:
+    """Sum Spotify's per-track play counts across an album.
+
+    `isrcs` is a comma-separated list (e.g. `?isrcs=USUM7170...,USUM7170...`).
+    Returns `{total_plays, resolved, total}` so the frontend can
+    decide whether the number is complete or partial.
+
+    First call is slow (~0.5s per un-cached track); subsequent calls
+    hit the SQLite cache. Frontend should fire this once per album
+    page and share the result.
+    """
+    _require_auth()
+    if not isrcs:
+        raise HTTPException(status_code=400, detail="isrcs is required")
+    codes = [c for c in isrcs.split(",") if c.strip()]
+    if not codes:
+        return {"total_plays": 0, "resolved": 0, "total": 0}
+    try:
+        from app import spotify_public
+        return spotify_public.album_total_plays(codes)
+    except Exception as exc:
+        logger.warning("spotify album-total-plays fetch failed: %s", exc)
+        return {"total_plays": 0, "resolved": 0, "total": len(codes)}
+
+
 @app.get("/api/spotify/artist-stats")
 def spotify_artist_stats(tidal_artist_id: str, sample_isrc: str) -> dict:
     """Spotify artist overview — monthly listeners, followers, world

@@ -191,6 +191,40 @@ def playcount_by_isrc(isrc: str) -> Optional[int]:
     return pc
 
 
+def album_total_plays(isrcs: list[str]) -> dict:
+    """Sum Spotify play counts across an album's tracks.
+
+    Returns `{total_plays, resolved, total}`:
+      - total_plays: sum of playcounts across all tracks Spotify
+        could resolve
+      - resolved:    how many ISRCs got a non-None playcount
+      - total:       how many ISRCs we tried
+
+    A partial result (resolved < total) still produces a sum — when
+    Spotify is missing a few tracks the number is an under-estimate,
+    but rendering "4.8B+" is better than showing nothing. The caller
+    can check `resolved / total` to decide whether to annotate the
+    number with a "(partial)" hint.
+    """
+    total_plays = 0
+    resolved = 0
+    cleaned = [i.strip().upper() for i in isrcs if i and i.strip()]
+    for isrc in cleaned:
+        try:
+            pc = playcount_by_isrc(isrc)
+        except Exception as exc:
+            log.warning("playcount lookup raised for %s: %s", isrc, exc)
+            continue
+        if pc is not None and pc > 0:
+            total_plays += pc
+            resolved += 1
+    return {
+        "total_plays": total_plays,
+        "resolved": resolved,
+        "total": len(cleaned),
+    }
+
+
 def artist_stats(
     tidal_artist_id: str, sample_isrc: str
 ) -> Optional[ArtistStats]:
@@ -422,5 +456,6 @@ def _safe_int(v: object) -> Optional[int]:
 __all__ = [
     "ArtistStats",
     "playcount_by_isrc",
+    "album_total_plays",
     "artist_stats",
 ]

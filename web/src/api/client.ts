@@ -254,6 +254,17 @@ export const api = {
       req<{ playcount: number | null }>(
         `/api/spotify/track-playcount?isrc=${encodeURIComponent(isrc)}`,
       ),
+    /** Sum of per-track Spotify play counts across an album,
+     *  computed server-side. Pass every track ISRC on the album.
+     *  `resolved < total` means Spotify couldn't find some tracks;
+     *  the `total_plays` is still a (lower-bound) number worth
+     *  rendering. */
+    albumTotalPlays: (isrcs: string[]) =>
+      req<{ total_plays: number; resolved: number; total: number }>(
+        `/api/spotify/album-total-plays?isrcs=${encodeURIComponent(
+          isrcs.join(","),
+        )}`,
+      ),
     /** Artist-level stats from Spotify: monthly listeners, followers,
      *  world rank, top cities. `sampleIsrc` is any ISRC from a track
      *  by the artist — used once to resolve Tidal artist → Spotify
