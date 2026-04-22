@@ -34,6 +34,12 @@ import sounddevice as sd  # type: ignore
 import tidalapi
 
 from app.audio.decoder import Decoder
+from app.audio.eq import (
+    BAND_FREQUENCIES_HZ as EQ_BAND_FREQUENCIES,
+    Equalizer,
+    PRESETS as EQ_PRESETS,
+    preset_bands as eq_preset_bands,
+)
 from app.audio.segment_reader import SegmentReader
 
 log = logging.getLogger(__name__)
@@ -162,6 +168,16 @@ class PCMPlayer:
         # the current track ends; consumed in-place by the audio
         # callback at end-of-track.
         self._preload: Optional[_Preload] = None
+
+        # 10-band biquad EQ applied in the audio callback. One
+        # instance owned for the lifetime of the player; when the
+        # output stream rate changes (cross-rate bridge) we rebuild
+        # it so the filter coefficients are recomputed against the
+        # new sample rate. Remembered user settings (bands / preamp)
+        # survive the rebuild.
+        self._eq: Optional[Equalizer] = None
+        self._eq_bands: list[float] = []
+        self._eq_preamp: Optional[float] = None
 
     # --- public API -------------------------------------------------
 
@@ -591,38 +607,52 @@ class PCMPlayer:
             self._seq += 1
         return self.snapshot()
 
-    # --- EQ stubs (Phase 5 replaces these) --------------------------
+    # --- EQ --------------------------------------------------------
     #
-    # Same class-method shape as VLCPlayer so server.py can call into
-    # them without branching. Until biquad filters land, the EQ
-    # sliders in the UI save + persist fine, they just don't shape
-    # audio. Bands/preamp values round-trip through settings.json so
-    # nothing is lost when we swap engines.
-    _STUB_EQ_FREQUENCIES = [
-        60.0, 170.0, 310.0, 600.0, 1000.0,
-        3000.0, 6000.0, 12000.0, 14000.0, 16000.0,
-    ]
+    # Same class-method shape as VLCPlayer so server.py can call
+    # these without branching on engine. Per-track coefficients
+    # depend on sample_rate, so the Equalizer instance is built /
+    # rebuilt in load()/_adopt_preload_locked/_bridge_to_preload,
+    # but the user's bands + preamp survive across rebuilds.
 
     @staticmethod
     def eq_presets() -> list[dict]:
-        return []
+        return [{"index": p["index"], "name": p["name"]} for p in EQ_PRESETS]
 
     @staticmethod
     def eq_bands_count() -> int:
-        return len(PCMPlayer._STUB_EQ_FREQUENCIES)
+        return len(EQ_BAND_FREQUENCIES)
 
     @staticmethod
     def eq_band_frequencies() -> list[float]:
-        return list(PCMPlayer._STUB_EQ_FREQUENCIES)
+        return list(EQ_BAND_FREQUENCIES)
 
     def apply_equalizer(
         self, bands: list[float], preamp: Optional[float] = None
     ) -> None:
-        # No-op until Phase 5 implements biquad filtering.
-        return
+        """Apply band gains (dB) to the active EQ. Empty `bands`
+        disables filtering entirely.
+
+        Remembered so that a stream reopen (cross-rate bridge,
+        track load) rebuilds the EQ coefficients against the new
+        sample rate without losing the user's curve.
+        """
+        with self._lock:
+            self._eq_bands = list(bands)
+            self._eq_preamp = preamp
+            if self._eq is not None:
+                if bands:
+                    self._eq.set_bands(list(bands), preamp_db=preamp)
+                else:
+                    self._eq.clear()
 
     def apply_equalizer_preset(self, preset_index: int) -> list[float]:
-        return [0.0] * self.eq_bands_count()
+        """Apply a preset by index, push its curve to the live EQ,
+        and return the resolved band amplitudes so the frontend's
+        sliders can snap to it."""
+        bands = eq_preset_bands(preset_index)
+        self.apply_equalizer(bands, preamp=None)
+        return bands
 
     # --- Device selection -------------------------------------------
 
@@ -816,6 +846,15 @@ class PCMPlayer:
             callback=self._audio_callback,
             finished_callback=self._on_stream_finished,
         )
+        # Rebuild the EQ against the new sample rate. Preserves the
+        # user's bands / preamp across tracks.
+        self._eq = Equalizer(sample_rate=sample_rate, channels=channels)
+        if self._eq_bands:
+            try:
+                self._eq.set_bands(self._eq_bands, preamp_db=self._eq_preamp)
+            except Exception:
+                log.exception("eq coefficient build failed")
+                self._eq.clear()
 
     def _start_decoder_thread(self) -> None:
         # Bind the decoder / queue / flags to the thread's locals at
@@ -952,8 +991,29 @@ class PCMPlayer:
             else:
                 self._callback_carry = self._callback_carry[take:]
 
+        # EQ (10-band biquad). Active only when the user has a
+        # non-flat curve set — when disabled, `apply()` is an early
+        # return and doesn't touch `outdata`, so bit-perfect
+        # pass-through is preserved at flat EQ + full volume + not
+        # muted. Filtering requires float32; we round-trip through
+        # float32 when the output dtype is int16/int32.
+        if self._eq is not None and self._eq.is_active():
+            if outdata.dtype == np.float32:
+                self._eq.apply(outdata)
+            else:
+                # Scale to float32 in the range [-1, 1], filter,
+                # scale back. int range constants chosen so the
+                # round-trip is exact for unmodified samples.
+                scale_in = (
+                    32768.0 if outdata.dtype == np.int16 else 2_147_483_648.0
+                )
+                buf = outdata.astype(np.float32, copy=True) / scale_in
+                self._eq.apply(buf)
+                np.clip(buf * scale_in, -scale_in, scale_in - 1.0, out=buf)
+                outdata[:] = buf.astype(outdata.dtype)
+
         # Volume + mute post-processing. At volume=100 and not muted
-        # we skip entirely, preserving bit-perfect pass-through.
+        # (and no EQ above), bit-perfect pass-through still holds.
         if self._muted or self._volume <= 0:
             outdata.fill(0)
         elif self._volume < 100:
