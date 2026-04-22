@@ -137,42 +137,56 @@ export function VideoPlayerModal() {
   // hls.js has told the <video> about the stream.
   useEffect(() => {
     const video = videoRef.current;
+    console.log("[video] url effect fired", {
+      url,
+      hasVideo: !!video,
+      nativeHls: video?.canPlayType("application/vnd.apple.mpegurl"),
+      hlsSupported: Hls.isSupported(),
+    });
     if (!video || !url) return;
     if (video.canPlayType("application/vnd.apple.mpegurl")) {
+      console.log("[video] native HLS path → setting video.src");
       video.src = url;
       return;
     }
     if (Hls.isSupported()) {
+      console.log("[video] hls.js path → attaching");
       const hls = new Hls();
       hls.loadSource(url);
       hls.attachMedia(video);
+      hls.on(Hls.Events.MEDIA_ATTACHED, () => {
+        console.log("[video] hls MEDIA_ATTACHED");
+      });
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
-        // Start muted on the hls.js path. Chrome's autoplay
-        // policy blocks audible autoplay when it can't verify a
-        // recent user gesture propagated to this async callback,
-        // and the policy is stricter in Chrome than Firefox or
-        // Safari. Rather than trying audible → falling back to
-        // muted (which hits a rejection-chain race that was
-        // failing in practice), we preemptively mute. Muted
-        // autoplay is universally allowed. The speaker icon
-        // renders "muted"; one click unmutes. Matches TikTok /
-        // Twitter / Instagram video UX.
+        console.log("[video] hls MANIFEST_PARSED", {
+          preMuted: video.muted,
+          preVolume: video.volume,
+          preReadyState: video.readyState,
+        });
         video.muted = true;
         setMuted(true);
-        video.play().catch(() => {
-          // Even muted autoplay failed (rare — iOS Low-Power
-          // Mode, locked-down enterprise policy). Show play
-          // button; one click starts playback.
-          setPlaying(false);
-        });
+        video
+          .play()
+          .then(() => {
+            console.log("[video] play() resolved", {
+              postMuted: video.muted,
+              postPaused: video.paused,
+              postReadyState: video.readyState,
+            });
+          })
+          .catch((err) => {
+            console.log("[video] play() REJECTED", err);
+            setPlaying(false);
+          });
+      });
+      hls.on(Hls.Events.ERROR, (_event, data) => {
+        console.log("[video] hls ERROR", data);
       });
       return () => {
         hls.destroy();
       };
     }
-    // No HLS path available — fall back to the raw URL so the
-    // browser at least renders a Cannot-play error rather than a
-    // silent empty element.
+    console.log("[video] no HLS path — raw src fallback");
     video.src = url;
   }, [url]);
 
@@ -182,6 +196,12 @@ export function VideoPlayerModal() {
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
+    console.log("[video] sync volume/muted effect", {
+      volume,
+      muted,
+      videoPrevMuted: v.muted,
+      url,
+    });
     v.volume = volume;
     v.muted = muted;
   }, [volume, muted, current?.id, url]);
@@ -416,8 +436,25 @@ export function VideoPlayerModal() {
         playsInline
         preload="auto"
         loop={repeat}
-        onPlay={() => setPlaying(true)}
-        onPause={() => setPlaying(false)}
+        onPlay={(e) => {
+          console.log("[video] onPlay", {
+            muted: (e.target as HTMLVideoElement).muted,
+            paused: (e.target as HTMLVideoElement).paused,
+          });
+          setPlaying(true);
+        }}
+        onPause={(e) => {
+          console.log("[video] onPause", {
+            muted: (e.target as HTMLVideoElement).muted,
+            paused: (e.target as HTMLVideoElement).paused,
+          });
+          setPlaying(false);
+        }}
+        onError={(e) => {
+          console.log("[video] onError", (e.target as HTMLVideoElement).error);
+        }}
+        onWaiting={() => console.log("[video] onWaiting (buffering)")}
+        onCanPlay={() => console.log("[video] onCanPlay")}
         onTimeUpdate={(e) =>
           setCurrentTime((e.target as HTMLVideoElement).currentTime)
         }
