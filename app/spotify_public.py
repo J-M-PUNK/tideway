@@ -200,21 +200,40 @@ def album_total_plays(isrcs: list[str]) -> dict:
       - resolved:    how many ISRCs got a non-None playcount
       - total:       how many ISRCs we tried
 
+    Lookups run in parallel — a 15-track album would take ~7s
+    serially (ISRC search + getTrack round-trip per track) but
+    parallelizes to ~1.5s with max_workers=5. The underlying
+    TLSClient from spotapi is thread-safe; the SQLite cache is
+    serialised via `_db_lock`, so concurrent inserts are safe.
+
     A partial result (resolved < total) still produces a sum — when
     Spotify is missing a few tracks the number is an under-estimate,
     but rendering "4.8B+" is better than showing nothing. The caller
     can check `resolved / total` to decide whether to annotate the
     number with a "(partial)" hint.
     """
-    total_plays = 0
-    resolved = 0
+    from concurrent.futures import ThreadPoolExecutor
+
     cleaned = [i.strip().upper() for i in isrcs if i and i.strip()]
-    for isrc in cleaned:
+    if not cleaned:
+        return {"total_plays": 0, "resolved": 0, "total": 0}
+
+    def _one(isrc: str) -> Optional[int]:
         try:
-            pc = playcount_by_isrc(isrc)
+            return playcount_by_isrc(isrc)
         except Exception as exc:
             log.warning("playcount lookup raised for %s: %s", isrc, exc)
-            continue
+            return None
+
+    # Cap at 5 workers so we stay well under any plausible Spotify
+    # per-origin rate limit. Five covers the typical 12-15-track
+    # album in ~two round-trip waves.
+    with ThreadPoolExecutor(max_workers=min(5, len(cleaned))) as pool:
+        results = list(pool.map(_one, cleaned))
+
+    total_plays = 0
+    resolved = 0
+    for pc in results:
         if pc is not None and pc > 0:
             total_plays += pc
             resolved += 1
