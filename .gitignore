@@ -181,6 +181,9 @@ settings.json
 watchlist.json
 download_queue.json
 
+# Vendored binaries (ffmpeg etc. — fetched on demand via scripts/fetch_ffmpeg.sh)
+vendor/
+
 # Packaging: our PyInstaller specs are hand-authored, not auto-generated,
 # so override the default *.spec exclusion further up in this file.
 !TidalDownloader-*.spec

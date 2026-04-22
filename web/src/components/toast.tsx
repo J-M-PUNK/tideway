@@ -19,6 +19,13 @@ export interface Toast {
   title: string;
   description?: string;
   durationMs: number;
+  /** Optional call-to-action button rendered on the toast. Used for
+   *  "Reveal in Finder" on download-complete toasts and similar
+   *  follow-up affordances. */
+  action?: {
+    label: string;
+    onClick: () => void;
+  };
 }
 
 interface ToastContextValue {
@@ -105,9 +112,24 @@ function ToastView({ toast, onDismiss }: { toast: Toast; onDismiss: () => void }
       <div className="min-w-0 flex-1">
         <div className="truncate text-sm font-semibold">{toast.title}</div>
         {toast.description && (
-          <div className="mt-0.5 line-clamp-2 text-xs text-muted-foreground">
+          <div className="mt-0.5 line-clamp-2 break-all text-xs text-muted-foreground">
             {toast.description}
           </div>
+        )}
+        {toast.action && (
+          <button
+            type="button"
+            onClick={() => {
+              try {
+                toast.action!.onClick();
+              } finally {
+                onDismiss();
+              }
+            }}
+            className="mt-2 inline-flex items-center rounded-md border border-border bg-secondary px-2 py-1 text-[11px] font-semibold hover:bg-accent"
+          >
+            {toast.action.label}
+          </button>
         )}
       </div>
       <button

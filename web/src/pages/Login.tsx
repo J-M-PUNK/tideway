@@ -3,7 +3,6 @@ import { ExternalLink, Loader2, LogIn, Music } from "lucide-react";
 import { api } from "@/api/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { resetDefaultQualityCache } from "@/components/DownloadButton";
 import { resetQualitiesCache } from "@/hooks/useQualities";
 
 type Mode = "pkce" | "device";
@@ -90,12 +89,11 @@ function PkceLogin({
     try {
       await api.auth.pkceComplete(redirectUrl.trim());
       // The PKCE session unlocks a higher quality ceiling than the
-      // device-code session. Invalidate the module-level caches so
-      // /api/qualities and the saved default re-fetch under the new
-      // client_id — otherwise the UI keeps showing the old Lossless
-      // cap even though the backend now allows Max.
+      // device-code session. Invalidate the quality cache so
+      // /api/qualities re-fetches under the new client_id — otherwise
+      // the UI keeps showing the old Lossless cap even though the
+      // backend now allows Max.
       resetQualitiesCache();
-      resetDefaultQualityCache();
       onLoggedIn();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));

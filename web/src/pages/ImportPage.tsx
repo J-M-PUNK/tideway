@@ -128,12 +128,13 @@ function Header() {
   return (
     <div className="mb-6">
       <h1 className="flex items-center gap-3 text-3xl font-bold tracking-tight">
-        <ImportIcon className="h-7 w-7" /> Import playlists
+        <ImportIcon className="h-7 w-7" /> Import
       </h1>
       <p className="mt-1 text-sm text-muted-foreground">
-        Pull playlists from Spotify or an M3U / text file into Tidal. Every
-        track is matched by ISRC (when known) or by fuzzy title + artist;
-        you review the matches before anything is created.
+        Pull playlists, liked songs, saved albums, or followed artists from
+        Spotify, Deezer, or an M3U / text file. Every item is matched by
+        ISRC / UPC when available or fuzzy name otherwise — you review and
+        pick which matches to keep before anything is created.
       </p>
     </div>
   );
@@ -900,6 +901,10 @@ function MatchReview({
     }
     return auto;
   });
+  // Visibility filter. "all" shows every row; "matches" hides rows we
+  // couldn't find on Tidal (they're unchecked anyway); "unmatched" lets
+  // the user concentrate on gaps.
+  const [filter, setFilter] = useState<"all" | "matches" | "unmatched">("all");
   const [busy, setBusy] = useState(false);
 
   const toggle = (id: string) => {
@@ -911,8 +916,24 @@ function MatchReview({
     });
   };
 
+  const selectAll = () => {
+    const next = new Set<string>();
+    for (const row of rows) {
+      if (row.match) next.add(row.match.tidal_id);
+    }
+    setSelected(next);
+  };
+
+  const clearAll = () => setSelected(new Set());
+
   const matched = rows.filter((r) => r.match !== null).length;
   const unmatched = rows.length - matched;
+
+  const visibleRows = rows.filter((r) => {
+    if (filter === "matches") return r.match !== null;
+    if (filter === "unmatched") return r.match === null;
+    return true;
+  });
 
   const confirm = async () => {
     if (selected.size === 0) {
@@ -990,13 +1011,61 @@ function MatchReview({
       </div>
 
       <div className="mb-4 flex flex-col gap-3 rounded-lg border border-border/50 bg-card/40 p-4">
-        <div className="text-sm font-semibold">
-          Matched {matched} of {rows.length} {pluralize(rowNoun, rows.length)}
-          {unmatched > 0 && (
-            <span className="ml-2 text-amber-300">
-              · {unmatched} couldn't be found on Tidal
-            </span>
-          )}
+        <div className="flex flex-wrap items-center justify-between gap-3">
+          <div className="text-sm font-semibold">
+            {selected.size} of {matched} {pluralize(rowNoun, matched)} selected
+            {unmatched > 0 && (
+              <span className="ml-2 text-amber-300">
+                · {unmatched} couldn't be found on Tidal
+              </span>
+            )}
+          </div>
+          <div className="flex items-center gap-1">
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={selectAll}
+              disabled={matched === 0 || selected.size === matched}
+            >
+              Select all
+            </Button>
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={clearAll}
+              disabled={selected.size === 0}
+            >
+              Clear
+            </Button>
+          </div>
+        </div>
+        <div className="inline-flex w-fit rounded-md border border-border bg-secondary p-0.5 text-xs">
+          {(
+            [
+              { id: "all" as const, label: `All (${rows.length})` },
+              { id: "matches" as const, label: `Matched (${matched})` },
+              {
+                id: "unmatched" as const,
+                label: `Unmatched (${unmatched})`,
+                disabled: unmatched === 0,
+              },
+            ]
+          ).map((opt) => (
+            <button
+              key={opt.id}
+              type="button"
+              onClick={() => setFilter(opt.id)}
+              disabled={opt.disabled}
+              className={cn(
+                "rounded-sm px-2.5 py-1 transition-colors disabled:cursor-not-allowed disabled:opacity-40",
+                filter === opt.id
+                  ? "bg-background font-semibold text-foreground"
+                  : "text-muted-foreground hover:text-foreground",
+              )}
+            >
+              {opt.label}
+            </button>
+          ))}
         </div>
         {action.kind === "playlist" && (
           <div className="flex flex-col gap-1">
@@ -1011,8 +1080,8 @@ function MatchReview({
           </div>
         )}
         <div className="text-xs text-muted-foreground">
-          High-confidence matches are pre-selected. Uncheck any you'd rather
-          skip.
+          High-confidence matches are pre-selected. Use Select all / Clear to
+          sweep, or pick individual rows.
           {action.kind === "favorite" && action.favoriteKind === "artist" && (
             <>
               {" "}Artist matching is fuzzier than track matching — identical-
@@ -1024,17 +1093,41 @@ function MatchReview({
       </div>
 
       <div className="flex flex-col divide-y divide-border/40 rounded-lg border border-border/50 bg-card/40">
-        {rows.map((row, i) => (
-          <MatchRowView
-            key={i}
-            row={row}
-            checked={row.match ? selected.has(row.match.tidal_id) : false}
-            onToggle={row.match ? () => toggle(row.match!.tidal_id) : undefined}
-          />
-        ))}
+        {visibleRows.length === 0 ? (
+          <div className="px-4 py-6 text-center text-xs text-muted-foreground">
+            No rows in this view.
+          </div>
+        ) : (
+          visibleRows.map((row) => (
+            <MatchRowView
+              // Stable identity across filter changes. ISRC is the
+              // canonical track id when Spotify / Deezer gave us one;
+              // otherwise composite of the source metadata. Without
+              // a stable key, index-based reconciliation scrambles
+              // checkbox state when the user flips All / Matched /
+              // Unmatched.
+              key={rowKey(row)}
+              row={row}
+              checked={row.match ? selected.has(row.match.tidal_id) : false}
+              onToggle={row.match ? () => toggle(row.match!.tidal_id) : undefined}
+            />
+          ))
+        )}
       </div>
     </div>
   );
+}
+
+function rowKey(row: MatchRow): string {
+  const src = row.spotify;
+  if (src.isrc) return `isrc:${src.isrc}`;
+  // Composite key — same track always yields the same string, regardless
+  // of filter visibility. Artists[0] only (not the full list) to stay
+  // compact; collisions on same title + same primary artist + same
+  // duration are vanishingly rare and the fallback tidal_id catches
+  // them.
+  const primaryArtist = src.artists[0] ?? "";
+  return `${src.name}|${primaryArtist}|${src.duration_ms}|${row.match?.tidal_id ?? "nomatch"}`;
 }
 
 function pluralize(word: string, n: number): string {

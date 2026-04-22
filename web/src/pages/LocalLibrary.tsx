@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
-import { ChevronDown, ChevronRight, Disc3, FolderOpen, HardDrive, Music, Play, User } from "lucide-react";
+import { ChevronDown, ChevronRight, Clock, Disc3, Film, FolderOpen, HardDrive, Music, Play, User } from "lucide-react";
 import { api } from "@/api/client";
-import type { LocalFile, Track } from "@/api/types";
+import type { LocalFile, LocalVideo, Track } from "@/api/types";
 import type { OnDownload } from "@/api/download";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -12,20 +12,38 @@ import { usePlayerActions } from "@/hooks/PlayerContext";
 import { formatDuration } from "@/lib/utils";
 import { cn } from "@/lib/utils";
 
-type GroupMode = "artist" | "folder";
+/** How music on the local-library page is grouped:
+ *  - "albums" (default): iTunes-style, one section per album. Best
+ *    for users who think about their library in album terms.
+ *  - "artists": one section per artist, tracks listed flat inside —
+ *    useful for quickly finding "everything by X" regardless of album.
+ *  - "recent": flat list sorted by download time (newest first) —
+ *    answers "what did I just download?"
+ */
+type MusicSort = "albums" | "artists" | "recent";
+/** Videos have no album concept, so just artist vs. recent. */
+type VideoSort = "artists" | "recent";
+type Tab = "music" | "videos";
 
 /**
  * Browse the user's downloaded files directly off disk — complement to
- * /library/* which show what Tidal considers favorited. "By artist"
- * groups by the artist tag; "By folder" groups by the immediate parent
- * directory, which matches how the downloader lays out files when
- * album-folders is enabled.
+ * /library/* which show what Tidal considers favorited. Music can be
+ * grouped by Albums (default), Artists, or Recent; Videos by Artists
+ * or Recent. "Recent" is a flat list sorted by mtime so the user can
+ * answer "what did I just download?" without scrolling.
  */
 export function LocalLibrary({ onDownload: _onDownload }: { onDownload: OnDownload }) {
-  const [data, setData] = useState<{ output_dir: string; files: LocalFile[] } | null>(null);
+  const [data, setData] = useState<{
+    output_dir: string;
+    videos_dir: string;
+    files: LocalFile[];
+    videos: LocalVideo[];
+  } | null>(null);
   const [loadError, setLoadError] = useState<Error | null>(null);
   const [filter, setFilter] = useState("");
-  const [groupMode, setGroupMode] = useState<GroupMode>("artist");
+  const [musicSort, setMusicSort] = useState<MusicSort>("albums");
+  const [videoSort, setVideoSort] = useState<VideoSort>("artists");
+  const [tab, setTab] = useState<Tab>("music");
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
 
   useEffect(() => {
@@ -52,18 +70,72 @@ export function LocalLibrary({ onDownload: _onDownload }: { onDownload: OnDownlo
     );
   }, [data, filter]);
 
-  const groups = useMemo(() => {
+  const filteredVideos = useMemo(() => {
+    if (!data) return [];
+    const q = filter.trim().toLowerCase();
+    if (!q) return data.videos;
+    return data.videos.filter((v) =>
+      `${v.title} ${v.artist}`.toLowerCase().includes(q),
+    );
+  }, [data, filter]);
+
+  const musicGroups = useMemo(() => {
+    if (musicSort === "recent") {
+      // Recent is flat — one "group" holding everything in mtime
+      // order. An empty string key signals the render path to hide
+      // the header chrome and just show the rows.
+      return [["", [...filtered].sort((a, b) => b.mtime - a.mtime)]] as [
+        string,
+        LocalFile[],
+      ][];
+    }
     const m = new Map<string, LocalFile[]>();
     for (const f of filtered) {
-      const key = groupMode === "artist" ? f.artist : folderOf(f);
+      // Albums view keys on "Artist · Album" so two albums with the
+      // same name by different artists don't merge (Greatest Hits
+      // edge case). Section header still reads nicely because we
+      // split the key when rendering.
+      const key =
+        musicSort === "albums"
+          ? `${f.artist || "(Unknown)"} • ${f.album || "(Untitled album)"}`
+          : f.artist || "(Unknown)";
       const list = m.get(key);
       if (list) list.push(f);
       else m.set(key, [f]);
     }
+    const entries = Array.from(m.entries());
+    if (musicSort === "albums") {
+      // Sort each album's tracks by track number for album-view
+      // sanity; artist view leaves the backend's sort intact
+      // (artist → album → track_num), which already reads well.
+      for (const [, list] of entries) {
+        list.sort((a, b) => a.track_num - b.track_num);
+      }
+    }
+    entries.sort(([a], [b]) => a.localeCompare(b));
+    return entries;
+  }, [filtered, musicSort]);
+
+  const videoGroups = useMemo(() => {
+    if (videoSort === "recent") {
+      return [["", [...filteredVideos].sort((a, b) => b.mtime - a.mtime)]] as [
+        string,
+        LocalVideo[],
+      ][];
+    }
+    const m = new Map<string, LocalVideo[]>();
+    for (const v of filteredVideos) {
+      const key = v.artist || "(Unknown artist)";
+      const list = m.get(key);
+      if (list) list.push(v);
+      else m.set(key, [v]);
+    }
     return Array.from(m.entries()).sort(([a], [b]) => a.localeCompare(b));
-  }, [filtered, groupMode]);
+  }, [filteredVideos, videoSort]);
 
   const totalBytes = data?.files.reduce((n, f) => n + f.size_bytes, 0) ?? 0;
+  const totalVideoBytes =
+    data?.videos.reduce((n, v) => n + v.size_bytes, 0) ?? 0;
 
   const toggleGroup = (key: string) => {
     setCollapsed((prev) => {
@@ -81,6 +153,19 @@ export function LocalLibrary({ onDownload: _onDownload }: { onDownload: OnDownlo
       </div>
     );
 
+  const showingMusic = tab === "music";
+  const countText = showingMusic
+    ? data
+      ? `${data.files.length.toLocaleString()} file${
+          data.files.length === 1 ? "" : "s"
+        } · ${formatBytes(totalBytes)} · ${data.output_dir}`
+      : ""
+    : data
+      ? `${data.videos.length.toLocaleString()} video${
+          data.videos.length === 1 ? "" : "s"
+        } · ${formatBytes(totalVideoBytes)} · ${data.videos_dir}`
+      : "";
+
   return (
     <div>
       <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
@@ -89,10 +174,7 @@ export function LocalLibrary({ onDownload: _onDownload }: { onDownload: OnDownlo
             <HardDrive className="h-7 w-7" /> On this device
           </h1>
           {data && (
-            <p className="mt-1 text-sm text-muted-foreground">
-              {data.files.length.toLocaleString()} file{data.files.length === 1 ? "" : "s"} ·{" "}
-              {formatBytes(totalBytes)} · {data.output_dir}
-            </p>
+            <p className="mt-1 text-sm text-muted-foreground">{countText}</p>
           )}
         </div>
         <div className="flex items-center gap-2">
@@ -102,55 +184,190 @@ export function LocalLibrary({ onDownload: _onDownload }: { onDownload: OnDownlo
             placeholder="Filter…"
             className="h-9 max-w-xs"
           />
-          <GroupToggle value={groupMode} onChange={setGroupMode} />
+          {showingMusic ? (
+            <SortToggle<MusicSort>
+              value={musicSort}
+              onChange={setMusicSort}
+              options={[
+                { value: "albums", label: "Albums", icon: Disc3 },
+                { value: "artists", label: "Artists", icon: User },
+                { value: "recent", label: "Recent", icon: Clock },
+              ]}
+            />
+          ) : (
+            <SortToggle<VideoSort>
+              value={videoSort}
+              onChange={setVideoSort}
+              options={[
+                { value: "artists", label: "Artists", icon: User },
+                { value: "recent", label: "Recent", icon: Clock },
+              ]}
+            />
+          )}
         </div>
       </div>
 
+      <TabStrip
+        value={tab}
+        onChange={setTab}
+        musicCount={data?.files.length ?? 0}
+        videoCount={data?.videos.length ?? 0}
+      />
+
       {!data && !loadError && <TrackListSkeleton />}
 
-      {data && data.files.length === 0 && (
-        <EmptyState
-          icon={Music}
-          title="No downloaded files yet"
-          description="Tracks you download will show up here, grouped by artist or folder."
-        />
+      {showingMusic ? (
+        <>
+          {data && data.files.length === 0 && (
+            <EmptyState
+              icon={Music}
+              title="No downloaded tracks yet"
+              description="Tracks you download will show up here. Switch between Albums, Artists, and Recent above."
+            />
+          )}
+          {data && data.files.length > 0 && filtered.length === 0 && (
+            <EmptyState icon={Music} title="No matches" description={`Nothing matches "${filter}".`} />
+          )}
+          {musicGroups.length > 0 && (
+            <div className="flex flex-col gap-6">
+              {musicGroups.map(([key, files]) => (
+                <MusicGroupSection
+                  key={key || "__flat__"}
+                  groupKey={key}
+                  files={files}
+                  allFiles={filtered}
+                  sort={musicSort}
+                  collapsed={collapsed}
+                  onToggle={toggleGroup}
+                />
+              ))}
+            </div>
+          )}
+        </>
+      ) : (
+        <>
+          {data && data.videos.length === 0 && (
+            <EmptyState
+              icon={Film}
+              title="No downloaded videos yet"
+              description="Music videos you download will show up here."
+            />
+          )}
+          {data && data.videos.length > 0 && filteredVideos.length === 0 && (
+            <EmptyState icon={Film} title="No matches" description={`Nothing matches "${filter}".`} />
+          )}
+          {videoGroups.length > 0 && (
+            <div className="flex flex-col gap-6">
+              {videoGroups.map(([key, videos]) => (
+                <VideoGroupSection
+                  key={key || "__flat__"}
+                  groupKey={key}
+                  videos={videos}
+                  collapsed={collapsed}
+                  onToggle={toggleGroup}
+                />
+              ))}
+            </div>
+          )}
+        </>
       )}
+    </div>
+  );
+}
 
-      {data && data.files.length > 0 && filtered.length === 0 && (
-        <EmptyState icon={Music} title="No matches" description={`Nothing matches "${filter}".`} />
-      )}
+function TabStrip({
+  value,
+  onChange,
+  musicCount,
+  videoCount,
+}: {
+  value: Tab;
+  onChange: (t: Tab) => void;
+  musicCount: number;
+  videoCount: number;
+}) {
+  const tabs: { id: Tab; label: string; icon: typeof Music; count: number }[] = [
+    { id: "music", label: "Music", icon: Music, count: musicCount },
+    { id: "videos", label: "Videos", icon: Film, count: videoCount },
+  ];
+  return (
+    <div className="mb-6 flex border-b border-border">
+      {tabs.map((t) => {
+        const Icon = t.icon;
+        const active = t.id === value;
+        return (
+          <button
+            key={t.id}
+            onClick={() => onChange(t.id)}
+            className={cn(
+              "-mb-px flex items-center gap-2 border-b-2 px-4 py-2 text-sm font-medium transition-colors",
+              active
+                ? "border-foreground text-foreground"
+                : "border-transparent text-muted-foreground hover:text-foreground",
+            )}
+          >
+            <Icon className="h-4 w-4" />
+            {t.label}
+            <span className="rounded-full bg-secondary px-2 py-0.5 text-[10px] font-bold">
+              {t.count}
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
 
-      {groups.length > 0 && (
-        <div className="flex flex-col gap-6">
-          {groups.map(([key, files]) => {
-            const isCollapsed = collapsed.has(key);
-            return (
-              <section key={key}>
-                <button
-                  onClick={() => toggleGroup(key)}
-                  className="mb-2 flex w-full items-center gap-2 text-left"
-                >
-                  {isCollapsed ? (
-                    <ChevronRight className="h-4 w-4 text-muted-foreground" />
-                  ) : (
-                    <ChevronDown className="h-4 w-4 text-muted-foreground" />
-                  )}
-                  {groupMode === "artist" ? (
-                    <User className="h-4 w-4 text-muted-foreground" />
-                  ) : (
-                    <FolderOpen className="h-4 w-4 text-muted-foreground" />
-                  )}
-                  <span className="font-semibold">{key}</span>
-                  <span className="text-xs text-muted-foreground">
-                    {files.length} track{files.length === 1 ? "" : "s"}
-                  </span>
-                </button>
-                {!isCollapsed && <LocalGroupList files={files} allFiles={filtered} />}
-              </section>
-            );
-          })}
-        </div>
+function LocalVideoGroupList({ videos }: { videos: LocalVideo[] }) {
+  return (
+    <div className="overflow-hidden rounded-md border border-border/50">
+      {videos.map((v, i) => (
+        <LocalVideoRow key={v.path} video={v} rowIndex={i} />
+      ))}
+    </div>
+  );
+}
+
+function LocalVideoRow({ video, rowIndex }: { video: LocalVideo; rowIndex: number }) {
+  const toast = useToast();
+  const reveal = async () => {
+    try {
+      await api.downloads.reveal(video.path);
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: "Couldn't show file",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+  return (
+    <div
+      className={cn(
+        "group grid select-none grid-cols-[40px_5fr_2fr_auto] items-center gap-3 px-3 py-2 text-sm",
+        rowIndex !== 0 && "border-t border-border/50",
       )}
+    >
+      <div className="flex justify-center text-muted-foreground">
+        <Film className="h-4 w-4" />
+      </div>
+      <div className="min-w-0">
+        <div className="truncate font-medium">{video.title}</div>
+        <div className="truncate text-xs text-muted-foreground">{video.artist}</div>
+      </div>
+      <div className="truncate text-xs uppercase tracking-wider text-muted-foreground">
+        {video.ext.replace(".", "")} · {formatBytes(video.size_bytes)}
+      </div>
+      <div className="flex justify-end">
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={reveal}
+          title="Show in file explorer"
+        >
+          <FolderOpen className="h-4 w-4" />
+        </Button>
+      </div>
     </div>
   );
 }
@@ -259,11 +476,15 @@ function LocalRow({
   );
 }
 
-function GroupToggle({ value, onChange }: { value: GroupMode; onChange: (v: GroupMode) => void }) {
-  const options: { value: GroupMode; label: string; icon: typeof User }[] = [
-    { value: "artist", label: "By artist", icon: User },
-    { value: "folder", label: "By folder", icon: FolderOpen },
-  ];
+function SortToggle<T extends string>({
+  value,
+  onChange,
+  options,
+}: {
+  value: T;
+  onChange: (v: T) => void;
+  options: { value: T; label: string; icon: typeof User }[];
+}) {
   return (
     <div className="inline-flex rounded-md border border-border bg-secondary p-0.5">
       {options.map((opt) => {
@@ -289,6 +510,120 @@ function GroupToggle({ value, onChange }: { value: GroupMode; onChange: (v: Grou
   );
 }
 
+/**
+ * One music group section — an album or artist header + its tracks.
+ * `groupKey === ""` signals a flat list (Recent sort) which hides
+ * the collapse chrome and just renders rows directly. Albums view
+ * keys as "Artist • Album" so we can split them back into a
+ * two-line header ("Album" big, "Artist" small underneath).
+ */
+function MusicGroupSection({
+  groupKey,
+  files,
+  allFiles,
+  sort,
+  collapsed,
+  onToggle,
+}: {
+  groupKey: string;
+  files: LocalFile[];
+  allFiles: LocalFile[];
+  sort: MusicSort;
+  collapsed: Set<string>;
+  onToggle: (key: string) => void;
+}) {
+  if (groupKey === "") {
+    // Recent mode — flat list, no header, no collapse.
+    return (
+      <section>
+        <LocalGroupList files={files} allFiles={allFiles} />
+      </section>
+    );
+  }
+  const isCollapsed = collapsed.has(groupKey);
+  let headerIcon = User;
+  let heading = groupKey;
+  let subheading: string | null = null;
+  if (sort === "albums") {
+    headerIcon = Disc3;
+    const idx = groupKey.indexOf(" • ");
+    if (idx > 0) {
+      subheading = groupKey.slice(0, idx);
+      heading = groupKey.slice(idx + 3);
+    }
+  }
+  const Icon = headerIcon;
+  return (
+    <section>
+      <button
+        onClick={() => onToggle(groupKey)}
+        className="mb-2 flex w-full items-center gap-2 text-left"
+      >
+        {isCollapsed ? (
+          <ChevronRight className="h-4 w-4 text-muted-foreground" />
+        ) : (
+          <ChevronDown className="h-4 w-4 text-muted-foreground" />
+        )}
+        <Icon className="h-4 w-4 text-muted-foreground" />
+        <div className="min-w-0 flex-1">
+          <div className="truncate font-semibold">{heading}</div>
+          {subheading && (
+            <div className="truncate text-xs text-muted-foreground">
+              {subheading}
+            </div>
+          )}
+        </div>
+        <span className="text-xs text-muted-foreground">
+          {files.length} track{files.length === 1 ? "" : "s"}
+        </span>
+      </button>
+      {!isCollapsed && <LocalGroupList files={files} allFiles={allFiles} />}
+    </section>
+  );
+}
+
+function VideoGroupSection({
+  groupKey,
+  videos,
+  collapsed,
+  onToggle,
+}: {
+  groupKey: string;
+  videos: LocalVideo[];
+  collapsed: Set<string>;
+  onToggle: (key: string) => void;
+}) {
+  if (groupKey === "") {
+    return (
+      <section>
+        <LocalVideoGroupList videos={videos} />
+      </section>
+    );
+  }
+  const cacheKey = `video:${groupKey}`;
+  const isCollapsed = collapsed.has(cacheKey);
+  return (
+    <section>
+      <button
+        onClick={() => onToggle(cacheKey)}
+        className="mb-2 flex w-full items-center gap-2 text-left"
+      >
+        {isCollapsed ? (
+          <ChevronRight className="h-4 w-4 text-muted-foreground" />
+        ) : (
+          <ChevronDown className="h-4 w-4 text-muted-foreground" />
+        )}
+        <User className="h-4 w-4 text-muted-foreground" />
+        <span className="font-semibold">{groupKey}</span>
+        <span className="text-xs text-muted-foreground">
+          {videos.length} video{videos.length === 1 ? "" : "s"}
+        </span>
+      </button>
+      {!isCollapsed && <LocalVideoGroupList videos={videos} />}
+    </section>
+  );
+}
+
 function toTrack(f: LocalFile): Track {
   return {
     kind: "track",
@@ -300,15 +635,6 @@ function toTrack(f: LocalFile): Track {
     artists: [{ id: "", name: f.artist }],
     album: { id: "", name: f.album, cover: null },
   };
-}
-
-function folderOf(f: LocalFile): string {
-  // On Windows the relative path may use backslashes; normalize so the
-  // group key matches regardless of how the backend happened to format
-  // it. Last segment is the filename — drop it.
-  const parts = f.relative_path.replace(/\\/g, "/").split("/");
-  parts.pop();
-  return parts.join("/") || "(root)";
 }
 
 function formatBytes(n: number): string {

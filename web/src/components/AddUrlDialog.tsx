@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link2, Loader2, Plus } from "lucide-react";
 import { api } from "@/api/client";
-import type { QualityOption, Settings } from "@/api/types";
+import type { QualityOption } from "@/api/types";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -14,40 +14,34 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/components/toast";
-import { qualityLabel } from "@/lib/utils";
 
 export function AddUrlDialog({ trigger }: { trigger?: React.ReactNode }) {
   const [open, setOpen] = useState(false);
   const [url, setUrl] = useState("");
   const [quality, setQuality] = useState<string>("");
   const [qualities, setQualities] = useState<QualityOption[]>([]);
-  const [defaultQuality, setDefaultQuality] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const toast = useToast();
 
   useEffect(() => {
     if (!open) return;
+    if (qualities.length) return;
     let cancelled = false;
     (async () => {
       try {
-        const [qs, s] = await Promise.all([
-          qualities.length ? Promise.resolve(qualities) : api.qualities(),
-          defaultQuality ? Promise.resolve<Settings | null>(null) : api.settings.get(),
-        ]);
+        const qs = await api.qualities();
         if (cancelled) return;
-        if (qs !== qualities) setQualities(qs);
-        if (s) setDefaultQuality(s.quality);
+        setQualities(qs);
       } catch {
-        // Fetch failures shouldn't break the dialog — the user can still
-        // paste a URL and leave "Use default" selected. Surface nothing;
-        // the dropdown just stays empty.
+        // Fetch failure shouldn't break the dialog — the user can still
+        // paste a URL and leave "Highest available" selected.
       }
     })();
     return () => {
       cancelled = true;
     };
-  }, [open, qualities, defaultQuality]);
+  }, [open, qualities]);
 
   const submit = async () => {
     if (!url.trim()) return;
@@ -111,12 +105,7 @@ export function AddUrlDialog({ trigger }: { trigger?: React.ReactNode }) {
               onChange={(e) => setQuality(e.target.value)}
               className="h-10 rounded-md border border-input bg-secondary px-3 text-sm"
             >
-              <option value="">
-                Use default
-                {defaultQuality
-                  ? ` (${qualities.find((q) => q.value === defaultQuality)?.label ?? qualityLabel(defaultQuality)})`
-                  : ""}
-              </option>
+              <option value="">Highest available</option>
               {qualities.map((q) => (
                 <option key={q.value} value={q.value}>
                   {q.label} — {q.codec} · {q.bitrate}

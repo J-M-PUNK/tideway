@@ -34,6 +34,10 @@ interface UiPreferences {
   /** Active color theme. Applied via a root-element class so CSS
    *  variables in index.css can swap their values. */
   theme: ThemeMode;
+  /** When true, hide the Import entry from the sidebar. The feature
+   *  stays reachable from Settings; this is just the user saying
+   *  "I've seen it, stop suggesting it." */
+  importLinkDismissed: boolean;
 }
 
 interface UiPreferencesContextValue extends UiPreferences {
@@ -42,8 +46,13 @@ interface UiPreferencesContextValue extends UiPreferences {
 
 const DEFAULTS: UiPreferences = {
   offlineOnly: false,
-  streamingQuality: "low_320k",
+  // Default to Max (hi-res lossless). Backend clamps down to
+  // whatever the subscription tier actually allows, so users on
+  // HiFi/Free still get the best quality available to them without
+  // 401s — no client-side pre-gating needed.
+  streamingQuality: "hi_res_lossless",
   theme: "dark",
+  importLinkDismissed: false,
 };
 
 const Ctx = createContext<UiPreferencesContextValue>({

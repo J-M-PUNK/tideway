@@ -42,6 +42,7 @@ import { CreditsDialog } from "@/components/CreditsDialog";
 import { DownloadButton } from "@/components/DownloadButton";
 import { HeartButton } from "@/components/HeartButton";
 import { SleepTimerButton } from "@/components/SleepTimerButton";
+import { StreamQualityBadge } from "@/components/StreamQualityBadge";
 import { useIsDownloaded } from "@/hooks/useDownloadedSet";
 import { useRecordPlays } from "@/hooks/useRecentlyPlayed";
 import { usePlayerActions, usePlayerMeta, usePlayerTime } from "@/hooks/PlayerContext";
@@ -62,8 +63,19 @@ export function NowPlaying({
   onExpand: () => void;
   onDownload: OnDownload;
 }) {
-  const { track, playing, loading, error, volume, shuffle, repeat, hasNext, hasPrev, queue } =
-    usePlayerMeta();
+  const {
+    track,
+    playing,
+    loading,
+    error,
+    volume,
+    shuffle,
+    repeat,
+    hasNext,
+    hasPrev,
+    queue,
+    streamInfo,
+  } = usePlayerMeta();
   const { currentTime, duration } = usePlayerTime();
   const actions = usePlayerActions();
   const isLocal = useIsDownloaded(track?.id ?? "");
@@ -127,6 +139,7 @@ export function NowPlaying({
                   Downloaded
                 </span>
               )}
+              <StreamQualityBadge info={streamInfo} className="ml-2" />
             </div>
           </div>
           <div className="flex items-center">

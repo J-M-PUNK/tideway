@@ -23,6 +23,7 @@ import type {
   LastFmUserInfo,
   LastFmWeeklyScrobble,
   LocalFile,
+  LocalVideo,
   Lyrics,
   MixDetail,
   PlayerSnapshot,
@@ -36,6 +37,7 @@ import type {
   TidalUser,
   Track,
   Video,
+  VideoDownloadJob,
 } from "./types";
 
 // Upper bound on how long any JSON request is allowed to hang before
@@ -111,6 +113,43 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ url }),
     }),
+  /** Force a full app shutdown. Needed because close-to-tray swallows
+   *  the red-X / Cmd+Q, so the user needs an explicit exit path.
+   *  Returns `{ok: false, reason}` when running outside the desktop
+   *  launcher (e.g. plain browser dev mode) — the UI should hide the
+   *  Quit entry in that case. */
+  quitApp: () =>
+    req<{ ok: boolean; reason?: string }>("/api/_internal/quit", {
+      method: "POST",
+    }),
+  /** Spawn the compact always-on-top mini-player window. Returns
+   *  {ok: false} in plain-browser dev mode. */
+  openMiniPlayer: () =>
+    req<{ ok: boolean; reason?: string }>("/api/_internal/mini_player", {
+      method: "POST",
+    }),
+  /** Fire an OS-native notification. The frontend owns the decision
+   *  of when to call this (only when window unfocused + pref enabled)
+   *  because it has the full context. */
+  notify: (title: string, body: string, subtitle?: string) =>
+    req<{ ok: boolean }>("/api/notify", {
+      method: "POST",
+      body: JSON.stringify({ title, body, subtitle }),
+    }).catch(() => ({ ok: false })),
+  autostart: {
+    /** Report whether the app is currently registered to launch at
+     *  login. `available` is false in dev mode (the exe path isn't
+     *  stable); the UI should disable the toggle in that case. */
+    status: () =>
+      req<{ available: boolean; enabled: boolean; path: string | null }>(
+        "/api/autostart",
+      ),
+    set: (enabled: boolean) =>
+      req<{ available: boolean; enabled: boolean; path: string | null }>(
+        "/api/autostart",
+        { method: "PUT", body: JSON.stringify({ enabled }) },
+      ),
+  },
   lastfm: {
     status: () => req<LastFmStatus>("/api/lastfm/status"),
     setCredentials: (api_key: string, api_secret: string) =>
@@ -215,6 +254,41 @@ export const api = {
       url: string | null;
       notes: string | null;
     }>("/api/update-check"),
+  /** Download the current-platform installer from the latest release
+   *  and open it. Caller should quit the app shortly after so the old
+   *  bundle is out of the way when the user runs the installer. */
+  updateInstall: () =>
+    req<{ ok: boolean; downloaded_to: string | null; reason?: string }>(
+      "/api/update/install",
+      { method: "POST" },
+    ),
+  playReportLog: () =>
+    req<{
+      entries: {
+        ts_ms: number;
+        phase: "sent" | "skipped";
+        track_id: string;
+        http_status: number | null;
+        listened_s?: number;
+        client_id?: string;
+        note?: string;
+      }[];
+    }>("/api/play-report/log"),
+  playReportDiagnose: (trackId?: number) =>
+    req<{
+      ok: boolean;
+      reason?: string;
+      entry?: {
+        ts_ms: number;
+        phase: string;
+        track_id: string;
+        http_status: number | null;
+        note?: string;
+      };
+    }>("/api/play-report/diagnose", {
+      method: "POST",
+      body: JSON.stringify(trackId ? { track_id: trackId } : {}),
+    }),
   import: {
     // Shared across every import source — Spotify / M3U / Deezer all
     // funnel into this after their own match step. The older
@@ -456,7 +530,12 @@ export const api = {
     artists: () => req<Artist[]>("/api/library/artists"),
     playlists: () => req<Playlist[]>("/api/library/playlists"),
     local: () =>
-      req<{ output_dir: string; files: LocalFile[] }>("/api/library/local"),
+      req<{
+        output_dir: string;
+        videos_dir: string;
+        files: LocalFile[];
+        videos: LocalVideo[];
+      }>("/api/library/local"),
     folders: {
       list: (parentId: string = "root") =>
         req<PlaylistFolder[]>(
@@ -513,6 +592,22 @@ export const api = {
     ),
   videoCredits: (id: string) => req<CreditEntry[]>(`/api/video/${id}/credits`),
   videoSimilar: (id: string) => req<Video[]>(`/api/video/${id}/similar`),
+  videoDownloadStart: (id: string, quality?: string) =>
+    req<VideoDownloadJob>(`/api/video/${id}/download`, {
+      method: "POST",
+      body: JSON.stringify(quality ? { quality } : {}),
+    }),
+  videoDownloadStatus: (id: string) =>
+    req<VideoDownloadJob>(`/api/video/${id}/download`),
+  videoDownloadsList: () =>
+    req<VideoDownloadJob[]>(`/api/video/downloads`),
+  /** Open the OS file manager with the given path highlighted.
+   *  No-ops silently in plain browser mode. */
+  revealInFinder: (path: string) =>
+    req<{ ok: boolean }>(`/api/reveal`, {
+      method: "POST",
+      body: JSON.stringify({ path }),
+    }).catch(() => ({ ok: false })),
   playlist: (id: string) => req<PlaylistDetail>(`/api/playlist/${id}`),
   mix: (id: string) => req<MixDetail>(`/api/mix/${encodeURIComponent(id)}`),
   trackLyrics: (id: string) => req<Lyrics>(`/api/track/${id}/lyrics`),
@@ -542,6 +637,30 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ track_id: trackId, quality }),
       }),
+    /** Combined load + play in one call. Saves a network round-trip
+     *  for auto-advance and keeps libvlc's set_media + play back-to-
+     *  back under the same lock so the DASH demuxer starts priming
+     *  as soon as possible. */
+    playTrack: (trackId: string, quality?: string) =>
+      req<PlayerSnapshot>("/api/player/play_track", {
+        method: "POST",
+        body: JSON.stringify({ track_id: trackId, quality }),
+      }),
+    /** Pre-resolve the next track's manifest so auto-advance skips
+     *  the network fetch. Fire-and-forget — a failed preload just
+     *  means the subsequent load() pays the full cost as before. */
+    preload: (trackId: string, quality?: string) =>
+      req<{ ok: boolean; cached: boolean; hit?: boolean }>(
+        "/api/player/preload",
+        {
+          method: "POST",
+          body: JSON.stringify({ track_id: trackId, quality }),
+        },
+      ).catch(() => ({ ok: false, cached: false })),
+    preloadClear: () =>
+      req<{ ok: boolean }>("/api/player/preload/clear", {
+        method: "POST",
+      }).catch(() => ({ ok: false })),
     play: () =>
       req<PlayerSnapshot>("/api/player/play", { method: "POST" }),
     pause: () =>
@@ -567,6 +686,7 @@ export const api = {
       }),
     eq: () =>
       req<{
+        enabled: boolean;
         bands: number[];
         preamp: number | null;
         band_count: number;
@@ -574,14 +694,24 @@ export const api = {
         presets: { index: number; name: string }[];
       }>("/api/player/eq"),
     setEq: (bands: number[], preamp: number | null) =>
-      req<{ ok: boolean; bands: number[]; preamp: number | null }>(
-        "/api/player/eq",
-        { method: "POST", body: JSON.stringify({ bands, preamp }) },
-      ),
-    setEqPreset: (preset: number) =>
-      req<{ ok: boolean; bands: number[] }>("/api/player/eq/preset", {
+      req<{
+        ok: boolean;
+        enabled: boolean;
+        bands: number[];
+        preamp: number | null;
+      }>("/api/player/eq", {
         method: "POST",
-        body: JSON.stringify({ preset }),
+        body: JSON.stringify({ bands, preamp }),
+      }),
+    setEqPreset: (preset: number) =>
+      req<{ ok: boolean; enabled: boolean; bands: number[] }>(
+        "/api/player/eq/preset",
+        { method: "POST", body: JSON.stringify({ preset }) },
+      ),
+    setEqEnabled: (enabled: boolean) =>
+      req<{ ok: boolean; enabled: boolean }>("/api/player/eq/enabled", {
+        method: "POST",
+        body: JSON.stringify({ enabled }),
       }),
     outputDevices: () =>
       req<{

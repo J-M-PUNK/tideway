@@ -1,22 +1,26 @@
 import { useEffect, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import {
+  Activity,
   Bell,
   Check,
+  ChevronRight,
   Download,
   Headphones,
+  Import as ImportIcon,
   Keyboard,
   Library as LibraryIcon,
   Loader2,
   LogOut,
   Moon,
   Palette,
+  Power,
   Settings as SettingsIcon,
   Sun,
 } from "lucide-react";
 import { api } from "@/api/client";
 import type { QualityOption, Settings } from "@/api/types";
 import { Button } from "@/components/ui/button";
-import { publishDefaultQuality } from "@/components/DownloadButton";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { useToast } from "@/components/toast";
@@ -92,7 +96,6 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
         setSettings((cur) =>
           cur && JSON.stringify(cur) === JSON.stringify(settings) ? saved : cur,
         );
-        publishDefaultQuality(saved.quality);
         // Sync the offline-mode context so the app's shell reacts
         // immediately when the user toggles it here — otherwise the
         // sidebar and routes stay out of step until the next reload.
@@ -201,7 +204,7 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
         icon={Download}
         description="Where and how your music is saved to disk."
       >
-        <Field label="Output folder">
+        <Field label="Output folder" hint="Audio downloads land here, organized into album subfolders.">
           <Input
             value={settings.output_dir}
             onChange={(e) => patch({ output_dir: e.target.value })}
@@ -209,21 +212,12 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
           />
         </Field>
 
-        <Field
-          label="Default quality"
-          hint="Used for any download that doesn't override it. Your subscription must support the selected quality."
-        >
-          <select
-            value={settings.quality}
-            onChange={(e) => patch({ quality: e.target.value })}
-            className="h-10 rounded-md border border-input bg-secondary px-3 text-sm"
-          >
-            {qualities.map((q) => (
-              <option key={q.value} value={q.value}>
-                {q.label} — {q.codec} · {q.bitrate}
-              </option>
-            ))}
-          </select>
+        <Field label="Videos folder" hint="Music videos go here — separate so they don't intermix with album folders.">
+          <Input
+            value={settings.videos_dir}
+            onChange={(e) => patch({ videos_dir: e.target.value })}
+            placeholder="/path/to/videos"
+          />
         </Field>
 
         <Field
@@ -286,6 +280,31 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
         />
       </Section>
 
+      <Section
+        title="Import"
+        icon={ImportIcon}
+        description="Bring in playlists, liked songs, saved albums, and followed artists from Spotify, Deezer, or M3U / text files."
+      >
+        <Link
+          to="/import"
+          className="group flex items-center gap-3 rounded-md border border-border/50 bg-card/60 p-3 text-sm transition-colors hover:bg-accent/40"
+        >
+          <ImportIcon className="h-4 w-4 text-primary" />
+          <div className="flex-1">
+            <div className="font-semibold">Open import hub</div>
+            <div className="text-xs text-muted-foreground">
+              Pick what you want to import and which specific items to bring over.
+            </div>
+          </div>
+          <ChevronRight className="h-4 w-4 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
+        </Link>
+        <Toggle
+          checked={!ui.importLinkDismissed}
+          onChange={(v) => ui.set({ importLinkDismissed: !v })}
+          label="Show Import in the sidebar"
+        />
+      </Section>
+
       <Section title="Appearance" icon={Palette}>
         <Field label="Theme">
           <ThemePicker value={ui.theme} onChange={(t) => ui.set({ theme: t })} />
@@ -295,14 +314,23 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
       <Section
         title="Notifications"
         icon={Bell}
-        description="Desktop notification when a batch of downloads finishes. The browser will prompt for permission the first time it fires."
+        description="Native OS notifications. Track-change notifications only fire when the window is unfocused, so the in-app now-playing bar isn't duplicated by a bezel."
       >
         <Toggle
           checked={settings.notify_on_complete}
           onChange={(v) => patch({ notify_on_complete: v })}
           label="Notify me when downloads finish"
         />
+        <Toggle
+          checked={settings.notify_on_track_change}
+          onChange={(v) => patch({ notify_on_track_change: v })}
+          label="Notify me when the track changes (while the window is unfocused)"
+        />
       </Section>
+
+      <AutostartSection />
+
+      <PlayReportingSection />
 
       <LastFmSection />
 
@@ -470,6 +498,7 @@ function ThemePicker({
 function AudioEngineFields() {
   const toast = useToast();
   const [eq, setEq] = useState<{
+    enabled: boolean;
     bands: number[];
     preamp: number | null;
     band_count: number;
@@ -500,6 +529,22 @@ function AudioEngineFields() {
       cancelled = true;
     };
   }, []);
+
+  const toggleEnabled = async (enabled: boolean) => {
+    if (!eq) return;
+    // Optimistic update so the toggle feels instant; roll back on error.
+    setEq({ ...eq, enabled });
+    try {
+      await api.player.setEqEnabled(enabled);
+    } catch (err) {
+      setEq({ ...eq, enabled: !enabled });
+      toast.show({
+        kind: "error",
+        title: "Couldn't toggle equalizer",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
 
   // Local mirror of the slider state so dragging is instant; flush to
   // the backend on release (via mouse-up / change commit).
@@ -572,48 +617,64 @@ function AudioEngineFields() {
 
       <Field
         label="Equalizer"
-        hint="Drag sliders or pick a preset. Reset flattens to zero."
+        hint={
+          eq.enabled
+            ? "Drag sliders or pick a preset. Reset flattens to zero."
+            : "Equalizer is off — toggle it on to hear your changes. Curves are saved either way."
+        }
       >
         <div className="flex flex-col gap-3">
-          <div className="flex flex-wrap items-center gap-2">
-            <select
-              onChange={(e) => {
-                const n = parseInt(e.target.value, 10);
-                if (!isNaN(n)) pickPreset(n);
-              }}
-              value=""
-              className="h-9 rounded-md border border-input bg-secondary px-3 text-xs"
-            >
-              <option value="">Presets…</option>
-              {eq.presets.map((p) => (
-                <option key={p.index} value={p.index}>
-                  {p.name}
-                </option>
-              ))}
-            </select>
-            <Button size="sm" variant="outline" onClick={reset}>
-              Reset
-            </Button>
-          </div>
+          <Toggle
+            checked={eq.enabled}
+            onChange={toggleEnabled}
+            label="Enable equalizer"
+          />
+          <div
+            className={cn(
+              "flex flex-col gap-3 transition-opacity",
+              !eq.enabled && "opacity-50",
+            )}
+          >
+            <div className="flex flex-wrap items-center gap-2">
+              <select
+                onChange={(e) => {
+                  const n = parseInt(e.target.value, 10);
+                  if (!isNaN(n)) pickPreset(n);
+                }}
+                value=""
+                className="h-9 rounded-md border border-input bg-secondary px-3 text-xs"
+              >
+                <option value="">Presets…</option>
+                {eq.presets.map((p) => (
+                  <option key={p.index} value={p.index}>
+                    {p.name}
+                  </option>
+                ))}
+              </select>
+              <Button size="sm" variant="outline" onClick={reset}>
+                Reset
+              </Button>
+            </div>
 
-          <div className="flex items-end gap-3">
-            {localBands?.map((v, i) => (
-              <EqSlider
-                key={i}
-                value={v}
-                freq={eq.frequencies[i]}
-                onChange={(nv) => {
-                  const next = [...localBands];
-                  next[i] = nv;
-                  setLocalBands(next);
-                }}
-                onCommit={(nv) => {
-                  const next = [...localBands];
-                  next[i] = nv;
-                  flush(next);
-                }}
-              />
-            ))}
+            <div className="flex items-end gap-3">
+              {localBands?.map((v, i) => (
+                <EqSlider
+                  key={i}
+                  value={v}
+                  freq={eq.frequencies[i]}
+                  onChange={(nv) => {
+                    const next = [...localBands];
+                    next[i] = nv;
+                    setLocalBands(next);
+                  }}
+                  onCommit={(nv) => {
+                    const next = [...localBands];
+                    next[i] = nv;
+                    flush(next);
+                  }}
+                />
+              ))}
+            </div>
           </div>
         </div>
       </Field>
@@ -928,6 +989,230 @@ function LastFmSection() {
               Save credentials
             </Button>
           </div>
+        </div>
+      )}
+    </Section>
+  );
+}
+
+/**
+ * OS-level autostart toggle. State lives in the OS (launchd plist on
+ * macOS, registry value on Windows, XDG desktop file on Linux) — not
+ * in settings.json — because it has to survive the app being replaced
+ * / reinstalled / moved. Component fetches its own status and writes
+ * directly; no coupling to the Settings dataclass.
+ */
+/**
+ * Diagnostic panel for Tidal play-reporting. Shows the recent report
+ * log + a "Send test event" button that fires a synthetic playback
+ * session through the same path a real play takes. If events are
+ * being accepted by Tidal (HTTP 200) but not showing up on the
+ * official Tidal app's Recently Played, that's a server-side quirk
+ * (caching, delay, event format) rather than a bug in this client.
+ */
+function PlayReportingSection() {
+  const toast = useToast();
+  const [entries, setEntries] = useState<
+    {
+      ts_ms: number;
+      phase: string;
+      track_id: string;
+      http_status: number | null;
+      listened_s?: number;
+      client_id?: string;
+      note?: string;
+    }[]
+  >([]);
+  const [busy, setBusy] = useState(false);
+
+  const refresh = async () => {
+    try {
+      const res = await api.playReportLog();
+      setEntries(res.entries);
+    } catch {
+      /* ignore — endpoint is optional in dev */
+    }
+  };
+
+  useEffect(() => {
+    refresh();
+    // Poll every 5 seconds so real plays (fired on track-end by the
+    // global hook) surface in the panel automatically.
+    const h = window.setInterval(refresh, 5000);
+    return () => window.clearInterval(h);
+  }, []);
+
+  const runTest = async () => {
+    setBusy(true);
+    try {
+      const res = await api.playReportDiagnose();
+      if (res.ok && res.entry) {
+        const status = res.entry.http_status;
+        if (status && status < 400) {
+          toast.show({
+            kind: "success",
+            title: "Tidal accepted the test event",
+            description:
+              "If the test track doesn't show up in Recently Played within a few minutes, Tidal is aggregating more slowly than usual.",
+          });
+        } else {
+          toast.show({
+            kind: "error",
+            title: `Tidal rejected the test event${status ? ` (HTTP ${status})` : ""}`,
+            description: res.entry.note || "Check the log below for details.",
+          });
+        }
+      } else {
+        toast.show({
+          kind: "error",
+          title: "Test didn't complete",
+          description: res.reason || "Reporter didn't process the event.",
+        });
+      }
+      await refresh();
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: "Diagnose failed",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const recent = entries.slice().reverse().slice(0, 15);
+  return (
+    <Section
+      title="Play reporting"
+      icon={Activity}
+      description="Every time a track plays here, an event is sent to Tidal so it appears in your Recently Played / feeds recommendations / credits the artist. If that's not working, send a test and watch the log below."
+    >
+      <div className="flex items-center gap-3">
+        <Button onClick={runTest} disabled={busy}>
+          {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Activity className="h-4 w-4" />}
+          Send test event
+        </Button>
+        <Button variant="outline" size="sm" onClick={refresh}>
+          Refresh log
+        </Button>
+      </div>
+      {recent.length === 0 ? (
+        <p className="text-xs text-muted-foreground">
+          No play events yet. Play a track for &gt; 30 seconds (or click
+          Send test event) to see activity here.
+        </p>
+      ) : (
+        <div className="flex flex-col gap-1 rounded-md border border-border/50 bg-card/40 p-2 text-xs font-mono">
+          {recent.map((e, i) => {
+            const ok = e.phase === "sent" && e.http_status !== null && e.http_status < 400;
+            const skipped = e.phase === "skipped";
+            const failed = !ok && !skipped;
+            return (
+              <div
+                key={i}
+                className={cn(
+                  "flex items-start gap-2 px-2 py-1",
+                  ok && "text-foreground",
+                  skipped && "text-muted-foreground",
+                  failed && "text-destructive",
+                )}
+              >
+                <span className="w-16 tabular-nums text-muted-foreground">
+                  {new Date(e.ts_ms).toLocaleTimeString([], {
+                    hour: "2-digit",
+                    minute: "2-digit",
+                    second: "2-digit",
+                  })}
+                </span>
+                <span className="w-16 font-semibold">
+                  {ok ? `HTTP ${e.http_status}` : skipped ? "SKIP" : failed ? `HTTP ${e.http_status ?? "err"}` : e.phase}
+                </span>
+                <span className="w-24 truncate">track {e.track_id}</span>
+                {e.listened_s != null && (
+                  <span className="w-16 tabular-nums text-muted-foreground">
+                    {e.listened_s}s
+                  </span>
+                )}
+                {e.note && <span className="min-w-0 flex-1 truncate">{e.note}</span>}
+              </div>
+            );
+          })}
+        </div>
+      )}
+    </Section>
+  );
+}
+
+
+function AutostartSection() {
+  const toast = useToast();
+  const [status, setStatus] = useState<{
+    available: boolean;
+    enabled: boolean;
+    path: string | null;
+  } | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.autostart
+      .status()
+      .then((s) => {
+        if (!cancelled) setStatus(s);
+      })
+      .catch(() => {
+        if (!cancelled)
+          setStatus({ available: false, enabled: false, path: null });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (!status) return null;
+
+  const flip = async (v: boolean) => {
+    if (!status.available) return;
+    setBusy(true);
+    try {
+      const next = await api.autostart.set(v);
+      setStatus(next);
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: "Couldn't change auto-start",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Section
+      title="Launch on login"
+      icon={Power}
+      description={
+        status.available
+          ? "Start Tidal Downloader automatically when you log in. Handled by the OS — no background service runs while this is off."
+          : "Auto-start only works in the packaged app. Run from the built .app / .exe to enable this."
+      }
+    >
+      <label className="flex items-center gap-3 text-sm">
+        <input
+          type="checkbox"
+          checked={status.enabled}
+          onChange={(e) => flip(e.target.checked)}
+          disabled={!status.available || busy}
+          className="h-4 w-4 accent-primary"
+        />
+        Start Tidal Downloader when I log in
+        {busy && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+      </label>
+      {status.available && status.path && (
+        <div className="text-xs text-muted-foreground">
+          Will launch: <code className="rounded bg-secondary px-1.5 py-0.5">{status.path}</code>
         </div>
       )}
     </Section>

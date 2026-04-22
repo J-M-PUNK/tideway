@@ -20,7 +20,7 @@ import { useUiPreferences, type StreamingQuality } from "./useUiPreferences";
  * avoids skewing royalties from accidental starts.
  */
 export function useTidalPlayReporter(): void {
-  const { track } = usePlayerMeta();
+  const { track, source } = usePlayerMeta();
   const { currentTime } = usePlayerTime();
   const { streamingQuality } = useUiPreferences();
 
@@ -32,12 +32,17 @@ export function useTidalPlayReporter(): void {
   //   - `lastKnownPositionRef` is the highest `currentTime` we saw —
   //     we use that as the end position since a fresh useEffect tick
   //     after track-change already has currentTime=0.
+  //   - `source` is snapshotted at play-start so if the user navigates
+  //     away from the album page mid-track, the stop event still
+  //     attributes the play to the album that started it.
   const sessionRef = useRef<{
     sessionId: string;
     trackId: string;
     startTsMs: number;
     startPositionS: number;
     duration: number;
+    sourceType: string;
+    sourceId: string;
   } | null>(null);
   const lastKnownPositionRef = useRef(0);
 
@@ -63,6 +68,15 @@ export function useTidalPlayReporter(): void {
             session_id: prev.sessionId,
             track_id: prev.trackId,
             quality: toTidalQuality(streamingQuality),
+            // Tidal's Recently Played aggregator surfaces
+            // container plays (ALBUM / PLAYLIST / MIX), not track
+            // events. When the queue was started with container
+            // context we report that source so the play attributes
+            // to the album/playlist; otherwise we fall back to
+            // "TRACK" + track_id which still counts toward
+            // aggregates like "My Most Listened."
+            source_type: prev.sourceType,
+            source_id: prev.sourceId,
             start_ts_ms: prev.startTsMs,
             end_ts_ms: Date.now(),
             start_position_s: prev.startPositionS,
@@ -79,6 +93,13 @@ export function useTidalPlayReporter(): void {
     // Open a fresh session for the new track. The server hands us a
     // UUID and start timestamp — using server time keeps events
     // consistent even if the client's clock is skewed.
+    //
+    // Source is captured from the player state at play-start. A later
+    // navigation to a different page doesn't retroactively change
+    // what originated this play — the album you clicked Play on is
+    // the one this listen should count toward on Recently Played.
+    const resolvedSourceType = source?.type ?? "TRACK";
+    const resolvedSourceId = source?.id ?? track.id;
     let cancelled = false;
     api.playReport
       .start()
@@ -90,6 +111,8 @@ export function useTidalPlayReporter(): void {
           startTsMs: resp.ts_ms,
           startPositionS: 0,
           duration: track.duration,
+          sourceType: resolvedSourceType,
+          sourceId: resolvedSourceId,
         };
         lastKnownPositionRef.current = 0;
       })
@@ -123,6 +146,8 @@ export function useTidalPlayReporter(): void {
           session_id: prev.sessionId,
           track_id: prev.trackId,
           quality: toTidalQuality(streamingQuality),
+          source_type: prev.sourceType,
+          source_id: prev.sourceId,
           start_ts_ms: prev.startTsMs,
           end_ts_ms: Date.now(),
           start_position_s: prev.startPositionS,

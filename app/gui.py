@@ -1264,12 +1264,6 @@ class SettingsDialog(ctk.CTkToplevel):
         self.dir_e.pack(side="left", padx=(0, 8))
         ctk.CTkButton(dr, text="Browse", width=72, command=self._browse).pack(side="left")
 
-        lbl("Audio Quality").pack(fill="x", **p)
-        self.q_var = ctk.StringVar(value=settings.quality)
-        ctk.CTkOptionMenu(self, width=220,
-                          values=["high_lossless", "hi_res", "hi_res_lossless"],
-                          variable=self.q_var).pack(anchor="w", padx=24, pady=(0, 10))
-
         lbl("Filename Template").pack(fill="x", **p)
         self.tmpl_e = ctk.CTkEntry(self, width=432)
         self.tmpl_e.insert(0, settings.filename_template)
@@ -1293,7 +1287,6 @@ class SettingsDialog(ctk.CTkToplevel):
 
     def _save(self):
         self.settings.output_dir = self.dir_e.get().strip()
-        self.settings.quality = self.q_var.get()
         self.settings.filename_template = self.tmpl_e.get().strip()
         self.settings.skip_existing = self.skip_var.get()
         save_settings(self.settings)

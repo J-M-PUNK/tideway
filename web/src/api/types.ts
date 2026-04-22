@@ -106,6 +106,21 @@ export type LibraryItem = Track | Album | Artist | Playlist;
  * is on, so the rest of the UI doesn't have to care which engine is
  * actually driving audio.
  */
+export interface StreamInfo {
+  /** Where the audio is coming from. Local means we're reading a file
+   *  off disk; stream means a live Tidal session. */
+  source: "stream" | "local";
+  codec: string | null;
+  bit_depth: number | null;
+  sample_rate_hz: number | null;
+  /** Tidal's tier string ("HIGH" / "LOSSLESS" / "HI_RES" /
+   *  "HI_RES_LOSSLESS"). Only set for streaming sources. */
+  audio_quality: string | null;
+  /** "STEREO" for anything we can reach via PKCE; immersive modes
+   *  (Atmos / 360) aren't authorized on our client_id. */
+  audio_mode: string | null;
+}
+
 export interface PlayerSnapshot {
   state: "idle" | "loading" | "playing" | "paused" | "ended" | "error";
   track_id: string | null;
@@ -115,6 +130,9 @@ export interface PlayerSnapshot {
   muted: boolean;
   error: string | null;
   seq: number;
+  /** What's actually audible. Null when the player is idle or still
+   *  loading; the UI hides the badge in that case. */
+  stream_info: StreamInfo | null;
 }
 
 export interface SearchResponse {
@@ -188,15 +206,35 @@ export interface DownloadItem {
   file_path: string | null;
 }
 
+export interface VideoDownloadJob {
+  video_id: number;
+  /** "idle" when the server has no record, "running" while ffmpeg is
+   *  working, "done" after success, "error" after a failure. */
+  state: "idle" | "running" | "done" | "error";
+  title?: string;
+  artist?: string;
+  output_path?: string | null;
+  error?: string | null;
+  /** 0..1 once ffmpeg has emitted its first progress line. Null
+   *  means "no progress yet" — not zero; the UI renders
+   *  indeterminate rather than 0% when null. */
+  progress?: number | null;
+}
+
 export interface Settings {
   output_dir: string;
-  quality: string;
+  /** Where music videos land. Kept separate from output_dir so video
+   *  files don't intermix with album folders / iTunes-style music
+   *  libraries. Default is ~/Movies/Tidal (macOS), ~/Videos/Tidal
+   *  (Windows), or either on Linux depending on which exists. */
+  videos_dir: string;
   filename_template: string;
   create_album_folders: boolean;
   skip_existing: boolean;
   concurrent_downloads: number;
   offline_mode: boolean;
   notify_on_complete: boolean;
+  notify_on_track_change: boolean;
 }
 
 export interface AuthStatus {
@@ -406,4 +444,20 @@ export interface LocalFile {
   duration: number;
   size_bytes: number;
   ext: string;
+  /** File mtime in seconds since epoch — drives the "Recent" sort
+   *  on the On-This-Device page. */
+  mtime: number;
+}
+
+/** A video file the user has downloaded. No album / track_num / tidal_id
+ *  fields because ffmpeg remux doesn't author tags; metadata is parsed
+ *  from the `<Artist> - <Title>` filename the downloader writes. */
+export interface LocalVideo {
+  path: string;
+  relative_path: string;
+  title: string;
+  artist: string;
+  size_bytes: number;
+  ext: string;
+  mtime: number;
 }

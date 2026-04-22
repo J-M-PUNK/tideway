@@ -42,7 +42,22 @@ _tray_icon = repo_root / "assets" / "tray-icon.png"
 if _tray_icon.is_file():
     datas.append((str(_tray_icon), "assets"))
 
-binaries = []
+# Bundled ffmpeg for HLS → MP4 video download. See the matching mac
+# spec for the rationale — we ship the binary so end users aren't
+# asked to install anything. Populate via `scripts/fetch_ffmpeg.sh`
+# (run from Git Bash / WSL on Windows).
+_ffmpeg_bin = repo_root / "vendor" / "ffmpeg" / "windows" / "ffmpeg.exe"
+if _ffmpeg_bin.is_file():
+    binaries_ffmpeg = [(str(_ffmpeg_bin), "ffmpeg")]
+else:
+    binaries_ffmpeg = []
+    print(
+        "[spec] WARNING: vendor/ffmpeg/windows/ffmpeg.exe missing — "
+        "video downloads will require ffmpeg on the user's system. "
+        "Run scripts/fetch_ffmpeg.sh to bundle it."
+    )
+
+binaries = list(binaries_ffmpeg)
 
 # Bundle libvlc + plugins so the native audio engine (Atmos / MQA /
 # Sony 360) works on machines without VLC installed. The runtime

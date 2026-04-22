@@ -182,8 +182,18 @@ export function PlaylistDetail({ onDownload }: { onDownload: OnDownload }) {
         }
         actions={
           <>
-            {tracks.length > 0 && <PlayAllButton tracks={tracks} />}
-            {tracks.length > 0 && <ShuffleButton tracks={tracks} />}
+            {tracks.length > 0 && (
+              <PlayAllButton
+                tracks={tracks}
+                source={{ type: "PLAYLIST", id: playlist.id }}
+              />
+            )}
+            {tracks.length > 0 && (
+              <ShuffleButton
+                tracks={tracks}
+                source={{ type: "PLAYLIST", id: playlist.id }}
+              />
+            )}
             <div className="ml-auto flex items-center gap-6">
               {!playlist.owned && <AddToLibraryButton kind="playlist" id={playlist.id} />}
               <ShareButton shareUrl={playlist.share_url} />
@@ -232,6 +242,7 @@ export function PlaylistDetail({ onDownload }: { onDownload: OnDownload }) {
           onDownload={onDownload}
           onRemove={playlist.owned ? onRemove : undefined}
           onReorder={playlist.owned ? onReorder : undefined}
+          source={{ type: "PLAYLIST", id: playlist.id }}
         />
       </div>
 

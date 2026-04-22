@@ -121,8 +121,24 @@ export function RadioPage({ kind, onDownload }: Props) {
         actions={
           tracks.length > 0 ? (
             <>
-              <PlayAllButton tracks={tracks} />
-              <ShuffleButton tracks={tracks} />
+              <PlayAllButton
+                tracks={tracks}
+                // Radio doesn't have a first-class Tidal id — seed it
+                // with the ARTIST or TRACK the radio spun up from so
+                // plays still attribute to something meaningful on
+                // Recently Played.
+                source={{
+                  type: kind === "artist" ? "ARTIST" : "TRACK",
+                  id,
+                }}
+              />
+              <ShuffleButton
+                tracks={tracks}
+                source={{
+                  type: kind === "artist" ? "ARTIST" : "TRACK",
+                  id,
+                }}
+              />
               <div className="ml-auto flex items-center gap-6">
                 <AddTracksToPlaylistButton tracks={tracks} />
                 <CollectionOverflowMenu tracks={tracks} />
@@ -132,7 +148,12 @@ export function RadioPage({ kind, onDownload }: Props) {
         }
       />
       <div className="mt-8">
-        <TrackList tracks={tracks} onDownload={onDownload} showAlbum />
+        <TrackList
+          tracks={tracks}
+          onDownload={onDownload}
+          showAlbum
+          source={{ type: kind === "artist" ? "ARTIST" : "TRACK", id }}
+        />
       </div>
     </div>
   );

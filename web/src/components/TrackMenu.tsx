@@ -363,7 +363,7 @@ function DownloadSubmenu({
   onPick: (quality?: string) => void;
   mediaTags?: string[];
 }) {
-  const { Item, Separator, Sub, SubTrigger, SubContent } = parts;
+  const { Item, Sub, SubTrigger, SubContent } = parts;
   const qualities = useQualities() ?? [];
   return (
     <Sub>
@@ -371,8 +371,6 @@ function DownloadSubmenu({
         <Download className="h-3.5 w-3.5" /> Download…
       </SubTrigger>
       <SubContent>
-        <Item onSelect={() => onPick()}>Use default quality</Item>
-        <Separator />
         {qualities.map((q) => {
           const effective = trackEffectiveFormat(q.value, mediaTags);
           return (

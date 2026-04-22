@@ -48,8 +48,14 @@ export function MixDetail({ onDownload }: { onDownload: OnDownload }) {
         actions={
           mix.tracks.length > 0 ? (
             <>
-              <PlayAllButton tracks={mix.tracks} />
-              <ShuffleButton tracks={mix.tracks} />
+              <PlayAllButton
+                tracks={mix.tracks}
+                source={{ type: "MIX", id: mix.id }}
+              />
+              <ShuffleButton
+                tracks={mix.tracks}
+                source={{ type: "MIX", id: mix.id }}
+              />
               <div className="ml-auto flex items-center gap-6">
                 <AddTracksToPlaylistButton tracks={mix.tracks} />
                 <ShareButton shareUrl={shareUrl} />
@@ -60,7 +66,11 @@ export function MixDetail({ onDownload }: { onDownload: OnDownload }) {
         }
       />
       <div className="mt-8">
-        <TrackList tracks={mix.tracks} onDownload={onDownload} />
+        <TrackList
+          tracks={mix.tracks}
+          onDownload={onDownload}
+          source={{ type: "MIX", id: mix.id }}
+        />
       </div>
     </div>
   );

@@ -42,6 +42,7 @@ import {
   DropdownMenuItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { VideoDownloadButton } from "@/components/VideoDownloadButton";
 import { cn, formatDuration, imageProxy } from "@/lib/utils";
 
 /**
@@ -756,13 +757,14 @@ function BottomBar({
             active={repeat}
           />
         </div>
-        <div className="flex w-[280px] flex-shrink-0 items-center justify-end gap-3">
+        <div className="flex w-[320px] flex-shrink-0 items-center justify-end gap-3">
           <InlineVolumeControl
             volume={volume}
             muted={muted}
             onChange={onVolumeChange}
             onToggleMute={onToggleMute}
           />
+          <VideoDownloadButton videoId={video.id} />
           <QualityPicker quality={quality} onChange={onQualityChange} />
         </div>
       </div>
