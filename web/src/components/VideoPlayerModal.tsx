@@ -183,12 +183,6 @@ export function VideoPlayerModal() {
   useEffect(() => {
     const v = videoRef.current;
     if (!v) return;
-    console.log("[video] sync volume/muted effect", {
-      volume,
-      muted,
-      videoPrevMuted: v.muted,
-      url,
-    });
     v.volume = volume;
     v.muted = muted;
   }, [volume, muted, current?.id, url]);
@@ -423,25 +417,8 @@ export function VideoPlayerModal() {
         playsInline
         preload="auto"
         loop={repeat}
-        onPlay={(e) => {
-          console.log("[video] onPlay", {
-            muted: (e.target as HTMLVideoElement).muted,
-            paused: (e.target as HTMLVideoElement).paused,
-          });
-          setPlaying(true);
-        }}
-        onPause={(e) => {
-          console.log("[video] onPause", {
-            muted: (e.target as HTMLVideoElement).muted,
-            paused: (e.target as HTMLVideoElement).paused,
-          });
-          setPlaying(false);
-        }}
-        onError={(e) => {
-          console.log("[video] onError", (e.target as HTMLVideoElement).error);
-        }}
-        onWaiting={() => console.log("[video] onWaiting (buffering)")}
-        onCanPlay={() => console.log("[video] onCanPlay")}
+        onPlay={() => setPlaying(true)}
+        onPause={() => setPlaying(false)}
         onTimeUpdate={(e) =>
           setCurrentTime((e.target as HTMLVideoElement).currentTime)
         }
