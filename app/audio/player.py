@@ -630,18 +630,23 @@ class PCMPlayer:
     def apply_equalizer(
         self, bands: list[float], preamp: Optional[float] = None
     ) -> None:
-        """Apply band gains (dB) to the active EQ. Empty `bands`
-        disables filtering entirely.
+        """Apply band gains (dB) to the active EQ. Empty `bands` OR
+        a flat curve with no preamp disables filtering entirely —
+        no point paying 10 biquad operations per sample when the
+        curve is unity.
 
         Remembered so that a stream reopen (cross-rate bridge,
         track load) rebuilds the EQ coefficients against the new
         sample rate without losing the user's curve.
         """
+        is_flat = bands and all(abs(b) < 1e-6 for b in bands) and (
+            preamp is None or abs(preamp) < 1e-6
+        )
         with self._lock:
             self._eq_bands = list(bands)
             self._eq_preamp = preamp
             if self._eq is not None:
-                if bands:
+                if bands and not is_flat:
                     self._eq.set_bands(list(bands), preamp_db=preamp)
                 else:
                     self._eq.clear()
@@ -675,13 +680,61 @@ class PCMPlayer:
         return out
 
     def set_output_device(self, device_id: str) -> None:
-        """Remember the device-id selection. The next time the
-        OutputStream opens (track load or cross-rate bridge) it's
-        constructed on this device. Phase 6 will reopen the stream
-        live; for now changes take effect at the next track.
+        """Remember the device-id selection and, if a stream is
+        currently open, reopen it on the new device without
+        dropping the current decoder/queue. Expected ~50ms of
+        silence during the reopen — same small blip the libvlc
+        path has.
         """
-        with self._lock:
-            self._selected_device_id = device_id or ""
+        device_id = device_id or ""
+        with self._pipeline_lock:
+            with self._lock:
+                prev_id = self._selected_device_id
+                self._selected_device_id = device_id
+                current_stream = self._stream
+                sample_rate = self._stream_sample_rate
+                channels = self._stream_channels
+                sd_dtype = self._stream_sd_dtype
+                was_playing = (
+                    self._state == "playing"
+                    and current_stream is not None
+                )
+            if (
+                not was_playing
+                or prev_id == device_id
+                or sample_rate is None
+                or channels is None
+                or sd_dtype is None
+            ):
+                # Either nothing's playing (picked-up on next load),
+                # the device didn't actually change, or we're missing
+                # the info we'd need to reopen. Nothing more to do.
+                return
+
+            # Close the current stream + open fresh on the new
+            # device. The decoder thread keeps filling the PCM
+            # queue in the background, so the new stream picks up
+            # where the old one left off after its first callback.
+            try:
+                current_stream.stop()
+            except Exception:
+                pass
+            try:
+                current_stream.close()
+            except Exception:
+                pass
+            with self._lock:
+                self._stream = None
+                # Reset the callback's mid-frame carry so the
+                # first post-reopen callback starts on a fresh
+                # chunk boundary — otherwise we could re-emit a
+                # partial chunk of already-played samples.
+                self._callback_carry = None
+                self._open_output_stream(sample_rate, channels, sd_dtype)
+            try:
+                self._stream.start()
+            except Exception:
+                log.exception("set_output_device: stream start failed")
 
     def snapshot(self) -> PlayerSnapshot:
         with self._lock:
@@ -1010,7 +1063,10 @@ class PCMPlayer:
                 buf = outdata.astype(np.float32, copy=True) / scale_in
                 self._eq.apply(buf)
                 np.clip(buf * scale_in, -scale_in, scale_in - 1.0, out=buf)
-                outdata[:] = buf.astype(outdata.dtype)
+                # np.rint rounds to nearest (banker's); plain astype
+                # would truncate toward zero and bias samples slightly
+                # negative on average.
+                outdata[:] = np.rint(buf).astype(outdata.dtype)
 
         # Volume + mute post-processing. At volume=100 and not muted
         # (and no EQ above), bit-perfect pass-through still holds.
