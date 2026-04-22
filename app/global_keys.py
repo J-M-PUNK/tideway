@@ -11,10 +11,11 @@ to our local player HTTP endpoints.
   surface the issue.
 - Windows / Linux: no permission prompt; pynput just works.
 
-All calls go to /api/player/* on the local loopback. The listener never
-touches VLCPlayer directly — keeps it engine-agnostic and avoids the
-GIL/threading surprises you get when pynput's listener thread touches
-libvlc.
+All calls go to /api/player/* on the local loopback. The listener
+never touches the audio engine directly — going through HTTP keeps
+it out of the realtime audio callback's way and avoids the
+GIL/threading surprises of a hotkey thread sharing state with the
+decoder.
 """
 from __future__ import annotations
 

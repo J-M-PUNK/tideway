@@ -1,10 +1,15 @@
-"""PCMPlayer — PyAV + sounddevice replacement for VLCPlayer.
+"""PCMPlayer — PyAV + sounddevice audio engine.
 
-Phase 3 scope: full single-track parity with the old VLCPlayer
-(pause/resume/seek/volume/mute, local files, position reporting,
-StreamInfo for the quality badge), plus bit-perfect output — the
-sounddevice OutputStream opens in the source's native sample rate
-AND native format, no software resampling or conversion.
+Decodes DASH / local audio with PyAV and drives a sounddevice
+OutputStream at the track's native sample rate + native format.
+No software resampling or format conversion anywhere in the
+playback path; samples hit CoreAudio / WASAPI / ALSA bit-identical
+to what's in the source.
+
+Gapless transitions: preloaded next-track PCM is spliced into the
+live OutputStream at the sample boundary (same-rate) or triggers a
+~50ms stream reopen (cross-rate). Both paths sit behind `preload()`
+and fire automatically on natural end-of-track.
 
 Threading model:
   - Main thread (HTTP handlers): calls load/play/pause/resume/seek/
@@ -312,10 +317,10 @@ class PCMPlayer:
     def play_track(
         self, track_id: str, quality: Optional[str] = None
     ) -> PlayerSnapshot:
-        """Combined load + play. Matches the VLCPlayer API so the
-        server's import-path swap in Phase 7 stays mechanical. The
-        pipeline lock keeps load + play atomic relative to other
-        state changes."""
+        """Combined load + play. The pipeline lock keeps load +
+        play atomic relative to other state changes, so a
+        concurrent stop / seek can't land in between the two
+        phases."""
         with self._pipeline_lock:
             snap = self.load(track_id, quality=quality)
             if snap.state == "error":
@@ -609,11 +614,11 @@ class PCMPlayer:
 
     # --- EQ --------------------------------------------------------
     #
-    # Same class-method shape as VLCPlayer so server.py can call
-    # these without branching on engine. Per-track coefficients
-    # depend on sample_rate, so the Equalizer instance is built /
-    # rebuilt in load()/_adopt_preload_locked/_bridge_to_preload,
-    # but the user's bands + preamp survive across rebuilds.
+    # Per-track coefficients depend on sample_rate, so the
+    # Equalizer instance is built / rebuilt in load() /
+    # _adopt_preload_locked / _bridge_to_preload, but the user's
+    # bands + preamp are remembered on the player and re-applied
+    # each rebuild.
 
     @staticmethod
     def eq_presets() -> list[dict]:
@@ -663,9 +668,8 @@ class PCMPlayer:
 
     def list_output_devices(self) -> list[dict]:
         """Enumerate output-capable audio devices via sounddevice.
-        Returns the same shape as VLCPlayer.list_output_devices():
-        `[{"id": "<int-as-str>", "name": "<human>"}]`, with an
-        empty-id "System default" entry first.
+        Returns `[{"id": "<int-as-str>", "name": "<human>"}]`, with
+        an empty-id "System default" entry first.
         """
         out: list[dict] = [{"id": "", "name": "System default"}]
         try:
@@ -683,8 +687,8 @@ class PCMPlayer:
         """Remember the device-id selection and, if a stream is
         currently open, reopen it on the new device without
         dropping the current decoder/queue. Expected ~50ms of
-        silence during the reopen — same small blip the libvlc
-        path has.
+        silence during the reopen — small blip, same as any
+        device-switch in any audio app.
         """
         device_id = device_id or ""
         with self._pipeline_lock:
@@ -1085,9 +1089,7 @@ class PCMPlayer:
 
         self._samples_emitted += frames
         # Bump seq so the frontend's SSE dedupe lets through the
-        # position update. libvlc bumped seq on every
-        # MediaPlayerTimeChanged (~4Hz); we mirror that here at a
-        # comparable rate. The callback fires ~90Hz at 44.1k /512
+        # position update. The callback fires ~90Hz at 44.1k /512
         # frames, so ~every 20th call keeps us close to 4-5Hz —
         # smooth for a scrubber, cheap on CPU.
         _cb_counter = getattr(self, "_seq_bump_counter", 0) + 1
@@ -1192,14 +1194,14 @@ class PCMPlayer:
         channel count match. Returns True on success; False if
         there's no preload or it's incompatible.
 
-        Emits `ended` BEFORE the swap and `playing` after. This
-        matches the libvlc path's frontend-contract: the frontend's
-        advance logic fires on `ended`, updates its
+        Emits `ended` BEFORE the swap and `playing` after. The
+        frontend's advance logic fires on `ended`, updates its
         `expectedTrackIdRef` via `playAtIndex`, and the redundant
         `play_track(next)` that follows lands on Path 0 (no-op
         because current_track_id already matches). Without the
-        `ended` emit, the frontend's expected-guard drops all new
-        snapshots because its expected is still the previous track.
+        `ended` emit, the frontend's expected-guard would drop all
+        new snapshots because its expected is still the previous
+        track.
 
         Assignments are individually atomic under the GIL; the
         callback is the sole modifier during the track-boundary

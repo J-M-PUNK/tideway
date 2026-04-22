@@ -11,10 +11,11 @@ sse-starlette>=2.0.0
 # on Win10 via the Evergreen bootstrapper). On macOS it uses WKWebView,
 # shipped with the OS.
 pywebview>=5.0
-# Native audio engine — PyAV (libav/ffmpeg) for demuxing + decoding +
-# sounddevice (PortAudio) for the output stream. This pair replaces the
-# libvlc-backed engine so we can pre-decode the next track into PCM and
-# splice at the sample boundary — true gapless, bit-perfect output.
+# Native audio engine — PyAV (libav/ffmpeg) for demuxing + decoding
+# and sounddevice (PortAudio) for the output stream. Pre-decoded PCM
+# is spliced at the sample boundary for true gapless transitions,
+# and samples hit the OS audio API at the track's native rate for
+# bit-perfect output.
 av>=12.0.0
 sounddevice>=0.4.6
 numpy>=1.26.0

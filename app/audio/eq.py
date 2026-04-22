@@ -25,9 +25,8 @@ import numpy as np
 from scipy.signal import sosfilt, sosfilt_zi  # type: ignore
 
 
-# ISO-standard 10-band center frequencies. Matches what libvlc
-# exposes via eq_band_frequencies() so the Settings UI lines up
-# regardless of active engine.
+# ISO-standard 10-band center frequencies. One peaking biquad
+# centered at each, rendered as a slider in the Settings UI.
 BAND_FREQUENCIES_HZ: tuple[float, ...] = (
     60.0, 170.0, 310.0, 600.0, 1000.0,
     3000.0, 6000.0, 12000.0, 14000.0, 16000.0,

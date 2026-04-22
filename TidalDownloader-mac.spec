@@ -73,27 +73,6 @@ else:
 
 binaries = list(binaries_ffmpeg)
 
-# Bundle libvlc so the native audio engine works on machines without
-# VLC installed. We copy the dylibs + plugin directory straight out of
-# a locally-installed VLC.app (the spec errors out below if VLC isn't
-# there — the user is expected to install it before building). The
-# runtime bootstrap in desktop.py points python-vlc at these paths via
-# PYTHON_VLC_LIB_PATH / PYTHON_VLC_MODULE_PATH env vars.
-vlc_root = Path("/Applications/VLC.app/Contents/MacOS")
-if not vlc_root.is_dir():
-    raise SystemExit(
-        "VLC.app not found at /Applications/VLC.app. Install VLC "
-        "(https://www.videolan.org/vlc/) before building — the bundled "
-        "libvlc powers Atmos/MQA/360 playback for users without VLC."
-    )
-for _lib in ("libvlc.dylib", "libvlc.5.dylib", "libvlccore.dylib", "libvlccore.9.dylib"):
-    _src = vlc_root / "lib" / _lib
-    if _src.is_file():
-        datas.append((str(_src), "vlc/lib"))
-# Plugin directory — 80MB, ~340 files. PyInstaller's datas walk this
-# recursively and mirror the tree under Contents/Resources/vlc/plugins.
-datas.append((str(vlc_root / "plugins"), "vlc/plugins"))
-
 # Pull pydantic_core's Rust extension in explicitly — default static
 # analysis misses the .so and the app crashes on import at launch.
 for pkg in ("pydantic", "pydantic_core"):

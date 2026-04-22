@@ -629,16 +629,7 @@ export const api = {
     }>("/api/feed"),
   player: {
     available: () =>
-      req<{
-        available: boolean;
-        engines?: { vlc: boolean; pcm: boolean };
-        current?: "vlc" | "pcm";
-      }>("/api/player/available"),
-    setEngine: (engine: "vlc" | "pcm") =>
-      req<{ ok: boolean; engine: "vlc" | "pcm" }>("/api/player/engine", {
-        method: "POST",
-        body: JSON.stringify({ engine }),
-      }),
+      req<{ available: boolean }>("/api/player/available"),
     state: () =>
       req<PlayerSnapshot>("/api/player/state"),
     load: (trackId: string, quality?: string) =>
@@ -647,8 +638,8 @@ export const api = {
         body: JSON.stringify({ track_id: trackId, quality }),
       }),
     /** Combined load + play in one call. Saves a network round-trip
-     *  for auto-advance and keeps libvlc's set_media + play back-to-
-     *  back under the same lock so the DASH demuxer starts priming
+     *  for auto-advance and keeps set_media + play back-to-back
+     *  under the same backend lock so the decoder starts priming
      *  as soon as possible. */
     playTrack: (trackId: string, quality?: string) =>
       req<PlayerSnapshot>("/api/player/play_track", {

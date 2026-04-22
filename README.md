@@ -1,10 +1,10 @@
 # Tidal Downloader
 
 A Spotify-style desktop client for Tidal with downloads, Last.fm scrobbling,
-listening stats, native audio engine (libvlc), equalizer, output-device picker,
-global media keys, and more. FastAPI backend wraps the download pipeline +
-libvlc playback; a Vite + React + Tailwind frontend provides the UI inside a
-pywebview window.
+listening stats, bit-perfect gapless playback (PyAV + sounddevice), 10-band
+equalizer, output-device picker, global media keys, and more. FastAPI backend
+wraps the download pipeline + audio engine; a Vite + React + Tailwind frontend
+provides the UI inside a pywebview window.
 
 ## Install (released builds)
 

@@ -59,38 +59,6 @@ else:
 
 binaries = list(binaries_ffmpeg)
 
-# Bundle libvlc + plugins so the native audio engine (Atmos / MQA /
-# Sony 360) works on machines without VLC installed. The runtime
-# bootstrap in desktop.py points python-vlc at these paths via
-# PYTHON_VLC_LIB_PATH / PYTHON_VLC_MODULE_PATH.
-#
-# VLC's Windows installer defaults to C:\Program Files\VideoLAN\VLC.
-# Environment override VLC_INSTALL_DIR lets CI / non-default installs
-# point us elsewhere. The spec errors out if neither is present —
-# the build machine is expected to have VLC installed.
-import os as _os
-
-_vlc_candidates = []
-if _os.environ.get("VLC_INSTALL_DIR"):
-    _vlc_candidates.append(Path(_os.environ["VLC_INSTALL_DIR"]))
-_vlc_candidates += [
-    Path(r"C:\Program Files\VideoLAN\VLC"),
-    Path(r"C:\Program Files (x86)\VideoLAN\VLC"),
-]
-vlc_root = next((p for p in _vlc_candidates if p.is_dir()), None)
-if vlc_root is None:
-    raise SystemExit(
-        "VLC install not found. Install from https://www.videolan.org/vlc/ "
-        "or set VLC_INSTALL_DIR to the VLC directory. Required for "
-        "bundling libvlc into the app."
-    )
-for _dll in ("libvlc.dll", "libvlccore.dll"):
-    _src = vlc_root / _dll
-    if _src.is_file():
-        datas.append((str(_src), "vlc"))
-if (vlc_root / "plugins").is_dir():
-    datas.append((str(vlc_root / "plugins"), "vlc/plugins"))
-
 # pydantic v2's core is a Rust extension (`pydantic_core._pydantic_core`)
 # plus a metadata dir. PyInstaller's default static analysis misses the
 # compiled .pyd; collect_all grabs data + binaries + submodules in one

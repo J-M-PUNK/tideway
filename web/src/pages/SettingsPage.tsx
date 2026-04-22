@@ -169,7 +169,7 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
       <Section
         title="Playback"
         icon={Headphones}
-        description="Streaming quality, output device, and the equalizer. The audio-engine picker lets you switch between the classic libvlc path and the new PyAV + sounddevice engine that ships gapless transitions."
+        description="Streaming quality, output device, and the equalizer. Playback runs through the native PyAV + sounddevice engine — gapless transitions and bit-perfect output at the track's sample rate."
       >
         <Field
           label="Streaming quality"
@@ -482,25 +482,19 @@ function ThemePicker({
 }
 
 /**
- * Equalizer + audio-output device picker. Both drive libvlc directly
- * and both are persisted in the backend settings.json so a relaunch
- * keeps the user's sound + device.
+ * Equalizer + audio-output device picker. Persisted in the backend
+ * settings.json so a relaunch keeps the user's sound + device.
  *
  * Rendered as Fields (no outer Section) so they compose into the
  * parent Playback section alongside the streaming-quality picker.
  *
- * Preset dropdown picks one of libvlc's 18 built-ins and lets the
- * backend resolve to per-band amplitudes (so "Rock" renders the
- * matching slider curve immediately). Manual slider changes POST the
- * full band array with `preamp` = null ("leave preamp at libvlc's
- * default" vs. an explicit number).
+ * Preset dropdown picks one of the backend's built-ins and the
+ * backend resolves to per-band amplitudes (so "Rock" renders the
+ * matching slider curve immediately). Manual slider changes POST
+ * the full band array with `preamp` = null ("no explicit preamp").
  */
 function AudioEngineFields() {
   const toast = useToast();
-  const [engineInfo, setEngineInfo] = useState<{
-    engines: { vlc: boolean; pcm: boolean };
-    current: "vlc" | "pcm";
-  } | null>(null);
   const [eq, setEq] = useState<{
     enabled: boolean;
     bands: number[];
@@ -514,56 +508,25 @@ function AudioEngineFields() {
     current: string;
   } | null>(null);
 
-  const loadPlaybackState = async () => {
-    try {
-      const [avail, e, d] = await Promise.all([
-        api.player.available(),
-        api.player.eq(),
-        api.player.outputDevices(),
-      ]);
-      setEngineInfo({
-        engines: avail.engines ?? { vlc: avail.available, pcm: false },
-        current: avail.current ?? "vlc",
-      });
-      setEq(e);
-      setDevices(d);
-    } catch {
-      /* audio engine not available — fields stay hidden */
-    }
-  };
-
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      await loadPlaybackState();
-      void cancelled;
+      try {
+        const [e, d] = await Promise.all([
+          api.player.eq(),
+          api.player.outputDevices(),
+        ]);
+        if (cancelled) return;
+        setEq(e);
+        setDevices(d);
+      } catch {
+        /* audio engine not available — fields stay hidden */
+      }
     })();
-    return () => {};
+    return () => {
+      cancelled = true;
+    };
   }, []);
-
-  const switchEngine = async (engine: "vlc" | "pcm") => {
-    try {
-      await api.player.setEngine(engine);
-      // Re-fetch EQ/devices so the new engine's band layout + device
-      // list (which differs on pcm: sounddevice enumerates separately
-      // from libvlc) replaces the stale data.
-      await loadPlaybackState();
-      toast.show({
-        kind: "success",
-        title: engine === "pcm" ? "Switched to PCM engine" : "Switched to libvlc engine",
-        description:
-          engine === "pcm"
-            ? "Gapless playback + bit-perfect output + EQ + live device switching."
-            : "Classic engine. No sample-accurate gapless on DASH.",
-      });
-    } catch (err) {
-      toast.show({
-        kind: "error",
-        title: "Couldn't switch audio engine",
-        description: err instanceof Error ? err.message : String(err),
-      });
-    }
-  };
 
   const toggleEnabled = async (enabled: boolean) => {
     if (!eq) return;
@@ -636,29 +599,6 @@ function AudioEngineFields() {
 
   return (
     <>
-      {engineInfo && engineInfo.engines.pcm && (
-        <Field
-          label="Audio engine"
-          hint={
-            engineInfo.current === "pcm"
-              ? "PyAV + sounddevice. Sample-accurate gapless transitions and bit-perfect output at the track's native sample rate, 10-band EQ, and live output-device switching."
-              : "libvlc. Long-shipping classic engine. Inter-track transitions have a small audible gap or clipped transient on DASH streams; stays as a fallback."
-          }
-        >
-          <select
-            value={engineInfo.current}
-            onChange={(e) => switchEngine(e.target.value as "vlc" | "pcm")}
-            className="h-10 rounded-md border border-input bg-secondary px-3 text-sm"
-          >
-            <option value="vlc" disabled={!engineInfo.engines.vlc}>
-              libvlc (classic){engineInfo.engines.vlc ? "" : " — unavailable"}
-            </option>
-            <option value="pcm" disabled={!engineInfo.engines.pcm}>
-              PyAV + sounddevice (gapless, bit-perfect)
-            </option>
-          </select>
-        </Field>
-      )}
       <Field label="Output device">
         <select
           value={devices.current}
