@@ -145,9 +145,12 @@ export function VideoPlayerModal() {
       hls.attachMedia(video);
       hls.on(Hls.Events.MANIFEST_PARSED, () => {
         video.play().catch(() => {
-          // Autoplay blocked (e.g., browser-level policy against
-          // audio playback without user interaction). The video
-          // is ready; user can hit the play button.
+          // Autoplay blocked (Chrome's policy for audible media
+          // without sufficient recent user-gesture credit). The
+          // video is loaded and paused; sync the UI state so the
+          // play/pause button shows "play" and a single click
+          // starts playback.
+          setPlaying(false);
         });
       });
       return () => {
