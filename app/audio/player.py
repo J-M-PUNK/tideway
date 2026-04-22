@@ -107,6 +107,14 @@ class PCMPlayer:
         self._quality_clamp = quality_clamp
 
         self._lock = threading.RLock()
+        # Serializes load/stop/seek/preload so concurrent HTTP calls
+        # can't race each other into opening overlapping streams or
+        # sharing a single decoder across threads. Held for the full
+        # duration of a state-changing operation; the audio callback
+        # and decoder threads never touch it. RLock so play_track()
+        # can take the lock around its load() + play() pair without
+        # needing a separate locked helper for play.
+        self._pipeline_lock = threading.RLock()
         self._state = "idle"
         self._current_track_id: Optional[str] = None
         self._current_duration_ms: int = 0
@@ -177,7 +185,18 @@ class PCMPlayer:
     ) -> PlayerSnapshot:
         """Resolve stream/local source, open decoder + output stream.
         Doesn't start playback; caller must `play()` next.
+
+        Serialized on `_pipeline_lock`: concurrent HTTP calls (rapid
+        skip, backend auto-swap colliding with frontend play_track,
+        etc.) resolve in order rather than racing into overlapping
+        sounddevice streams.
         """
+        with self._pipeline_lock:
+            return self._load_locked(track_id, quality)
+
+    def _load_locked(
+        self, track_id: str, quality: Optional[str]
+    ) -> PlayerSnapshot:
         with self._lock:
             # Path 0: already audible on this track. Happens when the
             # backend's gapless swap already transitioned us to the
@@ -231,9 +250,16 @@ class PCMPlayer:
             self._callback_carry = None
             self._paused = False
             self._seeking = False
-            self._stop_flag.clear()
-            self._decoder_done.clear()
-            self._drain_queue_locked()
+            # Fresh events + queue for the new run. An old decoder
+            # thread whose join() timed out might still be alive
+            # holding the PREVIOUS objects as locals. If we reuse
+            # those, the zombie thread would keep pushing pre-load
+            # samples into the live queue and see its stop_flag
+            # toggle back to "not set," so we hand the new run a
+            # clean set of objects.
+            self._stop_flag = threading.Event()
+            self._decoder_done = threading.Event()
+            self._pcm_queue = queue.Queue(maxsize=_PCM_QUEUE_MAX)
             self._last_error = None
 
         self._start_decoder_thread()
@@ -243,11 +269,14 @@ class PCMPlayer:
         self, track_id: str, quality: Optional[str] = None
     ) -> PlayerSnapshot:
         """Combined load + play. Matches the VLCPlayer API so the
-        server's import-path swap in Phase 7 stays mechanical."""
-        snap = self.load(track_id, quality=quality)
-        if snap.state == "error":
-            return snap
-        return self.play()
+        server's import-path swap in Phase 7 stays mechanical. The
+        pipeline lock keeps load + play atomic relative to other
+        state changes."""
+        with self._pipeline_lock:
+            snap = self.load(track_id, quality=quality)
+            if snap.state == "error":
+                return snap
+            return self.play()
 
     def play(self) -> PlayerSnapshot:
         with self._lock:
@@ -281,11 +310,12 @@ class PCMPlayer:
         return self.play()
 
     def stop(self) -> PlayerSnapshot:
-        self._teardown()
-        with self._lock:
-            self._last_error = None
-        self._emit()
-        return self.snapshot()
+        with self._pipeline_lock:
+            self._teardown()
+            with self._lock:
+                self._last_error = None
+            self._emit()
+            return self.snapshot()
 
     def seek(self, fraction: float) -> PlayerSnapshot:
         """Seek to `fraction` (0..1) of the track duration.
@@ -300,35 +330,37 @@ class PCMPlayer:
         Local files get a precise seek via `container.seek()` on
         the newly-opened container.
         """
-        fraction = max(0.0, min(1.0, float(fraction)))
-        with self._lock:
-            duration_ms = self._current_duration_ms
-            sample_rate = self._stream_sample_rate or 44100
-            if duration_ms <= 0:
-                return self.snapshot()
-            target_s = (duration_ms / 1000.0) * fraction
-
-        # Suppress CallbackStop during the decoder swap. Without
-        # this, the brief window where the queue is empty AND the
-        # old decoder has exited would let the callback raise
-        # CallbackStop and end the stream mid-seek.
-        with self._lock:
-            self._seeking = True
-        effective_s = target_s
-        try:
-            effective_s = self._restart_decoder_at(target_s)
-        except Exception:
-            log.exception("seek to %s failed", target_s)
-        finally:
+        with self._pipeline_lock:
+            fraction = max(0.0, min(1.0, float(fraction)))
             with self._lock:
-                # Use the DECODER'S effective start, not the user's
-                # requested target, so position reporting matches
-                # the audio you actually hear. On DASH this may be
-                # up to one segment earlier than requested (~3-4s).
-                self._samples_emitted = int(effective_s * sample_rate)
-                self._seeking = False
-                self._seq += 1
-        return self.snapshot()
+                duration_ms = self._current_duration_ms
+                sample_rate = self._stream_sample_rate or 44100
+                if duration_ms <= 0:
+                    return self.snapshot()
+                target_s = (duration_ms / 1000.0) * fraction
+
+            # Suppress CallbackStop during the decoder swap. Without
+            # this, the brief window where the queue is empty AND the
+            # old decoder has exited would let the callback raise
+            # CallbackStop and end the stream mid-seek.
+            with self._lock:
+                self._seeking = True
+            effective_s = target_s
+            try:
+                effective_s = self._restart_decoder_at(target_s)
+            except Exception:
+                log.exception("seek to %s failed", target_s)
+            finally:
+                with self._lock:
+                    # Use the DECODER'S effective start, not the
+                    # user's requested target, so position reporting
+                    # matches the audio you actually hear. On DASH
+                    # this may be up to one segment earlier than
+                    # requested (~3-4s).
+                    self._samples_emitted = int(effective_s * sample_rate)
+                    self._seeking = False
+                    self._seq += 1
+            return self.snapshot()
 
     # --- restart-based seek -----------------------------------------
 
@@ -367,10 +399,11 @@ class PCMPlayer:
 
         with self._lock:
             self._decoder = new_decoder
-            self._drain_queue_locked()
             self._callback_carry = None
-            self._stop_flag.clear()
-            self._decoder_done.clear()
+            # Fresh events + queue — see comment in _load_locked().
+            self._stop_flag = threading.Event()
+            self._decoder_done = threading.Event()
+            self._pcm_queue = queue.Queue(maxsize=_PCM_QUEUE_MAX)
 
         self._start_decoder_thread()
         return effective_s
@@ -409,101 +442,93 @@ class PCMPlayer:
 
         Idempotent for the same (track_id, quality); swapping the
         request to a different track tears down the existing
-        preload first.
+        preload first. Serialized on `_pipeline_lock` alongside
+        load/stop/seek.
         """
-        with self._lock:
-            existing = self._preload
-            if (
-                existing is not None
-                and existing.track_id == track_id
-                and existing.quality == quality
-            ):
-                return {"ok": True, "cached": True, "hit": True}
-        # Different track (or no preload) — tear down any stale one.
-        self._drop_preload()
+        with self._pipeline_lock:
+            with self._lock:
+                existing = self._preload
+                if (
+                    existing is not None
+                    and existing.track_id == track_id
+                    and existing.quality == quality
+                ):
+                    return {"ok": True, "cached": True, "hit": True}
+            # Different track (or no preload) — tear down any stale
+            # one before we build the new one.
+            self._drop_preload()
 
-        try:
-            source_spec, duration_s, stream_info = self._resolve_source(
-                track_id, quality
-            )
-            source = _build_source(source_spec)
-            decoder = Decoder(source)
-        except Exception as exc:
-            log.exception("preload resolve failed for %s", track_id)
-            return {"ok": False, "error": str(exc)}
-
-        q: queue.Queue[Optional[np.ndarray]] = queue.Queue(
-            maxsize=_PCM_QUEUE_MAX
-        )
-        stop_flag = threading.Event()
-        done = threading.Event()
-
-        def _loop() -> None:
             try:
-                while not stop_flag.is_set():
-                    pcm = decoder.next_pcm()
-                    if pcm is None:
-                        break
-                    while not stop_flag.is_set():
-                        try:
-                            q.put(pcm, timeout=0.5)
-                            break
-                        except queue.Full:
-                            continue
-            except Exception:
-                log.exception("preload decoder crashed")
-            finally:
-                done.set()
-                try:
-                    q.put_nowait(None)
-                except queue.Full:
-                    pass
+                source_spec, duration_s, stream_info = self._resolve_source(
+                    track_id, quality
+                )
+                source = _build_source(source_spec)
+                decoder = Decoder(source)
+            except Exception as exc:
+                log.exception("preload resolve failed for %s", track_id)
+                return {"ok": False, "error": str(exc)}
 
-        thread = threading.Thread(target=_loop, name="pcm-preload", daemon=True)
-        thread.start()
+            q: queue.Queue[Optional[np.ndarray]] = queue.Queue(
+                maxsize=_PCM_QUEUE_MAX
+            )
+            stop_flag = threading.Event()
+            done = threading.Event()
 
-        urls = source_spec if isinstance(source_spec, list) else None
-        path = source_spec if isinstance(source_spec, str) else None
+            thread = threading.Thread(
+                target=PCMPlayer._decoder_loop,
+                args=(decoder, q, stop_flag, done),
+                name="pcm-preload",
+                daemon=True,
+            )
+            thread.start()
 
-        pre = _Preload(
-            track_id=track_id,
-            quality=quality,
-            duration_ms=int(duration_s * 1000) if duration_s else 0,
-            stream_info=stream_info,
-            source_urls=list(urls) if urls is not None else None,
-            source_path=path,
-            decoder=decoder,
-            queue=q,
-            thread=thread,
-            stop_flag=stop_flag,
-            done=done,
-            sample_rate=decoder.sample_rate,
-            channels=decoder.channels,
-            sd_dtype=decoder.sounddevice_dtype,
-        )
-        with self._lock:
-            self._preload = pre
-        return {
-            "ok": True,
-            "cached": True,
-            "sample_rate": pre.sample_rate,
-            "dtype": pre.sd_dtype,
-        }
+            urls = source_spec if isinstance(source_spec, list) else None
+            path = source_spec if isinstance(source_spec, str) else None
+
+            pre = _Preload(
+                track_id=track_id,
+                quality=quality,
+                duration_ms=int(duration_s * 1000) if duration_s else 0,
+                stream_info=stream_info,
+                source_urls=list(urls) if urls is not None else None,
+                source_path=path,
+                decoder=decoder,
+                queue=q,
+                thread=thread,
+                stop_flag=stop_flag,
+                done=done,
+                sample_rate=decoder.sample_rate,
+                channels=decoder.channels,
+                sd_dtype=decoder.sounddevice_dtype,
+            )
+            with self._lock:
+                self._preload = pre
+            return {
+                "ok": True,
+                "cached": True,
+                "sample_rate": pre.sample_rate,
+                "dtype": pre.sd_dtype,
+            }
 
     def _drop_preload(self) -> None:
-        """Stop the preload thread, close its decoder, clear the slot."""
-        with self._lock:
-            pre = self._preload
-            self._preload = None
-        if pre is None:
-            return
-        pre.stop_flag.set()
-        if pre.thread.is_alive():
-            pre.thread.join(timeout=2.0)
-        try:
-            pre.decoder.close()
-        except Exception:
-            pass
+        """Stop the preload thread, close its decoder, clear the slot.
+        Safe to call from either a locked pipeline operation or from
+        the HTTP layer — takes the pipeline lock itself (RLock, so
+        nesting is fine).
+        """
+        with self._pipeline_lock:
+            with self._lock:
+                pre = self._preload
+                self._preload = None
+            if pre is None:
+                return
+            pre.stop_flag.set()
+            if pre.thread.is_alive():
+                pre.thread.join(timeout=2.0)
+            try:
+                pre.decoder.close()
+            except Exception:
+                pass
 
     def set_volume(self, volume: int) -> PlayerSnapshot:
         volume = max(0, min(100, int(volume)))
@@ -745,34 +770,57 @@ class PCMPlayer:
         )
 
     def _start_decoder_thread(self) -> None:
-        self._decoder_thread = threading.Thread(
+        # Bind the decoder / queue / flags to the thread's locals at
+        # creation time. The loop must NOT read self.* fields — a
+        # concurrent load() may rebind those, which previously caused
+        # two decoder threads to share one PyAV generator (hence
+        # "generator already executing" errors under rapid back-to-
+        # back play_track calls).
+        decoder = self._decoder
+        pcm_queue = self._pcm_queue
+        stop_flag = self._stop_flag
+        done_event = self._decoder_done
+        t = threading.Thread(
             target=self._decoder_loop,
+            args=(decoder, pcm_queue, stop_flag, done_event),
             name="pcm-decoder",
             daemon=True,
         )
-        self._decoder_thread.start()
+        self._decoder_thread = t
+        t.start()
 
-    def _decoder_loop(self) -> None:
-        decoder = self._decoder
+    @staticmethod
+    def _decoder_loop(
+        decoder: Optional[Decoder],
+        pcm_queue: "queue.Queue[Optional[np.ndarray]]",
+        stop_flag: threading.Event,
+        done_event: threading.Event,
+    ) -> None:
         if decoder is None:
+            done_event.set()
             return
         try:
-            while not self._stop_flag.is_set():
+            while not stop_flag.is_set():
                 pcm = decoder.next_pcm()
                 if pcm is None:
                     break
-                while not self._stop_flag.is_set():
+                while not stop_flag.is_set():
                     try:
-                        self._pcm_queue.put(pcm, timeout=0.5)
+                        pcm_queue.put(pcm, timeout=0.5)
                         break
                     except queue.Full:
                         continue
         except Exception:
             log.exception("decoder thread crashed")
         finally:
-            self._decoder_done.set()
+            done_event.set()
+            # Push the sentinel onto the thread's OWN queue, not
+            # whatever self._pcm_queue happens to point at now. If
+            # a gapless swap rebound self._pcm_queue to a different
+            # queue mid-loop, pushing the sentinel there would have
+            # incorrectly flagged the new decoder as done.
             try:
-                self._pcm_queue.put_nowait(None)
+                pcm_queue.put_nowait(None)
             except queue.Full:
                 pass
 
