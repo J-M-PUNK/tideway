@@ -243,12 +243,42 @@ function PeriodPicker({
 // Section components
 // ---------------------------------------------------------------------------
 
-// Collapsed-by-default row counts. Grids cap at 6 (one row at the
-// widest breakpoint, 2-3 rows at narrower ones — still compact
-// enough to read as "the headline"). Lists cap at 5, matching the
-// ArtistDetail "Popular" section's behavior.
-const GRID_COLLAPSED_COUNT = 6;
+// Collapsed track lists show 5, matching the ArtistDetail
+// "Popular" section. Grids cap at the actual column count at the
+// current viewport (see useGridCols) so "one row" stays one row
+// regardless of window width — a fixed count like 6 spills into a
+// half second row at the xl (5-col) breakpoint.
 const LIST_COLLAPSED_COUNT = 5;
+
+/**
+ * Number of cards per row on the stat grids at the current viewport
+ * width. Mirrors the Tailwind breakpoints on those grids exactly:
+ *   base  <640   → 2
+ *   sm    ≥640   → 3
+ *   lg    ≥1024  → 4
+ *   xl    ≥1280  → 5
+ *   2xl   ≥1536  → 6
+ * Updates on window resize so the collapsed view always fills
+ * exactly one row.
+ */
+function useGridCols(): number {
+  const compute = () => {
+    if (typeof window === "undefined") return 6;
+    const w = window.innerWidth;
+    if (w >= 1536) return 6;
+    if (w >= 1280) return 5;
+    if (w >= 1024) return 4;
+    if (w >= 640) return 3;
+    return 2;
+  };
+  const [cols, setCols] = useState(compute);
+  useEffect(() => {
+    const onResize = () => setCols(compute());
+    window.addEventListener("resize", onResize);
+    return () => window.removeEventListener("resize", onResize);
+  }, []);
+  return cols;
+}
 
 function ViewMoreButton({
   expanded,
@@ -271,6 +301,7 @@ function TopArtistsSection({ period }: { period: LastFmPeriod }) {
   const [data, setData] = useState<LastFmTopArtist[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [expanded, setExpanded] = useState(false);
+  const cols = useGridCols();
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
@@ -284,8 +315,7 @@ function TopArtistsSection({ period }: { period: LastFmPeriod }) {
       cancelled = true;
     };
   }, [period]);
-  const shown =
-    data && !expanded ? data.slice(0, GRID_COLLAPSED_COUNT) : data ?? [];
+  const shown = data && !expanded ? data.slice(0, cols) : data ?? [];
   return (
     <Section title="Top artists" subtitle="Ranked by plays">
       {loading && !data ? (
@@ -299,7 +329,7 @@ function TopArtistsSection({ period }: { period: LastFmPeriod }) {
               <ArtistCard key={`${a.name}-${i}`} rank={i + 1} artist={a} />
             ))}
           </div>
-          {data.length > GRID_COLLAPSED_COUNT && (
+          {data.length > cols && (
             <ViewMoreButton
               expanded={expanded}
               onToggle={() => setExpanded((v) => !v)}
@@ -359,6 +389,7 @@ function TopAlbumsSection({ period }: { period: LastFmPeriod }) {
   const [data, setData] = useState<LastFmTopAlbum[] | null>(null);
   const [loading, setLoading] = useState(false);
   const [expanded, setExpanded] = useState(false);
+  const cols = useGridCols();
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
@@ -372,8 +403,7 @@ function TopAlbumsSection({ period }: { period: LastFmPeriod }) {
       cancelled = true;
     };
   }, [period]);
-  const shown =
-    data && !expanded ? data.slice(0, GRID_COLLAPSED_COUNT) : data ?? [];
+  const shown = data && !expanded ? data.slice(0, cols) : data ?? [];
   return (
     <Section title="Top albums" subtitle="Ranked by plays">
       {loading && !data ? (
@@ -387,7 +417,7 @@ function TopAlbumsSection({ period }: { period: LastFmPeriod }) {
               <AlbumCard key={`${a.name}-${a.artist}-${i}`} rank={i + 1} album={a} />
             ))}
           </div>
-          {data.length > GRID_COLLAPSED_COUNT && (
+          {data.length > cols && (
             <ViewMoreButton
               expanded={expanded}
               onToggle={() => setExpanded((v) => !v)}
