@@ -466,8 +466,8 @@ class PCMPlayer:
             return self._source_path, None
         raise RuntimeError("no source to seek within")
 
-    _DEBUG = True  # verbose stderr logging — flip off once PCM is
-    # solid enough to stop needing it.
+    _DEBUG = False  # verbose stderr logging — flip on while
+    # debugging. At False only [pcm] state-transition prints fire.
 
     def _dbg(self, msg: str) -> None:
         if PCMPlayer._DEBUG:
