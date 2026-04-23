@@ -57,6 +57,7 @@ import asyncio
 import http.server
 import json
 import logging
+import os
 import queue
 import socketserver
 import threading
@@ -142,6 +143,12 @@ class RingBuffer:
             # (e.g. pyatv died silently).
             overflow = len(self._buf) + len(data) - self._max
             if overflow > 0:
+                # Silent drops mask a stalled receiver. Log at debug
+                # so the first real-hardware test surfaces the fact
+                # that bytes are being lost.
+                log.debug(
+                    "airplay ring buffer overflow: dropping %d bytes", overflow
+                )
                 del self._buf[:overflow]
             self._buf.extend(data)
             self._cv.notify_all()
@@ -178,7 +185,11 @@ class FlacStreamEncoder:
     def __init__(self, sample_rate: int, channels: int, dtype: str) -> None:
         self.sample_rate = sample_rate
         self.channels = channels
-        # av.format expects "s16" / "s32" / "flt" depending on dtype.
+        # av.format expects "s16" / "s32" depending on dtype. FLAC is
+        # integer-only — PyAV's FLAC encoder will raise at setup time
+        # if we hand it a float sample format. Fail fast here with a
+        # clearer message so the /api/airplay/connect handler can
+        # surface something useful instead of an opaque codec error.
         if dtype == "int16":
             self.av_format = "s16"
             self.np_dtype = np.int16
@@ -186,8 +197,10 @@ class FlacStreamEncoder:
             self.av_format = "s32"
             self.np_dtype = np.int32
         else:
-            self.av_format = "flt"
-            self.np_dtype = np.float32
+            raise ValueError(
+                f"FlacStreamEncoder: unsupported dtype {dtype!r}. "
+                "FLAC is integer-only; pass int16 or int32."
+            )
         self._setup()
 
     def _setup(self) -> None:
@@ -391,6 +404,18 @@ class AirPlayManager:
         try:
             CREDENTIALS_FILE.parent.mkdir(parents=True, exist_ok=True)
             CREDENTIALS_FILE.write_text(json.dumps(store, indent=2))
+            # Docstring promises user-only perms (0600). Apply them
+            # explicitly; default umask on most shells leaves the
+            # file world-readable otherwise. Best-effort on Windows
+            # where chmod is a no-op.
+            try:
+                import stat
+
+                os.chmod(
+                    CREDENTIALS_FILE, stat.S_IRUSR | stat.S_IWUSR
+                )
+            except OSError:
+                pass
         except Exception as exc:
             log.warning("airplay credentials write failed: %s", exc)
 
@@ -655,10 +680,20 @@ class AirPlayManager:
             log.warning("airplay disconnect hit: %s", exc)
 
     async def _disconnect(self, sess: _ConnectedSession) -> None:
+        # Order matters: signal the encoder first and let it exit
+        # cleanly before we close the buffer or the HTTP server.
+        # Otherwise the encoder can raise mid-write against a closed
+        # buffer, or the HTTP thread tears down the socket while
+        # pyatv's stream task is still trying to read.
         try:
-            sess.pcm_queue.put_nowait(None)  # sentinel to stop encoder
+            sess.pcm_queue.put_nowait(None)
         except Exception:
             pass
+        if sess.encoder_thread is not None:
+            try:
+                sess.encoder_thread.join(timeout=2.0)
+            except Exception:
+                pass
         try:
             sess.atv.close()  # type: ignore[attr-defined]
         except Exception:
@@ -732,6 +767,24 @@ class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
         # Quiet by default; switch to log.debug so `run.sh` doesn't
         # drown in per-chunk access-log lines during streaming.
         log.debug("airplay http: " + format, *args)
+
+    def do_HEAD(self) -> None:  # noqa: N802 - stdlib API
+        # Some AirPlay receivers (and plenty of middleboxes) probe
+        # headers with a HEAD before GET to check Content-Type and
+        # confirm the stream exists. Answer with the same response
+        # line GET uses so they don't fall back or abort.
+        server = self.server  # type: ignore[assignment]
+        if not isinstance(server, _StreamHTTPServer) or server.buffer is None:
+            self.send_error(503, "airplay session not ready")
+            return
+        if self.path != "/stream":
+            self.send_error(404, "not found")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "audio/flac")
+        self.send_header("Transfer-Encoding", "chunked")
+        self.send_header("Connection", "close")
+        self.end_headers()
 
     def do_GET(self) -> None:  # noqa: N802 - stdlib API
         server = self.server  # type: ignore[assignment]
