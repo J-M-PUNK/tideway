@@ -3447,12 +3447,69 @@ def search(q: str, limit: int = 25) -> dict:
     pref = (settings.explicit_content_preference or "explicit").lower()
     tracks = filter_explicit_dupes(results.get("tracks", []), pref, kind="track")
     albums = filter_explicit_dupes(results.get("albums", []), pref, kind="album")
+    artists = _rerank_artists(q, list(results.get("artists", [])))
     return {
         "tracks": [track_to_dict(t) for t in tracks],
         "albums": [album_to_dict(a) for a in albums],
-        "artists": [artist_to_dict(a) for a in results.get("artists", [])],
+        "artists": [artist_to_dict(a) for a in artists],
         "playlists": [playlist_to_dict(p) for p in results.get("playlists", [])],
     }
+
+
+def _rerank_artists(query: str, artists: list) -> list:
+    """Match Tidal's own search feel: surface the exact-name match
+    first, then splice in its relational "Fans also like" neighbours,
+    then keep the remaining fuzzy matches in whatever order Tidal
+    returned.
+
+    Runs best-effort. If the similarity lookup fails (network blip,
+    Tidal rate-limit, unknown-artist edge case), we skip the injection
+    and return the original list intact."""
+    if not artists:
+        return artists
+
+    norm_query = _norm_title(query)
+    if not norm_query:
+        return artists
+
+    # Find the first result whose normalized name equals the query.
+    exact_idx: Optional[int] = None
+    for i, a in enumerate(artists):
+        if _norm_title(getattr(a, "name", "")) == norm_query:
+            exact_idx = i
+            break
+    if exact_idx is None:
+        # No confident top hit — don't fan out, just hand Tidal's
+        # ordering through. Avoids bad injections for misspellings.
+        return artists
+
+    top_hit = artists[exact_idx]
+    rest = [a for j, a in enumerate(artists) if j != exact_idx]
+
+    # Fetch related / "fans also like" for the top hit. Capped so we
+    # don't drown out the raw fuzzy matches below.
+    similar: list = []
+    try:
+        raw = top_hit.get_similar() or []
+        seen = {str(getattr(top_hit, "id", ""))}
+        for a in raw:
+            aid = str(getattr(a, "id", "") or "")
+            if not aid or aid in seen:
+                continue
+            seen.add(aid)
+            similar.append(a)
+            if len(similar) >= 6:
+                break
+    except Exception:
+        similar = []
+
+    # De-dupe similars against the rest of the raw search results so
+    # the same artist doesn't render twice when Tidal already surfaced
+    # them as a fuzzy match.
+    rest_ids = {str(getattr(a, "id", "") or "") for a in rest}
+    similar = [a for a in similar if str(getattr(a, "id", "") or "") not in rest_ids]
+
+    return [top_hit, *similar, *rest]
 
 
 # ---------------------------------------------------------------------------
