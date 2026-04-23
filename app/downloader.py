@@ -911,12 +911,34 @@ class Downloader:
             item.status = DownloadStatus.TAGGING
             self._publish_update(item)
 
+            # Tagging is best-effort after the atomic rename. If we
+            # let a tag/cover failure bubble up to FAILED, the next
+            # retry would hit skip_existing on the already-complete
+            # audio file and silently decline to re-download, leaving
+            # the user with an untagged track and a stuck FAILED row.
             from app.metadata import fetch_cover_art, tag_file
-            cover = fetch_cover_art(album_obj or getattr(track, "album", None))
-            tag_file(out_path, track, cover)
+            tag_error: Optional[str] = None
+            try:
+                cover = fetch_cover_art(album_obj or getattr(track, "album", None))
+            except Exception as exc:
+                cover = None
+                tag_error = f"cover fetch failed: {exc}"
+            try:
+                tag_file(out_path, track, cover)
+            except Exception as exc:
+                if not tag_error:
+                    tag_error = f"tagging failed: {exc}"
 
             item.file_path = str(out_path)
             item.status = DownloadStatus.COMPLETE
+            if tag_error:
+                item.error = tag_error
+                print(
+                    f"[downloader] tag/cover warning id={item.item_id[:8]} "
+                    f"title={item.title!r}: {tag_error}",
+                    file=_sys.stderr,
+                    flush=True,
+                )
             self._publish_update(item)
             tid = getattr(track, "id", None)
             if tid is not None:
