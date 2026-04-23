@@ -854,6 +854,19 @@ _mini_player_callback: Optional[Callable[[], None]] = None
 # copy-the-Oops-URL paste step the dev-mode login still needs.
 _inapp_login_callback: Optional[Callable[[str], None]] = None
 
+# In-app login state surface. The frontend polls
+# /api/auth/login/inapp/state alongside /api/auth/status so when
+# the shell aborts a login early (SSO provider detected, timeout,
+# user closed the window) the UI switches out of the spinner
+# state immediately instead of hanging for 10 minutes.
+_inapp_login_state: dict[str, object] = {"phase": "idle"}
+
+
+def set_inapp_login_phase(phase: str) -> None:
+    """Called by desktop.py to flag state transitions on the in-
+    app login. Valid phases: idle, active, aborted_sso, closed."""
+    _inapp_login_state["phase"] = phase
+
 
 def register_focus_callback(fn: Callable[[], None]) -> None:
     global _focus_callback
@@ -1771,11 +1784,25 @@ def auth_login_inapp_start() -> dict:
     """
     if _inapp_login_callback is None:
         return {"supported": False}
+    _inapp_login_state["phase"] = "active"
     try:
         _inapp_login_callback(tidal.pkce_login_url())
     except Exception as exc:
+        _inapp_login_state["phase"] = "idle"
         raise HTTPException(status_code=500, detail=str(exc))
     return {"supported": True}
+
+
+@app.get("/api/auth/login/inapp/state")
+def auth_login_inapp_state() -> dict:
+    """Surface the in-app login window's state so the frontend can
+    react when the shell aborts early. phases:
+      - idle: no attempt in progress or shell not available
+      - active: window is open, user is signing in
+      - aborted_sso: shell closed the window because it detected
+        a navigation into an SSO provider WKWebView can't render
+      - closed: user or shell closed the window for another reason"""
+    return {"phase": _inapp_login_state.get("phase", "idle")}
 
 
 _OPEN_EXTERNAL_HOSTS = {

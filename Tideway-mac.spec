@@ -59,10 +59,32 @@ binaries: list[tuple[str, str]] = []
 
 # Pull pydantic_core's Rust extension in explicitly — default static
 # analysis misses the .so and the app crashes on import at launch.
-for pkg in ("pydantic", "pydantic_core"):
-    _d, _b, _h = collect_all(pkg)
-    datas += _d
-    binaries += _b
+# Same applies to async-upnp-client's transitive stack (aiohttp + its
+# C extensions, yarl, multidict, frozenlist, defusedxml,
+# python-didl-lite, voluptuous) — the UPnP discovery path imports
+# them on a daemon thread at startup and missing submodules there
+# show up as a SIGTRAP on Thread-N with no other clue.
+for pkg in (
+    "pydantic",
+    "pydantic_core",
+    "async_upnp_client",
+    "aiohttp",
+    "yarl",
+    "multidict",
+    "frozenlist",
+    "defusedxml",
+    "didl_lite",
+    "voluptuous",
+):
+    try:
+        _d, _b, _h = collect_all(pkg)
+        datas += _d
+        binaries += _b
+    except Exception:
+        # Optional deps the project will boot without (async-upnp-client
+        # is flagged optional in app/audio/upnp.py) shouldn't break the
+        # build if the user hasn't installed them.
+        pass
 
 hiddenimports = [
     "tidalapi",
@@ -79,6 +101,23 @@ hiddenimports = [
     "uvicorn.lifespan.on",
     "sse_starlette",
     "webview.platforms.cocoa",
+    # async-upnp-client + transitive hidden imports. collect_all
+    # above pulls most of these as data, but several submodules
+    # are loaded dynamically (async_upnp_client.search picks a
+    # backend at runtime) and need to be spelled out explicitly.
+    "async_upnp_client",
+    "async_upnp_client.search",
+    "async_upnp_client.aiohttp",
+    "async_upnp_client.client_factory",
+    "aiohttp",
+    "aiohttp.resolver",
+    "yarl",
+    "multidict",
+    "frozenlist",
+    "didl_lite",
+    "voluptuous",
+    "defusedxml",
+    "defusedxml.ElementTree",
     # Global media-key listener dependencies. pynput's macOS backend
     # pulls Quartz via pyobjc; PyInstaller's static analysis misses
     # the dynamic import.

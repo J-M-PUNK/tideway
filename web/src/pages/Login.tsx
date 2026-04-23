@@ -84,9 +84,12 @@ function PkceLogin({
   // Auth-status poll: once the in-app shell captures the redirect
   // and posts it to /api/auth/pkce/complete, the backend flips to
   // logged_in. We notice via this poll and call onLoggedIn.
-  // Capped at 10 minutes so a broken shell or a user who walks
-  // away doesn't leave a spinner spinning forever — matches the
-  // desktop-side poll timeout.
+  //
+  // Also watches the in-app login's own phase flag so when the
+  // shell aborts early (SSO provider detected, user closed the
+  // window) we bail out of the spinner state immediately and
+  // switch to the paste fallback instead of waiting for the
+  // 10-minute timeout.
   useEffect(() => {
     if (!waiting) return;
     const startedAt = Date.now();
@@ -98,11 +101,30 @@ function PkceLogin({
         return;
       }
       try {
-        const s = await api.auth.status();
-        if (s.logged_in) {
+        const [status, inapp] = await Promise.all([
+          api.auth.status(),
+          api.auth.inappLoginState(),
+        ]);
+        if (status.logged_in) {
           resetQualitiesCache();
           setWaiting(false);
           onLoggedIn();
+          return;
+        }
+        if (inapp.phase === "aborted_sso") {
+          setWaiting(false);
+          setFlow("paste");
+          setError(
+            "Sign in with Apple / Google / Facebook can't run inside the "
+              + "app's login window. Use the paste flow below: click Open "
+              + "Tidal login, sign in in your normal browser, then paste "
+              + "the URL from the page Tidal sends you to.",
+          );
+          return;
+        }
+        if (inapp.phase === "closed") {
+          setWaiting(false);
+          setError("Login window closed. Click Sign in with Tidal to try again.");
           return;
         }
       } catch {
