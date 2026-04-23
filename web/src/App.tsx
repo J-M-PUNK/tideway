@@ -114,6 +114,9 @@ const PopularPage = lazy(() =>
 const StatsPage = lazy(() =>
   import("@/pages/StatsPage").then((m) => ({ default: m.StatsPage })),
 );
+const StatsDetail = lazy(() =>
+  import("@/pages/StatsDetail").then((m) => ({ default: m.StatsDetail })),
+);
 const AlbumDetail = lazy(() =>
   import("@/pages/AlbumDetail").then((m) => ({ default: m.AlbumDetail })),
 );
@@ -519,6 +522,7 @@ function Shell({
                 <Route path="/feed" element={<FeedPage onDownload={enqueue} />} />
                 <Route path="/history" element={<HistoryPage onDownload={enqueue} />} />
                 <Route path="/stats" element={<StatsPage />} />
+                <Route path="/stats/:kind" element={<StatsDetail />} />
                 <Route path="/import" element={<ImportPage />} />
                 <Route path="/user/:id" element={<ProfilePage onDownload={enqueue} />} />
                 <Route path="/user/:id/followers" element={<FollowListPage kind="followers" />} />
