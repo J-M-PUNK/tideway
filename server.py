@@ -2975,6 +2975,12 @@ def player_preload(req: _PlayerLoadRequest) -> dict:
 class _PlayerPrefetchRequest(BaseModel):
     track_ids: list[str]
     quality: Optional[str] = None
+    # Whether to also pre-download the init + first media segment
+    # for each track. On by default since the whole point of this
+    # endpoint is to make the next click instant. Set false for
+    # large background sweeps where network / memory cost matters
+    # more than the snappiness gain.
+    warm_bytes: bool = True
 
 
 @app.get("/api/player/cache-stats")
@@ -3011,7 +3017,12 @@ def player_prefetch(req: _PlayerPrefetchRequest) -> dict:
     with ThreadPoolExecutor(
         max_workers=min(10, len(ids)), thread_name_prefix="prefetch"
     ) as pool:
-        results = list(pool.map(lambda tid: prefetch(tid, req.quality), ids))
+        results = list(
+            pool.map(
+                lambda tid: prefetch(tid, req.quality, warm_bytes=req.warm_bytes),
+                ids,
+            )
+        )
     return {"prefetched": sum(1 for r in results if r), "total": len(ids)}
 
 
