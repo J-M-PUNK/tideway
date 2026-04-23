@@ -103,6 +103,15 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ redirect_url }),
       }),
+    /** Ask the desktop shell to open a pywebview child window at
+     *  Tidal's PKCE login URL and auto-capture the post-signin
+     *  redirect. Returns `supported: false` when running in plain
+     *  browser dev mode (no shell to call back into); frontend
+     *  falls back to the copy-and-paste flow in that case. */
+    inappLoginStart: () =>
+      req<{ supported: boolean }>("/api/auth/login/inapp/start", {
+        method: "POST",
+      }),
   },
   /** Open a Tidal URL in the user's default system browser. Exists
    *  because `window.open` for external URLs is silently dropped in
