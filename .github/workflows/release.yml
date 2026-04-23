@@ -51,18 +51,19 @@ jobs:
       - name: Run PyInstaller
         run: pyinstaller Tideway-mac.spec --noconfirm
 
-      - name: Zip .app
-        # `ditto` preserves HFS resource forks / symlinks that the
-        # .app bundle relies on.
-        run: |
-          cd dist
-          ditto -c -k --sequesterRsrc --keepParent Tideway.app \
-            Tideway-macOS.zip
+      - name: Build DMG
+        # DMG is the canonical macOS install format — Finder mounts
+        # the image, shows the drag-to-Applications window, users
+        # eject when done. ZIP technically works but fails the
+        # Mac-native install expectation, so we ship only the DMG.
+        # Name matches the auto-updater's convention:
+        # Tideway-<version>.dmg.
+        run: bash scripts/build_dmg.sh
 
       - uses: actions/upload-artifact@v4
         with:
           name: Tideway-macOS
-          path: dist/Tideway-macOS.zip
+          path: dist/Tideway-*.dmg
           if-no-files-found: error
 
   # -------------------------------------------------------------------
@@ -143,8 +144,12 @@ jobs:
       - name: Create / update release
         uses: softprops/action-gh-release@v2
         with:
+          # Glob rather than explicit filename so the Mac DMG's
+          # version-stamped name (Tideway-0.1.0.dmg, etc.) lands
+          # alongside the Windows zip without hardcoding the
+          # version in two places.
           files: |
-            artifacts/Tideway-macOS.zip
+            artifacts/Tideway-*.dmg
             artifacts/Tideway-Windows.zip
           # draft: true preserves an existing draft's state. If the
           # release doesn't exist yet (a push with no manually-created
