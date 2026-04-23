@@ -5938,18 +5938,86 @@ def _raw_entry_to_item(entry: Any) -> Optional[dict]:
                 "isrc": data.get("isrc"),
             }
         if item_type == "MIX":
-            images = data.get("images") or {}
-            sq = images.get("SQUARE") or images.get("MEDIUM") or {}
-            return {
-                "kind": "mix",
-                "id": str(data.get("id") or ""),
-                "name": data.get("title") or "",
-                "subtitle": data.get("subTitle") or data.get("subtitle") or "",
-                "cover": sq.get("url"),
-            }
+            return _raw_mix_to_item(data)
     except Exception:
         return None
     return None
+
+
+_MIX_TYPE_LABELS = {
+    "DAILY_MIX": "Daily Mix",
+    "DISCOVERY_MIX": "Discovery Mix",
+    "NEW_ARRIVALS_MIX": "New Arrivals",
+    "HISTORY_ALLTIME_MIX": "My All-Time Mix",
+    "HISTORY_RECENT_MIX": "Recent History",
+    "ARTIST_MIX": "Artist Mix",
+    "TRACK_MIX": "Track Radio",
+    "ALBUM_MIX": "Album Radio",
+    "GENRE_MIX": "Genre Mix",
+    "DECADE_MIX": "Decade Mix",
+}
+
+
+def _raw_mix_to_item(data: dict) -> Optional[dict]:
+    """Map a raw V2 mix payload to our wire shape.
+
+    Tidal's V2 mix payloads come in two flavors depending on endpoint.
+    Some ship the full home-feed shape with `title` / `subTitle` and an
+    `images` dict keyed by SQUARE/MEDIUM/LARGE, others ship a stripped
+    pages shape with `titleTextInfo.text` / `subtitleTextInfo.text` and
+    a flat `mixImages` array of {size, url} objects. Handle both."""
+    if not isinstance(data, dict):
+        return None
+    mix_id = str(data.get("id") or "").strip()
+    if not mix_id:
+        return None
+    # Title: home-feed shipping uses `title`, pages shipping uses
+    # `titleTextInfo.text`. Fall back to a human label derived from the
+    # inner mix type constant so a missing text info never leaves the
+    # card blank.
+    title_info = data.get("titleTextInfo") if isinstance(data.get("titleTextInfo"), dict) else {}
+    subtitle_info = data.get("subtitleTextInfo") if isinstance(data.get("subtitleTextInfo"), dict) else {}
+    inner_type = (data.get("type") or "").upper()
+    name = (
+        data.get("title")
+        or title_info.get("text")
+        or _MIX_TYPE_LABELS.get(inner_type)
+        or "Mix"
+    )
+    subtitle = (
+        data.get("subTitle")
+        or data.get("subtitle")
+        or subtitle_info.get("text")
+        or ""
+    )
+    # Cover: home-feed shape first, then the pages-shape array.
+    images = data.get("images") if isinstance(data.get("images"), dict) else {}
+    cover = None
+    for bucket in ("SQUARE", "MEDIUM", "LARGE", "SMALL"):
+        img = images.get(bucket) if isinstance(images, dict) else None
+        if isinstance(img, dict) and img.get("url"):
+            cover = img["url"]
+            break
+    if not cover:
+        mix_images = data.get("mixImages")
+        if isinstance(mix_images, list) and mix_images:
+            # Prefer MEDIUM; fall back to whichever we have.
+            best = next(
+                (m for m in mix_images if isinstance(m, dict) and m.get("size") == "MEDIUM"),
+                None,
+            ) or next(
+                (m for m in mix_images if isinstance(m, dict) and m.get("url")),
+                None,
+            )
+            if best:
+                cover = best.get("url")
+    return {
+        "kind": "mix",
+        "id": mix_id,
+        "name": name,
+        "subtitle": subtitle,
+        "cover": cover,
+    }
 
 
 def _release_year(date_str: Optional[str]) -> Optional[int]:
@@ -6039,7 +6107,11 @@ def _parse_v2_item(session, entry: Any):
             if item_type == "PLAYLIST":
                 return session.parse_playlist(data)
             if item_type == "MIX":
-                return session.parse_mix(data)
+                # parse_v2_mix covers the V2 home/pages mix shape
+                # (mixImages / titleTextInfo); parse_mix is the V1
+                # legacy parser that expects a flat title field.
+                parser = getattr(session, "parse_v2_mix", None) or session.parse_mix
+                return parser(data)
         except Exception:
             return None
         return None
