@@ -1,19 +1,22 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { Music } from "lucide-react";
-import type { Album, Artist, Playlist } from "@/api/types";
+import { Heart, Music } from "lucide-react";
+import type { Album, Artist, Playlist, FavoriteKind } from "@/api/types";
 import type { OnDownload } from "@/api/download";
+import { useFavorites } from "@/hooks/useFavorites";
 import { imageProxy } from "@/lib/utils";
-import { DownloadButton } from "@/components/DownloadButton";
 import { PlayMediaButton } from "@/components/PlayMediaButton";
 
 type Item = Album | Artist | Playlist;
 
 export function MediaCard({
   item,
-  onDownload,
 }: {
   item: Item;
+  /** Download triggering was part of the old card overlay. Callers still
+   *  pass it through but the affordance now lives on the detail page so
+   *  we no longer render it in the hover area. Prop kept so the call
+   *  sites stay stable. */
   onDownload?: OnDownload;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
@@ -28,6 +31,15 @@ export function MediaCard({
 
   const cover = imageProxy(item.kind === "artist" ? item.picture : item.cover);
   const rounded = item.kind === "artist" ? "rounded-full" : "rounded-md";
+  const showHoverActions = item.kind !== "artist";
+  // Hide-on-leave is suppressed while the play request is in flight, so
+  // the button doesn't flicker back to opacity-0 if the cursor drifts
+  // off before the fetch resolves.
+  const hoverGroup = showHoverActions
+    ? menuOpen
+      ? "opacity-100"
+      : "opacity-0 group-hover:opacity-100 focus-within:opacity-100"
+    : "";
 
   return (
     <Link
@@ -47,31 +59,24 @@ export function MediaCard({
             <Music className="h-10 w-10" />
           </div>
         )}
-        {item.kind !== "artist" && (
-          <div
-            className={`absolute bottom-2 right-2 flex items-center gap-2 transition-all ${
-              menuOpen
-                ? "translate-y-0 opacity-100"
-                : "translate-y-2 opacity-0 group-hover:translate-y-0 group-hover:opacity-100"
-            }`}
-          >
-            <PlayMediaButton
-              kind={item.kind}
-              id={item.id}
-              className="h-10 w-10"
-              onOpenChange={setMenuOpen}
-            />
-            {onDownload && (
-              <DownloadButton
-                kind={item.kind}
+        {showHoverActions && (
+          <>
+            <div
+              className={`absolute bottom-2 left-2 transition-all ${hoverGroup}`}
+            >
+              <PlayMediaButton
+                kind={item.kind as "album" | "playlist"}
                 id={item.id}
-                onPick={onDownload}
-                iconOnly
-                className="h-10 w-10 shadow-lg"
+                className="h-10 w-10"
                 onOpenChange={setMenuOpen}
               />
-            )}
-          </div>
+            </div>
+            <InlineHeart
+              kind={item.kind as FavoriteKind}
+              id={item.id}
+              className={`absolute bottom-2 right-2 transition-all ${hoverGroup}`}
+            />
+          </>
         )}
       </div>
       <div className="min-w-0">
@@ -81,6 +86,45 @@ export function MediaCard({
         </div>
       </div>
     </Link>
+  );
+}
+
+/**
+ * Self-contained heart button for the hover overlay. Built in-place
+ * rather than going through HeartButton+Button+cva so there's no
+ * chance of an opacity or size class getting stripped by the merge
+ * chain. Dark circle, white outline when un-liked, primary fill when
+ * liked. Stops propagation so clicking it never follows the parent
+ * Link.
+ */
+function InlineHeart({
+  kind,
+  id,
+  className,
+}: {
+  kind: FavoriteKind;
+  id: string;
+  className?: string;
+}) {
+  const favs = useFavorites();
+  const liked = favs.has(kind, id);
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        void favs.toggle(kind, id);
+      }}
+      aria-pressed={liked}
+      aria-label={liked ? `Unlike ${kind}` : `Like ${kind}`}
+      title={liked ? `Unlike ${kind}` : `Like ${kind}`}
+      className={`flex h-10 w-10 items-center justify-center rounded-full bg-black/70 text-white shadow-lg transition-colors hover:bg-black/90 ${className ?? ""}`}
+    >
+      <Heart
+        className={`h-5 w-5 ${liked ? "fill-primary stroke-primary" : ""}`}
+      />
+    </button>
   );
 }
 

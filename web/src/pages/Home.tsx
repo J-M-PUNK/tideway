@@ -1,14 +1,26 @@
+import { useState } from "react";
 import { Link } from "react-router-dom";
-import { MoreHorizontal, Music } from "lucide-react";
+import { ChevronRight, Loader2, MoreHorizontal, Music, Play } from "lucide-react";
 import { api } from "@/api/client";
 import type { OnDownload } from "@/api/download";
 import { useApi } from "@/hooks/useApi";
+import { usePlayerActions, usePlayerMeta } from "@/hooks/PlayerContext";
 import { PageView } from "@/components/PageView";
 import { ErrorView } from "@/components/ErrorView";
 import { GridSkeleton } from "@/components/Skeletons";
 import { LastfmConnectNudge } from "@/components/LastfmConnectNudge";
+import { useToast } from "@/components/toast";
 import { imageProxy } from "@/lib/utils";
-import type { PageCategory, PageItem, TidalPage } from "@/api/types";
+import type {
+  Album,
+  Artist,
+  MixItem,
+  PageCategory,
+  PageItem,
+  Playlist,
+  TidalPage,
+  Track,
+} from "@/api/types";
 
 // Titles of Tidal editorial rows we do not want on our home page.
 // Matched case insensitively as a substring against the row title,
@@ -40,26 +52,22 @@ const HIDDEN_HOME_ROW_TITLES = [
 const MERGE_SOURCE_TITLES = ["recommended new tracks", "uploads for you"];
 const MERGED_ROW_TITLE = "Suggested new songs for you";
 
-// Titles of the rows that should be extracted and rendered at the top
-// of the home page with the compact pill layout (cover + title +
-// subtitle on one line), rather than as a grid of big cards. Matched
-// as a normalised full-string compare against the row title. These
-// rows are the "your quick access" shelf, so a density-oriented
-// treatment reads better than an eye-candy card wall.
-//
-// Note that Set iteration order follows insertion order, so the
-// sequence below is also the visual order the compact section
-// renders in: Recently played, then the merged "Suggested new songs
-// for you", then "Suggested new albums for you".
+// Rows that read better as a compact pill shelf than as a grid of
+// big cards. Track-heavy rows belong here because the density lets
+// the user scan more recently-played / suggested tracks without
+// scrolling. Albums / playlists / mixes stay as big cards below.
 const COMPACT_ROW_TITLES = new Set([
   "recently played",
   normalizeTitle(MERGED_ROW_TITLE),
-  "suggested new albums for you",
 ]);
 
-// Desired order for the card-style rows that remain in the page feed.
+// Desired order for the card-style rows that render through PageView.
 // Anything not listed here keeps whatever order Tidal sent.
-const PRIORITY_ROW_ORDER = ["custom mixes", "personal radio stations"];
+const PRIORITY_ROW_ORDER = [
+  "suggested new albums for you",
+  "custom mixes",
+  "personal radio stations",
+];
 
 function normalizeTitle(s: string): string {
   return s
@@ -113,11 +121,11 @@ function filterHomeRows(page: TidalPage): {
     };
   }
 
-  // Second pass: split the surviving categories into the compact rows
-  // (rendered as pill lists at the top of the page) and everything
-  // else (rendered as cards via PageView). Compact rows come out in
-  // the order declared in COMPACT_ROW_TITLES so the visual sequence
-  // on the page is predictable regardless of Tidal's feed order.
+  // Second pass: split out the compact pill rows (rendered above the
+  // fold) from everything else (rendered as big cards via PageView).
+  // Compact rows come out in the order declared in COMPACT_ROW_TITLES
+  // so the visual sequence on the page stays predictable regardless
+  // of Tidal's feed order.
   const compactByTitle = new Map<string, PageCategory>();
   const otherRows: PageCategory[] = [];
   for (const cat of kept) {
@@ -164,25 +172,50 @@ function filterHomeRows(page: TidalPage): {
 
 // ---------------------------------------------------------------------------
 // Compact pill row. Cover on the left, title + subtitle to the right,
-// three across, up to nine visible. Used for rows that are more "quick
-// list to pick from" than "browse editorial wall", specifically
-// Recently played and the merged Suggested new songs for you.
+// three across, up to nine visible. Used for Recently played and the
+// merged Suggested new songs row where density reads better than a
+// wall of big cards.
 // ---------------------------------------------------------------------------
+const COMPACT_VISIBLE_COUNT = 9;
+
 function CompactRow({ category }: { category: PageCategory }) {
-  const items = category.items.slice(0, 9);
+  const items = category.items.slice(0, COMPACT_VISIBLE_COUNT);
   if (items.length === 0) return null;
+  // View more routes to the dedicated drill-down page Tidal emits for
+  // this row, matching the card rows' SectionHeader behaviour.
+  const hasMore =
+    category.items.length > COMPACT_VISIBLE_COUNT && !!category.viewAllPath;
   return (
     <div className="mb-10">
       <div className="mb-4 flex items-baseline justify-between gap-4">
         <h2 className="text-xl font-bold tracking-tight">{category.title}</h2>
+        {hasMore && category.viewAllPath && (
+          <Link
+            to={`/browse/${encodeURIComponent(category.viewAllPath)}`}
+            className="flex flex-shrink-0 items-center gap-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground transition-colors hover:text-foreground"
+          >
+            View more <ChevronRight className="h-3.5 w-3.5" />
+          </Link>
+        )}
       </div>
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
         {items.map((item, i) => (
-          <CompactPill key={`${item.kind}-${pillId(item, i)}`} item={item} />
+          <CompactPill
+            key={`${item.kind}-${pillId(item, i)}`}
+            item={item}
+            rowTracks={rowTracks(items)}
+          />
         ))}
       </div>
     </div>
   );
+}
+
+// Pull the row's tracks out once so every CompactPill that represents a
+// track shares the same context queue. Clicking a track's cover plays
+// that track and sets next/prev to walk the rest of the row's tracks.
+function rowTracks(items: PageItem[]): Track[] {
+  return items.filter((it): it is Track => it.kind === "track");
 }
 
 function pillId(item: PageItem, fallback: number): string {
@@ -191,65 +224,73 @@ function pillId(item: PageItem, fallback: number): string {
   return String(fallback);
 }
 
-function pillRoute(item: PageItem): string | null {
-  switch (item.kind) {
-    case "track":
-      return item.album ? `/album/${item.album.id}` : null;
-    case "album":
-      return `/album/${item.id}`;
-    case "artist":
-      return `/artist/${item.id}`;
-    case "playlist":
-      return `/playlist/${item.id}`;
-    case "mix":
-      return `/mix/${item.id}`;
-    case "pagelink":
-      return null;
-  }
-}
+const PILL_CLASS =
+  "flex items-center gap-3 rounded-md bg-card/60 p-2 pr-3 transition-colors hover:bg-accent";
 
-function pillCover(item: PageItem): string | null {
+/**
+ * Unified compact pill. Every kind renders the same three hit regions
+ * Tidal's own client uses: the cover plays the item (or navigates for
+ * artists, which can't be played directly), the title opens the item's
+ * detail page, and the subtitle opens whoever "made" it when that's a
+ * real entity the user can navigate to.
+ */
+function CompactPill({
+  item,
+  rowTracks,
+}: {
+  item: PageItem;
+  rowTracks: Track[];
+}) {
   switch (item.kind) {
     case "track":
-      return item.album?.cover ?? null;
+      return <TrackPill track={item} rowTracks={rowTracks} />;
     case "album":
-      return item.cover ?? null;
-    case "artist":
-      return item.picture ?? null;
+      return <AlbumPill album={item} />;
     case "playlist":
-      return item.cover ?? null;
+      return <PlaylistPill playlist={item} />;
     case "mix":
-      return item.cover ?? null;
+      return <MixPill mix={item} />;
+    case "artist":
+      return <ArtistPill artist={item} />;
     default:
       return null;
   }
 }
 
-function pillSubtitle(item: PageItem): string {
-  switch (item.kind) {
-    case "track":
-      return item.artists.map((a) => a.name).join(", ");
-    case "album":
-      return item.artists.map((a) => a.name).join(", ");
-    case "artist":
-      return "Artist";
-    case "playlist":
-      return item.creator || "Playlist";
-    case "mix":
-      return item.subtitle || "Mix";
-    default:
-      return "";
-  }
-}
-
-function CompactPill({ item }: { item: PageItem }) {
-  const to = pillRoute(item);
-  const cover = pillCover(item);
-  const name = "name" in item ? item.name : "title" in item ? item.title : "";
-  const subtitle = pillSubtitle(item);
-  const inner = (
-    <>
-      <div className="h-12 w-12 flex-shrink-0 overflow-hidden rounded bg-secondary">
+/**
+ * Shared layout for a pill whose cover plays something. The caller
+ * owns the play handler, playing state, and the three text regions.
+ */
+function PlayablePill({
+  cover,
+  isPlaying,
+  busy,
+  ariaPlay,
+  onPlay,
+  title,
+  titleTo,
+  subtitle,
+  subtitleTo,
+}: {
+  cover: string | null;
+  isPlaying: boolean;
+  busy: boolean;
+  ariaPlay: string;
+  onPlay: () => void;
+  title: string;
+  titleTo: string | null;
+  subtitle: string | null;
+  subtitleTo: string | null;
+}) {
+  return (
+    <div className={`${PILL_CLASS} group`}>
+      <button
+        type="button"
+        onClick={onPlay}
+        disabled={busy}
+        aria-label={ariaPlay}
+        className="relative h-12 w-12 flex-shrink-0 overflow-hidden rounded bg-secondary disabled:opacity-80"
+      >
         {cover ? (
           <img
             src={imageProxy(cover)}
@@ -262,28 +303,222 @@ function CompactPill({ item }: { item: PageItem }) {
             <Music className="h-5 w-5" />
           </div>
         )}
-      </div>
+        <span
+          className={`absolute inset-0 flex items-center justify-center bg-black/50 transition-opacity ${
+            isPlaying || busy
+              ? "opacity-100"
+              : "opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+          }`}
+        >
+          {busy ? (
+            <Loader2 className="h-5 w-5 animate-spin text-foreground" />
+          ) : (
+            <Play className="h-5 w-5 text-foreground" fill="currentColor" />
+          )}
+        </span>
+      </button>
       <div className="min-w-0 flex-1">
-        <div className="truncate text-sm font-semibold">{name}</div>
+        {titleTo ? (
+          <Link
+            to={titleTo}
+            className="block truncate text-sm font-semibold hover:underline"
+          >
+            {title}
+          </Link>
+        ) : (
+          <div className="truncate text-sm font-semibold">{title}</div>
+        )}
         {subtitle && (
-          <div className="truncate text-xs text-muted-foreground">
-            {subtitle}
-          </div>
+          subtitleTo ? (
+            <Link
+              to={subtitleTo}
+              className="block truncate text-xs text-muted-foreground hover:underline"
+            >
+              {subtitle}
+            </Link>
+          ) : (
+            <div className="truncate text-xs text-muted-foreground">
+              {subtitle}
+            </div>
+          )
         )}
       </div>
       <MoreHorizontal className="h-4 w-4 flex-shrink-0 text-muted-foreground" />
-    </>
+    </div>
   );
-  const className =
-    "flex items-center gap-3 rounded-md bg-card/60 p-2 pr-3 transition-colors hover:bg-accent";
-  if (to) {
-    return (
-      <Link to={to} className={className}>
-        {inner}
-      </Link>
-    );
-  }
-  return <div className={className}>{inner}</div>;
+}
+
+function TrackPill({ track, rowTracks }: { track: Track; rowTracks: Track[] }) {
+  const actions = usePlayerActions();
+  const meta = usePlayerMeta();
+  const isCurrent = meta.track?.id === track.id;
+  const isPlaying = isCurrent && meta.playing;
+  const primaryArtist = track.artists[0];
+  return (
+    <PlayablePill
+      cover={track.album?.cover ?? null}
+      isPlaying={isPlaying}
+      busy={false}
+      ariaPlay={isPlaying ? `Pause ${track.name}` : `Play ${track.name}`}
+      onPlay={() => {
+        if (isCurrent) actions.toggle();
+        else actions.play(track, rowTracks);
+      }}
+      title={track.name}
+      titleTo={track.album ? `/album/${track.album.id}` : null}
+      subtitle={track.artists.map((a) => a.name).join(", ") || null}
+      subtitleTo={primaryArtist ? `/artist/${primaryArtist.id}` : null}
+    />
+  );
+}
+
+function AlbumPill({ album }: { album: Album }) {
+  const primaryArtist = album.artists[0];
+  const { busy, onPlay } = useCollectionPlay({
+    label: "album",
+    fetch: () => api.album(album.id),
+  });
+  return (
+    <PlayablePill
+      cover={album.cover}
+      isPlaying={false}
+      busy={busy}
+      ariaPlay={`Play ${album.name}`}
+      onPlay={onPlay}
+      title={album.name}
+      titleTo={`/album/${album.id}`}
+      subtitle={album.artists.map((a) => a.name).join(", ") || null}
+      subtitleTo={primaryArtist ? `/artist/${primaryArtist.id}` : null}
+    />
+  );
+}
+
+function PlaylistPill({ playlist }: { playlist: Playlist }) {
+  const { busy, onPlay } = useCollectionPlay({
+    label: "playlist",
+    fetch: () => api.playlist(playlist.id),
+  });
+  // Only link the creator when Tidal gives us a real id; the "0" sentinel
+  // is their editorial account catch-all and doesn't resolve to a page.
+  const creatorTo =
+    playlist.creator_id && playlist.creator_id !== "0"
+      ? `/user/${playlist.creator_id}`
+      : null;
+  return (
+    <PlayablePill
+      cover={playlist.cover}
+      isPlaying={false}
+      busy={busy}
+      ariaPlay={`Play ${playlist.name}`}
+      onPlay={onPlay}
+      title={playlist.name}
+      titleTo={`/playlist/${playlist.id}`}
+      subtitle={playlist.creator || "Playlist"}
+      subtitleTo={creatorTo}
+    />
+  );
+}
+
+function MixPill({ mix }: { mix: MixItem }) {
+  const { busy, onPlay } = useCollectionPlay({
+    label: "mix",
+    fetch: () => api.mix(mix.id),
+  });
+  return (
+    <PlayablePill
+      cover={mix.cover}
+      isPlaying={false}
+      busy={busy}
+      ariaPlay={`Play ${mix.name}`}
+      onPlay={onPlay}
+      title={mix.name}
+      titleTo={`/mix/${encodeURIComponent(mix.id)}`}
+      subtitle={mix.subtitle || "Mix"}
+      subtitleTo={null}
+    />
+  );
+}
+
+/**
+ * Artists are a special case: we don't have a safe "play an artist"
+ * operation outside of a seed-based radio mix, and that needs a sample
+ * ISRC which a pill doesn't know. Keep artist pills as a single Link so
+ * the click is unambiguous.
+ */
+function ArtistPill({ artist }: { artist: Artist }) {
+  return (
+    <Link to={`/artist/${artist.id}`} className={PILL_CLASS}>
+      <PillCover cover={artist.picture} />
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-sm font-semibold">{artist.name}</div>
+        <div className="truncate text-xs text-muted-foreground">Artist</div>
+      </div>
+      <MoreHorizontal className="h-4 w-4 flex-shrink-0 text-muted-foreground" />
+    </Link>
+  );
+}
+
+/**
+ * Fetch-then-play hook for collection pills (album / playlist / mix).
+ * Returns a busy flag and a handler the cover button can hook into.
+ * Same behaviour as PlayMediaButton: resolves the detail payload, then
+ * kicks playback with the first track and the whole list as context.
+ */
+function useCollectionPlay({
+  label,
+  fetch,
+}: {
+  label: string;
+  fetch: () => Promise<{ tracks?: Track[] }>;
+}) {
+  const actions = usePlayerActions();
+  const toast = useToast();
+  const [busy, setBusy] = useState(false);
+  const onPlay = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const detail = await fetch();
+      const tracks = detail.tracks;
+      if (!tracks?.length) {
+        toast.show({
+          kind: "info",
+          title: "Nothing to play",
+          description: `This ${label} has no playable tracks.`,
+        });
+        return;
+      }
+      actions.play(tracks[0], tracks);
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: "Couldn't start playback",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+  return { busy, onPlay };
+}
+
+function PillCover({ cover }: { cover: string | null }) {
+  return (
+    <div className="h-12 w-12 flex-shrink-0 overflow-hidden rounded bg-secondary">
+      {cover ? (
+        <img
+          src={imageProxy(cover)}
+          alt=""
+          className="h-full w-full object-cover"
+          loading="lazy"
+        />
+      ) : (
+        <div className="flex h-full w-full items-center justify-center text-muted-foreground">
+          <Music className="h-5 w-5" />
+        </div>
+      )}
+    </div>
+  );
 }
 
 export function Home({ onDownload }: { onDownload: OnDownload }) {

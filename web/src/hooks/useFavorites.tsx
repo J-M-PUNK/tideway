@@ -24,6 +24,7 @@ const EMPTY: Sets = {
   album: new Set(),
   artist: new Set(),
   playlist: new Set(),
+  mix: new Set(),
 };
 
 const Ctx = createContext<FavoritesContextValue>({
@@ -69,6 +70,7 @@ export function FavoritesProvider({ children }: { children: ReactNode }) {
             album: mergeSets(new Set(snap.albums), prev.album),
             artist: mergeSets(new Set(snap.artists), prev.artist),
             playlist: mergeSets(new Set(snap.playlists), prev.playlist),
+            mix: mergeSets(new Set(snap.mixes), prev.mix),
           }));
           return;
         }
@@ -77,6 +79,7 @@ export function FavoritesProvider({ children }: { children: ReactNode }) {
           album: new Set(snap.albums),
           artist: new Set(snap.artists),
           playlist: new Set(snap.playlists),
+          mix: new Set(snap.mixes),
         });
       })
       .catch(() => {
