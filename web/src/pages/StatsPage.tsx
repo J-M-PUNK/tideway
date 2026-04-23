@@ -3,6 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 import {
   BarChart3,
   Calendar,
+  ChevronRight,
   ExternalLink,
   Heart,
   Music,
@@ -285,13 +286,17 @@ function useGridCols(): number {
   return cols;
 }
 
+/**
+ * Header-right "View more" link, styled to match the home page's
+ * SectionHeader so the two pages feel consistent.
+ */
 function ViewMoreLink({ to }: { to: string }) {
   return (
     <Link
       to={to}
-      className="mt-4 inline-block text-xs font-semibold uppercase tracking-wider text-muted-foreground hover:text-foreground"
+      className="flex flex-shrink-0 items-center gap-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground transition-colors hover:text-foreground"
     >
-      View more
+      View more <ChevronRight className="h-3 w-3" />
     </Link>
   );
 }
@@ -313,21 +318,23 @@ function TopArtistsSection({ period }: { period: LastFmPeriod }) {
     };
   }, [period]);
   const shown = data ? data.slice(0, cols) : [];
+  const hasData = !!data && data.length > 0;
   return (
-    <Section title="Top artists" subtitle="Ranked by plays">
+    <Section
+      title="Top artists"
+      subtitle="Ranked by plays"
+      action={hasData ? <ViewMoreLink to={`/stats/artists?period=${period}`} /> : undefined}
+    >
       {loading && !data ? (
         <GridSkeleton />
       ) : !data || data.length === 0 ? (
         <EmptyState icon={UserIcon} title="No data" description="No plays in this range yet." />
       ) : (
-        <>
-          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6">
-            {shown.map((a, i) => (
-              <ArtistCard key={`${a.name}-${i}`} rank={i + 1} artist={a} />
-            ))}
-          </div>
-          <ViewMoreLink to={`/stats/artists?period=${period}`} />
-        </>
+        <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6">
+          {shown.map((a, i) => (
+            <ArtistCard key={`${a.name}-${i}`} rank={i + 1} artist={a} />
+          ))}
+        </div>
       )}
     </Section>
   );
@@ -349,21 +356,23 @@ function TopTracksSection({ period }: { period: LastFmPeriod }) {
     };
   }, [period]);
   const shown = data ? data.slice(0, LIST_COLLAPSED_COUNT) : [];
+  const hasData = !!data && data.length > 0;
   return (
-    <Section title="Top tracks" subtitle="Ranked by plays">
+    <Section
+      title="Top tracks"
+      subtitle="Ranked by plays"
+      action={hasData ? <ViewMoreLink to={`/stats/tracks?period=${period}`} /> : undefined}
+    >
       {loading && !data ? (
         <ListSkeleton />
       ) : !data || data.length === 0 ? (
         <EmptyState icon={Music} title="No data" description="No plays in this range yet." />
       ) : (
-        <>
-          <div className="flex flex-col gap-1">
-            {shown.map((t, i) => (
-              <TrackRow key={`${t.name}-${t.artist}-${i}`} rank={i + 1} track={t} />
-            ))}
-          </div>
-          <ViewMoreLink to={`/stats/tracks?period=${period}`} />
-        </>
+        <div className="flex flex-col gap-1">
+          {shown.map((t, i) => (
+            <TrackRow key={`${t.name}-${t.artist}-${i}`} rank={i + 1} track={t} />
+          ))}
+        </div>
       )}
     </Section>
   );
@@ -386,21 +395,23 @@ function TopAlbumsSection({ period }: { period: LastFmPeriod }) {
     };
   }, [period]);
   const shown = data ? data.slice(0, cols) : [];
+  const hasData = !!data && data.length > 0;
   return (
-    <Section title="Top albums" subtitle="Ranked by plays">
+    <Section
+      title="Top albums"
+      subtitle="Ranked by plays"
+      action={hasData ? <ViewMoreLink to={`/stats/albums?period=${period}`} /> : undefined}
+    >
       {loading && !data ? (
         <GridSkeleton />
       ) : !data || data.length === 0 ? (
         <EmptyState icon={Music} title="No data" description="No plays in this range yet." />
       ) : (
-        <>
-          <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6">
-            {shown.map((a, i) => (
-              <AlbumCard key={`${a.name}-${a.artist}-${i}`} rank={i + 1} album={a} />
-            ))}
-          </div>
-          <ViewMoreLink to={`/stats/albums?period=${period}`} />
-        </>
+        <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6">
+          {shown.map((a, i) => (
+            <AlbumCard key={`${a.name}-${a.artist}-${i}`} rank={i + 1} album={a} />
+          ))}
+        </div>
       )}
     </Section>
   );
@@ -426,19 +437,21 @@ function LovedTracksSection() {
   // worth flagging.
   if (!loading && (!data || data.length === 0)) return null;
   const shown = data ? data.slice(0, LIST_COLLAPSED_COUNT) : [];
+  const hasData = !!data && data.length > 0;
   return (
-    <Section title="Loved tracks" subtitle="Hearted on Last.fm">
+    <Section
+      title="Loved tracks"
+      subtitle="Hearted on Last.fm"
+      action={hasData ? <ViewMoreLink to="/stats/loved" /> : undefined}
+    >
       {loading && !data ? (
         <ListSkeleton />
       ) : (
-        <>
-          <div className="flex flex-col gap-1">
-            {shown.map((t, i) => (
-              <LovedRow key={`${t.name}-${t.artist}-${i}`} row={t} />
-            ))}
-          </div>
-          <ViewMoreLink to="/stats/loved" />
-        </>
+        <div className="flex flex-col gap-1">
+          {shown.map((t, i) => (
+            <LovedRow key={`${t.name}-${t.artist}-${i}`} row={t} />
+          ))}
+        </div>
       )}
     </Section>
   );
@@ -831,21 +844,29 @@ function findBestTrack(
 function Section({
   title,
   subtitle,
+  action,
   children,
 }: {
   title: string;
   subtitle?: string;
+  /** Right-aligned slot in the header row. Used for "View more"
+   *  links so each section echoes the home page's SectionHeader
+   *  layout where the drill-down sits on the top right. */
+  action?: React.ReactNode;
   children: React.ReactNode;
 }) {
   return (
     <section>
-      <div className="mb-4 flex items-baseline gap-3">
-        <h2 className="text-xl font-bold tracking-tight">{title}</h2>
-        {subtitle && (
-          <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-            {subtitle}
-          </span>
-        )}
+      <div className="mb-4 flex items-baseline justify-between gap-4">
+        <div className="flex min-w-0 items-baseline gap-3">
+          <h2 className="text-xl font-bold tracking-tight">{title}</h2>
+          {subtitle && (
+            <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+              {subtitle}
+            </span>
+          )}
+        </div>
+        {action}
       </div>
       {children}
     </section>
