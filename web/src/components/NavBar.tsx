@@ -1,6 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import { useLocation, useNavigate, useNavigationType } from "react-router-dom";
-import { ChevronLeft, ChevronRight } from "lucide-react";
+import {
+  useLocation,
+  useNavigate,
+  useNavigationType,
+  useSearchParams,
+} from "react-router-dom";
+import { ChevronLeft, ChevronRight, Search as SearchIcon } from "lucide-react";
+import { Input } from "@/components/ui/input";
 import { UserMenu } from "@/components/UserMenu";
 import { cn } from "@/lib/utils";
 
@@ -64,7 +70,7 @@ export function NavBar({
   const canForward = depth < maxDepth;
 
   return (
-    <div className="sticky top-0 z-10 flex items-center gap-2 bg-background/50 px-8 py-3 backdrop-blur-sm">
+    <div className="sticky top-0 z-10 flex items-center gap-3 bg-background/50 px-8 py-3 backdrop-blur-sm">
       <button
         onClick={() => canBack && navigate(-1)}
         disabled={!canBack}
@@ -85,16 +91,66 @@ export function NavBar({
       >
         <ChevronRight className="h-4 w-4" />
       </button>
-      <div className="ml-auto">
-        <UserMenu
-          username={username}
-          avatar={avatar}
-          userId={userId}
-          onLogout={onLogout}
-          offline={offline}
-          onSignInRequested={onSignInRequested}
-        />
-      </div>
+      <NavBarSearch />
+      <UserMenu
+        username={username}
+        avatar={avatar}
+        userId={userId}
+        onLogout={onLogout}
+        offline={offline}
+        onSignInRequested={onSignInRequested}
+      />
+    </div>
+  );
+}
+
+/**
+ * Always-visible search input in the top bar. Typing here navigates to
+ * /search?q=<query>; the Search page reads its query back out of the
+ * URL so both stays in sync. Empty input on a non-Search route does
+ * nothing — we only push once there's something to look for.
+ */
+function NavBarSearch() {
+  const navigate = useNavigate();
+  const location = useLocation();
+  const [params] = useSearchParams();
+  // Seed from the URL so navigating directly to /search?q=foo shows
+  // "foo" in the input.
+  const [value, setValue] = useState(() => params.get("q") ?? "");
+
+  // Keep the input in sync when the URL changes from elsewhere (e.g.
+  // clicking a saved search, using Back / Forward, external links).
+  useEffect(() => {
+    const q = params.get("q") ?? "";
+    // Only overwrite if different, so the effect doesn't fight the
+    // user's live keystrokes.
+    setValue((prev) => (prev === q ? prev : q));
+  }, [params]);
+
+  const onChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const next = e.target.value;
+    setValue(next);
+    // Update the URL in place. Replace when we're already on /search so
+    // a typing session doesn't flood history; push when entering from
+    // another page so Back returns where you were.
+    const target = `/search${next ? `?q=${encodeURIComponent(next)}` : ""}`;
+    if (location.pathname === "/search") {
+      navigate(target, { replace: true });
+    } else {
+      navigate(target);
+    }
+  };
+
+  return (
+    <div className="relative ml-2 flex-1 max-w-md">
+      <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
+      <Input
+        value={value}
+        onChange={onChange}
+        placeholder="Search"
+        aria-label="Search"
+        className="h-9 pl-9"
+      />
     </div>
   );
 }
