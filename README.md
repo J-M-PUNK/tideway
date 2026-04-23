@@ -166,11 +166,11 @@ app/              shared Python logic: tidal client, downloader,
                   metadata, play reporting, Spotify and Last.fm
                   clients
 app/audio/        audio engine: decoder, segment reader, player,
-                  equalizer, gapless splicing
+                  equalizer, gapless splicing, AirPlay output
+                  (coming soon)
 server.py         FastAPI entry point
 desktop.py        pywebview shell, which is the entry point for
                   the packaged app
-main.py           legacy customtkinter GUI, still works
 web/              Vite and React frontend
 run.sh            one command dev launcher
 Tideway-mac.spec  PyInstaller spec for macOS
@@ -221,18 +221,29 @@ either a Dolby-capable renderer on the OS side or a receiver on
 the other end of HDMI, which most setups do not have. If any of
 that changes, we can revisit.
 
-**Playback stays on this machine. There is no Tidal Connect, no
-AirPlay, no Chromecast.** Tidal Connect is Tidal's own protocol
-for casting a stream from the Tidal app to compatible network
-streamers, DACs, and receivers. Pairing with it requires the same
-kind of partner authorization that immersive audio does, so it is
-out for the same reason. The Cast and AirPlay protocols are also
-not implemented. Audio goes to whichever output device the host OS
-exposes, which is any wired DAC, Bluetooth sink, or builtin
-speaker you can select from the Settings output device picker.
-Network streamers that only accept Tidal Connect or AirPlay will
-not receive audio from this app. If your streamer also shows up
-as a Bluetooth device or a USB DAC, you can use that path instead.
+**Network audio output.** Tidal Connect, Chromecast, and AirPlay
+are all ways of casting a stream from a desktop app to a network
+streamer, DAC, or smart speaker. Their status here:
+
+- **AirPlay** is coming soon. The code is written and wired into
+  the Settings page, and the PCM tap on the audio engine already
+  feeds a live FLAC stream out to a paired receiver. The feature
+  is off in the current build because we have not tested it
+  against real hardware yet. It will enable in a future release
+  once that testing is done.
+- **Chromecast** is not implemented today. Possibly coming later.
+- **Tidal Connect** is not planned. Pairing with Tidal's own
+  protocol requires the partner authorization that immersive
+  audio does, and that is the same reason the Atmos / 360 tiers
+  are excluded.
+
+Audio in the shipping build goes to whichever output device the
+host OS exposes, which is any wired DAC, Bluetooth sink, or
+builtin speaker you can select from the Settings output-device
+picker. Network streamers that only accept Tidal Connect or
+Chromecast will not receive audio from this app yet. If your
+streamer also shows up as a Bluetooth device or a USB DAC, you
+can use that path instead.
 
 **Play reporting to Tidal Recently Played is best effort.** Every
 play fires a `playback_session` event at Tidal's event producer
