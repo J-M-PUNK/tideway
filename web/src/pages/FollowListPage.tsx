@@ -88,7 +88,12 @@ function UserRow({ user }: { user: TidalUser }) {
     >
       <div className="flex h-12 w-12 flex-shrink-0 items-center justify-center overflow-hidden rounded-full bg-secondary text-lg font-bold">
         {avatar ? (
-          <img src={avatar} alt="" className="h-full w-full object-cover" />
+          <img
+            src={avatar}
+            alt=""
+            className="h-full w-full object-cover"
+            loading="lazy"
+          />
         ) : (
           <span>{initial}</span>
         )}
