@@ -1,5 +1,6 @@
+import { useState } from "react";
 import { Link } from "react-router-dom";
-import { ChevronRight, MoreHorizontal, Music, Play } from "lucide-react";
+import { ChevronRight, Loader2, MoreHorizontal, Music, Play } from "lucide-react";
 import { api } from "@/api/client";
 import type { OnDownload } from "@/api/download";
 import { useApi } from "@/hooks/useApi";
@@ -8,8 +9,18 @@ import { PageView } from "@/components/PageView";
 import { ErrorView } from "@/components/ErrorView";
 import { GridSkeleton } from "@/components/Skeletons";
 import { LastfmConnectNudge } from "@/components/LastfmConnectNudge";
+import { useToast } from "@/components/toast";
 import { imageProxy } from "@/lib/utils";
-import type { PageCategory, PageItem, TidalPage, Track } from "@/api/types";
+import type {
+  Album,
+  Artist,
+  MixItem,
+  PageCategory,
+  PageItem,
+  Playlist,
+  TidalPage,
+  Track,
+} from "@/api/types";
 
 // Titles of Tidal editorial rows we do not want on our home page.
 // Matched case insensitively as a substring against the row title,
@@ -213,57 +224,16 @@ function pillId(item: PageItem, fallback: number): string {
   return String(fallback);
 }
 
-function pillRoute(item: PageItem): string | null {
-  switch (item.kind) {
-    case "track":
-      return item.album ? `/album/${item.album.id}` : null;
-    case "album":
-      return `/album/${item.id}`;
-    case "artist":
-      return `/artist/${item.id}`;
-    case "playlist":
-      return `/playlist/${item.id}`;
-    case "mix":
-      return `/mix/${item.id}`;
-    case "pagelink":
-      return null;
-  }
-}
+const PILL_CLASS =
+  "flex items-center gap-3 rounded-md bg-card/60 p-2 pr-3 transition-colors hover:bg-accent";
 
-function pillCover(item: PageItem): string | null {
-  switch (item.kind) {
-    case "track":
-      return item.album?.cover ?? null;
-    case "album":
-      return item.cover ?? null;
-    case "artist":
-      return item.picture ?? null;
-    case "playlist":
-      return item.cover ?? null;
-    case "mix":
-      return item.cover ?? null;
-    default:
-      return null;
-  }
-}
-
-function pillSubtitle(item: PageItem): string {
-  switch (item.kind) {
-    case "track":
-      return item.artists.map((a) => a.name).join(", ");
-    case "album":
-      return item.artists.map((a) => a.name).join(", ");
-    case "artist":
-      return "Artist";
-    case "playlist":
-      return item.creator || "Playlist";
-    case "mix":
-      return item.subtitle || "Mix";
-    default:
-      return "";
-  }
-}
-
+/**
+ * Unified compact pill. Every kind renders the same three hit regions
+ * Tidal's own client uses: the cover plays the item (or navigates for
+ * artists, which can't be played directly), the title opens the item's
+ * detail page, and the subtitle opens whoever "made" it when that's a
+ * real entity the user can navigate to.
+ */
 function CompactPill({
   item,
   rowTracks,
@@ -271,72 +241,55 @@ function CompactPill({
   item: PageItem;
   rowTracks: Track[];
 }) {
-  // Tracks have three separate hit regions so the card behaves like
-  // Tidal's own client: cover plays, title opens the album, subtitle
-  // opens the artist. Non-track items (albums, artists, playlists,
-  // mixes) keep the simpler whole-pill-is-a-link behaviour.
-  if (item.kind === "track") {
-    return <TrackPill track={item} rowTracks={rowTracks} />;
+  switch (item.kind) {
+    case "track":
+      return <TrackPill track={item} rowTracks={rowTracks} />;
+    case "album":
+      return <AlbumPill album={item} />;
+    case "playlist":
+      return <PlaylistPill playlist={item} />;
+    case "mix":
+      return <MixPill mix={item} />;
+    case "artist":
+      return <ArtistPill artist={item} />;
+    default:
+      return null;
   }
-  return <EntityPill item={item} />;
 }
 
-const PILL_CLASS =
-  "flex items-center gap-3 rounded-md bg-card/60 p-2 pr-3 transition-colors hover:bg-accent";
-
-function EntityPill({ item }: { item: PageItem }) {
-  const to = pillRoute(item);
-  const cover = pillCover(item);
-  const name = "name" in item ? item.name : "title" in item ? item.title : "";
-  const subtitle = pillSubtitle(item);
-  const inner = (
-    <>
-      <PillCover cover={cover} />
-      <div className="min-w-0 flex-1">
-        <div className="truncate text-sm font-semibold">{name}</div>
-        {subtitle && (
-          <div className="truncate text-xs text-muted-foreground">
-            {subtitle}
-          </div>
-        )}
-      </div>
-      <MoreHorizontal className="h-4 w-4 flex-shrink-0 text-muted-foreground" />
-    </>
-  );
-  if (to) {
-    return (
-      <Link to={to} className={PILL_CLASS}>
-        {inner}
-      </Link>
-    );
-  }
-  return <div className={PILL_CLASS}>{inner}</div>;
-}
-
-function TrackPill({ track, rowTracks }: { track: Track; rowTracks: Track[] }) {
-  const actions = usePlayerActions();
-  const meta = usePlayerMeta();
-  const isCurrent = meta.track?.id === track.id;
-  const isPlaying = isCurrent && meta.playing;
-  const cover = track.album?.cover ?? null;
-  const albumPath = track.album ? `/album/${track.album.id}` : null;
-  const primaryArtist = track.artists[0];
-  const artistPath = primaryArtist ? `/artist/${primaryArtist.id}` : null;
-  const artistLabel = track.artists.map((a) => a.name).join(", ");
-  const handlePlay = () => {
-    if (isCurrent) {
-      actions.toggle();
-    } else {
-      actions.play(track, rowTracks);
-    }
-  };
+/**
+ * Shared layout for a pill whose cover plays something. The caller
+ * owns the play handler, playing state, and the three text regions.
+ */
+function PlayablePill({
+  cover,
+  isPlaying,
+  busy,
+  ariaPlay,
+  onPlay,
+  title,
+  titleTo,
+  subtitle,
+  subtitleTo,
+}: {
+  cover: string | null;
+  isPlaying: boolean;
+  busy: boolean;
+  ariaPlay: string;
+  onPlay: () => void;
+  title: string;
+  titleTo: string | null;
+  subtitle: string | null;
+  subtitleTo: string | null;
+}) {
   return (
     <div className={`${PILL_CLASS} group`}>
       <button
         type="button"
-        onClick={handlePlay}
-        aria-label={isPlaying ? `Pause ${track.name}` : `Play ${track.name}`}
-        className="relative h-12 w-12 flex-shrink-0 overflow-hidden rounded bg-secondary"
+        onClick={onPlay}
+        disabled={busy}
+        aria-label={ariaPlay}
+        className="relative h-12 w-12 flex-shrink-0 overflow-hidden rounded bg-secondary disabled:opacity-80"
       >
         {cover ? (
           <img
@@ -352,36 +305,40 @@ function TrackPill({ track, rowTracks }: { track: Track; rowTracks: Track[] }) {
         )}
         <span
           className={`absolute inset-0 flex items-center justify-center bg-black/50 transition-opacity ${
-            isPlaying
+            isPlaying || busy
               ? "opacity-100"
               : "opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
           }`}
         >
-          <Play className="h-5 w-5 text-foreground" fill="currentColor" />
+          {busy ? (
+            <Loader2 className="h-5 w-5 animate-spin text-foreground" />
+          ) : (
+            <Play className="h-5 w-5 text-foreground" fill="currentColor" />
+          )}
         </span>
       </button>
       <div className="min-w-0 flex-1">
-        {albumPath ? (
+        {titleTo ? (
           <Link
-            to={albumPath}
+            to={titleTo}
             className="block truncate text-sm font-semibold hover:underline"
           >
-            {track.name}
+            {title}
           </Link>
         ) : (
-          <div className="truncate text-sm font-semibold">{track.name}</div>
+          <div className="truncate text-sm font-semibold">{title}</div>
         )}
-        {artistLabel && (
-          artistPath ? (
+        {subtitle && (
+          subtitleTo ? (
             <Link
-              to={artistPath}
+              to={subtitleTo}
               className="block truncate text-xs text-muted-foreground hover:underline"
             >
-              {artistLabel}
+              {subtitle}
             </Link>
           ) : (
             <div className="truncate text-xs text-muted-foreground">
-              {artistLabel}
+              {subtitle}
             </div>
           )
         )}
@@ -389,6 +346,160 @@ function TrackPill({ track, rowTracks }: { track: Track; rowTracks: Track[] }) {
       <MoreHorizontal className="h-4 w-4 flex-shrink-0 text-muted-foreground" />
     </div>
   );
+}
+
+function TrackPill({ track, rowTracks }: { track: Track; rowTracks: Track[] }) {
+  const actions = usePlayerActions();
+  const meta = usePlayerMeta();
+  const isCurrent = meta.track?.id === track.id;
+  const isPlaying = isCurrent && meta.playing;
+  const primaryArtist = track.artists[0];
+  return (
+    <PlayablePill
+      cover={track.album?.cover ?? null}
+      isPlaying={isPlaying}
+      busy={false}
+      ariaPlay={isPlaying ? `Pause ${track.name}` : `Play ${track.name}`}
+      onPlay={() => {
+        if (isCurrent) actions.toggle();
+        else actions.play(track, rowTracks);
+      }}
+      title={track.name}
+      titleTo={track.album ? `/album/${track.album.id}` : null}
+      subtitle={track.artists.map((a) => a.name).join(", ") || null}
+      subtitleTo={primaryArtist ? `/artist/${primaryArtist.id}` : null}
+    />
+  );
+}
+
+function AlbumPill({ album }: { album: Album }) {
+  const primaryArtist = album.artists[0];
+  const { busy, onPlay } = useCollectionPlay({
+    label: "album",
+    fetch: () => api.album(album.id),
+  });
+  return (
+    <PlayablePill
+      cover={album.cover}
+      isPlaying={false}
+      busy={busy}
+      ariaPlay={`Play ${album.name}`}
+      onPlay={onPlay}
+      title={album.name}
+      titleTo={`/album/${album.id}`}
+      subtitle={album.artists.map((a) => a.name).join(", ") || null}
+      subtitleTo={primaryArtist ? `/artist/${primaryArtist.id}` : null}
+    />
+  );
+}
+
+function PlaylistPill({ playlist }: { playlist: Playlist }) {
+  const { busy, onPlay } = useCollectionPlay({
+    label: "playlist",
+    fetch: () => api.playlist(playlist.id),
+  });
+  // Only link the creator when Tidal gives us a real id; the "0" sentinel
+  // is their editorial account catch-all and doesn't resolve to a page.
+  const creatorTo =
+    playlist.creator_id && playlist.creator_id !== "0"
+      ? `/user/${playlist.creator_id}`
+      : null;
+  return (
+    <PlayablePill
+      cover={playlist.cover}
+      isPlaying={false}
+      busy={busy}
+      ariaPlay={`Play ${playlist.name}`}
+      onPlay={onPlay}
+      title={playlist.name}
+      titleTo={`/playlist/${playlist.id}`}
+      subtitle={playlist.creator || "Playlist"}
+      subtitleTo={creatorTo}
+    />
+  );
+}
+
+function MixPill({ mix }: { mix: MixItem }) {
+  const { busy, onPlay } = useCollectionPlay({
+    label: "mix",
+    fetch: () => api.mix(mix.id),
+  });
+  return (
+    <PlayablePill
+      cover={mix.cover}
+      isPlaying={false}
+      busy={busy}
+      ariaPlay={`Play ${mix.name}`}
+      onPlay={onPlay}
+      title={mix.name}
+      titleTo={`/mix/${encodeURIComponent(mix.id)}`}
+      subtitle={mix.subtitle || "Mix"}
+      subtitleTo={null}
+    />
+  );
+}
+
+/**
+ * Artists are a special case: we don't have a safe "play an artist"
+ * operation outside of a seed-based radio mix, and that needs a sample
+ * ISRC which a pill doesn't know. Keep artist pills as a single Link so
+ * the click is unambiguous.
+ */
+function ArtistPill({ artist }: { artist: Artist }) {
+  return (
+    <Link to={`/artist/${artist.id}`} className={PILL_CLASS}>
+      <PillCover cover={artist.picture} />
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-sm font-semibold">{artist.name}</div>
+        <div className="truncate text-xs text-muted-foreground">Artist</div>
+      </div>
+      <MoreHorizontal className="h-4 w-4 flex-shrink-0 text-muted-foreground" />
+    </Link>
+  );
+}
+
+/**
+ * Fetch-then-play hook for collection pills (album / playlist / mix).
+ * Returns a busy flag and a handler the cover button can hook into.
+ * Same behaviour as PlayMediaButton: resolves the detail payload, then
+ * kicks playback with the first track and the whole list as context.
+ */
+function useCollectionPlay({
+  label,
+  fetch,
+}: {
+  label: string;
+  fetch: () => Promise<{ tracks?: Track[] }>;
+}) {
+  const actions = usePlayerActions();
+  const toast = useToast();
+  const [busy, setBusy] = useState(false);
+  const onPlay = async () => {
+    if (busy) return;
+    setBusy(true);
+    try {
+      const detail = await fetch();
+      const tracks = detail.tracks;
+      if (!tracks?.length) {
+        toast.show({
+          kind: "info",
+          title: "Nothing to play",
+          description: `This ${label} has no playable tracks.`,
+        });
+        return;
+      }
+      actions.play(tracks[0], tracks);
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: "Couldn't start playback",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+  return { busy, onPlay };
 }
 
 function PillCover({ cover }: { cover: string | null }) {
