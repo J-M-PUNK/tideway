@@ -146,8 +146,18 @@ jobs:
           files: |
             artifacts/Tideway-macOS.zip
             artifacts/Tideway-Windows.zip
-          generate_release_notes: true
-          draft: false
+          # draft: true preserves an existing draft's state. If the
+          # release doesn't exist yet (a push with no manually-created
+          # draft), one is created as a draft for the maintainer to
+          # review before publishing. Keeps curated release notes
+          # written before the tag was pushed from getting wiped.
+          draft: true
+          # generate_release_notes: false so curated notes written
+          # into a pre-existing draft aren't overwritten. When
+          # creating a fresh release from scratch the body will be
+          # empty; run `gh release edit vX.Y.Z --notes-file ...` or
+          # fill it in the GitHub UI before publishing.
+          generate_release_notes: false
           # Mark tags containing a hyphen (v0.2.0-rc1 etc.) as
           # prereleases automatically.
           prerelease: ${{ contains(github.ref_name, '-') }}
