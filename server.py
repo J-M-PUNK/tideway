@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import subprocess
 import tempfile
 import webbrowser
@@ -688,6 +689,85 @@ def album_to_dict(a) -> dict:
         # download-dropdown Max/Lossless annotation.
         "media_tags": [m for m in media_tags if m] if media_tags else [],
     }
+
+
+def _norm_title(s: Optional[str]) -> str:
+    """Normalise an album / track name for explicit-dupe matching. Drop
+    anything after a final '(Clean)' / '(Explicit)' marker so we treat
+    'Rodeo' and 'Rodeo (Clean)' as the same record."""
+    if not s:
+        return ""
+    base = s.strip().lower()
+    base = re.sub(r"\s*\((clean|explicit)\)\s*$", "", base)
+    return base
+
+
+def filter_explicit_dupes(items: list, preference: str, *, kind: str) -> list:
+    """Collapse explicit / clean pairs of the same album or track.
+
+    `preference` is whatever is stored in settings.explicit_content_preference:
+    'explicit' (default), 'clean', or 'both'. 'both' returns the list
+    unchanged; the other two drop the unwanted edition when a matching
+    pair exists, and leave solo entries alone.
+
+    Items are matched on (normalised_name, version, primary_artist_id)
+    for albums and (normalised_name, normalised_album, primary_artist_id)
+    for tracks, so a Deluxe re-release never merges into its original
+    and the same song on two different albums stays distinct."""
+    if preference not in ("explicit", "clean"):
+        return list(items)
+
+    def _primary_artist_id(item) -> str:
+        try:
+            artists = getattr(item, "artists", None) or []
+            if artists:
+                aid = getattr(artists[0], "id", None)
+                if aid is not None:
+                    return str(aid)
+        except Exception:
+            pass
+        try:
+            aid = getattr(getattr(item, "artist", None), "id", None)
+            return str(aid) if aid is not None else ""
+        except Exception:
+            return ""
+
+    def _key(item):
+        primary = _primary_artist_id(item)
+        name = _norm_title(getattr(item, "name", None))
+        if kind == "album":
+            version = (getattr(item, "version", "") or "").strip().lower()
+            return ("album", name, version, primary)
+        album_obj = getattr(item, "album", None)
+        album_name = _norm_title(getattr(album_obj, "name", None)) if album_obj else ""
+        return ("track", name, album_name, primary)
+
+    # Group items by key preserving first-seen order. If more than one
+    # edition exists under the same key, pick the preferred one.
+    buckets: dict[tuple, list] = {}
+    order: list[tuple] = []
+    for it in items:
+        key = _key(it)
+        if key not in buckets:
+            order.append(key)
+            buckets[key] = []
+        buckets[key].append(it)
+
+    out: list = []
+    want_explicit = preference == "explicit"
+    for key in order:
+        bucket = buckets[key]
+        if len(bucket) == 1:
+            out.append(bucket[0])
+            continue
+        # Prefer the requested edition; fall back to the first-seen when
+        # the preferred one isn't present.
+        preferred = next(
+            (x for x in bucket if bool(getattr(x, "explicit", False)) == want_explicit),
+            bucket[0],
+        )
+        out.append(preferred)
+    return out
 
 
 def artist_to_dict(a) -> dict:
@@ -3364,9 +3444,12 @@ def search(q: str, limit: int = 25) -> dict:
         results = tidal.search(q, limit=limit)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Search failed: {exc}")
+    pref = (settings.explicit_content_preference or "explicit").lower()
+    tracks = filter_explicit_dupes(results.get("tracks", []), pref, kind="track")
+    albums = filter_explicit_dupes(results.get("albums", []), pref, kind="album")
     return {
-        "tracks": [track_to_dict(t) for t in results.get("tracks", [])],
-        "albums": [album_to_dict(a) for a in results.get("albums", [])],
+        "tracks": [track_to_dict(t) for t in tracks],
+        "albums": [album_to_dict(a) for a in albums],
         "artists": [artist_to_dict(a) for a in results.get("artists", [])],
         "playlists": [playlist_to_dict(p) for p in results.get("playlists", [])],
     }
@@ -3972,6 +4055,14 @@ def artist_detail(artist_id: int) -> dict:
     albums_objs = _dedupe(raw_albums)
     ep_singles_objs = _dedupe(raw_eps)
     appears_on_objs = _dedupe(raw_appears)
+
+    # Collapse explicit / clean editions of the same album per the
+    # user's content-filter setting. Keeps the discography looking like
+    # Tidal's own client where duplicates rarely sit side by side.
+    pref = (settings.explicit_content_preference or "explicit").lower()
+    albums_objs = filter_explicit_dupes(albums_objs, pref, kind="album")
+    ep_singles_objs = filter_explicit_dupes(ep_singles_objs, pref, kind="album")
+    appears_on_objs = filter_explicit_dupes(appears_on_objs, pref, kind="album")
 
     return {
         **artist_to_dict(artist),

@@ -246,6 +246,12 @@ export interface Settings {
   offline_mode: boolean;
   notify_on_complete: boolean;
   notify_on_track_change: boolean;
+  /** How to handle Tidal returning both an explicit and a clean edit
+   *  of the same album / track. "explicit" keeps the explicit copy
+   *  (default), "clean" keeps the clean copy, "both" shows them both
+   *  as Tidal returned. Mirrors the toggle Tidal's own client has
+   *  under its "Explicit content" setting. */
+  explicit_content_preference: "explicit" | "clean" | "both";
 }
 
 export interface AuthStatus {

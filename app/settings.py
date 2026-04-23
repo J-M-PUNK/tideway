@@ -87,6 +87,14 @@ class Settings:
     # developer.spotify.com and paste the id here. PKCE OAuth so we
     # don't need a secret. Empty string = import feature hidden in UI.
     spotify_client_id: str = ""
+    # When Tidal returns both an explicit and a clean edit of the same
+    # album / track, the UI would otherwise show both side by side
+    # (e.g. "Rodeo" and "Rodeo" by Travis Scott). Match Tidal's own
+    # client behaviour and collapse the pair.
+    #  - "explicit": keep the explicit edit when both exist (default).
+    #  - "clean":    keep the clean edit when both exist.
+    #  - "both":     show both, as the raw API returned them.
+    explicit_content_preference: str = "explicit"
 
 
 def load_settings() -> Settings:
