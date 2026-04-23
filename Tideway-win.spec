@@ -94,13 +94,11 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    # customtkinter / app.gui are the legacy Tk UI; exclude so the bundle
-    # doesn't drag in tkinter + ~15MB of unused assets.
+    # tkinter isn't imported by anything we ship, but Python's stdlib
+    # _includes_ it, so PyInstaller will happily bundle it unless we
+    # say otherwise. Exclude to keep the Windows bundle lean.
     excludes=[
-        "customtkinter",
         "tkinter",
-        "app.gui",
-        "app.image_cache",
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
