@@ -165,6 +165,12 @@ export interface ArtistDetail extends Artist {
   /** Tidal's ARTIST_MIX id — the proper "Artist Radio" mix with
    *  composite cover. Null when no mix is available. */
   artist_mix_id: string | null;
+  /** Music videos released by the artist. Empty when none. */
+  videos: Video[];
+  /** Tracks where the artist is credited in any role (producer,
+   *  writer, featured, etc.). `role` annotated per row so the UI
+   *  can group. Empty when unavailable for this artist / region. */
+  credits: (Track & { role: string })[];
 }
 
 export interface MixDetail {

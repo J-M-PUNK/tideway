@@ -1,8 +1,8 @@
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
 import { ChevronRight, Play, Video as VideoIcon } from "lucide-react";
 import { api } from "@/api/client";
-import type { Album, Artist, Track, Video } from "@/api/types";
+import type { Album, Artist, Video } from "@/api/types";
 import type { OnDownload } from "@/api/download";
 import { useApi } from "@/hooks/useApi";
 import { useColumnCount } from "@/hooks/useColumnCount";
@@ -19,33 +19,16 @@ import { formatDuration, imageProxy } from "@/lib/utils";
 
 export function ArtistDetail({ onDownload }: { onDownload: OnDownload }) {
   const { id = "" } = useParams();
+  // Single round trip. The backend now parallelizes the eight Tidal
+  // calls it needs and bundles credits + videos into the response,
+  // so the frontend doesn't waterfall three separate fetches on
+  // mount like it used to.
   const { data: artist, loading, error } = useApi(() => api.artist(id), [id]);
-  // Credits is a separate lazy fetch — Tidal's endpoint is undocumented
-  // and may return nothing for some artists, so we load it in parallel
-  // and hide the section when empty rather than blocking the main view.
-  const [credits, setCredits] = useState<(Track & { role: string })[] | null>(null);
-  const [videos, setVideos] = useState<Video[] | null>(null);
   // Default to top-5; reveal the full top-10 on click. Matches
   // Spotify / Apple Music's "Show more" behavior on artist pages
   // where the first five tracks are the headline and the rest are
   // discoverable with one extra interaction.
   const [popularExpanded, setPopularExpanded] = useState(false);
-  useEffect(() => {
-    let cancelled = false;
-    setCredits(null);
-    setVideos(null);
-    api
-      .artistCredits(id)
-      .then((rows) => !cancelled && setCredits(rows))
-      .catch(() => !cancelled && setCredits([]));
-    api
-      .artistVideos(id)
-      .then((rows) => !cancelled && setVideos(rows))
-      .catch(() => !cancelled && setVideos([]));
-    return () => {
-      cancelled = true;
-    };
-  }, [id]);
 
   if (loading) {
     return (
@@ -117,13 +100,13 @@ export function ArtistDetail({ onDownload }: { onDownload: OnDownload }) {
         items={artist.appears_on}
         onDownload={onDownload}
       />
-      {videos && videos.length > 0 && <VideoRow videos={videos} />}
+      {artist.videos.length > 0 && <VideoRow videos={artist.videos} />}
       <MediaRow title="Fans also like" items={artist.similar} />
 
-      {credits && credits.length > 0 && (
+      {artist.credits.length > 0 && (
         <>
           <SectionHeader title="Credits" />
-          <TrackList tracks={credits} onDownload={onDownload} showAlbum />
+          <TrackList tracks={artist.credits} onDownload={onDownload} showAlbum />
         </>
       )}
 
