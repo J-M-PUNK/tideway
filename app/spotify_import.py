@@ -25,9 +25,10 @@ import secrets
 import stat
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, asdict
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 from urllib.parse import urlencode
 
 import requests
@@ -639,37 +640,76 @@ def match_artist(session, spotify_artist: dict) -> Optional[dict]:
     }
 
 
+# Cap concurrent Tidal search requests per import. 6 is well inside
+# tidalapi's rate budget and delivers the ~6x speed-up a 100-track
+# playlist needs to finish in a few seconds instead of half a minute.
+_MATCH_WORKERS = 6
+
+
+def _parallel_match(
+    matcher: Callable[[object, dict], Optional[dict]],
+    session,
+    rows: list[dict],
+) -> list[Optional[dict]]:
+    """Run `matcher(session, row)` across `rows` in parallel, preserving
+    input order. tidalapi's request session is thread-safe; see the
+    existing fan-outs in server.py `/api/artist` and `/api/album`."""
+    if not rows:
+        return []
+    with ThreadPoolExecutor(
+        max_workers=min(_MATCH_WORKERS, len(rows)),
+        thread_name_prefix="import-match",
+    ) as pool:
+        return list(pool.map(lambda r: matcher(session, r), rows))
+
+
+def match_tracks(session, rows: list[dict]) -> list[dict]:
+    """Match a list of source rows against Tidal tracks in parallel.
+    Shared by the Spotify playlist / liked-tracks endpoints and by
+    deezer_import / playlist_import so every import path gets the
+    same concurrency profile."""
+    matches = _parallel_match(match_track, session, rows)
+    return [
+        {
+            "spotify": {
+                "name": r.get("name"),
+                "artists": r.get("artists") or [],
+                "duration_ms": r.get("duration_ms") or 0,
+                "isrc": r.get("isrc"),
+            },
+            "match": m,
+        }
+        for r, m in zip(rows, matches)
+    ]
+
+
 def match_albums(session, rows: list[dict]) -> list[dict]:
-    out: list[dict] = []
-    for r in rows:
-        match = match_album(session, r)
-        out.append(
-            {
-                "spotify": {
-                    "name": r.get("name"),
-                    "artists": r.get("artists") or [],
-                    "duration_ms": 0,
-                    "isrc": None,
-                },
-                "match": match,
-            }
-        )
-    return out
+    matches = _parallel_match(match_album, session, rows)
+    return [
+        {
+            "spotify": {
+                "name": r.get("name"),
+                "artists": r.get("artists") or [],
+                "duration_ms": 0,
+                "isrc": None,
+            },
+            "match": m,
+        }
+        for r, m in zip(rows, matches)
+    ]
 
 
 def match_artists(session, rows: list[dict]) -> list[dict]:
-    out: list[dict] = []
-    for r in rows:
-        match = match_artist(session, r)
-        out.append(
-            {
-                "spotify": {
-                    "name": r.get("name"),
-                    "artists": [],
-                    "duration_ms": 0,
-                    "isrc": None,
-                },
-                "match": match,
-            }
-        )
-    return out
+    matches = _parallel_match(match_artist, session, rows)
+    return [
+        {
+            "spotify": {
+                "name": r.get("name"),
+                "artists": [],
+                "duration_ms": 0,
+                "isrc": None,
+            },
+            "match": m,
+        }
+        for r, m in zip(rows, matches)
+    ]

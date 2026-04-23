@@ -1107,11 +1107,9 @@ class _SpotifyMatchRequest(BaseModel):
 def spotify_match(req: _SpotifyMatchRequest) -> dict:
     """Fetch a Spotify playlist's tracks + resolve each to a Tidal
     track. Returns a preview payload so the frontend can let the user
-    eyeball the matches before creating the playlist. Intentionally
-    blocking — a 50-track playlist resolves in a few seconds; the
-    longest playlists (thousands of tracks) run on the order of tens
-    of seconds. If that becomes a complaint, swap this for an SSE
-    stream of per-track match events."""
+    eyeball the matches before creating the playlist. Matching fans
+    out across a bounded worker pool so a 100-track playlist lands in
+    a few seconds instead of half a minute."""
     _require_auth()
     auth = spotify_import.load_session()
     if auth is None:
@@ -1120,20 +1118,7 @@ def spotify_match(req: _SpotifyMatchRequest) -> dict:
         tracks = spotify_import.list_playlist_tracks(auth, req.playlist_id)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc))
-    rows: list[dict] = []
-    for t in tracks:
-        match = spotify_import.match_track(tidal.session, t)
-        rows.append(
-            {
-                "spotify": {
-                    "name": t.get("name"),
-                    "artists": t.get("artists") or [],
-                    "duration_ms": t.get("duration_ms") or 0,
-                    "isrc": t.get("isrc"),
-                },
-                "match": match,
-            }
-        )
+    rows = spotify_import.match_tracks(tidal.session, tracks)
     matched = sum(1 for r in rows if r["match"] is not None)
     return {
         "rows": rows,
@@ -1165,18 +1150,7 @@ def spotify_match_liked_tracks() -> dict:
         tracks = spotify_import.list_liked_tracks(auth)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc))
-    rows = [
-        {
-            "spotify": {
-                "name": t.get("name"),
-                "artists": t.get("artists") or [],
-                "duration_ms": t.get("duration_ms") or 0,
-                "isrc": t.get("isrc"),
-            },
-            "match": spotify_import.match_track(tidal.session, t),
-        }
-        for t in tracks
-    ]
+    rows = spotify_import.match_tracks(tidal.session, tracks)
     matched = sum(1 for r in rows if r["match"] is not None)
     return {"rows": rows, "total": len(rows), "matched": matched}
 
@@ -1753,6 +1727,7 @@ def lastfm_set_credentials(req: LastFmCredentialsRequest) -> dict:
             detail="Both API key and API secret are required.",
         )
     lastfm.set_credentials(req.api_key, req.api_secret)
+    _invalidate_lastfm_cache()
     return lastfm.status()
 
 
@@ -1779,6 +1754,7 @@ def lastfm_connect_complete(req: LastFmCompleteRequest) -> dict:
         # The most common failure mode is "Unauthorized Token" — user
         # clicked Continue before actually approving in the browser.
         raise HTTPException(status_code=400, detail=str(exc))
+    _invalidate_lastfm_cache()
     return {"connected": True, "username": username}
 
 
@@ -1786,6 +1762,7 @@ def lastfm_connect_complete(req: LastFmCompleteRequest) -> dict:
 def lastfm_disconnect() -> dict:
     _require_auth()
     lastfm.disconnect()
+    _invalidate_lastfm_cache()
     return lastfm.status()
 
 
@@ -1810,36 +1787,85 @@ def _validate_period(period: str) -> str:
     return period
 
 
+# Stats-page Last.fm fetches get coalesced behind a short TTL. Each
+# StatsPage mount fires user-info + top-artists + top-tracks +
+# top-albums + loved-tracks + three charts, and Last.fm's rate budget
+# is tight enough that a user who revisits the page every minute can
+# easily saturate the concurrency semaphore. Stats move slowly; five
+# minutes is invisible and cuts the request volume by ~90% on
+# typical browsing.
+_lastfm_cache: dict[str, tuple[float, Any]] = {}
+_lastfm_cache_lock = threading.Lock()
+_LASTFM_CACHE_TTL_SEC = 300.0
+
+
+def _lastfm_cached(key: str, fetch):
+    """Scope the cache to (username, endpoint, args). Username is part
+    of the key so reconnecting to a different account doesn't serve
+    the previous user's data, and disconnect clears the whole map."""
+    username = lastfm.status().get("username") or ""
+    full_key = f"{username}|{key}"
+    now = time.monotonic()
+    with _lastfm_cache_lock:
+        cached = _lastfm_cache.get(full_key)
+        if cached and (now - cached[0]) < _LASTFM_CACHE_TTL_SEC:
+            return cached[1]
+    data = fetch()
+    with _lastfm_cache_lock:
+        _lastfm_cache[full_key] = (now, data)
+    return data
+
+
+def _invalidate_lastfm_cache() -> None:
+    with _lastfm_cache_lock:
+        _lastfm_cache.clear()
+
+
 @app.get("/api/lastfm/user-info")
 def lastfm_user_info() -> dict:
     """Header profile data for the Stats page — playcount, registered
     date, avatar. Empty dict if Last.fm isn't connected."""
     _require_auth()
-    return lastfm.get_user_info()
+    return _lastfm_cached("user-info", lastfm.get_user_info)
 
 
 @app.get("/api/lastfm/top-artists")
 def lastfm_top_artists(period: str = "overall", limit: int = 50) -> list[dict]:
     _require_auth()
-    return lastfm.get_top_artists(period=_validate_period(period), limit=limit)
+    p = _validate_period(period)
+    return _lastfm_cached(
+        f"top-artists:{p}:{limit}",
+        lambda: lastfm.get_top_artists(period=p, limit=limit),
+    )
 
 
 @app.get("/api/lastfm/top-tracks")
 def lastfm_top_tracks(period: str = "overall", limit: int = 50) -> list[dict]:
     _require_auth()
-    return lastfm.get_top_tracks(period=_validate_period(period), limit=limit)
+    p = _validate_period(period)
+    return _lastfm_cached(
+        f"top-tracks:{p}:{limit}",
+        lambda: lastfm.get_top_tracks(period=p, limit=limit),
+    )
 
 
 @app.get("/api/lastfm/top-albums")
 def lastfm_top_albums(period: str = "overall", limit: int = 50) -> list[dict]:
     _require_auth()
-    return lastfm.get_top_albums(period=_validate_period(period), limit=limit)
+    p = _validate_period(period)
+    return _lastfm_cached(
+        f"top-albums:{p}:{limit}",
+        lambda: lastfm.get_top_albums(period=p, limit=limit),
+    )
 
 
 @app.get("/api/lastfm/loved-tracks")
 def lastfm_loved_tracks(limit: int = 50) -> list[dict]:
     _require_auth()
-    return lastfm.get_loved_tracks(limit=limit)
+    return _lastfm_cached(
+        f"loved-tracks:{limit}",
+        lambda: lastfm.get_loved_tracks(limit=limit),
+    )
 
 
 @app.get("/api/lastfm/artist-playcount")
@@ -2012,19 +2038,28 @@ def spotify_artist_stats(tidal_artist_id: str, sample_isrc: str) -> dict:
 @app.get("/api/lastfm/chart/top-artists")
 def lastfm_chart_top_artists(limit: int = 50) -> list[dict]:
     _require_auth()
-    return lastfm.get_chart_top_artists(limit=limit)
+    return _lastfm_cached(
+        f"chart-top-artists:{limit}",
+        lambda: lastfm.get_chart_top_artists(limit=limit),
+    )
 
 
 @app.get("/api/lastfm/chart/top-tracks")
 def lastfm_chart_top_tracks(limit: int = 50) -> list[dict]:
     _require_auth()
-    return lastfm.get_chart_top_tracks(limit=limit)
+    return _lastfm_cached(
+        f"chart-top-tracks:{limit}",
+        lambda: lastfm.get_chart_top_tracks(limit=limit),
+    )
 
 
 @app.get("/api/lastfm/chart/top-tags")
 def lastfm_chart_top_tags(limit: int = 50) -> list[dict]:
     _require_auth()
-    return lastfm.get_chart_top_tags(limit=limit)
+    return _lastfm_cached(
+        f"chart-top-tags:{limit}",
+        lambda: lastfm.get_chart_top_tags(limit=limit),
+    )
 
 
 _weekly_scrobbles_cache: dict[str, tuple[float, list]] = {}
