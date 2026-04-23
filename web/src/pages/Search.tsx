@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { Loader2, Music, Search as SearchIcon } from "lucide-react";
 import { api } from "@/api/client";
 import type { SearchResponse } from "@/api/types";
 import type { OnDownload } from "@/api/download";
-import { Input } from "@/components/ui/input";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Grid, SectionHeader } from "@/components/Grid";
 import { MediaCard } from "@/components/MediaCard";
@@ -19,18 +19,16 @@ import {
 type Filter = "all" | "tracks" | "albums" | "artists" | "playlists";
 
 export function Search({ onDownload }: { onDownload: OnDownload }) {
-  const [q, setQ] = useState("");
+  // The query lives in the URL so the NavBar's search input and this
+  // page stay in sync. Typing into either updates ?q=<value> and this
+  // page re-fetches whenever that value changes.
+  const [params] = useSearchParams();
+  const q = params.get("q") ?? "";
   const [results, setResults] = useState<SearchResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [filter, setFilter] = useState<Filter>("all");
   const [format, setFormat] = useState<AudioFormat>("all");
   const debounceRef = useRef<number | null>(null);
-  const inputRef = useRef<HTMLInputElement | null>(null);
-
-  // Focus the search field on first mount (this is what Cmd/Ctrl+K navigates to).
-  useEffect(() => {
-    inputRef.current?.focus();
-  }, []);
 
   useEffect(() => {
     if (debounceRef.current !== null) window.clearTimeout(debounceRef.current);
@@ -88,19 +86,11 @@ export function Search({ onDownload }: { onDownload: OnDownload }) {
 
   return (
     <div>
-      <div className="relative mb-6 max-w-xl">
-        <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
-        <Input
-          ref={inputRef}
-          value={q}
-          onChange={(e) => setQ(e.target.value)}
-          placeholder="What do you want to listen to?"
-          className="h-12 pl-10 text-base"
-        />
-        {loading && (
-          <Loader2 className="absolute right-3 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-muted-foreground" />
-        )}
-      </div>
+      {loading && (
+        <div className="mb-4 flex items-center gap-2 text-sm text-muted-foreground">
+          <Loader2 className="h-4 w-4 animate-spin" /> Searching…
+        </div>
+      )}
 
       {results && hasAny && (
         <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
@@ -123,7 +113,7 @@ export function Search({ onDownload }: { onDownload: OnDownload }) {
         <EmptyState
           icon={SearchIcon}
           title="Search Tidal"
-          description="Tracks, albums, artists, playlists — hit ⌘K from anywhere to get here fast."
+          description="Start typing in the search bar at the top to find tracks, albums, artists, or playlists."
         />
       )}
 
