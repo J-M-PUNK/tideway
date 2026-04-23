@@ -17,7 +17,9 @@ into memory unless libav reads to the end.
 from __future__ import annotations
 
 import io
+import sys
 import threading
+import time
 from typing import Optional
 
 import requests
@@ -48,7 +50,21 @@ class SegmentReader(io.RawIOBase):
         return True
 
     def seekable(self) -> bool:
-        return True
+        # Report non-seekable so libav treats the source as a live
+        # stream. Otherwise libav scans every moof atom in the
+        # fragmented MP4 during av.open() to build a seek table,
+        # which at hi-res is dozens of segment fetches and the bulk
+        # of the startup latency we're trying to kill.
+        #
+        # Backward / tell-me-the-size seeks that libav would have
+        # done during probing are skipped in this mode, so the
+        # decoder returns from av.open after the first media
+        # segment's header has been read. In-track user scrubbing
+        # is driven by PCMPlayer recreating the Decoder at the
+        # target segment rather than calling container.seek, so
+        # losing seekability on the file object does not cost us
+        # the scrubbing feature.
+        return False
 
     def writable(self) -> bool:
         return False
@@ -69,12 +85,27 @@ class SegmentReader(io.RawIOBase):
                 out = bytes(self._buf[self._pos:])
                 self._pos = len(self._buf)
                 return out
+            # Cap how far past the end of our fetched buffer we're
+            # willing to fetch to satisfy a single read. Legitimate
+            # forward-linear reads land at (or 1 byte past) the tail
+            # and are served by fetching the next segment or two.
+            # A seek near SEEK_END lands megabytes past the tail and
+            # would otherwise fetch every remaining segment trying
+            # to reach the position — that's the bug that used to
+            # pull the whole track before av.open returned.
+            _MAX_CATCHUP = 8 * 1024 * 1024  # 8 MB, ~3 hi-res segments
+            if self._pos > len(self._buf) + _MAX_CATCHUP:
+                return b""
             # Fetch segments until the read range is fully in buf —
-            # covers both "reading forward past current tail" and
-            # "reading after a seek to a byte beyond what's fetched."
+            # covers sequential-playback reads and any backward
+            # seeks to bytes inside the already-fetched region.
             needed = self._pos + size
             while needed > len(self._buf) and self._next_segment_idx < len(self._urls):
                 self._fetch_next_segment()
+            # If pos is still past the buffer after all fetches
+            # (segments ran out), signal EOF cleanly.
+            if self._pos >= len(self._buf):
+                return b""
             end = min(needed, len(self._buf))
             out = bytes(self._buf[self._pos:end])
             self._pos = end
@@ -95,20 +126,20 @@ class SegmentReader(io.RawIOBase):
             elif whence == io.SEEK_CUR:
                 target = self._pos + offset
             elif whence == io.SEEK_END:
-                # libav asks SEEK_END during av.open() probing. We
-                # do NOT fetch every segment to answer it — at
-                # hi-res that's ~100MB of eager download before the
-                # decoder can even start, which added ~5s to every
-                # load(). Instead, report a stable large size; libav
-                # uses this as "end of file far away." When reads
-                # eventually hit the actual tail of the segments,
-                # read() returns empty and libav sees EOF normally.
+                # libav calls SEEK_END during av.open() to find a
+                # trailing moov box and caches the returned position
+                # as the stream's total size. If we report our
+                # tiny fetched-so-far number, libav stops reading
+                # after the init segment and playback dies two
+                # seconds in. If we report the real end, we'd have
+                # to fetch every segment — also bad.
                 #
-                # The size is a conservative over-estimate: 250MB
-                # covers ~15 minutes of 24-bit/96kHz FLAC or many
-                # hours of lossy. Fine-grained accuracy isn't needed
-                # — libav doesn't use this for the decoder's notion
-                # of track length (that comes from the MP4 moov).
+                # Compromise: report a stable far-future value so
+                # libav never caps us at playback time. read() has
+                # its own gap-too-large guard that catches the
+                # "libav seeks near the fake end to probe for a
+                # trailing moov" pattern and returns EOF without
+                # fetching the whole track.
                 _FAKE_END = 250 * 1024 * 1024
                 target = _FAKE_END + offset
             else:
@@ -126,12 +157,21 @@ class SegmentReader(io.RawIOBase):
     def _fetch_next_segment(self) -> None:
         if self._next_segment_idx >= len(self._urls):
             return
-        url = self._urls[self._next_segment_idx]
+        idx = self._next_segment_idx
+        url = self._urls[idx]
         # Tidal CDN URLs are signed with time-bounded policy params,
         # so this is the only place we hit the network. We keep the
         # requests.Session around for HTTP/2 connection reuse.
+        t0 = time.monotonic()
         r = self._session.get(url, timeout=30)
         r.raise_for_status()
+        size = len(r.content)
         self._buf.extend(r.content)
         self._next_segment_idx += 1
+        elapsed_ms = (time.monotonic() - t0) * 1000.0
+        print(
+            f"[perf] segment idx={idx} size={size}B elapsed={elapsed_ms:.0f}ms",
+            file=sys.stderr,
+            flush=True,
+        )
 

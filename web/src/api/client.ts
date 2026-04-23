@@ -710,6 +710,16 @@ export const api = {
       req<{ ok: boolean }>("/api/player/preload/clear", {
         method: "POST",
       }).catch(() => ({ ok: false })),
+    /** Warm the stream-manifest cache for a set of tracks so the
+     *  next click skips the Tidal track→stream→manifest round-trips.
+     *  Fire-and-forget: errors are swallowed. Called from hover on
+     *  track rows (single id) and on album / playlist mount
+     *  (batched). */
+    prefetch: (trackIds: string[], quality?: string) =>
+      req<{ prefetched: number; total: number }>("/api/player/prefetch", {
+        method: "POST",
+        body: JSON.stringify({ track_ids: trackIds, quality }),
+      }).catch(() => ({ prefetched: 0, total: trackIds.length })),
     play: () =>
       req<PlayerSnapshot>("/api/player/play", { method: "POST" }),
     pause: () =>

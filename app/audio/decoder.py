@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import io
 import logging
+import sys
+import time
 from dataclasses import dataclass
 from typing import Iterator, Optional, Union
 
@@ -65,7 +67,46 @@ class Decoder:
 
     def __init__(self, source: Union[str, io.IOBase]):
         self._source = source
-        self._container = av.open(source)
+        # libav's default probesize (5 MB) and analyzeduration
+        # (5 seconds of audio) cause av.open to read several DASH
+        # segments before it's satisfied it knows what the stream
+        # is — adding seconds to every play on hi-res. We already
+        # know from Tidal's manifest that it's FLAC (or AAC) in
+        # fMP4; the moov atom in the init segment plus ~200ms of
+        # audio is plenty. If these values ever reject a legitimate
+        # stream we fall back to the libav defaults before giving up.
+        open_opts = {
+            "probesize": "131072",
+            "analyzeduration": "200000",
+        }
+        # Tidal serves fragmented MP4 at every quality tier, so we
+        # can short-circuit libav's format-detection phase by naming
+        # the container explicitly. Only applies to the streaming
+        # path — local files go through default sniffing so arbitrary
+        # downloaded formats (flac, mp3, m4a) still open.
+        open_fmt = "mp4" if not isinstance(source, str) else None
+        t0 = time.monotonic()
+        try:
+            self._container = av.open(
+                source, format=open_fmt, options=open_opts
+            )
+        except Exception as first_exc:
+            # Reopen with defaults as a safety net. The source must
+            # be re-seekable for this to work; both our SegmentReader
+            # and local filesystem paths support that.
+            print(
+                f"[perf] decoder av.open with probesize={open_opts['probesize']} "
+                f"failed ({first_exc!r}); retrying with libav defaults",
+                file=sys.stderr,
+                flush=True,
+            )
+            try:
+                if hasattr(source, "seek"):
+                    source.seek(0)  # type: ignore[union-attr]
+            except Exception:
+                pass
+            self._container = av.open(source)
+        t_open = time.monotonic()
         streams = [s for s in self._container.streams if s.type == "audio"]
         if not streams:
             self._container.close()
@@ -73,6 +114,12 @@ class Decoder:
         self._stream = streams[0]
         cc = self._stream.codec_context
         self._sample_rate = int(cc.sample_rate)
+        print(
+            f"[perf] decoder av.open={((t_open - t0) * 1000.0):.0f}ms "
+            f"codec_setup={((time.monotonic() - t_open) * 1000.0):.0f}ms",
+            file=sys.stderr,
+            flush=True,
+        )
         channels = getattr(cc, "channels", None)
         if channels is None:
             layout = getattr(cc, "layout", None) or getattr(cc, "channel_layout", None)
@@ -184,6 +231,19 @@ class Decoder:
             if not resampled:
                 continue
             return _frames_to_stereo(resampled, self._output_dtype)
+
+    def cancel_source(self) -> None:
+        """Close just the underlying file-like source, without touching
+        the container. Safe to call from a thread other than the one
+        using the decoder — for SegmentReader this aborts any pending
+        HTTP request so the decoder loop unblocks and notices the
+        stop flag quickly. The container is left for close() to
+        clean up once the decoder thread has exited."""
+        if hasattr(self._source, "close"):
+            try:
+                self._source.close()  # type: ignore[union-attr]
+            except Exception:
+                pass
 
     def close(self) -> None:
         try:

@@ -6,6 +6,7 @@ import type { OnDownload } from "@/api/download";
 import type { PlaylistFolder, Track } from "@/api/types";
 import { useApi } from "@/hooks/useApi";
 import { useMyPlaylists } from "@/hooks/useMyPlaylists";
+import { useTrackPrefetch } from "@/hooks/useTrackPrefetch";
 import { useToast } from "@/components/toast";
 import { AddToLibraryButton } from "@/components/AddToLibraryButton";
 import { CollectionOverflowMenu } from "@/components/CollectionOverflowMenu";
@@ -54,6 +55,17 @@ export function PlaylistDetail({ onDownload }: { onDownload: OnDownload }) {
   const toast = useToast();
 
   const tracks = localTracks ?? playlist?.tracks ?? [];
+
+  // Warm the stream-manifest cache for every track on the playlist so
+  // a click on any row skips the Tidal playbackinfo round-trip. Only
+  // re-fires when the track list identity changes, not on refreshTick
+  // or local optimistic edits.
+  const { prefetchMany } = useTrackPrefetch();
+  useEffect(() => {
+    if (playlist?.tracks?.length) {
+      prefetchMany(playlist.tracks.map((t) => t.id));
+    }
+  }, [playlist?.tracks, prefetchMany]);
 
   // Content-keyed duplicate detection. Only meaningful on playlists
   // the user owns (others' playlists aren't editable). We recompute

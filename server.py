@@ -2972,6 +2972,49 @@ def player_preload(req: _PlayerLoadRequest) -> dict:
     return _native_player().preload(req.track_id, quality=req.quality)
 
 
+class _PlayerPrefetchRequest(BaseModel):
+    track_ids: list[str]
+    quality: Optional[str] = None
+
+
+@app.get("/api/player/cache-stats")
+def player_cache_stats() -> dict:
+    """Inspect the stream-manifest cache. Useful while testing the
+    prefetch path — compare hits/misses across cold/warm clicks, and
+    confirm album-mount prefetch is actually landing in the cache."""
+    _require_local_access()
+    player = _native_player()
+    stats = getattr(player, "cache_stats", None)
+    if stats is None:
+        return {"hits": 0, "misses": 0, "size": 0, "entries": []}
+    return stats()
+
+
+@app.post("/api/player/prefetch")
+def player_prefetch(req: _PlayerPrefetchRequest) -> dict:
+    """Warm the stream-manifest cache for a list of tracks so the
+    next play-click skips the track→stream→manifest round-trips to
+    Tidal. Called by the frontend on hover (single id) and on
+    album / playlist mount (batched).
+
+    Runs the resolves in parallel with a small worker pool, but
+    caps at ~10 to respect tidalapi's implicit rate budget. Errors
+    are swallowed per-track — prefetch is fire-and-forget."""
+    _require_local_access()
+    ids = [tid for tid in req.track_ids if tid]
+    if not ids:
+        return {"prefetched": 0, "total": 0}
+    player = _native_player()
+    prefetch = getattr(player, "prefetch", None)
+    if prefetch is None:
+        return {"prefetched": 0, "total": len(ids)}
+    with ThreadPoolExecutor(
+        max_workers=min(10, len(ids)), thread_name_prefix="prefetch"
+    ) as pool:
+        results = list(pool.map(lambda tid: prefetch(tid, req.quality), ids))
+    return {"prefetched": sum(1 for r in results if r), "total": len(ids)}
+
+
 @app.post("/api/player/preload/clear")
 def player_preload_clear() -> dict:
     """Drop the preload cache. Used by the frontend on quality
