@@ -1,10 +1,10 @@
 import { useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
-import { Music } from "lucide-react";
-import type { Album, Artist, Playlist } from "@/api/types";
+import { Heart, Music } from "lucide-react";
+import type { Album, Artist, Playlist, FavoriteKind } from "@/api/types";
 import type { OnDownload } from "@/api/download";
+import { useFavorites } from "@/hooks/useFavorites";
 import { imageProxy } from "@/lib/utils";
-import { HeartButton } from "@/components/HeartButton";
 import { PlayMediaButton } from "@/components/PlayMediaButton";
 
 type Item = Album | Artist | Playlist;
@@ -71,17 +71,11 @@ export function MediaCard({
                 onOpenChange={setMenuOpen}
               />
             </div>
-            <div
-              className={`absolute bottom-2 right-2 flex h-10 w-10 items-center justify-center rounded-full bg-black/60 shadow-lg transition-all ${hoverGroup}`}
-            >
-              <HeartButton
-                kind={item.kind}
-                id={item.id}
-                size="md"
-                tone="foreground"
-                className="bg-transparent hover:bg-transparent"
-              />
-            </div>
+            <InlineHeart
+              kind={item.kind as FavoriteKind}
+              id={item.id}
+              className={`absolute bottom-2 right-2 transition-all ${hoverGroup}`}
+            />
           </>
         )}
       </div>
@@ -92,6 +86,45 @@ export function MediaCard({
         </div>
       </div>
     </Link>
+  );
+}
+
+/**
+ * Self-contained heart button for the hover overlay. Built in-place
+ * rather than going through HeartButton+Button+cva so there's no
+ * chance of an opacity or size class getting stripped by the merge
+ * chain. Dark circle, white outline when un-liked, primary fill when
+ * liked. Stops propagation so clicking it never follows the parent
+ * Link.
+ */
+function InlineHeart({
+  kind,
+  id,
+  className,
+}: {
+  kind: FavoriteKind;
+  id: string;
+  className?: string;
+}) {
+  const favs = useFavorites();
+  const liked = favs.has(kind, id);
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        void favs.toggle(kind, id);
+      }}
+      aria-pressed={liked}
+      aria-label={liked ? `Unlike ${kind}` : `Like ${kind}`}
+      title={liked ? `Unlike ${kind}` : `Like ${kind}`}
+      className={`flex h-10 w-10 items-center justify-center rounded-full bg-black/70 text-white shadow-lg transition-colors hover:bg-black/90 ${className ?? ""}`}
+    >
+      <Heart
+        className={`h-5 w-5 ${liked ? "fill-primary stroke-primary" : ""}`}
+      />
+    </button>
   );
 }
 

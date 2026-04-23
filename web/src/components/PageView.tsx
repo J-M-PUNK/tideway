@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { ChevronRight, Home, Music, Play } from "lucide-react";
+import { ChevronRight, Heart, Home, Music, Play } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/EmptyState";
 import type {
@@ -16,7 +16,7 @@ import type {
   Track,
 } from "@/api/types";
 import type { OnDownload } from "@/api/download";
-import { HeartButton } from "@/components/HeartButton";
+import { useFavorites } from "@/hooks/useFavorites";
 import { MediaCard } from "@/components/MediaCard";
 import { PlayMediaButton } from "@/components/PlayMediaButton";
 import { TrackList } from "@/components/TrackList";
@@ -346,18 +346,10 @@ function TrackCard({ track, rowTracks }: { track: Track; rowTracks: Track[] }) {
             <Play className="h-10 w-10 text-foreground" fill="currentColor" />
           </span>
         </button>
-        {/* Heart sits above the play button and stops propagation so
-            clicking it never triggers playback. z-10 raises it out of
-            the play button's flow without needing a portal. */}
-        <div className="absolute bottom-2 right-2 z-10 flex h-10 w-10 items-center justify-center rounded-full bg-black/60 opacity-0 shadow-lg transition-opacity group-hover:opacity-100 focus-within:opacity-100">
-          <HeartButton
-            kind="track"
-            id={track.id}
-            size="md"
-            tone="foreground"
-            className="bg-transparent hover:bg-transparent"
-          />
-        </div>
+        <TrackHeart
+          trackId={track.id}
+          className="absolute bottom-2 right-2 z-10 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100"
+        />
       </div>
       <div className="min-w-0">
         {albumPath ? (
@@ -386,6 +378,38 @@ function TrackCard({ track, rowTracks }: { track: Track; rowTracks: Track[] }) {
         </div>
       </div>
     </div>
+  );
+}
+
+function TrackHeart({
+  trackId,
+  className,
+}: {
+  trackId: string;
+  className?: string;
+}) {
+  const favs = useFavorites();
+  const liked = favs.has("track", trackId);
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        void favs.toggle("track", trackId);
+      }}
+      aria-pressed={liked}
+      aria-label={liked ? "Unlike track" : "Like track"}
+      title={liked ? "Unlike track" : "Like track"}
+      className={cn(
+        "flex h-10 w-10 items-center justify-center rounded-full bg-black/70 text-white shadow-lg transition-colors hover:bg-black/90",
+        className,
+      )}
+    >
+      <Heart
+        className={cn("h-5 w-5", liked && "fill-primary stroke-primary")}
+      />
+    </button>
   );
 }
 
