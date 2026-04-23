@@ -3054,21 +3054,11 @@ def airplay_disconnect() -> dict:
     return {"ok": True}
 
 
-@app.get("/api/airplay/stream")
-def airplay_stream():
-    """The HTTP endpoint pyatv connects to. Returns a chunked FLAC
-    stream fed by the active AirPlay session's encoder. Terminates
-    when the session disconnects."""
-    from fastapi.responses import StreamingResponse
-
-    from app.audio.airplay import AirPlayManager
-
-    if not AirPlayManager.is_available():
-        raise HTTPException(status_code=503, detail="airplay unavailable")
-    mgr = _airplay_manager()
-    if not mgr.is_connected():
-        raise HTTPException(status_code=409, detail="no active airplay session")
-    return StreamingResponse(mgr.stream_iter(), media_type="audio/flac")
+# The actual audio stream endpoint pyatv reaches is served by a
+# dedicated HTTP listener bound to 0.0.0.0 on an ephemeral port,
+# owned by AirPlayManager. See app/audio/airplay.py and
+# _StreamHTTPServer for why FastAPI doesn't host the stream
+# directly.
 
 
 # ---------------------------------------------------------------------------
