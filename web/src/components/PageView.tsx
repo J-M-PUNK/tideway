@@ -1,5 +1,5 @@
 import { Link } from "react-router-dom";
-import { ChevronRight, Home, Music } from "lucide-react";
+import { ChevronRight, Home, Music, Play } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/EmptyState";
 import type {
@@ -15,9 +15,11 @@ import type {
   Track,
 } from "@/api/types";
 import type { OnDownload } from "@/api/download";
+import { HeartButton } from "@/components/HeartButton";
 import { MediaCard } from "@/components/MediaCard";
 import { TrackList } from "@/components/TrackList";
 import { useColumnCount } from "@/hooks/useColumnCount";
+import { usePlayerActions, usePlayerMeta } from "@/hooks/PlayerContext";
 import { cn, imageProxy } from "@/lib/utils";
 
 interface Props {
@@ -126,10 +128,15 @@ function Section({
   // sections is quick; the only cost is some rows lose their "view
   // more" affordance when Tidal didn't send a viewAllPath for them.
   const singleRow = forceSingleRow || Boolean(context || viewAllPath);
-  // Cap to actual visible column count so the row never wraps. Without
-  // this, at lg (5 cols) a 6-item cap leaves one card orphaned on a
-  // partial second row — the exact visual glitch we're trying to avoid.
-  const visible = singleRow ? items.slice(0, columnCount) : items;
+  // Cap single rows at whichever is smaller: five (matches Tidal's
+  // homepage density) or the actual visible column count. Without the
+  // second cap a narrower viewport renders 4 cards then an orphaned
+  // 5th on a partial second row.
+  const ROW_CAP = 5;
+  const visible = singleRow ? items.slice(0, Math.min(ROW_CAP, columnCount)) : items;
+  // Track rows need a shared playback context: clicking one track's
+  // cover should play it with the row's other tracks queued up.
+  const rowTracks = items.filter((i): i is Track => i.kind === "track");
   return (
     <div>
       {title && (
@@ -144,7 +151,7 @@ function Section({
         className={cn(
           "grid gap-4",
           singleRow
-            ? "grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 2xl:grid-cols-6"
+            ? "grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5"
             : "grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6",
         )}
       >
@@ -153,6 +160,7 @@ function Section({
             key={`${it.kind}-${itemKey(it)}-${idx}`}
             item={it}
             onDownload={onDownload}
+            rowTracks={rowTracks}
           />
         ))}
       </div>
@@ -262,7 +270,15 @@ function SectionHeader({
   );
 }
 
-function PageItemCard({ item, onDownload }: { item: PageItem; onDownload: OnDownload }) {
+function PageItemCard({
+  item,
+  onDownload,
+  rowTracks = [],
+}: {
+  item: PageItem;
+  onDownload: OnDownload;
+  rowTracks?: Track[];
+}) {
   if (item.kind === "album" || item.kind === "artist" || item.kind === "playlist") {
     return <MediaCard item={item as Album | Artist | Playlist} onDownload={onDownload} />;
   }
@@ -270,29 +286,104 @@ function PageItemCard({ item, onDownload }: { item: PageItem; onDownload: OnDown
     return <MixCard mix={item} />;
   }
   if (item.kind === "track") {
-    const t = item as Track;
-    return (
-      <Link
-        to={t.album ? `/album/${t.album.id}` : `/artist/${t.artists[0]?.id ?? ""}`}
-        className="flex flex-col gap-3 rounded-lg bg-card p-4 transition-colors hover:bg-accent"
-      >
-        <div className="aspect-square overflow-hidden rounded-md bg-secondary">
-          {t.album?.cover ? (
-            <img src={imageProxy(t.album.cover)} alt="" className="h-full w-full object-cover" />
+    return <TrackCard track={item} rowTracks={rowTracks} />;
+  }
+  return null;
+}
+
+/**
+ * Track card with three hit regions, matching Tidal's homepage: clicking
+ * the art plays the song (with the row's other tracks as the playback
+ * queue), clicking the title navigates to the album, clicking the
+ * artist name navigates to the artist. A hover-revealed heart button
+ * in the bottom-right lets the user favourite the track in place.
+ */
+function TrackCard({ track, rowTracks }: { track: Track; rowTracks: Track[] }) {
+  const actions = usePlayerActions();
+  const meta = usePlayerMeta();
+  const isCurrent = meta.track?.id === track.id;
+  const isPlaying = isCurrent && meta.playing;
+  const cover = track.album?.cover ? imageProxy(track.album.cover) : null;
+  const albumPath = track.album ? `/album/${track.album.id}` : null;
+  const handlePlay = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (isCurrent) {
+      actions.toggle();
+    } else {
+      actions.play(track, rowTracks.length > 0 ? rowTracks : [track]);
+    }
+  };
+  return (
+    <div className="group flex flex-col gap-3 rounded-lg bg-card p-4 transition-colors hover:bg-accent">
+      <div className="relative aspect-square overflow-hidden rounded-md bg-secondary">
+        <button
+          type="button"
+          onClick={handlePlay}
+          aria-label={isPlaying ? `Pause ${track.name}` : `Play ${track.name}`}
+          className="absolute inset-0 z-0"
+        >
+          {cover ? (
+            <img
+              src={cover}
+              alt=""
+              loading="lazy"
+              className="h-full w-full object-cover transition-transform group-hover:scale-105"
+            />
           ) : (
             <Music className="m-auto h-10 w-10 text-muted-foreground" />
           )}
+          <span
+            className={cn(
+              "absolute inset-0 flex items-center justify-center bg-black/50 transition-opacity",
+              isPlaying
+                ? "opacity-100"
+                : "opacity-0 group-hover:opacity-100 focus-visible:opacity-100",
+            )}
+          >
+            <Play className="h-10 w-10 text-foreground" fill="currentColor" />
+          </span>
+        </button>
+        {/* Heart sits above the play button and stops propagation so
+            clicking it never triggers playback. z-10 raises it out of
+            the play button's flow without needing a portal. */}
+        <div className="absolute bottom-2 right-2 z-10 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+          <HeartButton
+            kind="track"
+            id={track.id}
+            size="md"
+            className="h-10 w-10 bg-background/80 backdrop-blur hover:bg-background"
+          />
         </div>
-        <div className="min-w-0">
-          <div className="truncate font-semibold">{t.name}</div>
-          <div className="truncate text-xs text-muted-foreground">
-            {t.artists.map((a) => a.name).join(", ")}
-          </div>
+      </div>
+      <div className="min-w-0">
+        {albumPath ? (
+          <Link
+            to={albumPath}
+            className="block truncate font-semibold hover:underline"
+          >
+            {track.name}
+          </Link>
+        ) : (
+          <div className="truncate font-semibold">{track.name}</div>
+        )}
+        <div className="truncate text-xs text-muted-foreground">
+          {track.artists.map((a, i) => (
+            <span key={a.id || i}>
+              {i > 0 && ", "}
+              {a.id ? (
+                <Link to={`/artist/${a.id}`} className="hover:text-foreground hover:underline">
+                  {a.name}
+                </Link>
+              ) : (
+                a.name
+              )}
+            </span>
+          ))}
         </div>
-      </Link>
-    );
-  }
-  return null;
+      </div>
+    </div>
+  );
 }
 
 function MixCard({ mix }: { mix: MixItem }) {
