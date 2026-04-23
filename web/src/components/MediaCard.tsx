@@ -72,13 +72,14 @@ export function MediaCard({
               />
             </div>
             <div
-              className={`absolute bottom-2 right-2 transition-all ${hoverGroup}`}
+              className={`absolute bottom-2 right-2 flex h-10 w-10 items-center justify-center rounded-full bg-black/60 shadow-lg transition-all ${hoverGroup}`}
             >
               <HeartButton
                 kind={item.kind}
                 id={item.id}
                 size="md"
-                className="h-10 w-10 bg-background/80 backdrop-blur hover:bg-background"
+                tone="foreground"
+                className="bg-transparent hover:bg-transparent"
               />
             </div>
           </>

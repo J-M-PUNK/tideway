@@ -349,12 +349,13 @@ function TrackCard({ track, rowTracks }: { track: Track; rowTracks: Track[] }) {
         {/* Heart sits above the play button and stops propagation so
             clicking it never triggers playback. z-10 raises it out of
             the play button's flow without needing a portal. */}
-        <div className="absolute bottom-2 right-2 z-10 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100">
+        <div className="absolute bottom-2 right-2 z-10 flex h-10 w-10 items-center justify-center rounded-full bg-black/60 opacity-0 shadow-lg transition-opacity group-hover:opacity-100 focus-within:opacity-100">
           <HeartButton
             kind="track"
             id={track.id}
             size="md"
-            className="h-10 w-10 bg-background/80 backdrop-blur hover:bg-background"
+            tone="foreground"
+            className="bg-transparent hover:bg-transparent"
           />
         </div>
       </div>
