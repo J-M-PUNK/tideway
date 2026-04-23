@@ -1107,11 +1107,9 @@ class _SpotifyMatchRequest(BaseModel):
 def spotify_match(req: _SpotifyMatchRequest) -> dict:
     """Fetch a Spotify playlist's tracks + resolve each to a Tidal
     track. Returns a preview payload so the frontend can let the user
-    eyeball the matches before creating the playlist. Intentionally
-    blocking — a 50-track playlist resolves in a few seconds; the
-    longest playlists (thousands of tracks) run on the order of tens
-    of seconds. If that becomes a complaint, swap this for an SSE
-    stream of per-track match events."""
+    eyeball the matches before creating the playlist. Matching fans
+    out across a bounded worker pool so a 100-track playlist lands in
+    a few seconds instead of half a minute."""
     _require_auth()
     auth = spotify_import.load_session()
     if auth is None:
@@ -1120,20 +1118,7 @@ def spotify_match(req: _SpotifyMatchRequest) -> dict:
         tracks = spotify_import.list_playlist_tracks(auth, req.playlist_id)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc))
-    rows: list[dict] = []
-    for t in tracks:
-        match = spotify_import.match_track(tidal.session, t)
-        rows.append(
-            {
-                "spotify": {
-                    "name": t.get("name"),
-                    "artists": t.get("artists") or [],
-                    "duration_ms": t.get("duration_ms") or 0,
-                    "isrc": t.get("isrc"),
-                },
-                "match": match,
-            }
-        )
+    rows = spotify_import.match_tracks(tidal.session, tracks)
     matched = sum(1 for r in rows if r["match"] is not None)
     return {
         "rows": rows,
@@ -1165,18 +1150,7 @@ def spotify_match_liked_tracks() -> dict:
         tracks = spotify_import.list_liked_tracks(auth)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc))
-    rows = [
-        {
-            "spotify": {
-                "name": t.get("name"),
-                "artists": t.get("artists") or [],
-                "duration_ms": t.get("duration_ms") or 0,
-                "isrc": t.get("isrc"),
-            },
-            "match": spotify_import.match_track(tidal.session, t),
-        }
-        for t in tracks
-    ]
+    rows = spotify_import.match_tracks(tidal.session, tracks)
     matched = sum(1 for r in rows if r["match"] is not None)
     return {"rows": rows, "total": len(rows), "matched": matched}
 
