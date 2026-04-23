@@ -1146,7 +1146,11 @@ class PCMPlayer:
         When warm_bytes=True (default), follows up by downloading the
         init segment plus the first media segment in parallel and
         caches those bytes too, so the next click's decoder_init
-        can skip the network entirely."""
+        can skip the network entirely.
+
+        No-ops when prefetch is disabled by the caller — the endpoint
+        layer bails out on offline_mode before ever reaching this
+        method, so we only get here when prefetch is wanted."""
         try:
             source_spec, _dur, _info, _bytes = self._resolve_source(track_id, quality)
         except Exception as exc:

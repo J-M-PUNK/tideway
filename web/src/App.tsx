@@ -3,6 +3,7 @@ import { BrowserRouter, Navigate, Route, Routes, useLocation } from "react-route
 import { Loader2 } from "lucide-react";
 import { Sidebar } from "@/components/Sidebar";
 import { NavBar } from "@/components/NavBar";
+import { OfflineBanner } from "@/components/OfflineBanner";
 import { UpdateBanner } from "@/components/UpdateBanner";
 import { NowPlaying } from "@/components/NowPlaying";
 import { QueuePanel } from "@/components/QueuePanel";
@@ -21,7 +22,6 @@ import { RecentsProvider } from "@/hooks/useRecentlyPlayed";
 import { TrackSelectionProvider } from "@/hooks/useTrackSelection";
 import { UiPreferencesProvider } from "@/hooks/useUiPreferences";
 import { OfflineProvider, useOfflineMode } from "@/hooks/useOfflineMode";
-import { useNetworkStatus } from "@/hooks/useNetworkStatus";
 import { PlayerProvider, usePlayerMeta } from "@/hooks/PlayerContext";
 import {
   VideoDownloadsProvider,
@@ -181,7 +181,6 @@ export default function App() {
 function AppInner() {
   const auth = useAuth();
   const { offline } = useOfflineMode();
-  const online = useNetworkStatus();
 
   // Hold the spinner until both probes resolve — rendering Login
   // prematurely would flash the sign-in screen for users who'd land
@@ -194,12 +193,11 @@ function AppInner() {
     );
   }
 
-  // A dead network is treated like the offline preference — even if
-  // the user never flipped the toggle, it would be strange to render
-  // Login with no way to actually reach Tidal. The Login page still
-  // shows when the user is genuinely signed out on an online network,
-  // which is the case a first-time user lands in.
-  if (!auth.logged_in && !offline && online) {
+  // `offline` is already the OR of the user toggle and the auto
+  // browser-level detection (see useOfflineMode). If it's false we
+  // have a live network and no user preference for offline, which is
+  // when a signed-out user should land on Login.
+  if (!auth.logged_in && !offline) {
     return (
       <Suspense fallback={<HeroSkeleton />}>
         <Login onLoggedIn={auth.refresh} />
@@ -212,11 +210,7 @@ function AppInner() {
   // what users expect ("Work offline" should immediately hide Search,
   // Explore, etc.) and it also lets someone browse their own files
   // without the app chattering at Tidal in the background.
-  //
-  // OR with `!online` so a browser-level drop temporarily flips the
-  // shell into offline mode without touching the persisted preference
-  // — when connectivity returns, the OR clears and we're back online.
-  const isOffline = offline || !online;
+  const isOffline = offline;
 
   // The mini-player window loads /mini — a compact transport UI that
   // shares player state (via backend SSE) with the main window but
@@ -474,6 +468,7 @@ function Shell({
             offline={offline}
             onSignInRequested={onSignInRequested}
           />
+          <OfflineBanner />
           <UpdateBanner />
           <div ref={fadeRef} className="animate-route px-8 py-6">
           <ErrorBoundary resetKey={location.pathname}>

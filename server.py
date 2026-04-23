@@ -848,6 +848,12 @@ _quit_callback: Optional[Callable[[], None]] = None
 # a second pywebview window. No-op in plain-browser dev mode.
 _mini_player_callback: Optional[Callable[[], None]] = None
 
+# Set by the desktop launcher so /api/auth/login/inapp/start can
+# open a pywebview child window pointed at Tidal's PKCE login URL
+# and intercept the tidal:// redirect automatically, skipping the
+# copy-the-Oops-URL paste step the dev-mode login still needs.
+_inapp_login_callback: Optional[Callable[[str], None]] = None
+
 
 def register_focus_callback(fn: Callable[[], None]) -> None:
     global _focus_callback
@@ -862,6 +868,11 @@ def register_quit_callback(fn: Callable[[], None]) -> None:
 def register_mini_player_callback(fn: Callable[[], None]) -> None:
     global _mini_player_callback
     _mini_player_callback = fn
+
+
+def register_inapp_login_callback(fn: Callable[[str], None]) -> None:
+    global _inapp_login_callback
+    _inapp_login_callback = fn
 
 
 # ---------------------------------------------------------------------------
@@ -1743,6 +1754,28 @@ def auth_pkce_url() -> dict:
     exchange the code in `/api/auth/pkce/complete`.
     """
     return {"url": tidal.pkce_login_url()}
+
+
+@app.post("/api/auth/login/inapp/start")
+def auth_login_inapp_start() -> dict:
+    """Ask the desktop shell to open an in-app pywebview window pointed
+    at Tidal's PKCE login URL. The shell watches for navigation to
+    `tidal://login/auth?...`, captures that URL, and posts it back
+    through /api/auth/pkce/complete — all without the user ever
+    seeing the "Oops" page or having to paste anything.
+
+    Only available when the packaged app is running. In `./run.sh`
+    dev mode there's no pywebview shell to call back into, so we
+    return `supported: false` and the frontend falls back to the
+    classic open-browser-and-paste flow.
+    """
+    if _inapp_login_callback is None:
+        return {"supported": False}
+    try:
+        _inapp_login_callback(tidal.pkce_login_url())
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    return {"supported": True}
 
 
 _OPEN_EXTERNAL_HOSTS = {
@@ -3005,8 +3038,14 @@ def player_prefetch(req: _PlayerPrefetchRequest) -> dict:
 
     Runs the resolves in parallel with a small worker pool, but
     caps at ~10 to respect tidalapi's implicit rate budget. Errors
-    are swallowed per-track — prefetch is fire-and-forget."""
+    are swallowed per-track — prefetch is fire-and-forget.
+
+    No-ops when offline mode is on — the user has explicitly opted
+    out of network activity for browsing, and prefetch is pure
+    speculative network."""
     _require_local_access()
+    if settings.offline_mode:
+        return {"prefetched": 0, "total": len(req.track_ids), "skipped": "offline"}
     ids = [tid for tid in req.track_ids if tid]
     if not ids:
         return {"prefetched": 0, "total": 0}
@@ -3216,6 +3255,40 @@ def _airplay_manager():
     from app.audio.airplay import AirPlayManager  # noqa: WPS433
 
     return AirPlayManager.instance()
+
+
+@app.get("/api/upnp/devices")
+def upnp_devices() -> dict:
+    """SSDP-scan the LAN for UPnP MediaRenderers. Used by the
+    forthcoming Settings UPnP section to populate the device
+    picker. Day 1 of UPnP work — no connect / play yet, just
+    confirming that at least one device on the user's network
+    responds to discovery."""
+    _require_local_access()
+    from app.audio.upnp import get_manager  # noqa: WPS433 — lazy
+
+    mgr = get_manager()
+    if not mgr.is_available():
+        return {
+            "available": False,
+            "reason": "async-upnp-client not installed",
+            "devices": [],
+        }
+    devices = mgr.discover(timeout=5.0)
+    return {
+        "available": True,
+        "devices": [
+            {
+                "id": d.id,
+                "name": d.name,
+                "manufacturer": d.manufacturer,
+                "model": d.model,
+                "location": d.location,
+                "service_types": list(d.service_types),
+            }
+            for d in devices
+        ],
+    }
 
 
 @app.get("/api/airplay/devices")
