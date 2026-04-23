@@ -193,6 +193,25 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
           </select>
         </Field>
         <AudioEngineFields />
+        <Field
+          label="Explicit content"
+          hint="Tidal returns both clean and explicit edits of the same album or track. Pick which copy you want to see when both exist."
+        >
+          <select
+            value={settings.explicit_content_preference}
+            onChange={(e) =>
+              patch({
+                explicit_content_preference: e.target
+                  .value as Settings["explicit_content_preference"],
+              })
+            }
+            className="h-10 rounded-md border border-input bg-secondary px-3 text-sm"
+          >
+            <option value="explicit">Show explicit</option>
+            <option value="clean">Show clean</option>
+            <option value="both">Show both</option>
+          </select>
+        </Field>
       </Section>
 
       <AirPlaySection />
