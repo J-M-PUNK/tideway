@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ExternalLink, Loader2, LogIn, Music } from "lucide-react";
+import { ExternalLink, Loader2, LogIn } from "lucide-react";
 import { api } from "@/api/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -13,9 +13,7 @@ export function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
   return (
     <div className="flex min-h-screen items-center justify-center bg-background p-6">
       <div className="flex w-full max-w-md flex-col items-center gap-6 rounded-xl border border-border bg-card p-10 shadow-2xl">
-        <div className="rounded-full bg-primary/10 p-4 text-primary">
-          <Music className="h-8 w-8" />
-        </div>
+        <img src="/app-icon.svg" alt="Tideway" className="h-16 w-16" />
         <div className="text-center">
           <h1 className="text-3xl font-bold tracking-tight">Tideway</h1>
           <p className="mt-1 text-sm text-muted-foreground">
@@ -35,10 +33,19 @@ export function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
 
 /**
  * PKCE login — the only Tidal auth flow that unlocks Max (hi-res) downloads.
- * There's no device-code handoff: the user logs in in their browser, lands
- * on Tidal's "Oops" page (we have no redirect handler registered with
- * Tidal), copies the URL, and pastes it back here. We exchange the code
- * server-side for hi-res-entitled tokens.
+ *
+ * Two paths, chosen automatically:
+ *
+ * 1. In-app: the packaged desktop shell opens a pywebview child window
+ *    at Tidal's login URL and intercepts the `tidal://...` redirect
+ *    after signin, no paste required. This is the default and lands
+ *    the user in the signed-in shell as soon as the backend polls
+ *    confirm logged_in.
+ *
+ * 2. Fallback: the dev-mode browser launch + paste the "Oops" URL.
+ *    Only shown when the in-app start call returns supported=false,
+ *    which happens when you run the app via ./run.sh without the
+ *    packaged pywebview shell attached.
  */
 function PkceLogin({
   onLoggedIn,
@@ -51,6 +58,13 @@ function PkceLogin({
   const [redirectUrl, setRedirectUrl] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // "inapp" is the zero-friction path the packaged app uses.
+  // "paste" shows the old copy-the-URL flow when we know the shell
+  // can't intercept (dev mode). Starts null until we know which
+  // to render.
+  const [flow, setFlow] = useState<"inapp" | "paste" | null>(null);
+  const [waiting, setWaiting] = useState(false);
+  const pollRef = useRef<number | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -67,32 +81,73 @@ function PkceLogin({
     };
   }, []);
 
-  const openLogin = async () => {
+  // Auth-status poll: once the in-app shell captures the redirect
+  // and posts it to /api/auth/pkce/complete, the backend flips to
+  // logged_in. We notice via this poll and call onLoggedIn.
+  // Capped at 10 minutes so a broken shell or a user who walks
+  // away doesn't leave a spinner spinning forever — matches the
+  // desktop-side poll timeout.
+  useEffect(() => {
+    if (!waiting) return;
+    const startedAt = Date.now();
+    const TIMEOUT_MS = 10 * 60 * 1000;
+    const tick = async () => {
+      if (Date.now() - startedAt > TIMEOUT_MS) {
+        setWaiting(false);
+        setError("Login timed out. Please try again.");
+        return;
+      }
+      try {
+        const s = await api.auth.status();
+        if (s.logged_in) {
+          resetQualitiesCache();
+          setWaiting(false);
+          onLoggedIn();
+          return;
+        }
+      } catch {
+        // Transient — keep polling.
+      }
+      pollRef.current = window.setTimeout(tick, 500);
+    };
+    pollRef.current = window.setTimeout(tick, 500);
+    return () => {
+      if (pollRef.current !== null) window.clearTimeout(pollRef.current);
+    };
+  }, [waiting, onLoggedIn]);
+
+  const openLoginInApp = async () => {
     if (!loginUrl) return;
-    // Ask the backend to launch the system browser. pywebview's embedded
-    // WebView silently drops `window.open` for external URLs, so the
-    // server runs Python's `webbrowser.open()` to reach the default
-    // browser. Falls back to window.open for plain-browser dev mode
-    // where the backend call might be blocked (or for manual debugging).
+    setError(null);
+    try {
+      const res = await api.auth.inappLoginStart();
+      if (res.supported) {
+        // Shell is live — it will open the login window and post the
+        // redirect back for us. Start polling auth status for the
+        // state change.
+        setWaiting(true);
+        setFlow("inapp");
+        return;
+      }
+    } catch {
+      // Shell call failed — fall through to the paste path.
+    }
+    // No shell: fall back to the classic open-external-browser +
+    // paste flow.
+    setFlow("paste");
     try {
       await api.openExternal(loginUrl);
-      return;
     } catch {
       window.open(loginUrl, "_blank", "noopener");
     }
   };
 
-  const submit = async () => {
+  const submitPaste = async () => {
     if (!redirectUrl.trim()) return;
     setSubmitting(true);
     setError(null);
     try {
       await api.auth.pkceComplete(redirectUrl.trim());
-      // The PKCE session unlocks a higher quality ceiling than the
-      // device-code session. Invalidate the quality cache so
-      // /api/qualities re-fetches under the new client_id — otherwise
-      // the UI keeps showing the old Lossless cap even though the
-      // backend now allows Max.
       resetQualitiesCache();
       onLoggedIn();
     } catch (err) {
@@ -104,53 +159,95 @@ function PkceLogin({
 
   return (
     <div className="flex w-full flex-col gap-4">
-      <ol className="list-decimal space-y-2 pl-5 text-sm text-muted-foreground">
-        <li>
-          <button
-            onClick={openLogin}
-            disabled={!loginUrl}
-            className="text-primary hover:underline disabled:opacity-50"
+      {flow !== "paste" ? (
+        <>
+          <p className="text-sm text-muted-foreground">
+            Click below to sign in with Tidal. A small login window will
+            open; once you finish, it closes automatically and you&apos;re
+            in.
+          </p>
+          <Button
+            onClick={openLoginInApp}
+            disabled={!loginUrl || waiting}
+            size="lg"
+            className="w-full"
           >
-            Open Tidal login
-          </button>{" "}
-          and sign in.
-        </li>
-        <li>
-          You'll land on a Tidal <strong>"Oops"</strong> page. That's expected.
-        </li>
-        <li>Copy the URL from that Oops page and paste it below.</li>
-      </ol>
+            {waiting ? (
+              <>
+                <Loader2 className="h-4 w-4 animate-spin" /> Waiting for sign-in…
+              </>
+            ) : (
+              <>
+                <LogIn className="h-4 w-4" /> Sign in with Tidal
+              </>
+            )}
+          </Button>
+          {waiting && (
+            <button
+              onClick={() => {
+                setWaiting(false);
+                setFlow("paste");
+              }}
+              className="text-center text-xs text-muted-foreground hover:text-foreground"
+            >
+              Stuck? Switch to the manual paste flow.
+            </button>
+          )}
+        </>
+      ) : (
+        <>
+          <ol className="list-decimal space-y-2 pl-5 text-sm text-muted-foreground">
+            <li>
+              <button
+                onClick={openLoginInApp}
+                disabled={!loginUrl}
+                className="text-primary hover:underline disabled:opacity-50"
+              >
+                Open Tidal login
+              </button>{" "}
+              and sign in.
+            </li>
+            <li>
+              You&apos;ll land on a Tidal <strong>&quot;Oops&quot;</strong> page. That&apos;s expected.
+            </li>
+            <li>Copy the URL from that Oops page and paste it below.</li>
+          </ol>
 
-      <Button onClick={openLogin} disabled={!loginUrl} size="lg" className="w-full">
-        <ExternalLink className="h-4 w-4" /> Open Tidal login
-      </Button>
+          <Button onClick={openLoginInApp} disabled={!loginUrl} size="lg" className="w-full">
+            <ExternalLink className="h-4 w-4" /> Open Tidal login
+          </Button>
 
-      <div className="flex flex-col gap-2">
-        <label htmlFor="redirect" className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-          Paste the Oops page URL
-        </label>
-        <Input
-          id="redirect"
-          value={redirectUrl}
-          onChange={(e) => setRedirectUrl(e.target.value)}
-          placeholder="https://tidal.com/android/login/auth?code=…"
-          onKeyDown={(e) => {
-            if (e.key === "Enter") submit();
-          }}
-        />
-      </div>
+          <div className="flex flex-col gap-2">
+            <label
+              htmlFor="redirect"
+              className="text-xs font-semibold uppercase tracking-wider text-muted-foreground"
+            >
+              Paste the Oops page URL
+            </label>
+            <Input
+              id="redirect"
+              value={redirectUrl}
+              onChange={(e) => setRedirectUrl(e.target.value)}
+              placeholder="https://tidal.com/android/login/auth?code=…"
+              onKeyDown={(e) => {
+                if (e.key === "Enter") submitPaste();
+              }}
+            />
+          </div>
+
+          <Button
+            onClick={submitPaste}
+            disabled={!redirectUrl.trim() || submitting}
+            size="lg"
+            className="w-full"
+          >
+            {submitting && <Loader2 className="h-4 w-4 animate-spin" />}
+            Continue
+          </Button>
+        </>
+      )}
 
       {error && <p className="text-xs text-destructive">{error}</p>}
-
-      <Button
-        onClick={submit}
-        disabled={!redirectUrl.trim() || submitting}
-        size="lg"
-        className="w-full"
-      >
-        {submitting && <Loader2 className="h-4 w-4 animate-spin" />}
-        Continue
-      </Button>
 
       <button
         onClick={onSwitchMode}

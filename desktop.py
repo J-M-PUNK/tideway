@@ -540,10 +540,171 @@ def main(argv: Optional[list[str]] = None) -> int:
             pass
         mini_window["value"] = mw
 
+    # --- In-app PKCE login window ------------------------------------
+    # State shared with the navigation hook so we only capture the
+    # redirect once per attempt, and so we can destroy the window
+    # from the hook without tripping pywebview's "window already
+    # closed" error when the user also closes it manually.
+    login_state: dict[str, object] = {"window": None, "captured": False}
+
+    def _open_login_window(pkce_url: str) -> None:
+        """Open a child pywebview window at Tidal's PKCE login URL
+        and watch for the post-signin redirect.
+
+        After a successful login Tidal redirects to a URL that
+        carries the OAuth code as a query-string param. We detect
+        that by polling the child window's current URL on a short
+        timer and checking for `code=`. Polling is more reliable
+        than pywebview's `loaded` event alone: on some platforms
+        the event fires once per full navigation, but Tidal's
+        login does a couple of JS-driven replaceState calls that
+        an event-only hook misses.
+        """
+        if login_state.get("window") is not None:
+            try:
+                w = login_state["window"]
+                w.show()  # type: ignore[attr-defined]
+                w.restore()  # type: ignore[attr-defined]
+            except Exception:
+                pass
+            return
+
+        login_state["captured"] = False
+        print(
+            f"[desktop] inapp-login: opening child window for {pkce_url[:80]}...",
+            file=sys.stderr,
+            flush=True,
+        )
+        try:
+            lw = webview.create_window(
+                "Sign in to Tidal",
+                pkce_url,
+                width=480,
+                height=720,
+                resizable=True,
+            )
+        except Exception as exc:
+            print(
+                f"[desktop] inapp-login: create_window failed: {exc!r}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return
+
+        stop_poll = threading.Event()
+
+        def _complete(url: str) -> None:
+            if login_state.get("captured"):
+                return
+            login_state["captured"] = True
+            stop_poll.set()
+            print(
+                f"[desktop] inapp-login: captured redirect {url[:120]}...",
+                file=sys.stderr,
+                flush=True,
+            )
+            try:
+                req = urllib.request.Request(
+                    f"http://{HOST}:{PORT}/api/auth/pkce/complete",
+                    data=json.dumps({"redirect_url": url}).encode(),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(req, timeout=30) as resp:
+                    body = resp.read().decode("utf-8", errors="replace")
+                    print(
+                        f"[desktop] inapp-login: pkce/complete ok status="
+                        f"{resp.status} body={body[:200]}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+            except Exception as exc:
+                print(
+                    f"[desktop] inapp-login: pkce/complete failed: {exc!r}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            try:
+                lw.destroy()
+            except Exception:
+                pass
+            # Clear the stashed ref here too. `closed` normally fires
+            # from destroy() and does this, but if destroy() raises
+            # the ref would otherwise leak and block the next
+            # attempt's "existing window? just raise it" branch from
+            # opening a fresh window.
+            login_state["window"] = None
+
+        # Hard cap on how long we'll sit polling a login window
+        # before giving up. 10 minutes is long enough to accommodate
+        # 2FA prompts, fumbled passwords, etc., without wedging a
+        # daemon thread forever if the user walks away.
+        _LOGIN_TIMEOUT_S = 10 * 60
+
+        def _poll_url() -> None:
+            """Check the current URL every 300 ms and fire _complete
+            as soon as a code shows up. Runs on a daemon thread so
+            it doesn't block anything; self-exits when the window
+            closes, we've captured a code, or the timeout fires."""
+            last_url: str = ""
+            attempts = 0
+            start = time.monotonic()
+            while not stop_poll.is_set():
+                attempts += 1
+                if time.monotonic() - start > _LOGIN_TIMEOUT_S:
+                    print(
+                        "[desktop] inapp-login: 10 minute timeout, giving up",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    try:
+                        lw.destroy()
+                    except Exception:
+                        pass
+                    login_state["window"] = None
+                    return
+                try:
+                    url = lw.get_current_url()
+                except Exception:
+                    url = None
+                if isinstance(url, str) and url != last_url:
+                    last_url = url
+                    # Log the first handful of URL changes so a
+                    # debug session can see exactly what Tidal is
+                    # walking the window through. After that we
+                    # stay quiet to avoid flooding stderr.
+                    if attempts < 30:
+                        print(
+                            f"[desktop] inapp-login: nav -> {url[:200]}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                    if "code=" in url:
+                        _complete(url)
+                        return
+                stop_poll.wait(0.3)
+
+        poll_thread = threading.Thread(
+            target=_poll_url, name="inapp-login-poll", daemon=True
+        )
+        poll_thread.start()
+
+        def _on_closed() -> None:
+            stop_poll.set()
+            login_state["window"] = None
+
+        try:
+            lw.events.closed += _on_closed
+        except Exception:
+            pass
+        login_state["window"] = lw
+
     # Register the focus callback so a second launch can raise us. The
     # callable runs on whatever thread the FastAPI handler lives on, so
     # schedule the actual restore onto the pywebview thread via its
     # event-dispatch mechanism.
+    import json
+    import urllib.request
     import server as _server
     _server.register_focus_callback(_show_window)
     # Register the quit callback so the in-app "Quit" menu entry can
@@ -552,6 +713,9 @@ def main(argv: Optional[list[str]] = None) -> int:
     # Register the mini-player callback so the in-app "Open mini
     # player" control can spawn a second pywebview window.
     _server.register_mini_player_callback(_open_mini_player)
+    # Register the in-app login callback so the frontend can kick off
+    # the PKCE flow without the user having to copy the Oops URL.
+    _server.register_inapp_login_callback(_open_login_window)
 
     # Start the tray icon. Non-blocking (run_detached internally).
     # `tray is None` when pystray's platform deps are missing, the icon
