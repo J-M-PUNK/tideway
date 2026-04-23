@@ -61,9 +61,7 @@ import queue
 import socketserver
 import threading
 import time
-import uuid
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -119,7 +117,7 @@ class _ConnectedSession:
     flac_buffer: "RingBuffer"
     http_server: Optional["_StreamHTTPServer"] = None
     http_port: int = 0
-    stream_task: Optional[asyncio.Task] = None
+    encoder_thread: Optional[threading.Thread] = None
 
 
 class RingBuffer:
@@ -198,14 +196,40 @@ class FlacStreamEncoder:
         self._buffer = bytearray()
 
         class _SinkFile:
-            # Minimal file-like object PyAV writes to. Captures
-            # encoded bytes into the outer bytearray.
+            """File-like sink PyAV writes to. The FLAC muxer writes
+            linearly during live encoding, but on container close
+            it seeks back to the start to rewrite the STREAMINFO
+            header with the now-known total sample count. So we
+            do need to support seek / tell, even if mid-stream it
+            never fires. The underlying bytearray grows as writes
+            hit new positions.
+            """
+
             def __init__(self, sink: bytearray) -> None:
                 self._sink = sink
+                self._pos = 0
 
             def write(self, data: bytes) -> int:
-                self._sink.extend(data)
+                needed = self._pos + len(data)
+                if needed > len(self._sink):
+                    self._sink.extend(b"\x00" * (needed - len(self._sink)))
+                self._sink[self._pos:needed] = data
+                self._pos = needed
                 return len(data)
+
+            def tell(self) -> int:
+                return self._pos
+
+            def seek(self, offset: int, whence: int = 0) -> int:
+                if whence == 0:
+                    self._pos = offset
+                elif whence == 1:
+                    self._pos += offset
+                elif whence == 2:
+                    self._pos = len(self._sink) + offset
+                else:
+                    raise ValueError(f"unsupported seek whence {whence}")
+                return self._pos
 
             def flush(self) -> None:
                 pass
@@ -214,13 +238,23 @@ class FlacStreamEncoder:
                 pass
 
         self._sink = _SinkFile(self._buffer)
-        # `mode="w"` + `format="flac"` opens a FLAC muxer. Streaming
-        # FLAC doesn't need the seekable metadata block re-write
-        # trick that WAV does, so PyAV handles this cleanly.
+        # `mode="w"` + `format="flac"` opens a FLAC muxer. Live
+        # encoding writes frames linearly; STREAMINFO rewrite at
+        # container-close seeks back to byte 0, but by that point
+        # we're tearing the session down anyway.
         self._container = av.open(self._sink, mode="w", format="flac")  # type: ignore
-        self._stream = self._container.add_stream("flac", rate=self.sample_rate)  # type: ignore
-        self._stream.channels = self.channels  # type: ignore
-        self._stream.format = self.av_format  # type: ignore
+        self._stream = self._container.add_stream(  # type: ignore
+            "flac", rate=self.sample_rate
+        )
+        # PyAV 17 moved channel / format configuration onto the
+        # codec_context and made the stream shortcut attributes
+        # read-only. Configure through codec_context. FLAC only
+        # accepts integer sample formats (s16 / s32 / s32p); we
+        # never send "flt" to a FLAC stream.
+        codec_ctx = self._stream.codec_context  # type: ignore
+        codec_ctx.layout = "stereo" if self.channels == 2 else "mono"
+        codec_ctx.format = av.AudioFormat(self.av_format)  # type: ignore
+        codec_ctx.sample_rate = self.sample_rate
 
     def encode(self, pcm: np.ndarray) -> bytes:
         """Feed one chunk of interleaved PCM. Returns whatever
@@ -228,18 +262,25 @@ class FlacStreamEncoder:
         the frame."""
         import av  # type: ignore
 
-        # PyAV wants non-interleaved (planar) frames for the
-        # common FLAC path; reshape samples[num_frames, channels]
-        # -> samples[channels, num_frames].
         if pcm.ndim != 2:
             raise ValueError(f"expected 2-D PCM, got shape {pcm.shape}")
-        samples, ch = pcm.shape
+        _frames, ch = pcm.shape
         if ch != self.channels:
             raise ValueError(
                 f"channel mismatch: encoder set for {self.channels}, got {ch}"
             )
+        # FLAC codec takes packed (interleaved) samples. PyAV's
+        # `from_ndarray` expects packed arrays shaped (1, frames*ch)
+        # with all samples concatenated in channel-interleaved order.
+        # Input here is already interleaved as (frames, channels), so
+        # a row-major flatten followed by reshape to (1, -1) lands in
+        # the exact layout the encoder wants without a real copy if
+        # the input is already contiguous.
+        flat = np.ascontiguousarray(
+            pcm.astype(self.np_dtype, copy=False)
+        ).reshape(1, -1)
         frame = av.AudioFrame.from_ndarray(  # type: ignore
-            pcm.T.astype(self.np_dtype, copy=False),
+            flat,
             format=self.av_format,
             layout="stereo" if self.channels == 2 else "mono",
         )
@@ -247,8 +288,7 @@ class FlacStreamEncoder:
         before = len(self._buffer)
         for packet in self._stream.encode(frame):  # type: ignore
             self._container.mux(packet)  # type: ignore
-        out = bytes(self._buffer[before:])
-        return out
+        return bytes(self._buffer[before:])
 
     def close(self) -> bytes:
         """Flush + close. Returns final trailing bytes."""
@@ -271,6 +311,7 @@ class AirPlayManager:
     is sync."""
 
     _instance: Optional["AirPlayManager"] = None
+    _instance_lock = threading.Lock()
 
     def __init__(self) -> None:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -286,9 +327,16 @@ class AirPlayManager:
 
     @classmethod
     def instance(cls) -> "AirPlayManager":
-        if cls._instance is None:
-            cls._instance = cls()
-        return cls._instance
+        # Double-checked locking. The fast path (instance already
+        # built) is a lock-free read. First-build contention is
+        # serialized so concurrent callers can't both spawn their
+        # own asyncio threads.
+        if cls._instance is not None:
+            return cls._instance
+        with cls._instance_lock:
+            if cls._instance is None:
+                cls._instance = cls()
+            return cls._instance
 
     @staticmethod
     def is_available() -> bool:
@@ -515,12 +563,17 @@ class AirPlayManager:
         session.http_port = http_server.server_address[1]
         log.info("airplay http server bound on port %s", session.http_port)
 
-        # Kick off the FLAC encoder loop on the AirPlay thread. It
-        # drains the pcm_queue and writes encoded bytes into the
-        # ring buffer the HTTP server reads from.
-        session.stream_task = loop.create_task(
-            self._encoder_loop(session, dtype)
+        # Encoder runs on a dedicated thread, not on the asyncio
+        # loop, because queue.Queue.get is blocking and would freeze
+        # the loop during the wait. Thread lives until the sentinel
+        # None lands on pcm_queue during disconnect.
+        session.encoder_thread = threading.Thread(
+            target=self._encoder_worker,
+            args=(session, dtype),
+            name=f"airplay-encoder-{device_id}",
+            daemon=True,
         )
+        session.encoder_thread.start()
 
         with self._lock:
             self._session = session
@@ -546,15 +599,22 @@ class AirPlayManager:
         except Exception as exc:
             log.exception("airplay: stream_file failed: %s", exc)
 
-    async def _encoder_loop(self, session: _ConnectedSession, dtype: str) -> None:
-        encoder = FlacStreamEncoder(
-            sample_rate=session.sample_rate,
-            channels=session.channels,
-            dtype=dtype,
-        )
+    def _encoder_worker(self, session: _ConnectedSession, dtype: str) -> None:
+        """Drains pcm_queue and writes FLAC bytes into flac_buffer.
+        Runs on its own thread so the blocking queue.get doesn't
+        stall the asyncio loop that pyatv is using."""
+        try:
+            encoder = FlacStreamEncoder(
+                sample_rate=session.sample_rate,
+                channels=session.channels,
+                dtype=dtype,
+            )
+        except Exception as exc:
+            log.exception("airplay: encoder init failed: %s", exc)
+            session.flac_buffer.close()
+            return
         try:
             while True:
-                await asyncio.sleep(0)  # yield to loop
                 try:
                     raw = session.pcm_queue.get(timeout=0.5)
                 except queue.Empty:
@@ -563,15 +623,23 @@ class AirPlayManager:
                     break
                 # raw is a (frames, channels) interleaved int16 /
                 # int32 / float32 buffer serialized as bytes.
-                arr = np.frombuffer(raw, dtype=encoder.np_dtype)
-                if session.channels > 0:
-                    arr = arr.reshape(-1, session.channels)
-                encoded = encoder.encode(arr)
-                if encoded:
-                    session.flac_buffer.write(encoded)
-            tail = encoder.close()
-            if tail:
-                session.flac_buffer.write(tail)
+                try:
+                    arr = np.frombuffer(raw, dtype=encoder.np_dtype)
+                    if session.channels > 0:
+                        arr = arr.reshape(-1, session.channels)
+                    encoded = encoder.encode(arr)
+                    if encoded:
+                        session.flac_buffer.write(encoded)
+                except Exception as exc:
+                    log.warning("airplay: encode chunk failed: %s", exc)
+                    # Keep the loop alive; one bad chunk should not
+                    # terminate the whole stream.
+            try:
+                tail = encoder.close()
+                if tail:
+                    session.flac_buffer.write(tail)
+            except Exception:
+                pass
         finally:
             session.flac_buffer.close()
 
@@ -632,31 +700,6 @@ class AirPlayManager:
             sess.pcm_queue.put_nowait(bytes(pcm))
         except queue.Full:
             pass
-
-    # ------------------------------------------------------------------
-    # HTTP endpoint support
-    # ------------------------------------------------------------------
-
-    def stream_iter(self, chunk_size: int = 16384):
-        """Generator yielding encoded FLAC bytes from the active
-        session. Used by the /api/airplay/stream endpoint.
-        Terminates when the session disconnects."""
-        with self._lock:
-            sess = self._session
-        if sess is None:
-            return
-        while True:
-            chunk = sess.flac_buffer.read(chunk_size, timeout=2.0)
-            if not chunk:
-                # Short idle: check whether the session was torn
-                # down. If yes, end the HTTP response so pyatv
-                # closes its connection.
-                with self._lock:
-                    if self._session is not sess:
-                        return
-                continue
-            yield chunk
-
 
 class _StreamHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     """Dedicated HTTP server, bound to 0.0.0.0 on an ephemeral port,
