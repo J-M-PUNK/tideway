@@ -1,5 +1,6 @@
+import { useState } from "react";
 import { Link } from "react-router-dom";
-import { ChevronRight, Home, Music } from "lucide-react";
+import { ChevronRight, Heart, Home, Music, Play } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/EmptyState";
 import type {
@@ -15,9 +16,12 @@ import type {
   Track,
 } from "@/api/types";
 import type { OnDownload } from "@/api/download";
+import { useFavorites } from "@/hooks/useFavorites";
 import { MediaCard } from "@/components/MediaCard";
+import { PlayMediaButton } from "@/components/PlayMediaButton";
 import { TrackList } from "@/components/TrackList";
 import { useColumnCount } from "@/hooks/useColumnCount";
+import { usePlayerActions, usePlayerMeta } from "@/hooks/PlayerContext";
 import { cn, imageProxy } from "@/lib/utils";
 
 interface Props {
@@ -126,10 +130,15 @@ function Section({
   // sections is quick; the only cost is some rows lose their "view
   // more" affordance when Tidal didn't send a viewAllPath for them.
   const singleRow = forceSingleRow || Boolean(context || viewAllPath);
-  // Cap to actual visible column count so the row never wraps. Without
-  // this, at lg (5 cols) a 6-item cap leaves one card orphaned on a
-  // partial second row — the exact visual glitch we're trying to avoid.
-  const visible = singleRow ? items.slice(0, columnCount) : items;
+  // Cap single rows at whichever is smaller: five (matches Tidal's
+  // homepage density) or the actual visible column count. Without the
+  // second cap a narrower viewport renders 4 cards then an orphaned
+  // 5th on a partial second row.
+  const ROW_CAP = 5;
+  const visible = singleRow ? items.slice(0, Math.min(ROW_CAP, columnCount)) : items;
+  // Track rows need a shared playback context: clicking one track's
+  // cover should play it with the row's other tracks queued up.
+  const rowTracks = items.filter((i): i is Track => i.kind === "track");
   return (
     <div>
       {title && (
@@ -144,7 +153,7 @@ function Section({
         className={cn(
           "grid gap-4",
           singleRow
-            ? "grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 2xl:grid-cols-6"
+            ? "grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5"
             : "grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6",
         )}
       >
@@ -153,6 +162,7 @@ function Section({
             key={`${it.kind}-${itemKey(it)}-${idx}`}
             item={it}
             onDownload={onDownload}
+            rowTracks={rowTracks}
           />
         ))}
       </div>
@@ -262,7 +272,15 @@ function SectionHeader({
   );
 }
 
-function PageItemCard({ item, onDownload }: { item: PageItem; onDownload: OnDownload }) {
+function PageItemCard({
+  item,
+  onDownload,
+  rowTracks = [],
+}: {
+  item: PageItem;
+  onDownload: OnDownload;
+  rowTracks?: Track[];
+}) {
   if (item.kind === "album" || item.kind === "artist" || item.kind === "playlist") {
     return <MediaCard item={item as Album | Artist | Playlist} onDownload={onDownload} />;
   }
@@ -270,38 +288,185 @@ function PageItemCard({ item, onDownload }: { item: PageItem; onDownload: OnDown
     return <MixCard mix={item} />;
   }
   if (item.kind === "track") {
-    const t = item as Track;
-    return (
-      <Link
-        to={t.album ? `/album/${t.album.id}` : `/artist/${t.artists[0]?.id ?? ""}`}
-        className="flex flex-col gap-3 rounded-lg bg-card p-4 transition-colors hover:bg-accent"
-      >
-        <div className="aspect-square overflow-hidden rounded-md bg-secondary">
-          {t.album?.cover ? (
-            <img src={imageProxy(t.album.cover)} alt="" className="h-full w-full object-cover" />
-          ) : (
-            <Music className="m-auto h-10 w-10 text-muted-foreground" />
-          )}
-        </div>
-        <div className="min-w-0">
-          <div className="truncate font-semibold">{t.name}</div>
-          <div className="truncate text-xs text-muted-foreground">
-            {t.artists.map((a) => a.name).join(", ")}
-          </div>
-        </div>
-      </Link>
-    );
+    return <TrackCard track={item} rowTracks={rowTracks} />;
   }
   return null;
 }
 
+/**
+ * Track card matching the MediaCard layout so tracks on a view-more
+ * page feel like first-class items. The whole card is a Link to the
+ * album; the hover overlay puts a play button in the bottom-left and
+ * a heart in the bottom-right, same slots the album / playlist cards
+ * use. Clicking play kicks off the track with the row's other tracks
+ * as the queue. Artist names in the subtitle are their own Links that
+ * stop propagation so the card's Link doesn't swallow the click.
+ */
+function TrackCard({ track, rowTracks }: { track: Track; rowTracks: Track[] }) {
+  const actions = usePlayerActions();
+  const meta = usePlayerMeta();
+  const isCurrent = meta.track?.id === track.id;
+  const isPlaying = isCurrent && meta.playing;
+  const cover = track.album?.cover ? imageProxy(track.album.cover) : null;
+  const albumPath = track.album ? `/album/${track.album.id}` : null;
+  const handlePlay = (e: React.MouseEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (isCurrent) {
+      actions.toggle();
+    } else {
+      actions.play(track, rowTracks.length > 0 ? rowTracks : [track]);
+    }
+  };
+  const overlayClass =
+    "opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100";
+  const inner = (
+    <>
+      <div className="relative aspect-square overflow-hidden rounded-md bg-secondary">
+        {cover ? (
+          <img
+            src={cover}
+            alt=""
+            loading="lazy"
+            className="h-full w-full object-cover transition-transform group-hover:scale-105"
+          />
+        ) : (
+          <Music className="m-auto h-10 w-10 text-muted-foreground" />
+        )}
+        <button
+          type="button"
+          onClick={handlePlay}
+          aria-label={isPlaying ? `Pause ${track.name}` : `Play ${track.name}`}
+          className={cn(
+            "absolute bottom-2 left-2 flex h-10 w-10 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-lg transition-transform hover:scale-105",
+            isPlaying ? "opacity-100" : overlayClass,
+          )}
+        >
+          <Play className="h-5 w-5" fill="currentColor" />
+        </button>
+        <TrackHeart
+          trackId={track.id}
+          className={cn("absolute bottom-2 right-2", overlayClass)}
+        />
+      </div>
+      <div className="min-w-0">
+        <div className="truncate font-semibold">{track.name}</div>
+        <div className="truncate text-xs text-muted-foreground">
+          {track.artists.map((a, i) => (
+            <span key={a.id || i}>
+              {i > 0 && ", "}
+              {a.id ? (
+                <Link
+                  to={`/artist/${a.id}`}
+                  onClick={(e) => e.stopPropagation()}
+                  className="hover:text-foreground hover:underline"
+                >
+                  {a.name}
+                </Link>
+              ) : (
+                a.name
+              )}
+            </span>
+          ))}
+        </div>
+      </div>
+    </>
+  );
+  if (albumPath) {
+    return (
+      <Link
+        to={albumPath}
+        className="group flex flex-col gap-3 rounded-lg bg-card p-4 transition-colors hover:bg-accent"
+      >
+        {inner}
+      </Link>
+    );
+  }
+  return (
+    <div className="group flex flex-col gap-3 rounded-lg bg-card p-4 transition-colors hover:bg-accent">
+      {inner}
+    </div>
+  );
+}
+
+function TrackHeart({
+  trackId,
+  className,
+}: {
+  trackId: string;
+  className?: string;
+}) {
+  const favs = useFavorites();
+  const liked = favs.has("track", trackId);
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        void favs.toggle("track", trackId);
+      }}
+      aria-pressed={liked}
+      aria-label={liked ? "Unlike track" : "Like track"}
+      title={liked ? "Unlike track" : "Like track"}
+      className={cn(
+        "flex h-10 w-10 items-center justify-center rounded-full bg-black/70 text-white shadow-lg transition-colors hover:bg-black/90",
+        className,
+      )}
+    >
+      <Heart
+        className={cn("h-5 w-5", liked && "fill-primary stroke-primary")}
+      />
+    </button>
+  );
+}
+
+function MixHeart({
+  mixId,
+  className,
+}: {
+  mixId: string;
+  className?: string;
+}) {
+  const favs = useFavorites();
+  const liked = favs.has("mix", mixId);
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        void favs.toggle("mix", mixId);
+      }}
+      aria-pressed={liked}
+      aria-label={liked ? "Unlike mix" : "Like mix"}
+      title={liked ? "Unlike mix" : "Like mix"}
+      className={cn(
+        "flex h-10 w-10 items-center justify-center rounded-full bg-black/70 text-white shadow-lg transition-colors hover:bg-black/90",
+        className,
+      )}
+    >
+      <Heart
+        className={cn("h-5 w-5", liked && "fill-primary stroke-primary")}
+      />
+    </button>
+  );
+}
+
 function MixCard({ mix }: { mix: MixItem }) {
+  // Same bottom-left hover-play + bottom-right hover-heart treatment as
+  // MediaCard. tidalapi exposes favorites/mixes/add|remove, so mixes
+  // get the full card interaction instead of play-only.
+  const [menuOpen, setMenuOpen] = useState(false);
+  const hoverGroup = menuOpen
+    ? "opacity-100"
+    : "opacity-0 group-hover:opacity-100 focus-within:opacity-100";
   return (
     <Link
       to={`/mix/${encodeURIComponent(mix.id)}`}
-      className="group flex flex-col gap-3 rounded-lg bg-card p-4 transition-colors hover:bg-accent"
+      className="group relative flex flex-col gap-3 rounded-lg bg-card p-4 transition-colors hover:bg-accent"
     >
-      <div className="aspect-square overflow-hidden rounded-md bg-secondary">
+      <div className="relative aspect-square overflow-hidden rounded-md bg-secondary">
         {mix.cover ? (
           <img
             src={imageProxy(mix.cover)}
@@ -311,6 +476,18 @@ function MixCard({ mix }: { mix: MixItem }) {
         ) : (
           <Music className="m-auto h-10 w-10 text-muted-foreground" />
         )}
+        <div className={`absolute bottom-2 left-2 transition-all ${hoverGroup}`}>
+          <PlayMediaButton
+            kind="mix"
+            id={mix.id}
+            className="h-10 w-10"
+            onOpenChange={setMenuOpen}
+          />
+        </div>
+        <MixHeart
+          mixId={mix.id}
+          className={`absolute bottom-2 right-2 transition-all ${hoverGroup}`}
+        />
       </div>
       <div className="min-w-0">
         <div className="truncate font-semibold">{mix.name}</div>

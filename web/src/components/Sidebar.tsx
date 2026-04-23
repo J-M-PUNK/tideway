@@ -94,7 +94,7 @@ export function Sidebar({
           half of the 40 pixel glyph lands at 38, which is where the
           20 pixel nav icons have their centers.
 
-          On hover the background tints with a soft brand purple via
+          On hover the background tints with a soft brand accent via
           `bg-primary/10` and the glyph scales up to 1.05. That feels
           like an interactive logo rather than a nav row that happens
           to be at the top. */}

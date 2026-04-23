@@ -23,7 +23,7 @@ export function PlayMediaButton({
   className,
   onOpenChange,
 }: {
-  kind: "album" | "playlist";
+  kind: "album" | "playlist" | "mix";
   id: string;
   className?: string;
   /** Matches DownloadButton's prop so the hover-reveal CSS can latch
@@ -43,7 +43,11 @@ export function PlayMediaButton({
     onOpenChange?.(true);
     try {
       const detail =
-        kind === "album" ? await api.album(id) : await api.playlist(id);
+        kind === "album"
+          ? await api.album(id)
+          : kind === "playlist"
+            ? await api.playlist(id)
+            : await api.mix(id);
       const tracks = detail.tracks;
       if (!tracks?.length) {
         toast.show({

@@ -742,8 +742,18 @@ class TidalClient:
             return None
 
     def favorite(self, kind: str, obj_id: str, add: bool) -> None:
-        """Add or remove a favorite. `kind` in {track, album, artist, playlist}."""
+        """Add or remove a favorite. `kind` in {track, album, artist, playlist, mix}."""
         favs = self.session.user.favorites
+        # tidalapi's mix helpers are plural (add_mixes / remove_mixes) and
+        # accept a list of string ids, while the other kinds are singular
+        # and expect an int (or a uuid string for playlist).
+        if kind == "mix":
+            method_name = ("add_" if add else "remove_") + "mixes"
+            method = getattr(favs, method_name, None)
+            if method is None:
+                raise ValueError("Unsupported favorite kind: mix")
+            method([str(obj_id)])
+            return
         method_name = ("add_" if add else "remove_") + kind
         method = getattr(favs, method_name, None)
         if method is None:
@@ -754,7 +764,7 @@ class TidalClient:
 
     def favorites_snapshot(self) -> dict:
         """Return sets of favorite IDs the UI needs to render heart states."""
-        result = {"tracks": [], "albums": [], "artists": [], "playlists": []}
+        result = {"tracks": [], "albums": [], "artists": [], "playlists": [], "mixes": []}
         for kind, attr in (
             ("tracks", "get_favorite_tracks"),
             ("albums", "get_favorite_albums"),
@@ -768,6 +778,13 @@ class TidalClient:
                 ]
             except Exception:
                 continue
+        # Mixes live under session.user.mixes() in tidalapi rather than
+        # self.get_favorite_* like the other kinds.
+        try:
+            mixes = self.session.user.mixes(limit=200)
+            result["mixes"] = [str(getattr(m, "id", "") or "") for m in mixes if getattr(m, "id", "")]
+        except Exception:
+            pass
         return result
 
     def create_playlist(self, title: str, description: str = ""):

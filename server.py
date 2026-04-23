@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import subprocess
 import tempfile
 import webbrowser
@@ -108,6 +109,43 @@ def _patched_parse_base(self, list_item):
 
 
 _tidal_page.PageCategoryV2._parse_base = _patched_parse_base
+
+
+# tidalapi's SimpleList.get_item silently returns None for any item type
+# it doesn't recognize, and only logs at WARNING level on its own
+# "tidalapi.page" logger which we don't forward. Wrap it so both the
+# "type not implemented" case and the "parse raised an exception" case
+# surface to stderr with the raw shape, so a row that suddenly renders
+# short tells us which item types got dropped.
+_orig_get_item = _tidal_page.SimpleList.get_item
+
+
+def _patched_get_item(self, json_obj):
+    try:
+        result = _orig_get_item(self, json_obj)
+    except Exception as exc:
+        try:
+            data_preview = json.dumps(json_obj)[:400]
+        except Exception:
+            data_preview = repr(json_obj)[:400]
+        print(
+            f"[page] SimpleList.get_item raised on "
+            f"type={json_obj.get('type')!r}: {exc} | data={data_preview}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return None
+    if result is None:
+        print(
+            f"[page] SimpleList.get_item dropped item type="
+            f"{json_obj.get('type')!r} (not in item_types map)",
+            file=sys.stderr,
+            flush=True,
+        )
+    return result
+
+
+_tidal_page.SimpleList.get_item = _patched_get_item
 
 
 tidal = TidalClient()
@@ -651,6 +689,85 @@ def album_to_dict(a) -> dict:
         # download-dropdown Max/Lossless annotation.
         "media_tags": [m for m in media_tags if m] if media_tags else [],
     }
+
+
+def _norm_title(s: Optional[str]) -> str:
+    """Normalise an album / track name for explicit-dupe matching. Drop
+    anything after a final '(Clean)' / '(Explicit)' marker so we treat
+    'Rodeo' and 'Rodeo (Clean)' as the same record."""
+    if not s:
+        return ""
+    base = s.strip().lower()
+    base = re.sub(r"\s*\((clean|explicit)\)\s*$", "", base)
+    return base
+
+
+def filter_explicit_dupes(items: list, preference: str, *, kind: str) -> list:
+    """Collapse explicit / clean pairs of the same album or track.
+
+    `preference` is whatever is stored in settings.explicit_content_preference:
+    'explicit' (default), 'clean', or 'both'. 'both' returns the list
+    unchanged; the other two drop the unwanted edition when a matching
+    pair exists, and leave solo entries alone.
+
+    Items are matched on (normalised_name, version, primary_artist_id)
+    for albums and (normalised_name, normalised_album, primary_artist_id)
+    for tracks, so a Deluxe re-release never merges into its original
+    and the same song on two different albums stays distinct."""
+    if preference not in ("explicit", "clean"):
+        return list(items)
+
+    def _primary_artist_id(item) -> str:
+        try:
+            artists = getattr(item, "artists", None) or []
+            if artists:
+                aid = getattr(artists[0], "id", None)
+                if aid is not None:
+                    return str(aid)
+        except Exception:
+            pass
+        try:
+            aid = getattr(getattr(item, "artist", None), "id", None)
+            return str(aid) if aid is not None else ""
+        except Exception:
+            return ""
+
+    def _key(item):
+        primary = _primary_artist_id(item)
+        name = _norm_title(getattr(item, "name", None))
+        if kind == "album":
+            version = (getattr(item, "version", "") or "").strip().lower()
+            return ("album", name, version, primary)
+        album_obj = getattr(item, "album", None)
+        album_name = _norm_title(getattr(album_obj, "name", None)) if album_obj else ""
+        return ("track", name, album_name, primary)
+
+    # Group items by key preserving first-seen order. If more than one
+    # edition exists under the same key, pick the preferred one.
+    buckets: dict[tuple, list] = {}
+    order: list[tuple] = []
+    for it in items:
+        key = _key(it)
+        if key not in buckets:
+            order.append(key)
+            buckets[key] = []
+        buckets[key].append(it)
+
+    out: list = []
+    want_explicit = preference == "explicit"
+    for key in order:
+        bucket = buckets[key]
+        if len(bucket) == 1:
+            out.append(bucket[0])
+            continue
+        # Prefer the requested edition; fall back to the first-seen when
+        # the preferred one isn't present.
+        preferred = next(
+            (x for x in bucket if bool(getattr(x, "explicit", False)) == want_explicit),
+            bucket[0],
+        )
+        out.append(preferred)
+    return out
 
 
 def artist_to_dict(a) -> dict:
@@ -3327,9 +3444,12 @@ def search(q: str, limit: int = 25) -> dict:
         results = tidal.search(q, limit=limit)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Search failed: {exc}")
+    pref = (settings.explicit_content_preference or "explicit").lower()
+    tracks = filter_explicit_dupes(results.get("tracks", []), pref, kind="track")
+    albums = filter_explicit_dupes(results.get("albums", []), pref, kind="album")
     return {
-        "tracks": [track_to_dict(t) for t in results.get("tracks", [])],
-        "albums": [album_to_dict(a) for a in results.get("albums", [])],
+        "tracks": [track_to_dict(t) for t in tracks],
+        "albums": [album_to_dict(a) for a in albums],
         "artists": [artist_to_dict(a) for a in results.get("artists", [])],
         "playlists": [playlist_to_dict(p) for p in results.get("playlists", [])],
     }
@@ -3935,6 +4055,14 @@ def artist_detail(artist_id: int) -> dict:
     albums_objs = _dedupe(raw_albums)
     ep_singles_objs = _dedupe(raw_eps)
     appears_on_objs = _dedupe(raw_appears)
+
+    # Collapse explicit / clean editions of the same album per the
+    # user's content-filter setting. Keeps the discography looking like
+    # Tidal's own client where duplicates rarely sit side by side.
+    pref = (settings.explicit_content_preference or "explicit").lower()
+    albums_objs = filter_explicit_dupes(albums_objs, pref, kind="album")
+    ep_singles_objs = filter_explicit_dupes(ep_singles_objs, pref, kind="album")
+    appears_on_objs = filter_explicit_dupes(appears_on_objs, pref, kind="album")
 
     return {
         **artist_to_dict(artist),
@@ -5652,9 +5780,11 @@ def _serialize_page_item(item) -> Optional[dict]:
         return artist_to_dict(item)
     if isinstance(item, tidalapi.Playlist):
         return playlist_to_dict(item)
-    # Mix — lives in tidalapi.mix.Mix (or MixV2)
+    # Mix — tidalapi ships these under several class names
+    # (Mix, MixV2, MixV2Full, …). Any class whose name starts with
+    # "Mix" is a mix record from our perspective.
     name = type(item).__name__
-    if name in ("Mix", "MixV2"):
+    if name.startswith("Mix"):
         try:
             return {
                 "kind": "mix",
@@ -5717,9 +5847,11 @@ def _fetch_v2_view_all(path: str) -> dict:
     ``home/pages/NEW_ALBUM_SUGGESTIONS/view-all``) and serialize it as
     a single-category Page so the frontend can render it with PageView.
 
-    The view-all response shape is different from a regular Page — it's
-    a flat {"items": [...]} where each item has a ``type`` like
-    "ALBUM"/"TRACK"/"ARTIST"/"PLAYLIST"/"MIX" and a ``data`` payload.
+    Tidal emits several response shapes for view-alls:
+      1. Flat items with type wrappers: {"items": [{"type": "MIX", "data": {...}}, ...]}
+      2. Flat items as bare objects: {"items": [{...mix fields...}, ...]}
+      3. Module-nested: {"modules": [{"pagedList": {"items": [...]}}]} or
+         {"rows": [{"modules": [...]}]}
     tidalapi's Page parser expects category-typed rows, so we map items
     ourselves using session.parse_* helpers and emit one synthetic
     "HorizontalList" row.
@@ -5747,30 +5879,60 @@ def _fetch_v2_view_all(path: str) -> dict:
     resp.raise_for_status()
     body = resp.json()
 
-    raw_items = body.get("items") or []
     title = body.get("title") or ""
+    raw_items = _collect_v2_items(body)
     out: list[dict] = []
+    dropped_types: list[str] = []
     for entry in raw_items:
-        item_type = (entry.get("type") or "").upper()
-        data = entry.get("data") or entry
-        try:
-            if item_type == "TRACK":
-                obj = session.parse_track(data)
-            elif item_type == "ALBUM":
-                obj = session.parse_album(data)
-            elif item_type == "ARTIST":
-                obj = session.parse_artist(data)
-            elif item_type == "PLAYLIST":
-                obj = session.parse_playlist(data)
-            elif item_type == "MIX":
-                obj = session.parse_mix(data)
-            else:
-                continue
-        except Exception:
-            continue
-        serialized = _serialize_page_item(obj)
-        if serialized:
+        serialized: Optional[dict] = None
+        # First try tidalapi's parsers + our existing serializer. They
+        # cover the common shape where Tidal includes every field the
+        # parser expects.
+        obj = _parse_v2_item(session, entry)
+        if obj is not None:
+            serialized = _serialize_page_item(obj)
+        # Fallback: map the raw JSON straight to our wire shape. tidalapi's
+        # parse methods insist on fields like numberOfVideos /
+        # promotedArtists that Tidal drops from V2 view-all payloads,
+        # so a playlist that renders fine on Home disappears here unless
+        # we can bypass the strict parser.
+        if serialized is None or _is_empty_shell(serialized):
+            serialized = _raw_entry_to_item(entry) or serialized
+        if serialized and not _is_empty_shell(serialized):
             out.append(serialized)
+        else:
+            dropped_types.append(
+                (entry.get("type") if isinstance(entry, dict) else None) or "?"
+            )
+            if isinstance(entry, dict):
+                try:
+                    preview = json.dumps(entry)[:600]
+                except Exception:
+                    preview = repr(entry)[:600]
+                print(
+                    f"[page/resolve] could not build an item for "
+                    f"type={entry.get('type')!r}; entry keys={list(entry.keys())}; "
+                    f"sample={preview}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+
+    if dropped_types:
+        print(
+            f"[page/resolve] view-all dropped {len(dropped_types)} item(s) for "
+            f"path={path!r}; types={sorted(set(dropped_types))}",
+            file=sys.stderr,
+            flush=True,
+        )
+
+    if not out:
+        preview = json.dumps(body)[:800] if isinstance(body, (dict, list)) else str(body)[:800]
+        print(
+            f"[page/resolve] view-all produced zero items for path={path!r}; "
+            f"body preview: {preview}",
+            file=sys.stderr,
+            flush=True,
+        )
 
     return {
         "title": title,
@@ -5778,6 +5940,290 @@ def _fetch_v2_view_all(path: str) -> dict:
             {"type": "HorizontalList", "title": "", "items": out},
         ],
     }
+
+
+def _raw_entry_to_item(entry: Any) -> Optional[dict]:
+    """Map a raw Tidal V2 item entry straight onto our PageItem shape.
+
+    This is the fallback for when tidalapi's strict parsers reject a
+    payload that is missing a field. The UI only needs id, name, a cover
+    image, and enough metadata to render the card, so we can build that
+    from whichever fields Tidal did include without demanding the full
+    set tidalapi wants."""
+    if not isinstance(entry, dict):
+        return None
+    item_type = (entry.get("type") or "").upper()
+    data = _resolve_entry_payload(entry, item_type)
+
+    def _cover(uuid: Optional[str]) -> Optional[str]:
+        return _cover_url_from_uuid(uuid, size=640) if uuid else None
+
+    def _artist_names(xs) -> list[dict]:
+        out: list[dict] = []
+        if not isinstance(xs, list):
+            return out
+        for a in xs:
+            if not isinstance(a, dict):
+                continue
+            name = a.get("name") or ""
+            aid = a.get("id")
+            if name or aid is not None:
+                out.append({"id": str(aid or ""), "name": name, "picture": a.get("picture")})
+        return out
+
+    try:
+        if item_type == "PLAYLIST":
+            return {
+                "kind": "playlist",
+                "id": str(data.get("uuid") or data.get("id") or ""),
+                "name": data.get("title") or "",
+                "description": data.get("description") or "",
+                "num_tracks": int(data.get("numberOfTracks") or 0),
+                "duration": int(data.get("duration") or 0),
+                "cover": _cover(data.get("squareImage") or data.get("image")),
+                "creator": (data.get("creator") or {}).get("name"),
+                "creator_id": str((data.get("creator") or {}).get("id") or "") or None,
+                "owned": False,
+                "share_url": None,
+            }
+        if item_type == "ALBUM":
+            return {
+                "kind": "album",
+                "id": str(data.get("id") or ""),
+                "name": data.get("title") or "",
+                "num_tracks": int(data.get("numberOfTracks") or 0),
+                "year": _release_year(data.get("releaseDate") or data.get("streamStartDate")),
+                "duration": int(data.get("duration") or 0),
+                "cover": _cover(data.get("cover")),
+                "artists": _artist_names(data.get("artists")),
+                "explicit": bool(data.get("explicit")),
+                "share_url": None,
+                "release_date": data.get("releaseDate"),
+                "copyright": data.get("copyright"),
+                "media_tags": data.get("mediaMetadata", {}).get("tags") or [],
+            }
+        if item_type == "ARTIST":
+            return {
+                "kind": "artist",
+                "id": str(data.get("id") or ""),
+                "name": data.get("name") or "",
+                "picture": _cover(data.get("picture")),
+            }
+        if item_type == "TRACK":
+            album = data.get("album") or {}
+            return {
+                "kind": "track",
+                "id": str(data.get("id") or ""),
+                "name": data.get("title") or "",
+                "duration": int(data.get("duration") or 0),
+                "track_num": int(data.get("trackNumber") or 0),
+                "explicit": bool(data.get("explicit")),
+                "artists": _artist_names(data.get("artists")),
+                "album": {
+                    "id": str(album.get("id") or ""),
+                    "name": album.get("title") or "",
+                    "cover": _cover(album.get("cover")),
+                } if album.get("id") else None,
+                "share_url": None,
+                "media_tags": data.get("mediaMetadata", {}).get("tags") or [],
+                "isrc": data.get("isrc"),
+            }
+        if item_type == "MIX":
+            return _raw_mix_to_item(data)
+    except Exception:
+        return None
+    return None
+
+
+_MIX_TYPE_LABELS = {
+    "DAILY_MIX": "Daily Mix",
+    "DISCOVERY_MIX": "Discovery Mix",
+    "NEW_ARRIVALS_MIX": "New Arrivals",
+    "HISTORY_ALLTIME_MIX": "My All-Time Mix",
+    "HISTORY_RECENT_MIX": "Recent History",
+    "ARTIST_MIX": "Artist Mix",
+    "TRACK_MIX": "Track Radio",
+    "ALBUM_MIX": "Album Radio",
+    "GENRE_MIX": "Genre Mix",
+    "DECADE_MIX": "Decade Mix",
+}
+
+
+def _raw_mix_to_item(data: dict) -> Optional[dict]:
+    """Map a raw V2 mix payload to our wire shape.
+
+    Tidal's V2 mix payloads come in two flavors depending on endpoint.
+    Some ship the full home-feed shape with `title` / `subTitle` and an
+    `images` dict keyed by SQUARE/MEDIUM/LARGE, others ship a stripped
+    pages shape with `titleTextInfo.text` / `subtitleTextInfo.text` and
+    a flat `mixImages` array of {size, url} objects. Handle both."""
+    if not isinstance(data, dict):
+        return None
+    mix_id = str(data.get("id") or "").strip()
+    if not mix_id:
+        return None
+    # Title: home-feed shipping uses `title`, pages shipping uses
+    # `titleTextInfo.text`. Fall back to a human label derived from the
+    # inner mix type constant so a missing text info never leaves the
+    # card blank.
+    title_info = data.get("titleTextInfo") if isinstance(data.get("titleTextInfo"), dict) else {}
+    subtitle_info = data.get("subtitleTextInfo") if isinstance(data.get("subtitleTextInfo"), dict) else {}
+    inner_type = (data.get("type") or "").upper()
+    name = (
+        data.get("title")
+        or title_info.get("text")
+        or _MIX_TYPE_LABELS.get(inner_type)
+        or "Mix"
+    )
+    subtitle = (
+        data.get("subTitle")
+        or data.get("subtitle")
+        or subtitle_info.get("text")
+        or ""
+    )
+    # Cover: home-feed shape first, then the pages-shape array.
+    images = data.get("images") if isinstance(data.get("images"), dict) else {}
+    cover = None
+    for bucket in ("SQUARE", "MEDIUM", "LARGE", "SMALL"):
+        img = images.get(bucket) if isinstance(images, dict) else None
+        if isinstance(img, dict) and img.get("url"):
+            cover = img["url"]
+            break
+    if not cover:
+        mix_images = data.get("mixImages")
+        if isinstance(mix_images, list) and mix_images:
+            # Prefer MEDIUM; fall back to whichever we have.
+            best = next(
+                (m for m in mix_images if isinstance(m, dict) and m.get("size") == "MEDIUM"),
+                None,
+            ) or next(
+                (m for m in mix_images if isinstance(m, dict) and m.get("url")),
+                None,
+            )
+            if best:
+                cover = best.get("url")
+    return {
+        "kind": "mix",
+        "id": mix_id,
+        "name": name,
+        "subtitle": subtitle,
+        "cover": cover,
+    }
+
+
+def _release_year(date_str: Optional[str]) -> Optional[int]:
+    if not date_str:
+        return None
+    try:
+        return int(str(date_str)[:4])
+    except Exception:
+        return None
+
+
+def _is_empty_shell(item: dict) -> bool:
+    """True when an item dict has no id and no name — the card would
+    render as a blank placeholder with a music icon. Better to drop it
+    than to paint emptiness on the page."""
+    if not isinstance(item, dict):
+        return True
+    has_id = bool(str(item.get("id") or "").strip())
+    has_name = bool((item.get("name") or "").strip())
+    return not (has_id and has_name)
+
+
+def _resolve_entry_payload(entry: dict, item_type: str) -> dict:
+    """Find the inner object inside a V2 view-all entry. Tidal puts the
+    real payload in different slots depending on endpoint: some ship
+    `data`, others ship `item`, others stash a type-specific key like
+    `playlist`/`album`, and a few dump the fields straight onto the
+    entry. Try each candidate in turn."""
+    type_key = item_type.lower() if item_type else ""
+    candidate_keys = ("data", "item", type_key) if type_key else ("data", "item")
+    for key in candidate_keys:
+        if not key:
+            continue
+        candidate = entry.get(key)
+        if isinstance(candidate, dict) and candidate:
+            return candidate
+    # Fall through: treat the entry itself as the payload.
+    return entry
+
+
+def _collect_v2_items(body: Any) -> list:
+    """Walk a Tidal V2 view-all response and collect everything that
+    looks like an item. Handles a few shapes Tidal uses for different
+    content types without requiring per-row special-casing."""
+    if not isinstance(body, dict):
+        return []
+    # Shape 1 / 2: top-level items array.
+    items = body.get("items")
+    if isinstance(items, list) and items:
+        return items
+    # Shape 3: modules / rows wrapper — flatten one level.
+    out: list = []
+    for container_key in ("modules", "rows"):
+        container = body.get(container_key)
+        if not isinstance(container, list):
+            continue
+        for module in container:
+            if not isinstance(module, dict):
+                continue
+            for inner_key in ("items", "pagedList"):
+                inner = module.get(inner_key)
+                if isinstance(inner, dict):
+                    inner = inner.get("items")
+                if isinstance(inner, list):
+                    out.extend(inner)
+    return out
+
+
+def _parse_v2_item(session, entry: Any):
+    """Turn a single V2 item dict into a tidalapi object, tolerating
+    both the {type, data} wrapper and bare-object shapes. Returns None
+    when the entry is something we don't render."""
+    if not isinstance(entry, dict):
+        return None
+    item_type = (entry.get("type") or "").upper()
+    data = entry.get("data") if isinstance(entry.get("data"), dict) else entry
+
+    # Type wrapper present — dispatch by the declared type.
+    if item_type:
+        try:
+            if item_type == "TRACK":
+                return session.parse_track(data)
+            if item_type == "ALBUM":
+                return session.parse_album(data)
+            if item_type == "ARTIST":
+                return session.parse_artist(data)
+            if item_type == "PLAYLIST":
+                return session.parse_playlist(data)
+            if item_type == "MIX":
+                # parse_v2_mix covers the V2 home/pages mix shape
+                # (mixImages / titleTextInfo); parse_mix is the V1
+                # legacy parser that expects a flat title field.
+                parser = getattr(session, "parse_v2_mix", None) or session.parse_mix
+                return parser(data)
+        except Exception:
+            return None
+        return None
+
+    # No type wrapper — sniff the shape. Mixes carry a `mixType` or a
+    # string id that starts with a known prefix; albums/tracks/playlists
+    # carry numeric / uuid ids with distinguishing fields.
+    try:
+        if "mixType" in data or "mixNumber" in data:
+            return session.parse_mix(data)
+        if "numberOfTracks" in data and "artists" in data:
+            return session.parse_album(data)
+        if "numberOfTracks" in data and "creator" in data:
+            return session.parse_playlist(data)
+        if "album" in data and "duration" in data:
+            return session.parse_track(data)
+        if "picture" in data and "name" in data and "popularity" in data:
+            return session.parse_artist(data)
+    except Exception:
+        return None
+    return None
 
 
 def _category_view_all_path(cat) -> Optional[str]:
@@ -5819,7 +6265,23 @@ def _serialize_page(page) -> dict:
                 subtitle = candidate
                 break
         raw_items = list(getattr(cat, "items", []) or [])
-        items = [d for d in (_serialize_page_item(i) for i in raw_items) if d]
+        serialized_pairs = [(i, _serialize_page_item(i)) for i in raw_items]
+        items = [d for _, d in serialized_pairs if d]
+        if len(items) < len(raw_items):
+            # Log which tidalapi classes we dropped so a short row like
+            # "Recently played shows 13 instead of 15" surfaces the
+            # concrete types we still need to handle.
+            dropped = sorted({
+                "None" if raw is None else type(raw).__name__
+                for raw, d in serialized_pairs if d is None
+            })
+            if dropped:
+                print(
+                    f"[page] {cat_type} {title!r} served "
+                    f"{len(items)}/{len(raw_items)} items; dropped classes={dropped}",
+                    file=sys.stderr,
+                    flush=True,
+                )
         if not items:
             continue
         entry: dict = {"type": cat_type, "title": title, "items": items}
@@ -5893,11 +6355,7 @@ def resolve_page(req: PagePathRequest) -> dict:
             # V2 view-all path — returns a JSON dict directly, no Page
             # object to serialize.
             return _fetch_v2_view_all(path)
-    except Exception as exc:
-        # Tidal's 400/404 bodies usually contain a JSON error that tells
-        # us exactly which parameter it's rejecting — the HTTPError
-        # itself only says "400 Bad Request". Grab the latest response
-        # tidalapi cached and log both.
+    except Exception as exc:  # noqa: BLE001 — need a catch-all to log body
         body = ""
         try:
             resp = tidal.session.request.latest_err_response
@@ -5910,7 +6368,27 @@ def resolve_page(req: PagePathRequest) -> dict:
             flush=True,
         )
         raise HTTPException(status_code=502, detail=f"{path}: {exc} | {body}")
-    return _serialize_page(page)
+    result = _serialize_page(page)
+    if not result.get("categories"):
+        # V1 page returned but every row was filtered out during
+        # serialization — usually because tidalapi handed back a class
+        # name _serialize_page_item doesn't recognise. Log a preview so
+        # we can see which types went missing.
+        preview = []
+        for cat in getattr(page, "categories", []) or []:
+            raw_items = list(getattr(cat, "items", []) or [])
+            preview.append({
+                "category": type(cat).__name__,
+                "title": getattr(cat, "title", "") or "",
+                "item_types": sorted({type(x).__name__ for x in raw_items}),
+                "count": len(raw_items),
+            })
+        print(
+            f"[page/resolve] V1 page had zero renderable categories "
+            f"for path={path!r}; raw rows: {preview}",
+            flush=True,
+        )
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -5918,7 +6396,7 @@ def resolve_page(req: PagePathRequest) -> dict:
 # ---------------------------------------------------------------------------
 
 
-FAVORITE_KINDS = {"track", "album", "artist", "playlist"}
+FAVORITE_KINDS = {"track", "album", "artist", "playlist", "mix"}
 
 
 @app.get("/api/favorites")

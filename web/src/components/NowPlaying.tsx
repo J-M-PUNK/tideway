@@ -344,7 +344,7 @@ const QUALITY_OPTIONS: {
 
 // Per-tier color for the Now Playing quality pill. Pinned Tailwind
 // palette entries read on both dark and light backgrounds without
-// needing a mode-specific override; `primary` is the brand purple,
+// needing a mode-specific override. `primary` is the brand accent,
 // reserved for Max so the top tier is visually distinct.
 const QUALITY_BADGE_CLASS: Record<StreamingQuality, string> = {
   low_96k: "bg-neutral-500/15 text-neutral-400 hover:bg-neutral-500/25",
