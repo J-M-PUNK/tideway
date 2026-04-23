@@ -413,11 +413,42 @@ function TrackHeart({
   );
 }
 
+function MixHeart({
+  mixId,
+  className,
+}: {
+  mixId: string;
+  className?: string;
+}) {
+  const favs = useFavorites();
+  const liked = favs.has("mix", mixId);
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        void favs.toggle("mix", mixId);
+      }}
+      aria-pressed={liked}
+      aria-label={liked ? "Unlike mix" : "Like mix"}
+      title={liked ? "Unlike mix" : "Like mix"}
+      className={cn(
+        "flex h-10 w-10 items-center justify-center rounded-full bg-black/70 text-white shadow-lg transition-colors hover:bg-black/90",
+        className,
+      )}
+    >
+      <Heart
+        className={cn("h-5 w-5", liked && "fill-primary stroke-primary")}
+      />
+    </button>
+  );
+}
+
 function MixCard({ mix }: { mix: MixItem }) {
-  // Same bottom-left hover-play treatment as MediaCard. Mixes don't
-  // have a backend favorite endpoint so the bottom-right heart slot is
-  // intentionally omitted — Tidal's own homepage renders mix cards the
-  // same way.
+  // Same bottom-left hover-play + bottom-right hover-heart treatment as
+  // MediaCard. tidalapi exposes favorites/mixes/add|remove, so mixes
+  // get the full card interaction instead of play-only.
   const [menuOpen, setMenuOpen] = useState(false);
   const hoverGroup = menuOpen
     ? "opacity-100"
@@ -445,6 +476,10 @@ function MixCard({ mix }: { mix: MixItem }) {
             onOpenChange={setMenuOpen}
           />
         </div>
+        <MixHeart
+          mixId={mix.id}
+          className={`absolute bottom-2 right-2 transition-all ${hoverGroup}`}
+        />
       </div>
       <div className="min-w-0">
         <div className="truncate font-semibold">{mix.name}</div>
