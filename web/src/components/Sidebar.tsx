@@ -94,21 +94,16 @@ export function Sidebar({
           half of the 40 pixel glyph lands at 38, which is where the
           20 pixel nav icons have their centers.
 
-          On hover the background tints with a soft brand accent via
-          `bg-primary/10` and the glyph scales up to 1.05. That feels
-          like an interactive logo rather than a nav row that happens
-          to be at the top. */}
+          No hover or active background tile — the icon itself is
+          transparent and sits directly on the sidebar's dark
+          background. A subtle scale bump on hover still makes it
+          feel interactive without painting a box behind the glyph. */}
       <NavLink
         to="/"
         end
         aria-label="Home"
         title="Home"
-        className={({ isActive }) =>
-          cn(
-            "ml-[10px] inline-flex h-10 w-10 items-center justify-center rounded-lg transition-all duration-150 hover:scale-105 hover:bg-primary/10",
-            isActive && "bg-primary/10",
-          )
-        }
+        className="ml-[10px] inline-flex h-10 w-10 items-center justify-center transition-transform duration-150 hover:scale-105"
       >
         <img src="/app-icon.svg" alt="" className="h-10 w-10 shrink-0" />
       </NavLink>
