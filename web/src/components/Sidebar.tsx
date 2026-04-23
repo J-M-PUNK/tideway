@@ -15,7 +15,6 @@ import {
   Newspaper,
   Plus,
   Rss,
-  Search,
   TrendingUp,
   User,
   X,
@@ -28,7 +27,6 @@ import { cn } from "@/lib/utils";
 
 const primary = [
   { to: "/", label: "Home", icon: Home, end: true },
-  { to: "/search", label: "Search", icon: Search },
   { to: "/feed", label: "Feed", icon: Rss },
   { to: "/explore", label: "Explore", icon: Compass },
 ];
