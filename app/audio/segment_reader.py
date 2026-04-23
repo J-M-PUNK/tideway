@@ -20,7 +20,7 @@ import io
 import sys
 import threading
 import time
-from typing import Optional
+from typing import Dict, Optional
 
 import requests
 
@@ -30,7 +30,11 @@ import requests
 
 
 class SegmentReader(io.RawIOBase):
-    def __init__(self, urls: list[str]):
+    def __init__(
+        self,
+        urls: list[str],
+        prefetched: Optional[dict[int, bytes]] = None,
+    ):
         if not urls:
             raise ValueError("SegmentReader: empty url list")
         self._urls = list(urls)
@@ -40,9 +44,33 @@ class SegmentReader(io.RawIOBase):
         self._pos = 0
         self._lock = threading.Lock()
         self._session = requests.Session()
+        # Byte-level prefetch fast path: if the caller hands us
+        # pre-downloaded bytes for segment 0, 1, ..., N in order,
+        # seed the buffer with them and advance _next_segment_idx
+        # past them. The decoder's av.open call then reads through
+        # those bytes without touching the network at all, which
+        # is the whole point of byte-level prefetch.
+        #
+        # Only accept a contiguous prefix starting at 0 — a gap
+        # (we have 0 but not 1) means a half-prefetch that we
+        # can't use directly. Fall back to eager init fetch in
+        # that case.
+        seeded_any = False
+        if prefetched:
+            idx = 0
+            while idx in prefetched and idx < len(self._urls):
+                chunk = prefetched[idx]
+                if not isinstance(chunk, (bytes, bytearray)) or not chunk:
+                    break
+                self._buf.extend(chunk)
+                self._next_segment_idx = idx + 1
+                idx += 1
+                seeded_any = True
         # Eager-fetch the init segment so callers that only probe
-        # headers (av.open's stream-probing phase) don't get EOF.
-        self._fetch_next_segment()
+        # headers (av.open's stream-probing phase) don't get EOF —
+        # unless prefetch already seeded it.
+        if not seeded_any:
+            self._fetch_next_segment()
 
     # --- io.RawIOBase interface ------------------------------------
 
