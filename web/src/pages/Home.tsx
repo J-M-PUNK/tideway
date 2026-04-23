@@ -1,5 +1,6 @@
+import { useState } from "react";
 import { Link } from "react-router-dom";
-import { MoreHorizontal, Music } from "lucide-react";
+import { ChevronRight, MoreHorizontal, Music } from "lucide-react";
 import { api } from "@/api/client";
 import type { OnDownload } from "@/api/download";
 import { useApi } from "@/hooks/useApi";
@@ -168,13 +169,30 @@ function filterHomeRows(page: TidalPage): {
 // list to pick from" than "browse editorial wall", specifically
 // Recently played and the merged Suggested new songs for you.
 // ---------------------------------------------------------------------------
+const COMPACT_COLLAPSED_COUNT = 9;
+
 function CompactRow({ category }: { category: PageCategory }) {
-  const items = category.items.slice(0, 9);
-  if (items.length === 0) return null;
+  const [expanded, setExpanded] = useState(false);
+  if (category.items.length === 0) return null;
+  const items = expanded
+    ? category.items
+    : category.items.slice(0, COMPACT_COLLAPSED_COUNT);
+  const hasMore = category.items.length > COMPACT_COLLAPSED_COUNT;
   return (
     <div className="mb-10">
       <div className="mb-4 flex items-baseline justify-between gap-4">
         <h2 className="text-xl font-bold tracking-tight">{category.title}</h2>
+        {hasMore && (
+          <button
+            onClick={() => setExpanded((v) => !v)}
+            className="flex flex-shrink-0 items-center gap-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground transition-colors hover:text-foreground"
+          >
+            {expanded ? "Show less" : "View more"}
+            <ChevronRight
+              className={`h-3.5 w-3.5 transition-transform ${expanded ? "rotate-90" : ""}`}
+            />
+          </button>
+        )}
       </div>
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
         {items.map((item, i) => (

@@ -5652,9 +5652,11 @@ def _serialize_page_item(item) -> Optional[dict]:
         return artist_to_dict(item)
     if isinstance(item, tidalapi.Playlist):
         return playlist_to_dict(item)
-    # Mix — lives in tidalapi.mix.Mix (or MixV2)
+    # Mix — tidalapi ships these under several class names
+    # (Mix, MixV2, MixV2Full, …). Any class whose name starts with
+    # "Mix" is a mix record from our perspective.
     name = type(item).__name__
-    if name in ("Mix", "MixV2"):
+    if name.startswith("Mix"):
         try:
             return {
                 "kind": "mix",
@@ -5717,9 +5719,11 @@ def _fetch_v2_view_all(path: str) -> dict:
     ``home/pages/NEW_ALBUM_SUGGESTIONS/view-all``) and serialize it as
     a single-category Page so the frontend can render it with PageView.
 
-    The view-all response shape is different from a regular Page — it's
-    a flat {"items": [...]} where each item has a ``type`` like
-    "ALBUM"/"TRACK"/"ARTIST"/"PLAYLIST"/"MIX" and a ``data`` payload.
+    Tidal emits several response shapes for view-alls:
+      1. Flat items with type wrappers: {"items": [{"type": "MIX", "data": {...}}, ...]}
+      2. Flat items as bare objects: {"items": [{...mix fields...}, ...]}
+      3. Module-nested: {"modules": [{"pagedList": {"items": [...]}}]} or
+         {"rows": [{"modules": [...]}]}
     tidalapi's Page parser expects category-typed rows, so we map items
     ourselves using session.parse_* helpers and emit one synthetic
     "HorizontalList" row.
@@ -5747,30 +5751,27 @@ def _fetch_v2_view_all(path: str) -> dict:
     resp.raise_for_status()
     body = resp.json()
 
-    raw_items = body.get("items") or []
     title = body.get("title") or ""
+    raw_items = _collect_v2_items(body)
     out: list[dict] = []
     for entry in raw_items:
-        item_type = (entry.get("type") or "").upper()
-        data = entry.get("data") or entry
-        try:
-            if item_type == "TRACK":
-                obj = session.parse_track(data)
-            elif item_type == "ALBUM":
-                obj = session.parse_album(data)
-            elif item_type == "ARTIST":
-                obj = session.parse_artist(data)
-            elif item_type == "PLAYLIST":
-                obj = session.parse_playlist(data)
-            elif item_type == "MIX":
-                obj = session.parse_mix(data)
-            else:
-                continue
-        except Exception:
+        obj = _parse_v2_item(session, entry)
+        if obj is None:
             continue
         serialized = _serialize_page_item(obj)
         if serialized:
             out.append(serialized)
+
+    if not out:
+        # Log the body when parsing produced nothing so we can diagnose
+        # new Tidal response shapes without having to add tracing each
+        # time a row silently disappears from the UI.
+        preview = json.dumps(body)[:800] if isinstance(body, (dict, list)) else str(body)[:800]
+        print(
+            f"[page/resolve] view-all produced zero items for path={path!r}; "
+            f"body preview: {preview}",
+            flush=True,
+        )
 
     return {
         "title": title,
@@ -5778,6 +5779,79 @@ def _fetch_v2_view_all(path: str) -> dict:
             {"type": "HorizontalList", "title": "", "items": out},
         ],
     }
+
+
+def _collect_v2_items(body: Any) -> list:
+    """Walk a Tidal V2 view-all response and collect everything that
+    looks like an item. Handles a few shapes Tidal uses for different
+    content types without requiring per-row special-casing."""
+    if not isinstance(body, dict):
+        return []
+    # Shape 1 / 2: top-level items array.
+    items = body.get("items")
+    if isinstance(items, list) and items:
+        return items
+    # Shape 3: modules / rows wrapper — flatten one level.
+    out: list = []
+    for container_key in ("modules", "rows"):
+        container = body.get(container_key)
+        if not isinstance(container, list):
+            continue
+        for module in container:
+            if not isinstance(module, dict):
+                continue
+            for inner_key in ("items", "pagedList"):
+                inner = module.get(inner_key)
+                if isinstance(inner, dict):
+                    inner = inner.get("items")
+                if isinstance(inner, list):
+                    out.extend(inner)
+    return out
+
+
+def _parse_v2_item(session, entry: Any):
+    """Turn a single V2 item dict into a tidalapi object, tolerating
+    both the {type, data} wrapper and bare-object shapes. Returns None
+    when the entry is something we don't render."""
+    if not isinstance(entry, dict):
+        return None
+    item_type = (entry.get("type") or "").upper()
+    data = entry.get("data") if isinstance(entry.get("data"), dict) else entry
+
+    # Type wrapper present — dispatch by the declared type.
+    if item_type:
+        try:
+            if item_type == "TRACK":
+                return session.parse_track(data)
+            if item_type == "ALBUM":
+                return session.parse_album(data)
+            if item_type == "ARTIST":
+                return session.parse_artist(data)
+            if item_type == "PLAYLIST":
+                return session.parse_playlist(data)
+            if item_type == "MIX":
+                return session.parse_mix(data)
+        except Exception:
+            return None
+        return None
+
+    # No type wrapper — sniff the shape. Mixes carry a `mixType` or a
+    # string id that starts with a known prefix; albums/tracks/playlists
+    # carry numeric / uuid ids with distinguishing fields.
+    try:
+        if "mixType" in data or "mixNumber" in data:
+            return session.parse_mix(data)
+        if "numberOfTracks" in data and "artists" in data:
+            return session.parse_album(data)
+        if "numberOfTracks" in data and "creator" in data:
+            return session.parse_playlist(data)
+        if "album" in data and "duration" in data:
+            return session.parse_track(data)
+        if "picture" in data and "name" in data and "popularity" in data:
+            return session.parse_artist(data)
+    except Exception:
+        return None
+    return None
 
 
 def _category_view_all_path(cat) -> Optional[str]:
@@ -5893,11 +5967,7 @@ def resolve_page(req: PagePathRequest) -> dict:
             # V2 view-all path — returns a JSON dict directly, no Page
             # object to serialize.
             return _fetch_v2_view_all(path)
-    except Exception as exc:
-        # Tidal's 400/404 bodies usually contain a JSON error that tells
-        # us exactly which parameter it's rejecting — the HTTPError
-        # itself only says "400 Bad Request". Grab the latest response
-        # tidalapi cached and log both.
+    except Exception as exc:  # noqa: BLE001 — need a catch-all to log body
         body = ""
         try:
             resp = tidal.session.request.latest_err_response
@@ -5910,7 +5980,27 @@ def resolve_page(req: PagePathRequest) -> dict:
             flush=True,
         )
         raise HTTPException(status_code=502, detail=f"{path}: {exc} | {body}")
-    return _serialize_page(page)
+    result = _serialize_page(page)
+    if not result.get("categories"):
+        # V1 page returned but every row was filtered out during
+        # serialization — usually because tidalapi handed back a class
+        # name _serialize_page_item doesn't recognise. Log a preview so
+        # we can see which types went missing.
+        preview = []
+        for cat in getattr(page, "categories", []) or []:
+            raw_items = list(getattr(cat, "items", []) or [])
+            preview.append({
+                "category": type(cat).__name__,
+                "title": getattr(cat, "title", "") or "",
+                "item_types": sorted({type(x).__name__ for x in raw_items}),
+                "count": len(raw_items),
+            })
+        print(
+            f"[page/resolve] V1 page had zero renderable categories "
+            f"for path={path!r}; raw rows: {preview}",
+            flush=True,
+        )
+    return result
 
 
 # ---------------------------------------------------------------------------
