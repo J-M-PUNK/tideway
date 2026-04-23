@@ -294,11 +294,13 @@ function PageItemCard({
 }
 
 /**
- * Track card with three hit regions, matching Tidal's homepage: clicking
- * the art plays the song (with the row's other tracks as the playback
- * queue), clicking the title navigates to the album, clicking the
- * artist name navigates to the artist. A hover-revealed heart button
- * in the bottom-right lets the user favourite the track in place.
+ * Track card matching the MediaCard layout so tracks on a view-more
+ * page feel like first-class items. The whole card is a Link to the
+ * album; the hover overlay puts a play button in the bottom-left and
+ * a heart in the bottom-right, same slots the album / playlist cards
+ * use. Clicking play kicks off the track with the row's other tracks
+ * as the queue. Artist names in the subtitle are their own Links that
+ * stop propagation so the card's Link doesn't swallow the click.
  */
 function TrackCard({ track, rowTracks }: { track: Track; rowTracks: Track[] }) {
   const actions = usePlayerActions();
@@ -316,58 +318,49 @@ function TrackCard({ track, rowTracks }: { track: Track; rowTracks: Track[] }) {
       actions.play(track, rowTracks.length > 0 ? rowTracks : [track]);
     }
   };
-  return (
-    <div className="group flex flex-col gap-3 rounded-lg bg-card p-4 transition-colors hover:bg-accent">
+  const overlayClass =
+    "opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100";
+  const inner = (
+    <>
       <div className="relative aspect-square overflow-hidden rounded-md bg-secondary">
+        {cover ? (
+          <img
+            src={cover}
+            alt=""
+            loading="lazy"
+            className="h-full w-full object-cover transition-transform group-hover:scale-105"
+          />
+        ) : (
+          <Music className="m-auto h-10 w-10 text-muted-foreground" />
+        )}
         <button
           type="button"
           onClick={handlePlay}
           aria-label={isPlaying ? `Pause ${track.name}` : `Play ${track.name}`}
-          className="absolute inset-0 z-0"
-        >
-          {cover ? (
-            <img
-              src={cover}
-              alt=""
-              loading="lazy"
-              className="h-full w-full object-cover transition-transform group-hover:scale-105"
-            />
-          ) : (
-            <Music className="m-auto h-10 w-10 text-muted-foreground" />
+          className={cn(
+            "absolute bottom-2 left-2 flex h-10 w-10 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-lg transition-transform hover:scale-105",
+            isPlaying ? "opacity-100" : overlayClass,
           )}
-          <span
-            className={cn(
-              "absolute inset-0 flex items-center justify-center bg-black/50 transition-opacity",
-              isPlaying
-                ? "opacity-100"
-                : "opacity-0 group-hover:opacity-100 focus-visible:opacity-100",
-            )}
-          >
-            <Play className="h-10 w-10 text-foreground" fill="currentColor" />
-          </span>
+        >
+          <Play className="h-5 w-5" fill="currentColor" />
         </button>
         <TrackHeart
           trackId={track.id}
-          className="absolute bottom-2 right-2 z-10 opacity-0 transition-opacity group-hover:opacity-100 focus-within:opacity-100"
+          className={cn("absolute bottom-2 right-2", overlayClass)}
         />
       </div>
       <div className="min-w-0">
-        {albumPath ? (
-          <Link
-            to={albumPath}
-            className="block truncate font-semibold hover:underline"
-          >
-            {track.name}
-          </Link>
-        ) : (
-          <div className="truncate font-semibold">{track.name}</div>
-        )}
+        <div className="truncate font-semibold">{track.name}</div>
         <div className="truncate text-xs text-muted-foreground">
           {track.artists.map((a, i) => (
             <span key={a.id || i}>
               {i > 0 && ", "}
               {a.id ? (
-                <Link to={`/artist/${a.id}`} className="hover:text-foreground hover:underline">
+                <Link
+                  to={`/artist/${a.id}`}
+                  onClick={(e) => e.stopPropagation()}
+                  className="hover:text-foreground hover:underline"
+                >
                   {a.name}
                 </Link>
               ) : (
@@ -377,6 +370,21 @@ function TrackCard({ track, rowTracks }: { track: Track; rowTracks: Track[] }) {
           ))}
         </div>
       </div>
+    </>
+  );
+  if (albumPath) {
+    return (
+      <Link
+        to={albumPath}
+        className="group flex flex-col gap-3 rounded-lg bg-card p-4 transition-colors hover:bg-accent"
+      >
+        {inner}
+      </Link>
+    );
+  }
+  return (
+    <div className="group flex flex-col gap-3 rounded-lg bg-card p-4 transition-colors hover:bg-accent">
+      {inner}
     </div>
   );
 }
