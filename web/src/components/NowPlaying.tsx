@@ -76,20 +76,15 @@ export function NowPlaying({
     queue,
     streamInfo,
   } = usePlayerMeta();
-  const { currentTime, duration } = usePlayerTime();
   const actions = usePlayerActions();
   const isLocal = useIsDownloaded(track?.id ?? "");
   // Shared credits-dialog state, opened by the right-click menu on the
   // current-track info block. Kept at this level so closing the menu
   // doesn't tear down the dialog.
   const [creditsOpen, setCreditsOpen] = useState(false);
-  // Record plays from here — NowPlaying already re-renders on every
-  // timeupdate (via PlayerTime context), so subscribing here is free.
-  useRecordPlays(track, currentTime);
   if (!track) return null;
 
   const cover = imageProxy(track.album?.cover);
-  const pct = duration > 0 ? (currentTime / duration) * 100 : 0;
 
   return (
     <div className="border-t border-border bg-[hsl(var(--now-playing-bg))] px-4 py-3">
@@ -212,7 +207,7 @@ export function NowPlaying({
               size="icon"
               className="h-8 w-8"
               onClick={actions.prev}
-              disabled={!hasPrev && currentTime < 3}
+              disabled={!hasPrev}
               title="Previous"
             >
               <SkipBack className="h-4 w-4" fill="currentColor" />
@@ -263,23 +258,7 @@ export function NowPlaying({
               )}
             </Button>
           </div>
-          <div className="flex w-full max-w-xl items-center gap-2 text-[11px] text-muted-foreground">
-            <span className="w-10 text-right tabular-nums">{formatDuration(currentTime)}</span>
-            <input
-              type="range"
-              min={0}
-              max={Math.max(duration, 1)}
-              step={0.1}
-              value={Math.min(currentTime, duration || 0)}
-              onChange={(e) => actions.seek(Number(e.target.value))}
-              className="h-1 flex-1 cursor-pointer appearance-none rounded-full bg-secondary accent-primary"
-              style={{
-                background: `linear-gradient(to right, hsl(var(--primary)) ${pct}%, hsl(var(--secondary)) ${pct}%)`,
-              }}
-              aria-label="Seek"
-            />
-            <span className="w-10 tabular-nums">{formatDuration(duration)}</span>
-          </div>
+          <ProgressBar track={track} />
         </div>
 
         <div className="flex flex-1 items-center justify-end gap-2">
@@ -309,6 +288,45 @@ export function NowPlaying({
       {error && (
         <div className="mt-1 text-center text-[11px] text-destructive">{error}</div>
       )}
+    </div>
+  );
+}
+
+/**
+ * Progress bar, elapsed / remaining time, and the `useRecordPlays`
+ * subscription. Split out from the main NowPlaying body so the
+ * bottom bar's expensive parts — cover, title, artist link, side
+ * buttons — don't re-render at the player's 4 Hz position tick.
+ * Only this tiny subtree consumes `usePlayerTime` and gets ticked.
+ */
+function ProgressBar({
+  track,
+}: {
+  track: NonNullable<ReturnType<typeof usePlayerMeta>["track"]>;
+}) {
+  const { currentTime, duration } = usePlayerTime();
+  const actions = usePlayerActions();
+  useRecordPlays(track, currentTime);
+  const pct = duration > 0 ? (currentTime / duration) * 100 : 0;
+  return (
+    <div className="flex w-full max-w-xl items-center gap-2 text-[11px] text-muted-foreground">
+      <span className="w-10 text-right tabular-nums">
+        {formatDuration(currentTime)}
+      </span>
+      <input
+        type="range"
+        min={0}
+        max={Math.max(duration, 1)}
+        step={0.1}
+        value={Math.min(currentTime, duration || 0)}
+        onChange={(e) => actions.seek(Number(e.target.value))}
+        className="h-1 flex-1 cursor-pointer appearance-none rounded-full bg-secondary accent-primary"
+        style={{
+          background: `linear-gradient(to right, hsl(var(--primary)) ${pct}%, hsl(var(--secondary)) ${pct}%)`,
+        }}
+        aria-label="Seek"
+      />
+      <span className="w-10 tabular-nums">{formatDuration(duration)}</span>
     </div>
   );
 }

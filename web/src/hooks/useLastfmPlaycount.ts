@@ -113,6 +113,77 @@ function fetchOnce(key: string, request: () => Promise<LastFmPlaycount>) {
   inflight.set(key, promise);
 }
 
+// Track-playcount batching.
+//
+// A single TrackList render queues a playcount request for every
+// visible row. Without batching, that's N parallel HTTP calls to
+// `/api/lastfm/track-playcount`, which pipelines slowly through
+// Last.fm's upstream rate limit and leaves rows blank for seconds.
+// We collect track-playcount requests that arrive in the same tick
+// and flush them to the batch endpoint as one POST. Backend still
+// does one Last.fm lookup per item, but the browser only opens one
+// request slot, and the shared HTTP round-trip overhead is paid
+// once instead of fifty times.
+interface PendingTrackReq {
+  key: string;
+  artist: string;
+  track: string;
+}
+
+const trackBatch: PendingTrackReq[] = [];
+let trackBatchScheduled = false;
+
+function enqueueTrackPlaycountRequest(
+  key: string,
+  artist: string,
+  track: string,
+): void {
+  if (cache.has(key) || inflight.has(key)) return;
+  // Mark inflight against this key so concurrent callers for the
+  // same (artist, track) don't queue duplicates. The real batch
+  // fetch resolves them all in one go.
+  inflight.set(key, new Promise<LastFmPlaycount>(() => undefined));
+  trackBatch.push({ key, artist, track });
+  if (trackBatchScheduled) return;
+  trackBatchScheduled = true;
+  // setTimeout(0) gives the browser a microtask tick to collect
+  // every row in a TrackList render pass. A longer delay would
+  // visibly stagger first-paint; shorter doesn't change anything.
+  setTimeout(flushTrackBatch, 0);
+}
+
+function flushTrackBatch(): void {
+  trackBatchScheduled = false;
+  const pending = trackBatch.splice(0);
+  if (pending.length === 0) return;
+  api
+    .lastfmTrackPlaycountsBatch(
+      pending.map((p) => ({ artist: p.artist, track: p.track })),
+    )
+    .then((res) => {
+      const now = Date.now();
+      for (const p of pending) {
+        const lookup = `${p.artist.toLowerCase()}|${p.track.toLowerCase()}`;
+        const val = res.results[lookup] ?? ({} as LastFmPlaycount);
+        cache.set(p.key, val);
+        inflight.delete(p.key);
+        notify(p.key);
+      }
+      schedulePersist();
+      void now;
+    })
+    .catch(() => {
+      // Resolve every pending key to an empty result so the UI
+      // stops showing a permanent loading state on failure.
+      for (const p of pending) {
+        cache.set(p.key, {} as LastFmPlaycount);
+        inflight.delete(p.key);
+        notify(p.key);
+      }
+      schedulePersist();
+    });
+}
+
 /** Clear every cached playcount. Called when the user disconnects or
  *  changes Last.fm account so stale "you've played this 342 times"
  *  numbers don't linger across sessions. */
@@ -165,7 +236,7 @@ export function useLastfmTrackPlaycount(
   useEffect(() => {
     if (!key || !artist || !track || !lastfmEnabled) return;
     const off = subscribe(key, () => force((n) => n + 1));
-    fetchOnce(key, () => api.lastfm.trackPlaycount(artist, track));
+    enqueueTrackPlaycountRequest(key, artist, track);
     return off;
   }, [key, artist, track]);
   return key ? cache.get(key) ?? null : null;

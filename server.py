@@ -22,7 +22,7 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Optional
+from typing import Any, AsyncIterator, Callable, Generator, Optional
 from urllib.parse import quote, urljoin, urlparse
 
 import tidalapi
@@ -1864,6 +1864,53 @@ def lastfm_track_playcount(artist: str, track: str) -> dict:
     if not artist or not track:
         raise HTTPException(status_code=400, detail="artist and track are required")
     return lastfm.get_track_playcount(artist, track)
+
+
+class _LastFmTrackPlaycountBatchItem(BaseModel):
+    artist: str
+    track: str
+
+
+class _LastFmTrackPlaycountBatchRequest(BaseModel):
+    items: list[_LastFmTrackPlaycountBatchItem]
+
+
+@app.post("/api/lastfm/track-playcounts")
+def lastfm_track_playcounts(req: _LastFmTrackPlaycountBatchRequest) -> dict:
+    """Batched variant of /api/lastfm/track-playcount.
+
+    The frontend's useLastfmTrackPlaycount hook coalesces any
+    same-tick requests from a rendering track list into one POST to
+    this endpoint, so a 50-row album hits Last.fm through a single
+    HTTP call from the UI's perspective even though each row still
+    maps to its own Last.fm API request on the backend. Rate limit
+    pressure on Last.fm stays the same; what this avoids is the
+    50-parallel-fetch storm the browser would otherwise open and
+    the request-queue churn that comes with it.
+
+    Response shape mirrors the per-row endpoint: a dict keyed by
+    "artist|track" (lowercased) so the frontend can look entries up
+    without having to rebuild the request key.
+    """
+    _require_auth()
+    results: dict[str, dict] = {}
+    # Dedupe by key before hitting Last.fm; callers can submit the
+    # same (artist, track) multiple times when a track appears on
+    # several playlists rendered simultaneously.
+    seen: set[tuple[str, str]] = set()
+    for item in req.items:
+        if not item.artist or not item.track:
+            continue
+        key_pair = (item.artist.lower(), item.track.lower())
+        if key_pair in seen:
+            continue
+        seen.add(key_pair)
+        try:
+            val = lastfm.get_track_playcount(item.artist, item.track)
+        except Exception:
+            val = {}
+        results[f"{key_pair[0]}|{key_pair[1]}"] = val
+    return {"results": results}
 
 
 # ---------------------------------------------------------------------------
@@ -6214,26 +6261,51 @@ def image_proxy(url: str) -> Response:
         # host would otherwise be followed by requests and turn this into an
         # SSRF probe. Tidal covers are direct URLs so this should never fire
         # on legitimate traffic.
-        with SESSION.get(url, timeout=10, stream=True, allow_redirects=False) as resp:
-            if resp.status_code in (301, 302, 303, 307, 308):
-                raise HTTPException(status_code=502, detail="Upstream redirect refused")
-            resp.raise_for_status()
-            # Stop if the server advertises an oversized payload.
-            declared = int(resp.headers.get("Content-Length") or 0)
-            if declared and declared > MAX_IMAGE_BYTES:
-                raise HTTPException(status_code=413, detail="Image too large")
-            buf = bytearray()
-            for chunk in resp.iter_content(chunk_size=65536):
-                buf.extend(chunk)
-                if len(buf) > MAX_IMAGE_BYTES:
-                    raise HTTPException(status_code=413, detail="Image too large")
-            content_type = resp.headers.get("Content-Type", "image/jpeg")
+        resp = SESSION.get(url, timeout=10, stream=True, allow_redirects=False)
+        if resp.status_code in (301, 302, 303, 307, 308):
+            resp.close()
+            raise HTTPException(status_code=502, detail="Upstream redirect refused")
+        resp.raise_for_status()
+        declared = int(resp.headers.get("Content-Length") or 0)
+        if declared and declared > MAX_IMAGE_BYTES:
+            resp.close()
+            raise HTTPException(status_code=413, detail="Image too large")
+        content_type = resp.headers.get("Content-Type", "image/jpeg")
     except HTTPException:
         raise
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc))
-    return Response(
-        content=bytes(buf),
+
+    # Stream the bytes straight to the client instead of buffering
+    # the entire image into memory before responding. This cuts
+    # first-byte latency for every cover on every page, and keeps
+    # peak memory flat regardless of concurrent image requests.
+    # The MAX_IMAGE_BYTES safety check moves into the generator.
+    def _iter() -> Generator[bytes, None, None]:
+        streamed = 0
+        try:
+            for chunk in resp.iter_content(chunk_size=65536):
+                if not chunk:
+                    continue
+                streamed += len(chunk)
+                if streamed > MAX_IMAGE_BYTES:
+                    # We've already started writing to the socket, so
+                    # we can't raise HTTPException here. Just stop
+                    # emitting; the client gets a truncated payload
+                    # which is harmless for an already-oversized
+                    # response the client shouldn't have trusted
+                    # anyway. Tidal's covers never come close to
+                    # 5 MB in practice.
+                    return
+                yield chunk
+        finally:
+            try:
+                resp.close()
+            except Exception:
+                pass
+
+    return StreamingResponse(
+        _iter(),
         media_type=content_type,
         headers={
             "Cache-Control": "public, max-age=86400",
