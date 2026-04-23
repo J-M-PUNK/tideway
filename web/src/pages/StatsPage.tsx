@@ -217,7 +217,7 @@ function Stat({ label, value }: { label: string; value: number }) {
   );
 }
 
-function PeriodPicker({
+export function PeriodPicker({
   period,
   onChange,
 }: {
@@ -285,32 +285,24 @@ function useGridCols(): number {
   return cols;
 }
 
-function ViewMoreButton({
-  expanded,
-  onToggle,
-}: {
-  expanded: boolean;
-  onToggle: () => void;
-}) {
+function ViewMoreLink({ to }: { to: string }) {
   return (
-    <button
-      onClick={onToggle}
-      className="mt-4 text-xs font-semibold uppercase tracking-wider text-muted-foreground hover:text-foreground"
+    <Link
+      to={to}
+      className="mt-4 inline-block text-xs font-semibold uppercase tracking-wider text-muted-foreground hover:text-foreground"
     >
-      {expanded ? "View less" : "View more"}
-    </button>
+      View more
+    </Link>
   );
 }
 
 function TopArtistsSection({ period }: { period: LastFmPeriod }) {
   const [data, setData] = useState<LastFmTopArtist[] | null>(null);
   const [loading, setLoading] = useState(false);
-  const [expanded, setExpanded] = useState(false);
   const cols = useGridCols();
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    setExpanded(false);
     api.lastfm
       .topArtists(period, 30)
       .then((rows) => !cancelled && setData(rows))
@@ -320,7 +312,7 @@ function TopArtistsSection({ period }: { period: LastFmPeriod }) {
       cancelled = true;
     };
   }, [period]);
-  const shown = data && !expanded ? data.slice(0, cols) : data ?? [];
+  const shown = data ? data.slice(0, cols) : [];
   return (
     <Section title="Top artists" subtitle="Ranked by plays">
       {loading && !data ? (
@@ -334,12 +326,7 @@ function TopArtistsSection({ period }: { period: LastFmPeriod }) {
               <ArtistCard key={`${a.name}-${i}`} rank={i + 1} artist={a} />
             ))}
           </div>
-          {data.length > cols && (
-            <ViewMoreButton
-              expanded={expanded}
-              onToggle={() => setExpanded((v) => !v)}
-            />
-          )}
+          <ViewMoreLink to={`/stats/artists?period=${period}`} />
         </>
       )}
     </Section>
@@ -349,11 +336,9 @@ function TopArtistsSection({ period }: { period: LastFmPeriod }) {
 function TopTracksSection({ period }: { period: LastFmPeriod }) {
   const [data, setData] = useState<LastFmTopTrack[] | null>(null);
   const [loading, setLoading] = useState(false);
-  const [expanded, setExpanded] = useState(false);
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    setExpanded(false);
     api.lastfm
       .topTracks(period, 50)
       .then((rows) => !cancelled && setData(rows))
@@ -363,8 +348,7 @@ function TopTracksSection({ period }: { period: LastFmPeriod }) {
       cancelled = true;
     };
   }, [period]);
-  const shown =
-    data && !expanded ? data.slice(0, LIST_COLLAPSED_COUNT) : data ?? [];
+  const shown = data ? data.slice(0, LIST_COLLAPSED_COUNT) : [];
   return (
     <Section title="Top tracks" subtitle="Ranked by plays">
       {loading && !data ? (
@@ -378,12 +362,7 @@ function TopTracksSection({ period }: { period: LastFmPeriod }) {
               <TrackRow key={`${t.name}-${t.artist}-${i}`} rank={i + 1} track={t} />
             ))}
           </div>
-          {data.length > LIST_COLLAPSED_COUNT && (
-            <ViewMoreButton
-              expanded={expanded}
-              onToggle={() => setExpanded((v) => !v)}
-            />
-          )}
+          <ViewMoreLink to={`/stats/tracks?period=${period}`} />
         </>
       )}
     </Section>
@@ -393,12 +372,10 @@ function TopTracksSection({ period }: { period: LastFmPeriod }) {
 function TopAlbumsSection({ period }: { period: LastFmPeriod }) {
   const [data, setData] = useState<LastFmTopAlbum[] | null>(null);
   const [loading, setLoading] = useState(false);
-  const [expanded, setExpanded] = useState(false);
   const cols = useGridCols();
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
-    setExpanded(false);
     api.lastfm
       .topAlbums(period, 30)
       .then((rows) => !cancelled && setData(rows))
@@ -408,7 +385,7 @@ function TopAlbumsSection({ period }: { period: LastFmPeriod }) {
       cancelled = true;
     };
   }, [period]);
-  const shown = data && !expanded ? data.slice(0, cols) : data ?? [];
+  const shown = data ? data.slice(0, cols) : [];
   return (
     <Section title="Top albums" subtitle="Ranked by plays">
       {loading && !data ? (
@@ -422,12 +399,7 @@ function TopAlbumsSection({ period }: { period: LastFmPeriod }) {
               <AlbumCard key={`${a.name}-${a.artist}-${i}`} rank={i + 1} album={a} />
             ))}
           </div>
-          {data.length > cols && (
-            <ViewMoreButton
-              expanded={expanded}
-              onToggle={() => setExpanded((v) => !v)}
-            />
-          )}
+          <ViewMoreLink to={`/stats/albums?period=${period}`} />
         </>
       )}
     </Section>
@@ -437,7 +409,6 @@ function TopAlbumsSection({ period }: { period: LastFmPeriod }) {
 function LovedTracksSection() {
   const [data, setData] = useState<LastFmLovedTrack[] | null>(null);
   const [loading, setLoading] = useState(false);
-  const [expanded, setExpanded] = useState(false);
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
@@ -454,8 +425,7 @@ function LovedTracksSection() {
   // track — empty Loved lists are the norm, not a "no data" state
   // worth flagging.
   if (!loading && (!data || data.length === 0)) return null;
-  const shown =
-    data && !expanded ? data.slice(0, LIST_COLLAPSED_COUNT) : data ?? [];
+  const shown = data ? data.slice(0, LIST_COLLAPSED_COUNT) : [];
   return (
     <Section title="Loved tracks" subtitle="Hearted on Last.fm">
       {loading && !data ? (
@@ -467,12 +437,7 @@ function LovedTracksSection() {
               <LovedRow key={`${t.name}-${t.artist}-${i}`} row={t} />
             ))}
           </div>
-          {data && data.length > LIST_COLLAPSED_COUNT && (
-            <ViewMoreButton
-              expanded={expanded}
-              onToggle={() => setExpanded((v) => !v)}
-            />
-          )}
+          <ViewMoreLink to="/stats/loved" />
         </>
       )}
     </Section>
@@ -483,7 +448,7 @@ function LovedTracksSection() {
 // Item cards
 // ---------------------------------------------------------------------------
 
-function ArtistCard({ rank, artist }: { rank: number; artist: LastFmTopArtist }) {
+export function ArtistCard({ rank, artist }: { rank: number; artist: LastFmTopArtist }) {
   const play = usePlayArtist();
   const navigate = useNavigate();
   const toast = useToast();
@@ -559,7 +524,7 @@ function ArtistCard({ rank, artist }: { rank: number; artist: LastFmTopArtist })
   );
 }
 
-function AlbumCard({ rank, album }: { rank: number; album: LastFmTopAlbum }) {
+export function AlbumCard({ rank, album }: { rank: number; album: LastFmTopAlbum }) {
   const play = usePlayAlbum();
   const navigate = useNavigate();
   const toast = useToast();
@@ -638,7 +603,7 @@ function AlbumCard({ rank, album }: { rank: number; album: LastFmTopAlbum }) {
   );
 }
 
-function TrackRow({ rank, track }: { rank: number; track: LastFmTopTrack }) {
+export function TrackRow({ rank, track }: { rank: number; track: LastFmTopTrack }) {
   const play = usePlayTrack();
   const tidalArt = useTidalArt("track", track.name, track.artist);
   const img = imageProxy(track.image || tidalArt || undefined);
@@ -694,7 +659,7 @@ function TrackRow({ rank, track }: { rank: number; track: LastFmTopTrack }) {
   );
 }
 
-function LovedRow({ row }: { row: LastFmLovedTrack }) {
+export function LovedRow({ row }: { row: LastFmLovedTrack }) {
   const play = usePlayTrack();
   const tidalArt = useTidalArt("track", row.name, row.artist);
   const img = imageProxy(row.image || tidalArt || undefined);
