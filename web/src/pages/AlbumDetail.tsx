@@ -33,6 +33,11 @@ export function AlbumDetail({ onDownload }: { onDownload: OnDownload }) {
   // no separate surface to open credits — that's what the Credits
   // button is for.
   const [coverOpen, setCoverOpen] = useState(false);
+  // Shuffle pre-selection for this album only. Flipping it does
+  // not touch the globally-playing queue. It only takes effect
+  // when the user presses Play on this page, which hands it to
+  // PlayAllButton.
+  const [shuffleIntent, setShuffleIntent] = useState(false);
 
   if (loading) {
     return (
@@ -90,8 +95,9 @@ export function AlbumDetail({ onDownload }: { onDownload: OnDownload }) {
             <PlayAllButton
               tracks={album.tracks}
               source={{ type: "ALBUM", id: album.id }}
+              shuffleIntent={shuffleIntent}
             />
-            <ShuffleButton />
+            <ShuffleButton value={shuffleIntent} onChange={setShuffleIntent} />
             <div className="ml-auto flex items-center gap-6">
               <AddToLibraryButton kind="album" id={album.id} />
               <AlbumCreditsButton

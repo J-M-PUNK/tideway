@@ -241,6 +241,13 @@ export function usePlayer() {
   // crossing the 15s-remaining threshold. Resets when track_id
   // changes.
   const preloadedForTrackIdRef = useRef<string | null>(null);
+  // Track ids we've already kicked off a rehydrate fetch for. Keeps
+  // us from firing the same GET /api/track/{id} on every position
+  // tick when the frontend has no cached Track for the current id.
+  // Happens after a page reload: the backend keeps playing, the
+  // frontend boots with an empty queue, and the first snapshot
+  // arrives with a track id we cannot render without metadata.
+  const rehydratingTrackIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     const url = "/api/player/events";
@@ -257,6 +264,50 @@ export function usePlayer() {
         snap.track_id !== expectedTrackIdRef.current
       ) {
         return;
+      }
+      // Rehydrate the now-playing bar after a reload. When the
+      // backend is already playing something and the frontend has
+      // no record of the track (empty queue on boot), fetch the
+      // full Track dict and drop it into state so the bar can
+      // render name, artist, cover, etc. Only fires once per id.
+      const cur = stateRef.current;
+      const needsRehydrate =
+        snap.track_id !== null &&
+        snap.state !== "idle" &&
+        snap.state !== "ended" &&
+        (!cur.track || cur.track.id !== snap.track_id) &&
+        rehydratingTrackIdRef.current !== snap.track_id;
+      if (needsRehydrate && snap.track_id) {
+        const id = snap.track_id;
+        rehydratingTrackIdRef.current = id;
+        expectedTrackIdRef.current = id;
+        api.track(id)
+          .then((t) => {
+            setState((s) => {
+              // Race guard: if the backend has since moved on to a
+              // different track, drop this late response.
+              if (expectedTrackIdRef.current !== id) return s;
+              // Splice the rehydrated track into the queue at a
+              // deterministic index so Next/Prev arithmetic works.
+              // If the queue already contains this track, use that
+              // index; otherwise prepend a single-track queue.
+              const existingIdx = s.queue.findIndex((q) => q.id === id);
+              if (existingIdx >= 0) {
+                return { ...s, track: t, queueIndex: existingIdx };
+              }
+              return {
+                ...s,
+                track: t,
+                queue: [t],
+                queueIndex: 0,
+              };
+            });
+          })
+          .catch(() => {
+            // Leave the bar in its pre-rehydrate state if the fetch
+            // fails. Next snapshot will retry via the same gate.
+            rehydratingTrackIdRef.current = null;
+          });
       }
       setState((s) => {
         const currentTime = snap.position_ms / 1000;

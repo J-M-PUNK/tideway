@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useLocation, useParams } from "react-router-dom";
 import { Radio as RadioIcon } from "lucide-react";
 import { api } from "@/api/client";
@@ -40,6 +40,7 @@ interface Props {
 export function RadioPage({ kind, onDownload }: Props) {
   const { id = "" } = useParams();
   const location = useLocation();
+  const [shuffleIntent, setShuffleIntent] = useState(false);
   // Router state carries the seed for track radio since we have no
   // cheap metadata endpoint for tracks. Artist radio also respects
   // state as a short-circuit to skip the extra fetch.
@@ -131,8 +132,9 @@ export function RadioPage({ kind, onDownload }: Props) {
                   type: kind === "artist" ? "ARTIST" : "TRACK",
                   id,
                 }}
+                shuffleIntent={shuffleIntent}
               />
-              <ShuffleButton />
+              <ShuffleButton value={shuffleIntent} onChange={setShuffleIntent} />
               <div className="ml-auto flex items-center gap-6">
                 <AddTracksToPlaylistButton tracks={tracks} />
                 <CollectionOverflowMenu tracks={tracks} />

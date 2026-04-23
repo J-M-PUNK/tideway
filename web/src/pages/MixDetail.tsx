@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useParams } from "react-router-dom";
 import { api } from "@/api/client";
 import type { OnDownload } from "@/api/download";
@@ -15,6 +16,7 @@ import { HeroSkeleton, TrackListSkeleton } from "@/components/Skeletons";
 export function MixDetail({ onDownload }: { onDownload: OnDownload }) {
   const { id = "" } = useParams();
   const { data: mix, loading, error } = useApi(() => api.mix(id), [id]);
+  const [shuffleIntent, setShuffleIntent] = useState(false);
 
   if (loading) {
     return (
@@ -51,8 +53,9 @@ export function MixDetail({ onDownload }: { onDownload: OnDownload }) {
               <PlayAllButton
                 tracks={mix.tracks}
                 source={{ type: "MIX", id: mix.id }}
+                shuffleIntent={shuffleIntent}
               />
-              <ShuffleButton />
+              <ShuffleButton value={shuffleIntent} onChange={setShuffleIntent} />
               <div className="ml-auto flex items-center gap-6">
                 <AddTracksToPlaylistButton tracks={mix.tracks} />
                 <ShareButton shareUrl={shareUrl} />

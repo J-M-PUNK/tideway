@@ -125,6 +125,11 @@ export function StatsPage() {
   return (
     <div>
       <UserHeader user={user} />
+      <p className="mb-6 text-xs text-muted-foreground">
+        Stats provided by Last.fm. Numbers reflect every scrobble from
+        your connected Last.fm account, including plays from this app
+        and from any other client tied to the same account.
+      </p>
       <LastFmActivityChart period={period} />
       <PeriodPicker period={period} onChange={setPeriod} />
       <div className="mt-8 flex flex-col gap-10">

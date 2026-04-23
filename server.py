@@ -3603,6 +3603,32 @@ def artist_detail(artist_id: int) -> dict:
         raw_appears = list(artist.get_other(limit=40)) or []
     except Exception:
         raw_appears = []
+    # tidalapi's `get_other()` uses filter=COMPILATIONS under the
+    # hood. That only returns multi-artist compilations and misses
+    # the common "appears on" case, which is the artist showing up
+    # as a featured or guest performer on someone else's regular
+    # album. Tidal's own artist page (the one their web and mobile
+    # clients render) has a dedicated "Appears on" module that
+    # includes those guest spots, so we also pull the artist page
+    # and scrape any album-bearing category whose title points at
+    # appearances. Any overlap with the compilation list or the
+    # artist's own discography is handled by the shared dedup pass
+    # below.
+    try:
+        from tidalapi.album import Album as _TidalAlbum
+
+        artist_page = artist.page()
+        for cat in getattr(artist_page, "categories", []) or []:
+            cat_title = (getattr(cat, "title", "") or "").strip().lower()
+            if "appear" not in cat_title and "featured" not in cat_title:
+                continue
+            for item in getattr(cat, "items", []) or []:
+                if isinstance(item, _TidalAlbum):
+                    raw_appears.append(item)
+    except Exception:
+        # Page fetch failures are acceptable, compilation data still
+        # feeds the section if it came back.
+        pass
 
     # Dedupe across all three discography sections. Sources of dupes:
     #  1. tidalapi's `get_albums()` can page internally and surface the
@@ -4010,6 +4036,25 @@ def video_proxy(u: str):
     return StreamingResponse(
         _chunks(), media_type=content_type or "application/octet-stream"
     )
+
+
+@app.get("/api/track/{track_id}")
+def get_track(track_id: int) -> dict:
+    """Return a single track by id.
+
+    Used by the frontend to rehydrate the now-playing bar after a
+    page reload. The SSE snapshot only carries the track id, so a
+    fresh load with no prior queue state needs a way to fetch the
+    full metadata the bar renders from. Uses the same track dict
+    shape as search and library results so the frontend can reuse
+    its existing `Track` type without mapping.
+    """
+    _require_auth()
+    try:
+        track = tidal.session.track(track_id)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    return track_to_dict(track)
 
 
 @app.get("/api/track/{track_id}/credits")
