@@ -6305,7 +6305,7 @@ def resolve_page(req: PagePathRequest) -> dict:
 # ---------------------------------------------------------------------------
 
 
-FAVORITE_KINDS = {"track", "album", "artist", "playlist"}
+FAVORITE_KINDS = {"track", "album", "artist", "playlist", "mix"}
 
 
 @app.get("/api/favorites")

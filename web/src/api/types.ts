@@ -388,13 +388,14 @@ export interface QualityOption {
   description: string;
 }
 
-export type FavoriteKind = "track" | "album" | "artist" | "playlist";
+export type FavoriteKind = "track" | "album" | "artist" | "playlist" | "mix";
 
 export interface FavoritesSnapshot {
   tracks: string[];
   albums: string[];
   artists: string[];
   playlists: string[];
+  mixes: string[];
 }
 
 export interface MixItem {
