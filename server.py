@@ -110,6 +110,43 @@ def _patched_parse_base(self, list_item):
 _tidal_page.PageCategoryV2._parse_base = _patched_parse_base
 
 
+# tidalapi's SimpleList.get_item silently returns None for any item type
+# it doesn't recognize, and only logs at WARNING level on its own
+# "tidalapi.page" logger which we don't forward. Wrap it so both the
+# "type not implemented" case and the "parse raised an exception" case
+# surface to stderr with the raw shape, so a row that suddenly renders
+# short tells us which item types got dropped.
+_orig_get_item = _tidal_page.SimpleList.get_item
+
+
+def _patched_get_item(self, json_obj):
+    try:
+        result = _orig_get_item(self, json_obj)
+    except Exception as exc:
+        try:
+            data_preview = json.dumps(json_obj)[:400]
+        except Exception:
+            data_preview = repr(json_obj)[:400]
+        print(
+            f"[page] SimpleList.get_item raised on "
+            f"type={json_obj.get('type')!r}: {exc} | data={data_preview}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return None
+    if result is None:
+        print(
+            f"[page] SimpleList.get_item dropped item type="
+            f"{json_obj.get('type')!r} (not in item_types map)",
+            file=sys.stderr,
+            flush=True,
+        )
+    return result
+
+
+_tidal_page.SimpleList.get_item = _patched_get_item
+
+
 tidal = TidalClient()
 lastfm = LastFmClient()
 play_reporter = PlayReporter(tidal)
@@ -5893,7 +5930,23 @@ def _serialize_page(page) -> dict:
                 subtitle = candidate
                 break
         raw_items = list(getattr(cat, "items", []) or [])
-        items = [d for d in (_serialize_page_item(i) for i in raw_items) if d]
+        serialized_pairs = [(i, _serialize_page_item(i)) for i in raw_items]
+        items = [d for _, d in serialized_pairs if d]
+        if len(items) < len(raw_items):
+            # Log which tidalapi classes we dropped so a short row like
+            # "Recently played shows 13 instead of 15" surfaces the
+            # concrete types we still need to handle.
+            dropped = sorted({
+                "None" if raw is None else type(raw).__name__
+                for raw, d in serialized_pairs if d is None
+            })
+            if dropped:
+                print(
+                    f"[page] {cat_type} {title!r} served "
+                    f"{len(items)}/{len(raw_items)} items; dropped classes={dropped}",
+                    file=sys.stderr,
+                    flush=True,
+                )
         if not items:
             continue
         entry: dict = {"type": cat_type, "title": title, "items": items}
