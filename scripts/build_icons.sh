@@ -57,10 +57,15 @@ echo "Wrote: assets/icon.icns"
 
 # --- Windows .ico --------------------------------------------------------
 # Windows wants a multi-size .ico with 16/32/48/256 packed inside.
-# Use Pillow since macOS ships no native .ico tooling. Falls back to a
-# friendly message if Pillow's not present (it is — mutagen/pywebview
-# pull Pillow transitively for tray icons).
-python3 - <<'PY'
+# Use Pillow since macOS ships no native .ico tooling. Prefer the
+# project's .venv python when present so this works on a machine
+# where Pillow is installed there but not system-wide.
+if [[ -x "$REPO_ROOT/.venv/bin/python" ]]; then
+  PY_BIN="$REPO_ROOT/.venv/bin/python"
+else
+  PY_BIN="python3"
+fi
+"$PY_BIN" - <<'PY'
 from pathlib import Path
 try:
     from PIL import Image
