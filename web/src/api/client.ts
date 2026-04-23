@@ -649,6 +649,7 @@ export const api = {
     }).catch(() => ({ ok: false })),
   playlist: (id: string) => req<PlaylistDetail>(`/api/playlist/${id}`),
   mix: (id: string) => req<MixDetail>(`/api/mix/${encodeURIComponent(id)}`),
+  track: (id: string) => req<Track>(`/api/track/${id}`),
   trackLyrics: (id: string) => req<Lyrics>(`/api/track/${id}/lyrics`),
   trackRadio: (id: string) => req<Track[]>(`/api/track/${id}/radio`),
   trackCredits: (id: string) => req<CreditEntry[]>(`/api/track/${id}/credits`),

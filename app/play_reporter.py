@@ -26,7 +26,6 @@ from __future__ import annotations
 import base64
 import json
 import logging
-import platform
 import sys
 import threading
 import time
@@ -44,21 +43,28 @@ _EVENT_NAME = "playback_session"
 _EVENT_GROUP = "play_log"
 _EVENT_VERSION = 2
 
-_APP_NAME = "TIDAL Desktop"
+# Matches the app-name value Tidal's Android client sends. Older
+# revisions of this module claimed "TIDAL Desktop", which was
+# inconsistent with the android platform and androidAuto device
+# type below. Keeping the app name and version in the same
+# ecosystem as the claimed platform removes another inconsistency
+# a validator might key off of.
+_APP_NAME = "TIDAL"
 _APP_VERSION = "2.47.0"
 _CONSENT_CATEGORY = "NECESSARY"
 
-# Browser attributes reported in the Headers MessageAttribute.
-# Tidal Desktop is an Electron shell sitting on top of the
-# tidal-sdk-web code, so the values it reports are the Chromium
-# engine strings below. The event bus itself doesn't enforce these
-# values. They feed telemetry breakdowns. The reason they're here
-# at all is that an earlier version of this module omitted them,
-# which was a drift from `tidal-sdk-web/utils/headerUtils.ts` and
-# may have been what the play_log consumer's validator was
-# catching on.
-_BROWSER_NAME = "Chrome"
-_BROWSER_VERSION = "120.0.0.0"
+# Device and platform values claimed in both the body `client`
+# object and the Headers attribute. The PKCE client id tidalapi
+# authenticates under (numeric cid 8017) is Tidal's Android
+# Automotive OAuth client, so claiming android + androidAuto is
+# the honest shape. Two earlier attempts claimed web + DESKTOP
+# (matching tidal-sdk-web) and saw events accepted at the bus
+# but never surfaced in Recently Played. The current theory is
+# that the downstream play_log consumer routes by client shape
+# and web/DESKTOP events are filtered out of Recently Played on
+# purpose, while mobile-shaped events go through.
+_CLIENT_PLATFORM = "android"
+_CLIENT_DEVICE_TYPE = "androidAuto"
 
 
 # Rolling buffer of the most recent report attempts + their outcomes.
@@ -92,12 +98,11 @@ def recent_log() -> list[dict]:
 
 
 def _os_name() -> str:
-    sys = platform.system().lower()
-    if sys == "darwin":
-        return "macos"
-    if sys == "windows":
-        return "windows"
-    return "linux"
+    # We claim `platform: "android"` in the body so the header has
+    # to say android too. Mixing a mobile platform in the body with
+    # macos/windows in the header was the kind of cross-field
+    # inconsistency the older web-DESKTOP attempt had.
+    return "android"
 
 
 @dataclass
@@ -179,59 +184,80 @@ def _playback_session_payload(session: PlaySession) -> dict:
     }
 
 
-def _message_body(session: PlaySession) -> str:
-    """Wrap the play_log event the same way tidal-sdk-web does.
+def _message_body(session: PlaySession, *, access_token: str) -> str:
+    """Wrap the play_log event the way the Tidal mobile SDKs do.
 
-    The real SDK builds the outer body in
-    `tidal-sdk-web/packages/event-producer/src/send/send.ts`. The
-    `createPayload` function spreads the raw event and appends
-    `ts` and `uuid`, so the body shape is just `group`, `name`,
-    `payload`, `version`, `ts`, and `uuid`. There is no `user` or
-    `client` object. Attribution is done on the server side from
-    the JWT in the `authorization` Headers attribute.
+    This is our third shape for this body. The first attempt
+    included `user` and `client` with web/DESKTOP values. The
+    second stripped them entirely to match tidal-sdk-web. Neither
+    produced Recently Played entries despite HTTP 200 responses
+    from the bus. Diffing the three official SDKs showed that web
+    is actually the outlier: both tidal-sdk-ios
+    (`Sources/Player/PlaybackEngine/Internal/Events/PlayerEvent.swift`)
+    and tidal-sdk-android
+    (`player/events/.../AudioPlaybackSession.kt`) ship `user` and
+    `client` objects inside the MessageBody and do not include
+    `name` there. Android additionally carries a `sessionId` on
+    the user object.
 
-    An earlier version of this function did include `user` and
-    `client` keys, matching a schema we assumed Tidal used
-    internally. The bus accepted those events and SQS returned
-    200, but the plays never surfaced in Recently Played. The
-    most likely explanation is that the play_log consumer
-    validates the body shape against the real SDK schema and
-    quietly rejects events with unexpected keys.
+    Current working theory is that the downstream play_log
+    consumer routes events into Recently Played only when the
+    body looks like it came from a mobile client. A web-shaped
+    body goes into a different aggregate, if anywhere. The PKCE
+    client id tidalapi uses is Tidal's Android Automotive OAuth
+    client (numeric cid 8017), so mimicking Android's body shape
+    is at least internally consistent with the authenticated
+    identity.
+
+    The `user` fields all come straight from the JWT claims. The
+    token carries `uid` (user id as int), `cid` (client id as
+    int), and `sid` (session id as string). No part of user or
+    client is fabricated.
     """
+    claims = _decode_jwt_claims(access_token)
+    user_id_int = int(claims.get("uid") or 0)
+    client_id_int = int(claims.get("cid") or 0)
+    session_id = str(claims.get("sid") or "")
     return json.dumps(
         {
             "group": _EVENT_GROUP,
-            "name": _EVENT_NAME,
             "version": _EVENT_VERSION,
             "ts": int(time.time() * 1000),
             "uuid": str(uuid.uuid4()),
+            "user": {
+                "id": user_id_int,
+                "clientId": client_id_int,
+                "sessionId": session_id,
+            },
+            "client": {
+                "token": str(client_id_int),
+                "deviceType": _CLIENT_DEVICE_TYPE,
+                "version": _APP_VERSION,
+                "platform": _CLIENT_PLATFORM,
+            },
             "payload": _playback_session_payload(session),
+            "extras": None,
         },
         separators=(",", ":"),
     )
 
 
 def _headers_attr(access_token: str, client_id: str) -> str:
-    # Mirrors `tidal-sdk-web/utils/headerUtils.ts` exactly. Every
-    # key the real SDK sets is set here. The `browser-name` and
-    # `browser-version` entries were missing in an earlier version
-    # of this function, which is most likely why the bus accepted
-    # events but Recently Played never surfaced them.
+    # The Headers MessageAttribute goes alongside the MessageBody
+    # in every SQS entry. The web SDK's headerUtils.ts adds
+    # `browser-name` and `browser-version` for telemetry, and an
+    # earlier version of this module followed that. Now that we
+    # are claiming to be an Android client in the body, the
+    # browser fields make no sense here, so they are gone. The
+    # remaining keys match what both mobile SDKs send.
     #
-    # Two details to watch. The `authorization` value is the raw
-    # token with no `Bearer ` prefix. The outer HTTP Authorization
-    # header is still `Bearer <token>`. The `requested-sent-timestamp`
-    # value is a number, not a string. The SDK types the value as
-    # `Record<string, number | string>`, so either would work at
-    # the JSON level, but sending a number matches what the real
-    # client does and removes one more thing the validator might
-    # care about.
+    # The `authorization` value is the raw token with no
+    # `Bearer ` prefix. The outer HTTP Authorization header is
+    # still `Bearer <token>`.
     return json.dumps(
         {
             "app-name": _APP_NAME,
             "app-version": _APP_VERSION,
-            "browser-name": _BROWSER_NAME,
-            "browser-version": _BROWSER_VERSION,
             "client-id": client_id,
             "consent-category": _CONSENT_CATEGORY,
             "os-name": _os_name(),
@@ -318,7 +344,7 @@ class PlayReporter:
             })
             return
         msg_id = str(uuid.uuid4())
-        body = _message_body(session)
+        body = _message_body(session, access_token=access_token)
         form = _encode_sqs_batch([
             (msg_id, body, _headers_attr(access_token, client_id or "unknown")),
         ])

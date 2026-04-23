@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
   Check,
@@ -5,11 +6,8 @@ import {
   ExternalLink,
   Heart,
   MoreHorizontal,
-  Pause,
-  Play,
   Radio,
   Share2,
-  Shuffle,
   Download as DownloadIcon,
 } from "lucide-react";
 import { api } from "@/api/client";
@@ -22,11 +20,12 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { PlayAllButton } from "@/components/PlayAllButton";
+import { ShuffleButton } from "@/components/ShuffleButton";
 import { useToast } from "@/components/toast";
 import { useFavorites } from "@/hooks/useFavorites";
 import { useLastfmArtistPlaycount } from "@/hooks/useLastfmPlaycount";
 import { useSpotifyArtistStats } from "@/hooks/useSpotifyEnrichment";
-import { usePlayerActions, usePlayerMeta } from "@/hooks/PlayerContext";
 import { cn, imageProxy } from "@/lib/utils";
 
 interface Props {
@@ -63,19 +62,7 @@ export function ArtistHero({
   artistMixId,
 }: Props) {
   const cover = imageProxy(picture);
-  const { track, playing } = usePlayerMeta();
-  const actions = usePlayerActions();
-  const isOurQueue = !!track && topTracks.some((t) => t.id === track.id);
-  const isPlaying = isOurQueue && playing;
-
-  const onPlay = () => {
-    if (isOurQueue) {
-      actions.toggle();
-      return;
-    }
-    if (topTracks.length === 0) return;
-    actions.play(topTracks[0], topTracks);
-  };
+  const [shuffleIntent, setShuffleIntent] = useState(false);
 
   return (
     <div className="relative -mx-8 -mt-6 mb-8 overflow-hidden">
@@ -120,20 +107,12 @@ export function ArtistHero({
         />
 
         <div className="mt-6 flex flex-wrap items-center gap-4">
-          <button
-            onClick={onPlay}
-            disabled={topTracks.length === 0}
-            className="flex items-center gap-2 rounded-full bg-foreground px-8 py-3 text-sm font-bold text-background shadow-xl transition-transform hover:scale-105 active:scale-95 disabled:opacity-40"
-          >
-            {isPlaying ? (
-              <Pause className="h-4 w-4" fill="currentColor" />
-            ) : (
-              <Play className="h-4 w-4" fill="currentColor" />
-            )}
-            {isPlaying ? "Pause" : "Play"}
-          </button>
-
-          <ShuffleButton topTracks={topTracks} />
+          <PlayAllButton
+            tracks={topTracks}
+            source={{ type: "ARTIST", id: artistId }}
+            shuffleIntent={shuffleIntent}
+          />
+          <ShuffleButton value={shuffleIntent} onChange={setShuffleIntent} />
 
           <div className="flex flex-1 items-center justify-end gap-6">
             <FollowToggle artistId={artistId} />
@@ -150,30 +129,6 @@ export function ArtistHero({
         </div>
       </div>
     </div>
-  );
-}
-
-function ShuffleButton({ topTracks }: { topTracks: Track[] }) {
-  const actions = usePlayerActions();
-  const { shuffle } = usePlayerMeta();
-
-  const onShuffle = () => {
-    if (topTracks.length === 0) return;
-    // Make sure shuffle is enabled so Next continues picking random
-    // tracks from the list, then start with a random one.
-    if (!shuffle) actions.toggleShuffle();
-    const start = topTracks[Math.floor(Math.random() * topTracks.length)];
-    actions.play(start, topTracks);
-  };
-
-  return (
-    <button
-      onClick={onShuffle}
-      disabled={topTracks.length === 0}
-      className="flex items-center gap-2 rounded-full border border-border/60 bg-black/30 px-6 py-3 text-sm font-bold text-foreground transition-colors hover:bg-black/50 disabled:opacity-40"
-    >
-      <Shuffle className="h-4 w-4" /> Shuffle
-    </button>
   );
 }
 
@@ -371,9 +326,8 @@ function ArtistPlaycountLine({
       : "";
 
   return (
-    <div className="mt-1 flex flex-wrap items-center gap-x-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground drop-shadow">
+    <div className="mt-3 flex flex-wrap items-center gap-x-6 text-xs font-semibold uppercase tracking-wider text-muted-foreground drop-shadow">
       {monthlyLabel && <span>{monthlyLabel}</span>}
-      {monthlyLabel && personal && <span aria-hidden>·</span>}
       {personal && <span className="text-primary">{personal}</span>}
     </div>
   );

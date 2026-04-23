@@ -26,8 +26,13 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-echo "Starting FastAPI on http://127.0.0.1:8000"
-"$PY" -m uvicorn server:app --host 127.0.0.1 --port 8000 --reload &
+# Keep the port in sync with what the FastAPI app tells its global
+# media-key listener. Without this, the listener defaults to 47823
+# (the packaged-app port) and the media-key POSTs silently 404 in
+# dev because uvicorn is actually on 8000.
+export TIDAL_DL_PORT=8000
+echo "Starting FastAPI on http://127.0.0.1:$TIDAL_DL_PORT"
+"$PY" -m uvicorn server:app --host 127.0.0.1 --port "$TIDAL_DL_PORT" --reload &
 API_PID=$!
 
 echo "Starting Vite on http://127.0.0.1:5173"

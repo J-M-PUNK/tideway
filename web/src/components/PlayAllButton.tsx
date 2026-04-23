@@ -12,6 +12,15 @@ interface Props {
    *  aggregation; without it they get reported as sourceType=TRACK
    *  which Tidal files under aggregate stats but not Recently Played. */
   source?: PlaySource;
+  /** Pre-selection from the page's ShuffleButton. When true and
+   *  the user starts a new queue by pressing Play, the first
+   *  track is a random pick from the list and the global shuffle
+   *  flag gets turned on so subsequent Next picks stay random.
+   *  When false, the global shuffle flag is cleared so the queue
+   *  plays in track order. A no-op when the button is in "pause
+   *  currently playing" mode — switching shuffle mid-playback is
+   *  the bottom bar's job. */
+  shuffleIntent?: boolean;
 }
 
 /**
@@ -21,8 +30,13 @@ interface Props {
  * CTA on a detail page, small enough to pair visually with the other
  * labeled action buttons in the actions row.
  */
-export function PlayAllButton({ tracks, size = "md", source }: Props) {
-  const { track, playing } = usePlayerMeta();
+export function PlayAllButton({
+  tracks,
+  size = "md",
+  source,
+  shuffleIntent = false,
+}: Props) {
+  const { track, playing, shuffle } = usePlayerMeta();
   const actions = usePlayerActions();
 
   const dim = size === "lg" ? "h-14 w-14" : "h-12 w-12";
@@ -35,7 +49,16 @@ export function PlayAllButton({ tracks, size = "md", source }: Props) {
       return;
     }
     if (tracks.length === 0) return;
-    actions.play(tracks[0], tracks, source);
+    // Apply the shuffle pre-selection to the global player state
+    // before the queue starts, so the bottom bar reflects the new
+    // state immediately and subsequent Next picks respect it.
+    if (shuffleIntent !== shuffle) {
+      actions.toggleShuffle();
+    }
+    const seed = shuffleIntent
+      ? tracks[Math.floor(Math.random() * tracks.length)]
+      : tracks[0];
+    actions.play(seed, tracks, source);
   };
 
   const isPlaying = isOurQueue && playing;

@@ -1,5 +1,7 @@
 # Tideway
 
+TIDAL BUT BETTER. NO BLOAT WITH THE ABSOLUTE MOST.
+
 The ultimate desktop client for Tidal. Bit perfect gapless playback,
 hi-res downloads, listening data from Last.fm and Spotify, full
 library management, and more. Everything ships in one native

@@ -64,6 +64,10 @@ export function PlaylistDetail({ onDownload }: { onDownload: OnDownload }) {
     [tracks, playlist?.owned],
   );
   const [duplicatesOpen, setDuplicatesOpen] = useState(false);
+  // Local shuffle pre-selection for this playlist. See AlbumDetail
+  // for the pattern; nothing happens to global player state until
+  // the user presses Play on this page.
+  const [shuffleIntent, setShuffleIntent] = useState(false);
   const dupeTrackCount = duplicates.reduce(
     (s, g) => s + (g.indices.length - 1),
     0,
@@ -186,9 +190,12 @@ export function PlaylistDetail({ onDownload }: { onDownload: OnDownload }) {
               <PlayAllButton
                 tracks={tracks}
                 source={{ type: "PLAYLIST", id: playlist.id }}
+                shuffleIntent={shuffleIntent}
               />
             )}
-            {tracks.length > 0 && <ShuffleButton />}
+            {tracks.length > 0 && (
+              <ShuffleButton value={shuffleIntent} onChange={setShuffleIntent} />
+            )}
             <div className="ml-auto flex items-center gap-6">
               {!playlist.owned && <AddToLibraryButton kind="playlist" id={playlist.id} />}
               <ShareButton shareUrl={playlist.share_url} />
