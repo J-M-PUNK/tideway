@@ -3687,61 +3687,72 @@ def album_detail(album_id: int) -> dict:
         album = tidal.session.album(album_id)
     except Exception as exc:
         raise HTTPException(status_code=404, detail=str(exc))
-    # Similar / review / more-by-artist / related-artists are all best-
-    # effort. Tidal 404s on many of these for non-editorial content; we'd
-    # rather render the page without a given section than 500 the whole
-    # request.
-    try:
-        similar = [album_to_dict(a) for a in album.similar()][:12]
-    except Exception:
-        similar = []
-    try:
-        review = album.review() or None
-    except Exception:
-        review = None
 
-    # Other albums by the primary artist, excluding the current album.
-    # We take full-lengths first, then pad with EP/singles so the row
-    # always has something to show when we can fetch anything at all.
-    more_by: list[dict] = []
-    related_artists: list[dict] = []
     primary = _first(lambda: album.artist) or (
         album.artists[0] if getattr(album, "artists", None) else None
     )
-    if primary is not None:
+
+    # Everything below is a separate Tidal round-trip; running them
+    # in parallel turns the album page into a one-slow-call load
+    # instead of six-sequential-calls. Each helper is wrapped so a
+    # failure just yields the empty default without blowing up the
+    # whole response — similar / review / more-by-artist /
+    # related-artists all 404 on non-editorial content, and we'd
+    # rather render a page with holes than return a 500.
+    def _safe(fn, default):
         try:
-            full = list(tidal.get_artist_albums(primary)) or []
+            return fn()
         except Exception:
-            full = []
-        try:
-            eps = list(primary.get_ep_singles(limit=20)) or []
-        except Exception:
-            eps = []
-        combined = full + eps
+            return default
+
+    def _more_by() -> list[dict]:
+        if primary is None:
+            return []
+        full = _safe(lambda: list(tidal.get_artist_albums(primary)) or [], [])
+        eps = _safe(lambda: list(primary.get_ep_singles(limit=20)) or [], [])
+        out: list[dict] = []
         current_id = str(album.id)
         seen: set[str] = set()
-        for a in combined:
+        for a in full + eps:
             aid = str(getattr(a, "id", "") or "")
             if not aid or aid == current_id or aid in seen:
                 continue
             seen.add(aid)
-            more_by.append(album_to_dict(a))
-            if len(more_by) >= 12:
+            out.append(album_to_dict(a))
+            if len(out) >= 12:
                 break
-        try:
-            related_artists = [
-                artist_to_dict(x) for x in primary.get_similar()
-            ][:12]
-        except Exception:
-            related_artists = []
+        return out
+
+    def _related_artists() -> list[dict]:
+        if primary is None:
+            return []
+        return _safe(
+            lambda: [artist_to_dict(x) for x in primary.get_similar()][:12],
+            [],
+        )
+
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        f_tracks = pool.submit(
+            _safe,
+            lambda: [track_to_dict(t) for t in tidal.get_album_tracks(album)],
+            [],
+        )
+        f_similar = pool.submit(
+            _safe,
+            lambda: [album_to_dict(a) for a in album.similar()][:12],
+            [],
+        )
+        f_review = pool.submit(_safe, lambda: album.review() or None, None)
+        f_more_by = pool.submit(_more_by)
+        f_related = pool.submit(_related_artists)
 
     return {
         **album_to_dict(album),
-        "tracks": [track_to_dict(t) for t in tidal.get_album_tracks(album)],
-        "similar": similar,
-        "review": review,
-        "more_by_artist": more_by,
-        "related_artists": related_artists,
+        "tracks": f_tracks.result(),
+        "similar": f_similar.result(),
+        "review": f_review.result(),
+        "more_by_artist": f_more_by.result(),
+        "related_artists": f_related.result(),
     }
 
 
@@ -3752,53 +3763,90 @@ def artist_detail(artist_id: int) -> dict:
         artist = tidal.session.artist(artist_id)
     except Exception as exc:
         raise HTTPException(status_code=404, detail=str(exc))
-    # Bio + similar are best-effort; they fail for some artists and we'd
-    # rather render the page without them than 500 the whole request.
-    try:
-        bio = artist.get_bio()
-    except Exception:
-        bio = None
-    try:
-        similar = [artist_to_dict(a) for a in artist.get_similar()][:12]
-    except Exception:
-        similar = []
-    # tidalapi doesn't expose the EP/single-only lists as part of the
-    # default get_albums query — tidal's own client shows those on the
-    # artist page (below the full-length discography), so include them.
-    try:
-        raw_eps = list(artist.get_ep_singles(limit=40)) or []
-    except Exception:
-        raw_eps = []
-    try:
-        raw_appears = list(artist.get_other(limit=40)) or []
-    except Exception:
-        raw_appears = []
-    # tidalapi's `get_other()` uses filter=COMPILATIONS under the
-    # hood. That only returns multi-artist compilations and misses
-    # the common "appears on" case, which is the artist showing up
-    # as a featured or guest performer on someone else's regular
-    # album. Tidal's own artist page (the one their web and mobile
-    # clients render) has a dedicated "Appears on" module that
-    # includes those guest spots, so we also pull the artist page
-    # and scrape any album-bearing category whose title points at
-    # appearances. Any overlap with the compilation list or the
-    # artist's own discography is handled by the shared dedup pass
-    # below.
-    try:
-        from tidalapi.album import Album as _TidalAlbum
 
-        artist_page = artist.page()
-        for cat in getattr(artist_page, "categories", []) or []:
-            cat_title = (getattr(cat, "title", "") or "").strip().lower()
-            if "appear" not in cat_title and "featured" not in cat_title:
-                continue
-            for item in getattr(cat, "items", []) or []:
-                if isinstance(item, _TidalAlbum):
-                    raw_appears.append(item)
-    except Exception:
-        # Page fetch failures are acceptable, compilation data still
-        # feeds the section if it came back.
-        pass
+    # Nine Tidal calls feed the artist page: bio, similar artists,
+    # top tracks, albums, EPs/singles, "other" (compilations only,
+    # per tidalapi's COMPILATIONS filter), the Tidal-curated artist
+    # page (for the real "Appears on" entries), the Artist Radio
+    # mix id, videos, and credits. Each hits tidal.com over HTTPS
+    # with a typical round-trip of 150-400ms, so running them
+    # sequentially used to stack to 2-3 seconds per artist page
+    # load. Fanning out across a small worker pool cuts the
+    # wall-clock down to the slowest single call.
+    def _safe(fn, default):
+        try:
+            return fn()
+        except Exception:
+            return default
+
+    with ThreadPoolExecutor(max_workers=9) as pool:
+        f_bio = pool.submit(_safe, artist.get_bio, None)
+        f_similar = pool.submit(
+            _safe,
+            lambda: [artist_to_dict(a) for a in artist.get_similar()][:12],
+            [],
+        )
+        f_top_tracks = pool.submit(
+            _safe,
+            lambda: [
+                track_to_dict(t) for t in tidal.get_artist_top_tracks(artist)
+            ],
+            [],
+        )
+        f_albums_raw = pool.submit(
+            _safe, lambda: list(tidal.get_artist_albums(artist)) or [], []
+        )
+        f_eps = pool.submit(
+            _safe, lambda: list(artist.get_ep_singles(limit=40)) or [], []
+        )
+        f_compilations = pool.submit(
+            _safe, lambda: list(artist.get_other(limit=40)) or [], []
+        )
+        f_page = pool.submit(_safe, artist.page, None)
+        f_mix_id = pool.submit(
+            _safe, lambda: str(artist.get_radio_mix().id), None
+        )
+        # Credits and videos used to be separate endpoints the
+        # frontend fetched in parallel after the main artist
+        # payload arrived. Folding them into the same response
+        # saves two HTTP round-trips on every artist page load.
+        f_videos = pool.submit(
+            _safe,
+            lambda: [video_to_dict(v) for v in artist.get_videos(limit=50) or []],
+            [],
+        )
+        f_credits = pool.submit(_safe, lambda: _artist_credits_list(artist_id, 20), [])
+
+    bio = f_bio.result()
+    similar = f_similar.result()
+    top_tracks = f_top_tracks.result()
+    raw_albums = f_albums_raw.result()
+    raw_eps = f_eps.result()
+    raw_appears = list(f_compilations.result())
+    artist_page = f_page.result()
+    artist_mix_id = f_mix_id.result()
+    videos = f_videos.result()
+    credits = f_credits.result()
+
+    # Merge "Appears on" rows scraped from the curated page into
+    # raw_appears. tidalapi's `get_other()` uses filter=COMPILATIONS
+    # which only returns multi-artist compilations and misses the
+    # common "appears on" case of a featured or guest performance
+    # on another artist's album. Tidal's own artist page carries a
+    # dedicated "Appears on" module with those entries.
+    if artist_page is not None:
+        try:
+            from tidalapi.album import Album as _TidalAlbum
+
+            for cat in getattr(artist_page, "categories", []) or []:
+                cat_title = (getattr(cat, "title", "") or "").strip().lower()
+                if "appear" not in cat_title and "featured" not in cat_title:
+                    continue
+                for item in getattr(cat, "items", []) or []:
+                    if isinstance(item, _TidalAlbum):
+                        raw_appears.append(item)
+        except Exception:
+            pass
 
     # Dedupe across all three discography sections. Sources of dupes:
     #  1. tidalapi's `get_albums()` can page internally and surface the
@@ -3817,7 +3865,6 @@ def artist_detail(artist_id: int) -> dict:
     # separate — but duplicate uploads of the same release collapse.
     # Precedence: albums win over EPs, EPs win over appears-on. The
     # first list a key appears in is where it stays.
-    raw_albums = list(tidal.get_artist_albums(artist)) or []
 
     def _album_key(a) -> Optional[tuple]:
         name = (getattr(a, "name", "") or "").strip().lower()
@@ -3854,26 +3901,17 @@ def artist_detail(artist_id: int) -> dict:
     ep_singles_objs = _dedupe(raw_eps)
     appears_on_objs = _dedupe(raw_appears)
 
-    # Resolve Tidal's ARTIST_MIX id — the proper "Artist Radio" mix
-    # with a composite cover and the "Artist Radio" subtitle. One extra
-    # Tidal call per artist page load; cheap. When present, the
-    # frontend routes the Artist Radio button to /mix/{id} so it gets
-    # the full Tidal treatment. Falls back to our generic radio page
-    # when the artist has no mix (rare — most do).
-    try:
-        artist_mix_id = str(artist.get_radio_mix().id)
-    except Exception:
-        artist_mix_id = None
-
     return {
         **artist_to_dict(artist),
-        "top_tracks": [track_to_dict(t) for t in tidal.get_artist_top_tracks(artist)],
+        "top_tracks": top_tracks,
         "albums": [album_to_dict(a) for a in albums_objs],
         "ep_singles": [album_to_dict(a) for a in ep_singles_objs],
         "appears_on": [album_to_dict(a) for a in appears_on_objs],
         "bio": bio,
         "similar": similar,
         "artist_mix_id": artist_mix_id,
+        "videos": videos,
+        "credits": credits,
         # Stable share URL for the copy/open-in-Tidal actions in the UI.
         "share_url": getattr(artist, "share_url", None)
         or f"https://tidal.com/browse/artist/{artist.id}",
@@ -4361,18 +4399,14 @@ def album_credits(album_id: int) -> list[dict]:
     return out
 
 
-@app.get("/api/artist/{artist_id}/credits")
-def artist_credits(artist_id: int, limit: int = 20) -> list[dict]:
-    """List tracks where this artist is credited in any role — the
-    equivalent of Tidal's artist-page "Credits" section (writer,
-    producer, engineer, featured, etc.). Returns serialized Track rows
-    with their role annotated so the frontend can group by role.
+def _artist_credits_list(artist_id: int, limit: int) -> list[dict]:
+    """Shared helper that powers both the /api/artist/{id}/credits
+    endpoint and the `credits` field in the main artist response.
 
-    Graceful fallback: Tidal's `/artists/{id}/credits` endpoint is
-    undocumented. If it 404s or the response is unexpected, we return
-    an empty list and the section simply won't render.
+    Tidal's `/artists/{id}/credits` endpoint is undocumented. If it
+    404s or the response is unexpected, return an empty list and let
+    the frontend hide the section. Never raises.
     """
-    _require_auth()
     try:
         resp = tidal.session.request.request(
             "GET", f"artists/{artist_id}/credits", params={"limit": limit, "offset": 0}
@@ -4382,13 +4416,8 @@ def artist_credits(artist_id: int, limit: int = 20) -> list[dict]:
         resp.raise_for_status()
         data = resp.json()
     except Exception:
-        # Endpoint not available for this artist / region / account tier.
-        # Return empty rather than 500 — the section hides itself.
         return []
 
-    # Tidal's response shape here isn't officially documented. From the
-    # observed envelope, `items` is a list of {role, track, contributors}
-    # dicts. We be defensive about every field.
     raw_items = data.get("items") if isinstance(data, dict) else None
     if not isinstance(raw_items, list):
         return []
@@ -4407,6 +4436,23 @@ def artist_credits(artist_id: int, limit: int = 20) -> list[dict]:
             continue
         out.append({**track_to_dict(track), "role": role})
     return out
+
+
+@app.get("/api/artist/{artist_id}/credits")
+def artist_credits(artist_id: int, limit: int = 20) -> list[dict]:
+    """List tracks where this artist is credited in any role — the
+    equivalent of Tidal's artist-page "Credits" section (writer,
+    producer, engineer, featured, etc.). Returns serialized Track rows
+    with their role annotated so the frontend can group by role.
+
+    The main /api/artist/{id} response already includes a `credits`
+    field with this same data, so the frontend no longer hits this
+    route on the normal artist page load. Kept around for any code
+    path that wants a larger `limit` than the bundled default (20)
+    without refetching the whole artist payload.
+    """
+    _require_auth()
+    return _artist_credits_list(artist_id, limit)
 
 
 @app.get("/api/track/{track_id}/lyrics")
