@@ -112,6 +112,15 @@ export const api = {
       req<{ supported: boolean }>("/api/auth/login/inapp/start", {
         method: "POST",
       }),
+    /** Poll this to notice when the in-app login window closes
+     *  early (SSO provider detected, user closed manually). The
+     *  frontend reads it alongside /api/auth/status so it can
+     *  bail out of the waiting spinner and show the paste fallback
+     *  without waiting for the 10-minute timeout. */
+    inappLoginState: () =>
+      req<{ phase: "idle" | "active" | "aborted_sso" | "closed" }>(
+        "/api/auth/login/inapp/state",
+      ).catch(() => ({ phase: "idle" as const })),
   },
   /** Open a Tidal URL in the user's default system browser. Exists
    *  because `window.open` for external URLs is silently dropped in

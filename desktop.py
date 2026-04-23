@@ -598,6 +598,10 @@ def main(argv: Optional[list[str]] = None) -> int:
                 return
             login_state["captured"] = True
             stop_poll.set()
+            try:
+                _server.set_inapp_login_phase("idle")
+            except Exception:
+                pass
             print(
                 f"[desktop] inapp-login: captured redirect {url[:120]}...",
                 file=sys.stderr,
@@ -641,11 +645,52 @@ def main(argv: Optional[list[str]] = None) -> int:
         # daemon thread forever if the user walks away.
         _LOGIN_TIMEOUT_S = 10 * 60
 
+        # Domains we bail out of hard. WKWebView on macOS has a
+        # well-documented hard-trap problem with Apple's Sign-in-with-
+        # Apple page — loading appleid.apple.com inside an embedded
+        # web view kills the host process with a SIGTRAP that Python
+        # can't catch. Google and Facebook exhibit similar "you're
+        # not Safari, refuse to render" behaviours that are less
+        # severe but still unreliable. The only path Apple itself
+        # endorses for third-party OAuth is ASWebAuthenticationSession,
+        # which pywebview doesn't expose. So when the login flow
+        # tries to jump to one of these providers we close our window
+        # fast and let the user fall back to the system-browser +
+        # paste path, which always works.
+        _SSO_BAIL_DOMAINS = (
+            "appleid.apple.com",
+            "accounts.google.com",
+            "facebook.com/login",
+            "facebook.com/dialog/oauth",
+        )
+
+        def _abort_sso(url: str) -> None:
+            print(
+                f"[desktop] inapp-login: SSO provider detected ({url[:80]}), "
+                "closing window — user should fall back to paste flow",
+                file=sys.stderr,
+                flush=True,
+            )
+            stop_poll.set()
+            try:
+                _server.set_inapp_login_phase("aborted_sso")
+            except Exception:
+                pass
+            try:
+                lw.destroy()
+            except Exception:
+                pass
+            login_state["window"] = None
+
         def _poll_url() -> None:
             """Check the current URL every 300 ms and fire _complete
             as soon as a code shows up. Runs on a daemon thread so
             it doesn't block anything; self-exits when the window
-            closes, we've captured a code, or the timeout fires."""
+            closes, we've captured a code, or the timeout fires.
+
+            Also watches for navigation into SSO providers that
+            can't render in our embedded WKWebView (see above) and
+            bails out before WKWebView trips its trap."""
             last_url: str = ""
             attempts = 0
             start = time.monotonic()
@@ -669,16 +714,15 @@ def main(argv: Optional[list[str]] = None) -> int:
                     url = None
                 if isinstance(url, str) and url != last_url:
                     last_url = url
-                    # Log the first handful of URL changes so a
-                    # debug session can see exactly what Tidal is
-                    # walking the window through. After that we
-                    # stay quiet to avoid flooding stderr.
                     if attempts < 30:
                         print(
                             f"[desktop] inapp-login: nav -> {url[:200]}",
                             file=sys.stderr,
                             flush=True,
                         )
+                    if any(d in url for d in _SSO_BAIL_DOMAINS):
+                        _abort_sso(url)
+                        return
                     if "code=" in url:
                         _complete(url)
                         return
@@ -692,9 +736,55 @@ def main(argv: Optional[list[str]] = None) -> int:
         def _on_closed() -> None:
             stop_poll.set()
             login_state["window"] = None
+            # If we closed without a captured code or SSO abort,
+            # the user closed the window manually. Flag it so the
+            # frontend exits its spinner state instead of waiting
+            # 10 minutes for the timeout.
+            try:
+                if not login_state.get("captured"):
+                    _server.set_inapp_login_phase("closed")
+            except Exception:
+                pass
+
+        def _on_loaded_inject_css() -> None:
+            """Hide the SSO sign-in buttons on Tidal's login page so
+            the user physically can't click into a provider flow
+            WKWebView crashes on. Runs on every page load inside the
+            login window — cheap, idempotent, and bounces off non-
+            Tidal pages without doing any harm since the selectors
+            won't match anything."""
+            try:
+                lw.evaluate_js(
+                    """
+                    (function () {
+                      var style = document.createElement('style');
+                      style.textContent = [
+                        'a[href*="apple"]',
+                        'a[href*="google"]',
+                        'a[href*="facebook"]',
+                        'button[class*="apple" i]',
+                        'button[class*="google" i]',
+                        'button[class*="facebook" i]',
+                        '[data-test*="apple"]',
+                        '[data-test*="google"]',
+                        '[data-test*="facebook"]',
+                        '[aria-label*="Apple" i]',
+                        '[aria-label*="Google" i]',
+                        '[aria-label*="Facebook" i]'
+                      ].join(',') + '{display:none !important;}';
+                      document.head.appendChild(style);
+                    })();
+                    """
+                )
+            except Exception:
+                pass
 
         try:
             lw.events.closed += _on_closed
+        except Exception:
+            pass
+        try:
+            lw.events.loaded += _on_loaded_inject_css
         except Exception:
             pass
         login_state["window"] = lw
