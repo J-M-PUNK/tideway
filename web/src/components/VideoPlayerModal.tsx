@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import Hls from "hls.js";
 import { Link, useNavigate } from "react-router-dom";
 import {
   ChevronDown,
@@ -138,43 +137,65 @@ export function VideoPlayerModal() {
   useEffect(() => {
     const video = videoRef.current;
     if (!video || !url) return;
-    // Prefer hls.js when supported. Chrome lies about
+    // hls.js is a ~100 KB dependency that only runs when a video
+    // is actually being watched. Dynamic-import it here so it
+    // ships as its own Vite chunk instead of bloating the main
+    // bundle for every user. The side effect is an async gap
+    // before playback starts; we guard against unmount via a
+    // `disposed` flag so a late import doesn't attach to a video
+    // element the user already closed.
+    //
+    // Safari's WKWebView supports HLS natively; on that path we
+    // skip the import entirely and assign src. Chrome lies about
     // `canPlayType('application/vnd.apple.mpegurl')` — returns
-    // 'maybe' when it actually can't decode HLS — so native-first
-    // branching silently breaks Chrome. Safari doesn't support
-    // MediaSource for HLS, so `Hls.isSupported()` returns false
-    // there and we fall through to the native path.
-    if (Hls.isSupported()) {
-      const hls = new Hls();
-      hls.loadSource(url);
-      hls.attachMedia(video);
-      hls.on(Hls.Events.MANIFEST_PARSED, () => {
-        // Start muted on the hls.js path. Chromium's autoplay
-        // policy blocks audible autoplay without a recent user-
-        // gesture credit propagating to this async callback.
-        // Muted autoplay is universally allowed; one click
-        // unmutes. Same UX TikTok / Twitter / Instagram use.
-        video.muted = true;
-        setMuted(true);
-        video.play().catch(() => {
-          // Even muted autoplay failed (iOS Low-Power Mode,
-          // locked-down enterprise policy). Show play button.
-          setPlaying(false);
+    // 'maybe' when it actually can't decode HLS — so we prefer
+    // the hls.js path whenever the browser supports MediaSource.
+    let disposed = false;
+    let hlsInstance: { destroy: () => void } | null = null;
+    if (typeof window !== "undefined" && "MediaSource" in window) {
+      (async () => {
+        const { default: Hls } = await import("hls.js");
+        if (disposed) return;
+        if (!Hls.isSupported()) {
+          // Fall back to native HLS. Should only hit here on
+          // browsers that expose MediaSource but not the codecs
+          // hls.js wants; rare.
+          video.src = url;
+          return;
+        }
+        const hls = new Hls();
+        hls.loadSource(url);
+        hls.attachMedia(video);
+        hls.on(Hls.Events.MANIFEST_PARSED, () => {
+          // Start muted on the hls.js path. Chromium's autoplay
+          // policy blocks audible autoplay without a recent user-
+          // gesture credit propagating to this async callback.
+          // Muted autoplay is universally allowed; one click
+          // unmutes. Same UX TikTok / Twitter / Instagram use.
+          video.muted = true;
+          setMuted(true);
+          video.play().catch(() => {
+            // Even muted autoplay failed (iOS Low-Power Mode,
+            // locked-down enterprise policy). Show play button.
+            setPlaying(false);
+          });
         });
-      });
-      return () => {
-        hls.destroy();
-      };
-    }
-    // Native HLS path (Safari / WKWebView). canPlayType returns
-    // 'probably' or 'maybe' — either is a go.
-    if (video.canPlayType("application/vnd.apple.mpegurl")) {
+        hlsInstance = hls;
+      })();
+    } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
+      // Native HLS path (Safari / WKWebView without MediaSource).
       video.src = url;
-      return;
+    } else {
+      // Truly no HLS path — assign raw URL so the browser surfaces
+      // a concrete error rather than a silent empty element.
+      video.src = url;
     }
-    // Truly no HLS path — assign raw URL so the browser surfaces
-    // a concrete error rather than a silent empty element.
-    video.src = url;
+    return () => {
+      disposed = true;
+      if (hlsInstance) {
+        hlsInstance.destroy();
+      }
+    };
   }, [url]);
 
   // Apply volume/mute on every render where the video element is

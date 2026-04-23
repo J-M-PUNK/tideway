@@ -650,6 +650,15 @@ export const api = {
   playlist: (id: string) => req<PlaylistDetail>(`/api/playlist/${id}`),
   mix: (id: string) => req<MixDetail>(`/api/mix/${encodeURIComponent(id)}`),
   track: (id: string) => req<Track>(`/api/track/${id}`),
+  lastfmTrackPlaycountsBatch: (
+    items: { artist: string; track: string }[],
+  ) =>
+    req<{
+      results: Record<string, LastFmPlaycount>;
+    }>("/api/lastfm/track-playcounts", {
+      method: "POST",
+      body: JSON.stringify({ items }),
+    }),
   trackLyrics: (id: string) => req<Lyrics>(`/api/track/${id}/lyrics`),
   trackRadio: (id: string) => req<Track[]>(`/api/track/${id}/radio`),
   trackCredits: (id: string) => req<CreditEntry[]>(`/api/track/${id}/credits`),
