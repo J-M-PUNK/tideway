@@ -1284,10 +1284,20 @@ class PCMPlayer:
         # teardown. _teardown() sets state to idle FIRST, so we can
         # distinguish: idle here means user-initiated stop; anything
         # else means the track ended naturally.
+        #
+        # Capture AND clear the preload pointer under the same lock
+        # acquisition so a concurrent _drop_preload on the HTTP
+        # thread (e.g. if the user also clicked Stop at the same
+        # microsecond as natural EOF) cannot close the preload's
+        # decoder between our read of self._preload and the bridge
+        # thread's use of it. We "own" the preload for the duration
+        # of the bridge attempt; if the bridge fails, it's
+        # responsible for disposing of the decoder itself.
         with self._lock:
             if self._state in ("idle", "error"):
                 return
             pre = self._preload
+            self._preload = None
 
         # Cross-rate bridge: preload exists but has a different
         # sample rate / dtype than the current stream, so the

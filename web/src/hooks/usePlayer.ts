@@ -439,12 +439,18 @@ export function usePlayer() {
 
   const playAtIndex = useCallback(
     (index: number, queueOverride?: Track[], sourceOverride?: PlaySource | null) => {
+      // Bounds-check against the queue before the optimistic state
+      // update so we can set refs up front without worrying about
+      // rolling them back on a no-op. setState reducers should be
+      // pure; ref writes belong outside the updater.
+      const resolvedQueue = queueOverride ?? stateRef.current.queue;
+      if (index < 0 || index >= resolvedQueue.length) return;
+      const track = resolvedQueue[index];
+      expectedTrackIdRef.current = track.id;
+      endOfTrackPendingRef.current = false;
       setState((s) => {
         const queue = queueOverride ?? s.queue;
         if (index < 0 || index >= queue.length) return s;
-        const track = queue[index];
-        expectedTrackIdRef.current = track.id;
-        endOfTrackPendingRef.current = false;
         // Optimistic UI: track/loading/queueIndex update immediately
         // so the now-playing bar reflects the selection before the
         // backend answers.
