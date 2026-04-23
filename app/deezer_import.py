@@ -83,14 +83,20 @@ def fetch_playlist(playlist_id: str) -> dict:
         )
     tracks_raw = ((body.get("tracks") or {}).get("data")) or []
 
-    # For very long playlists Deezer paginates the embedded tracks —
-    # chase `tracks.next` links until exhausted.
+    # For very long playlists Deezer paginates the embedded tracks.
+    # Chase `tracks.next` links until exhausted. Surface failures
+    # instead of returning a silently-truncated playlist, since the
+    # user has no other signal that half the tracks went missing.
     next_url = (body.get("tracks") or {}).get("next")
     while next_url:
         try:
-            page = requests.get(next_url, timeout=15).json()
-        except Exception:
-            break
+            resp = requests.get(next_url, timeout=15)
+            resp.raise_for_status()
+            page = resp.json()
+        except Exception as exc:
+            raise RuntimeError(
+                f"Deezer pagination failed after {len(tracks_raw)} tracks: {exc}"
+            ) from exc
         tracks_raw.extend(page.get("data") or [])
         next_url = page.get("next")
 
@@ -124,18 +130,4 @@ def fetch_playlist(playlist_id: str) -> dict:
 def match_each(session, tracks: list[dict]) -> list[dict]:
     """Match Deezer rows against Tidal. Same shape as the Spotify /
     M3U flows so the frontend's MatchReview handles all three."""
-    out: list[dict] = []
-    for t in tracks:
-        match = spotify_import.match_track(session, t)
-        out.append(
-            {
-                "spotify": {
-                    "name": t.get("name"),
-                    "artists": t.get("artists") or [],
-                    "duration_ms": t.get("duration_ms") or 0,
-                    "isrc": None,
-                },
-                "match": match,
-            }
-        )
-    return out
+    return spotify_import.match_tracks(session, tracks)

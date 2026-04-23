@@ -143,21 +143,7 @@ def _looks_like_path(s: str) -> bool:
 
 def match_each(session, rows: Iterable[ParsedTrack]) -> list[dict]:
     """Run every parsed row through the Tidal matcher and return the
-    same {spotify, match} shape the ImportPage already renders —
-    spotify-as-source-label is a misnomer here; the key stuck."""
-    out: list[dict] = []
-    for row in rows:
-        raw = row.as_match_dict()
-        match = spotify_import.match_track(session, raw)
-        out.append(
-            {
-                "spotify": {
-                    "name": row.name,
-                    "artists": row.artists,
-                    "duration_ms": row.duration_ms,
-                    "isrc": None,
-                },
-                "match": match,
-            }
-        )
-    return out
+    same {spotify, match} shape the ImportPage already renders. The
+    "spotify" key name is a misnomer here; it stuck after the M3U
+    path was added to the shared review UI."""
+    return spotify_import.match_tracks(session, [row.as_match_dict() for row in rows])
