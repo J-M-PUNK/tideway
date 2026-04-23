@@ -240,6 +240,8 @@ def _enable_webview_media_prefs() -> None:
 # Held at module scope so the Objective-C runtime keeps a strong ref
 # to the observer for the lifetime of the process.
 _macos_notification_observer: Optional[object] = None
+_macos_quit_observer: Optional[object] = None
+_macos_quit_delegate: Optional[object] = None
 
 
 def _wire_macos_dock_reopen(window) -> None:  # type: ignore[no-untyped-def]
@@ -288,6 +290,121 @@ def _wire_macos_dock_reopen(window) -> None:  # type: ignore[no-untyped-def]
         _macos_notification_observer = observer
     except Exception as exc:
         print(f"[desktop] dock-reopen observer install failed: {exc!r}",
+              file=sys.stderr, flush=True)
+
+
+def _wire_macos_app_quit(window, actually_quitting) -> None:  # type: ignore[no-untyped-def]
+    """Make Cmd+Q, Dock right-click Quit, and menu-bar Quit actually
+    quit the app instead of falling into the hide-to-tray branch.
+
+    The mechanism: wrap pywebview's NSApp delegate with an Objective-C
+    proxy. Our wrapper intercepts `applicationShouldTerminate:`, sets
+    the quit flag, and forwards the call to the original delegate so
+    pywebview still drives its normal close sequence. Our window close
+    handler then sees the flag set and returns True, allowing the
+    termination to proceed. Every other selector is forwarded to the
+    original delegate unchanged via standard NSProxy forwarding, so
+    pywebview's delegate behaviour is otherwise untouched.
+
+    pywebview installs its delegate during `webview.start()`, which is
+    after this function is called, so we wait for the
+    `NSApplicationDidFinishLaunching` notification to do the swap.
+    """
+    global _macos_quit_observer, _macos_quit_delegate
+    if sys.platform != "darwin":
+        return
+    try:
+        import AppKit
+        import objc
+        from Foundation import NSObject
+    except Exception as exc:
+        print(f"[desktop] quit hook imports failed: {exc!r}",
+              file=sys.stderr, flush=True)
+        return
+
+    class _QuitWrapperDelegate(NSObject):
+        def initWithInner_flag_(self, inner, flag_ref):  # noqa: N802
+            s = objc.super(_QuitWrapperDelegate, self).init()
+            if s is None:
+                return None
+            s._inner = inner
+            s._flag = flag_ref
+            return s
+
+        def applicationShouldTerminate_(self, sender):  # noqa: N802
+            try:
+                self._flag["value"] = True
+            except Exception:
+                pass
+            inner = getattr(self, "_inner", None)
+            if inner is not None and inner.respondsToSelector_(b"applicationShouldTerminate:"):
+                return inner.applicationShouldTerminate_(sender)
+            return AppKit.NSTerminateNow
+
+        # ---- Forwarding plumbing so pywebview's delegate keeps
+        # receiving every other selector exactly as before.
+        def methodSignatureForSelector_(self, sel):  # noqa: N802
+            sig = objc.super(_QuitWrapperDelegate, self).methodSignatureForSelector_(sel)
+            if sig is not None:
+                return sig
+            inner = getattr(self, "_inner", None)
+            if inner is not None:
+                return inner.methodSignatureForSelector_(sel)
+            return None
+
+        def forwardInvocation_(self, invocation):  # noqa: N802
+            inner = getattr(self, "_inner", None)
+            if inner is not None and inner.respondsToSelector_(invocation.selector()):
+                invocation.invokeWithTarget_(inner)
+            else:
+                objc.super(_QuitWrapperDelegate, self).forwardInvocation_(invocation)
+
+        def respondsToSelector_(self, sel):  # noqa: N802
+            if objc.super(_QuitWrapperDelegate, self).respondsToSelector_(sel):
+                return True
+            inner = getattr(self, "_inner", None)
+            if inner is not None and inner.respondsToSelector_(sel):
+                return True
+            return False
+
+    def _install_wrapper() -> None:
+        global _macos_quit_delegate
+        app = AppKit.NSApplication.sharedApplication()
+        existing = app.delegate()
+        if existing is None:
+            print("[desktop] quit hook: no NSApp delegate to wrap yet",
+                  file=sys.stderr, flush=True)
+            return
+        wrapper = _QuitWrapperDelegate.alloc().initWithInner_flag_(existing, actually_quitting)
+        if wrapper is None:
+            return
+        app.setDelegate_(wrapper)
+        # Strong reference; without this the Objective-C runtime
+        # eventually releases the wrapper and we silently revert to
+        # pywebview's original delegate.
+        _macos_quit_delegate = wrapper
+
+    class _DidLaunchObserver(NSObject):
+        def didFinishLaunching_(self, _n):  # noqa: N802
+            _install_wrapper()
+
+    try:
+        # If pywebview's run loop already fired didFinishLaunching we
+        # install right now; otherwise wait for the notification.
+        app = AppKit.NSApplication.sharedApplication()
+        if app.delegate() is not None:
+            _install_wrapper()
+        else:
+            observer = _DidLaunchObserver.alloc().init()
+            AppKit.NSNotificationCenter.defaultCenter().addObserver_selector_name_object_(
+                observer,
+                "didFinishLaunching:",
+                AppKit.NSApplicationDidFinishLaunchingNotification,
+                None,
+            )
+            _macos_quit_observer = observer
+    except Exception as exc:
+        print(f"[desktop] quit hook install failed: {exc!r}",
               file=sys.stderr, flush=True)
 
 
@@ -518,6 +635,15 @@ def main(argv: Optional[list[str]] = None) -> int:
         # macOS: wire the Dock-click → window.show() path. No-op on
         # Windows (minimize handles it natively via the taskbar).
         _wire_macos_dock_reopen(window)
+        # Cmd+Q / Dock right-click Quit / menu-bar "Quit Tideway" all go
+        # through NSApp.terminate → applicationShouldTerminate:, which
+        # pywebview's delegate translates into our window's closing
+        # event. Without special handling our closing handler hides
+        # instead of quitting, so the user can never fully exit except
+        # via the tray menu. Wrap the app delegate so those three
+        # paths set the quit flag first, then let pywebview close
+        # windows normally.
+        _wire_macos_app_quit(window, actually_quitting)
 
     try:
         # gui=None lets pywebview pick the native backend
