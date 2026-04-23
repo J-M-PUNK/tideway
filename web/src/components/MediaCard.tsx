@@ -4,16 +4,19 @@ import { Music } from "lucide-react";
 import type { Album, Artist, Playlist } from "@/api/types";
 import type { OnDownload } from "@/api/download";
 import { imageProxy } from "@/lib/utils";
-import { DownloadButton } from "@/components/DownloadButton";
+import { HeartButton } from "@/components/HeartButton";
 import { PlayMediaButton } from "@/components/PlayMediaButton";
 
 type Item = Album | Artist | Playlist;
 
 export function MediaCard({
   item,
-  onDownload,
 }: {
   item: Item;
+  /** Download triggering was part of the old card overlay. Callers still
+   *  pass it through but the affordance now lives on the detail page so
+   *  we no longer render it in the hover area. Prop kept so the call
+   *  sites stay stable. */
   onDownload?: OnDownload;
 }) {
   const [menuOpen, setMenuOpen] = useState(false);
@@ -28,6 +31,15 @@ export function MediaCard({
 
   const cover = imageProxy(item.kind === "artist" ? item.picture : item.cover);
   const rounded = item.kind === "artist" ? "rounded-full" : "rounded-md";
+  const showHoverActions = item.kind !== "artist";
+  // Hide-on-leave is suppressed while the play request is in flight, so
+  // the button doesn't flicker back to opacity-0 if the cursor drifts
+  // off before the fetch resolves.
+  const hoverGroup = showHoverActions
+    ? menuOpen
+      ? "opacity-100"
+      : "opacity-0 group-hover:opacity-100 focus-within:opacity-100"
+    : "";
 
   return (
     <Link
@@ -47,31 +59,29 @@ export function MediaCard({
             <Music className="h-10 w-10" />
           </div>
         )}
-        {item.kind !== "artist" && (
-          <div
-            className={`absolute bottom-2 right-2 flex items-center gap-2 transition-all ${
-              menuOpen
-                ? "translate-y-0 opacity-100"
-                : "translate-y-2 opacity-0 group-hover:translate-y-0 group-hover:opacity-100"
-            }`}
-          >
-            <PlayMediaButton
-              kind={item.kind}
-              id={item.id}
-              className="h-10 w-10"
-              onOpenChange={setMenuOpen}
-            />
-            {onDownload && (
-              <DownloadButton
-                kind={item.kind}
+        {showHoverActions && (
+          <>
+            <div
+              className={`absolute bottom-2 left-2 transition-all ${hoverGroup}`}
+            >
+              <PlayMediaButton
+                kind={item.kind as "album" | "playlist"}
                 id={item.id}
-                onPick={onDownload}
-                iconOnly
-                className="h-10 w-10 shadow-lg"
+                className="h-10 w-10"
                 onOpenChange={setMenuOpen}
               />
-            )}
-          </div>
+            </div>
+            <div
+              className={`absolute bottom-2 right-2 transition-all ${hoverGroup}`}
+            >
+              <HeartButton
+                kind={item.kind}
+                id={item.id}
+                size="md"
+                className="h-10 w-10 bg-background/80 backdrop-blur hover:bg-background"
+              />
+            </div>
+          </>
         )}
       </div>
       <div className="min-w-0">
