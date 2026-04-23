@@ -15,8 +15,11 @@ import {
   Moon,
   Palette,
   Power,
+  Radio as RadioIcon,
+  RefreshCw,
   Settings as SettingsIcon,
   Sun,
+  Unlink,
 } from "lucide-react";
 import { api } from "@/api/client";
 import type { QualityOption, Settings } from "@/api/types";
@@ -191,6 +194,8 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
         </Field>
         <AudioEngineFields />
       </Section>
+
+      <AirPlaySection />
 
       <Section
         title="Downloads"
@@ -718,6 +723,270 @@ function EqSlider({
       />
       <div className="text-xs text-muted-foreground">{label}</div>
     </div>
+  );
+}
+
+
+/**
+ * AirPlay output control. Lists discovered receivers on the local
+ * network, walks the user through a one-time pair, and lets them
+ * connect / disconnect. Audio that the PCMPlayer produces is tee'd
+ * to the connected device via pyatv; local speakers keep playing
+ * in parallel (mute with the volume slider if you don't want echo).
+ *
+ * Not end-to-end tested against hardware yet. Pair flow is based
+ * on pyatv's documented API; first real test will surface any
+ * protocol quirks on HomePods, AirPlay speakers, or Apple TVs.
+ */
+interface AirPlayDeviceRow {
+  id: string;
+  name: string;
+  address: string;
+  has_raop: boolean;
+  paired: boolean;
+}
+
+function AirPlaySection() {
+  const toast = useToast();
+  const [available, setAvailable] = useState<boolean | null>(null);
+  const [reason, setReason] = useState<string | null>(null);
+  const [devices, setDevices] = useState<AirPlayDeviceRow[]>([]);
+  const [connectedId, setConnectedId] = useState<string | null>(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [pairing, setPairing] = useState<AirPlayDeviceRow | null>(null);
+  const [pin, setPin] = useState("");
+  const [pinBusy, setPinBusy] = useState(false);
+  const [busyId, setBusyId] = useState<string | null>(null);
+
+  const refresh = async () => {
+    setRefreshing(true);
+    try {
+      const res = await api.airplay.devices();
+      setAvailable(res.available);
+      setReason(res.reason ?? null);
+      setDevices(res.devices);
+      setConnectedId(res.connected_id);
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: "Couldn't list AirPlay devices",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setRefreshing(false);
+    }
+  };
+
+  useEffect(() => {
+    refresh();
+  }, []);
+
+  const startPair = async (dev: AirPlayDeviceRow) => {
+    setPairing(dev);
+    setPin("");
+    try {
+      await api.airplay.pairStart(dev.id);
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: "Couldn't start pairing",
+        description: err instanceof Error ? err.message : String(err),
+      });
+      setPairing(null);
+    }
+  };
+
+  const submitPin = async () => {
+    if (!pairing || !pin) return;
+    setPinBusy(true);
+    try {
+      await api.airplay.pairPin(pin.trim());
+      toast.show({
+        kind: "success",
+        title: "Paired",
+        description: `${pairing.name} is ready to use.`,
+      });
+      setPairing(null);
+      setPin("");
+      await refresh();
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: "Pairing failed",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setPinBusy(false);
+    }
+  };
+
+  const cancelPair = async () => {
+    await api.airplay.pairCancel().catch(() => undefined);
+    setPairing(null);
+    setPin("");
+  };
+
+  const connect = async (dev: AirPlayDeviceRow) => {
+    setBusyId(dev.id);
+    try {
+      await api.airplay.connect(dev.id);
+      toast.show({
+        kind: "success",
+        title: "AirPlay connected",
+        description: `Sending to ${dev.name}.`,
+      });
+      await refresh();
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: "Couldn't connect",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const disconnect = async () => {
+    try {
+      await api.airplay.disconnect();
+      await refresh();
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: "Couldn't disconnect",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+
+  return (
+    <Section title="AirPlay" icon={RadioIcon}>
+      {available === false && (
+        <p className="text-sm text-muted-foreground">
+          AirPlay support is unavailable on this install.
+          {reason ? ` (${reason})` : null}
+        </p>
+      )}
+      {available !== false && (
+        <>
+          <div className="flex items-center gap-3">
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={refresh}
+              disabled={refreshing}
+            >
+              {refreshing ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : (
+                <RefreshCw className="h-3.5 w-3.5" />
+              )}
+              Refresh
+            </Button>
+            {connectedId && (
+              <Button variant="ghost" size="sm" onClick={disconnect}>
+                <Unlink className="h-3.5 w-3.5" />
+                Disconnect
+              </Button>
+            )}
+          </div>
+          {devices.length === 0 ? (
+            <p className="text-xs text-muted-foreground">
+              No AirPlay receivers found on this network. Make sure the
+              speaker or HomePod is powered on and awake.
+            </p>
+          ) : (
+            <ul className="flex flex-col gap-2">
+              {devices.map((dev) => {
+                const isConnected = connectedId === dev.id;
+                const isBusy = busyId === dev.id;
+                return (
+                  <li
+                    key={dev.id}
+                    className="flex items-center gap-3 rounded-md border border-border/40 bg-card/40 p-3"
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-sm font-semibold">
+                        {dev.name}
+                      </div>
+                      <div className="truncate text-xs text-muted-foreground">
+                        {dev.address}
+                        {!dev.has_raop &&
+                          " — video-only AirPlay, audio streaming unavailable"}
+                      </div>
+                    </div>
+                    {isConnected ? (
+                      <span className="flex items-center gap-1 text-xs font-semibold text-primary">
+                        <Check className="h-3.5 w-3.5" /> Connected
+                      </span>
+                    ) : dev.paired ? (
+                      <Button
+                        size="sm"
+                        onClick={() => connect(dev)}
+                        disabled={isBusy || !dev.has_raop}
+                      >
+                        {isBusy ? (
+                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                        ) : null}
+                        Connect
+                      </Button>
+                    ) : (
+                      <Button
+                        variant="secondary"
+                        size="sm"
+                        onClick={() => startPair(dev)}
+                        disabled={!dev.has_raop}
+                      >
+                        Pair
+                      </Button>
+                    )}
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+          <p className="text-xs text-muted-foreground">
+            Audio tees to the connected AirPlay receiver while local
+            output keeps playing. Mute your local speakers with the
+            volume slider if you don't want both at once. macOS's
+            built-in AirPlay Receiver is not supported (Apple's
+            proprietary pairing); HomePods, AirPort Express, Apple TVs,
+            and most third-party AirPlay speakers work.
+          </p>
+        </>
+      )}
+      {pairing && (
+        <div className="mt-2 rounded-md border border-primary/40 bg-primary/5 p-4">
+          <div className="mb-1 text-sm font-semibold">
+            Pairing with {pairing.name}
+          </div>
+          <p className="mb-3 text-xs text-muted-foreground">
+            A 4-digit PIN should appear on the receiver now. If the
+            receiver is a HomePod, check the paired iPhone or iPad;
+            some models display the PIN there.
+          </p>
+          <div className="flex items-center gap-2">
+            <Input
+              value={pin}
+              onChange={(e) => setPin(e.target.value)}
+              placeholder="0000"
+              inputMode="numeric"
+              maxLength={8}
+              className="max-w-[8rem]"
+              autoFocus
+            />
+            <Button onClick={submitPin} disabled={pinBusy || !pin}>
+              {pinBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+              Submit
+            </Button>
+            <Button variant="ghost" onClick={cancelPair}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      )}
+    </Section>
   );
 }
 

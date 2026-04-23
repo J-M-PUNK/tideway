@@ -1,0 +1,764 @@
+"""AirPlay output support.
+
+This module adds a second audio sink alongside the existing
+sounddevice output. When AirPlay is active, every PCM chunk the
+PCMPlayer produces is also encoded to FLAC on the fly and streamed
+to a paired AirPlay receiver via `pyatv`. The local sounddevice
+output can either keep playing in parallel or be muted with the
+normal volume slider; that's a UX decision the settings page
+owns, not this module.
+
+Data flow when AirPlay is active:
+
+    Tidal DASH / local file
+            |
+            v
+         Decoder
+            |
+            v    (PCM chunks)
+       PCMPlayer  -----> sounddevice (muted or not, user's choice)
+            |
+            |  (tap hook, same PCM)
+            v
+       AirPlayManager._on_pcm()
+            |
+            v
+       FlacStreamEncoder  (PyAV, format=flac, non-seekable)
+            |
+            v    (encoded bytes)
+       RingBuffer
+            |
+            v    (served by FastAPI /api/airplay/stream over HTTP)
+            |
+            v
+        pyatv.stream.stream_file(localhost URL)
+            |
+            v
+        AirPlay receiver
+
+Pairing is a separate, interactive flow. Modern receivers need a
+one-time HomeKit-style pair handshake before they accept streams.
+The `begin_pairing()` / `submit_pin()` / `finish_pairing()` methods
+here expose that flow to the frontend as three backend calls. On
+success the resulting credential string goes into
+`airplay_credentials.json` keyed by device id, and future
+connections reuse it without re-pairing.
+
+None of this has been end-to-end tested against real hardware
+yet. The code was written to match pyatv's public API, but you
+will almost certainly find sharp edges the first time it talks
+to a real HomePod / AirPort Express / AirPlay speaker. Logging
+is verbose on purpose so the first test session surfaces what's
+actually happening at every boundary.
+"""
+from __future__ import annotations
+
+import asyncio
+import http.server
+import json
+import logging
+import queue
+import socketserver
+import threading
+import time
+import uuid
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
+
+import numpy as np
+
+from app.paths import user_data_dir
+
+log = logging.getLogger(__name__)
+
+# pyatv is optional at import time. The rest of the app must boot
+# fine on machines where pyatv either failed to install or has a
+# runtime crash at import. AirPlay just becomes unavailable in that
+# case, signalled via `is_available()`.
+try:  # pragma: no cover - environment dependent
+    import pyatv  # type: ignore
+    from pyatv.const import Protocol  # type: ignore
+
+    _IMPORT_ERROR: Optional[str] = None
+except Exception as exc:  # pragma: no cover
+    pyatv = None  # type: ignore
+    Protocol = None  # type: ignore
+    _IMPORT_ERROR = str(exc)
+
+
+CREDENTIALS_FILE = user_data_dir() / "airplay_credentials.json"
+
+
+@dataclass
+class AirPlayDevice:
+    """Minimal public representation of a discovered receiver."""
+    id: str
+    name: str
+    address: str
+    has_raop: bool
+    paired: bool
+
+
+@dataclass
+class _ConnectedSession:
+    """Internal: holds the pyatv handle and the PCM streaming pipe
+    for an active AirPlay connection.
+
+    `pcm_queue` accumulates raw int16 or float32 PCM chunks from the
+    PCMPlayer's tap. The encoder loop (running on the AirPlay
+    asyncio thread) drains it, converts to FLAC frames, and writes
+    them into `flac_buffer`. A tiny HTTP server bound on
+    `http_port` pulls from `flac_buffer` and hands bytes to pyatv.
+    """
+    device_id: str
+    atv: object  # pyatv's ATV handle
+    sample_rate: int
+    channels: int
+    pcm_queue: "queue.Queue[bytes]"
+    flac_buffer: "RingBuffer"
+    http_server: Optional["_StreamHTTPServer"] = None
+    http_port: int = 0
+    stream_task: Optional[asyncio.Task] = None
+
+
+class RingBuffer:
+    """A bounded byte buffer with blocking read. Used by the HTTP
+    stream endpoint to pull encoded FLAC bytes in chunks. Not a
+    speed-critical path: readers poll at a low rate and writers
+    produce at realtime audio rate (a few hundred KB/s for hi-res
+    FLAC), well under any reasonable buffer limit."""
+
+    def __init__(self, max_bytes: int = 8 * 1024 * 1024) -> None:
+        self._max = max_bytes
+        self._buf = bytearray()
+        self._cv = threading.Condition()
+        self._closed = False
+
+    def write(self, data: bytes) -> None:
+        with self._cv:
+            if self._closed:
+                return
+            # Drop oldest bytes if we'd blow the cap. Prevents the
+            # encoder blocking indefinitely if no one is reading
+            # (e.g. pyatv died silently).
+            overflow = len(self._buf) + len(data) - self._max
+            if overflow > 0:
+                del self._buf[:overflow]
+            self._buf.extend(data)
+            self._cv.notify_all()
+
+    def read(self, n: int, timeout: float = 1.0) -> bytes:
+        deadline = time.monotonic() + timeout
+        with self._cv:
+            while not self._buf and not self._closed:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return b""
+                self._cv.wait(timeout=remaining)
+            chunk = bytes(self._buf[:n])
+            del self._buf[: len(chunk)]
+            return chunk
+
+    def close(self) -> None:
+        with self._cv:
+            self._closed = True
+            self._cv.notify_all()
+
+
+class FlacStreamEncoder:
+    """PCM chunks in, FLAC bytes out.
+
+    PyAV is already a project dependency and has a FLAC encoder. We
+    open an output container to a `BytesIO`-like sink and push
+    encoded frames as they come out. Because FLAC's frame structure
+    is self-contained, an open-ended encoded stream is valid to
+    consume mid-flight; the receiver doesn't need a seekable
+    container.
+    """
+
+    def __init__(self, sample_rate: int, channels: int, dtype: str) -> None:
+        self.sample_rate = sample_rate
+        self.channels = channels
+        # av.format expects "s16" / "s32" / "flt" depending on dtype.
+        if dtype == "int16":
+            self.av_format = "s16"
+            self.np_dtype = np.int16
+        elif dtype == "int32":
+            self.av_format = "s32"
+            self.np_dtype = np.int32
+        else:
+            self.av_format = "flt"
+            self.np_dtype = np.float32
+        self._setup()
+
+    def _setup(self) -> None:
+        import av  # type: ignore
+
+        self._buffer = bytearray()
+
+        class _SinkFile:
+            # Minimal file-like object PyAV writes to. Captures
+            # encoded bytes into the outer bytearray.
+            def __init__(self, sink: bytearray) -> None:
+                self._sink = sink
+
+            def write(self, data: bytes) -> int:
+                self._sink.extend(data)
+                return len(data)
+
+            def flush(self) -> None:
+                pass
+
+            def close(self) -> None:
+                pass
+
+        self._sink = _SinkFile(self._buffer)
+        # `mode="w"` + `format="flac"` opens a FLAC muxer. Streaming
+        # FLAC doesn't need the seekable metadata block re-write
+        # trick that WAV does, so PyAV handles this cleanly.
+        self._container = av.open(self._sink, mode="w", format="flac")  # type: ignore
+        self._stream = self._container.add_stream("flac", rate=self.sample_rate)  # type: ignore
+        self._stream.channels = self.channels  # type: ignore
+        self._stream.format = self.av_format  # type: ignore
+
+    def encode(self, pcm: np.ndarray) -> bytes:
+        """Feed one chunk of interleaved PCM. Returns whatever
+        encoded bytes came out. May return b"" if PyAV buffered
+        the frame."""
+        import av  # type: ignore
+
+        # PyAV wants non-interleaved (planar) frames for the
+        # common FLAC path; reshape samples[num_frames, channels]
+        # -> samples[channels, num_frames].
+        if pcm.ndim != 2:
+            raise ValueError(f"expected 2-D PCM, got shape {pcm.shape}")
+        samples, ch = pcm.shape
+        if ch != self.channels:
+            raise ValueError(
+                f"channel mismatch: encoder set for {self.channels}, got {ch}"
+            )
+        frame = av.AudioFrame.from_ndarray(  # type: ignore
+            pcm.T.astype(self.np_dtype, copy=False),
+            format=self.av_format,
+            layout="stereo" if self.channels == 2 else "mono",
+        )
+        frame.rate = self.sample_rate
+        before = len(self._buffer)
+        for packet in self._stream.encode(frame):  # type: ignore
+            self._container.mux(packet)  # type: ignore
+        out = bytes(self._buffer[before:])
+        return out
+
+    def close(self) -> bytes:
+        """Flush + close. Returns final trailing bytes."""
+        import av  # type: ignore
+
+        before = len(self._buffer)
+        try:
+            for packet in self._stream.encode():  # type: ignore
+                self._container.mux(packet)  # type: ignore
+            self._container.close()  # type: ignore
+        except Exception:
+            pass
+        return bytes(self._buffer[before:])
+
+
+class AirPlayManager:
+    """Singleton manager for AirPlay discovery, pairing, and
+    streaming. Runs a dedicated asyncio loop on a background thread
+    because pyatv is async-native and the rest of the player engine
+    is sync."""
+
+    _instance: Optional["AirPlayManager"] = None
+
+    def __init__(self) -> None:
+        self._loop: Optional[asyncio.AbstractEventLoop] = None
+        self._loop_thread: Optional[threading.Thread] = None
+        self._loop_ready = threading.Event()
+        self._lock = threading.RLock()
+
+        self._discovered: dict[str, AirPlayDevice] = {}
+        self._pending_pair: Optional[dict] = None  # {id, pairing}
+        self._session: Optional[_ConnectedSession] = None
+
+        self._start_loop_thread()
+
+    @classmethod
+    def instance(cls) -> "AirPlayManager":
+        if cls._instance is None:
+            cls._instance = cls()
+        return cls._instance
+
+    @staticmethod
+    def is_available() -> bool:
+        return pyatv is not None
+
+    @staticmethod
+    def import_error() -> Optional[str]:
+        return _IMPORT_ERROR
+
+    # ------------------------------------------------------------------
+    # Loop thread plumbing
+    # ------------------------------------------------------------------
+
+    def _start_loop_thread(self) -> None:
+        def _run() -> None:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            self._loop = loop
+            self._loop_ready.set()
+            try:
+                loop.run_forever()
+            finally:
+                loop.close()
+
+        self._loop_thread = threading.Thread(
+            target=_run, name="airplay-asyncio", daemon=True
+        )
+        self._loop_thread.start()
+        self._loop_ready.wait(timeout=5.0)
+
+    def _run_coro(self, coro, timeout: float = 30.0):
+        """Run an async coroutine on the AirPlay thread and wait for
+        the result from the caller's (sync) thread."""
+        if self._loop is None:
+            raise RuntimeError("AirPlay loop not running")
+        fut = asyncio.run_coroutine_threadsafe(coro, self._loop)
+        return fut.result(timeout=timeout)
+
+    # ------------------------------------------------------------------
+    # Credentials persistence
+    # ------------------------------------------------------------------
+
+    def _load_credentials(self) -> dict:
+        try:
+            if CREDENTIALS_FILE.is_file():
+                return json.loads(CREDENTIALS_FILE.read_text())
+        except Exception as exc:
+            log.warning("airplay credentials read failed: %s", exc)
+        return {}
+
+    def _save_credentials(self, store: dict) -> None:
+        try:
+            CREDENTIALS_FILE.parent.mkdir(parents=True, exist_ok=True)
+            CREDENTIALS_FILE.write_text(json.dumps(store, indent=2))
+        except Exception as exc:
+            log.warning("airplay credentials write failed: %s", exc)
+
+    def paired_device_ids(self) -> set[str]:
+        return set(self._load_credentials().keys())
+
+    # ------------------------------------------------------------------
+    # Discovery
+    # ------------------------------------------------------------------
+
+    def discover(self, timeout: float = 5.0) -> list[AirPlayDevice]:
+        if not self.is_available():
+            return []
+        devices = self._run_coro(self._discover(timeout), timeout=timeout + 5)
+        with self._lock:
+            self._discovered = {d.id: d for d in devices}
+        return devices
+
+    async def _discover(self, timeout: float) -> list[AirPlayDevice]:
+        loop = asyncio.get_event_loop()
+        results = await pyatv.scan(loop, timeout=timeout)
+        paired = self.paired_device_ids()
+        out: list[AirPlayDevice] = []
+        for conf in results or []:
+            protocols = {svc.protocol.name for svc in conf.services}
+            has_raop = "RAOP" in protocols
+            out.append(
+                AirPlayDevice(
+                    id=conf.identifier,
+                    name=conf.name,
+                    address=str(conf.address),
+                    has_raop=has_raop,
+                    paired=conf.identifier in paired,
+                )
+            )
+        return out
+
+    async def _find_conf(self, device_id: str):
+        """Re-scan and return the pyatv conf for a device by id.
+        Scanning on every call is wasteful but correct. Caching the
+        conf is risky because the receiver's IP can change."""
+        loop = asyncio.get_event_loop()
+        results = await pyatv.scan(loop, timeout=3.0)
+        for conf in results or []:
+            if conf.identifier == device_id:
+                return conf
+        return None
+
+    # ------------------------------------------------------------------
+    # Pairing
+    # ------------------------------------------------------------------
+
+    def begin_pairing(self, device_id: str) -> None:
+        if not self.is_available():
+            raise RuntimeError("pyatv not available")
+        self._run_coro(self._begin_pairing(device_id))
+
+    async def _begin_pairing(self, device_id: str) -> None:
+        conf = await self._find_conf(device_id)
+        if conf is None:
+            raise RuntimeError(f"device {device_id} not found")
+        loop = asyncio.get_event_loop()
+        pairing = await pyatv.pair(conf, Protocol.RAOP, loop)
+        await pairing.begin()
+        with self._lock:
+            self._pending_pair = {
+                "device_id": device_id,
+                "pairing": pairing,
+                "name": conf.name,
+            }
+
+    def submit_pin(self, pin: str) -> None:
+        with self._lock:
+            pending = self._pending_pair
+        if pending is None:
+            raise RuntimeError("no pending pairing")
+        self._run_coro(self._submit_pin(pin))
+
+    async def _submit_pin(self, pin: str) -> None:
+        with self._lock:
+            pending = self._pending_pair
+        if pending is None:
+            return
+        pairing = pending["pairing"]
+        pairing.pin(pin)
+        try:
+            await pairing.finish()
+        finally:
+            try:
+                await pairing.close()
+            except Exception:
+                pass
+        if not pairing.has_paired:
+            raise RuntimeError("pairing did not complete")
+        creds = pairing.service.credentials
+        if not creds:
+            raise RuntimeError("pairing returned no credentials")
+        store = self._load_credentials()
+        store[pending["device_id"]] = {
+            "name": pending.get("name") or "",
+            "credentials": creds,
+        }
+        self._save_credentials(store)
+        with self._lock:
+            self._pending_pair = None
+
+    def cancel_pairing(self) -> None:
+        with self._lock:
+            pending = self._pending_pair
+            self._pending_pair = None
+        if pending is None:
+            return
+        try:
+            self._run_coro(self._cancel_pairing(pending["pairing"]), timeout=5.0)
+        except Exception:
+            pass
+
+    async def _cancel_pairing(self, pairing) -> None:
+        try:
+            await pairing.close()
+        except Exception:
+            pass
+
+    # ------------------------------------------------------------------
+    # Connect + stream
+    # ------------------------------------------------------------------
+
+    def connect(self, device_id: str, sample_rate: int, channels: int,
+                dtype: str) -> None:
+        """Connect to a paired device and prepare the streaming
+        pipe. Raises if the device has no saved credentials or if
+        pyatv rejects the connection."""
+        if not self.is_available():
+            raise RuntimeError("pyatv not available")
+        self.disconnect()
+        self._run_coro(self._connect(device_id, sample_rate, channels, dtype))
+
+    async def _connect(self, device_id: str, sample_rate: int,
+                       channels: int, dtype: str) -> None:
+        store = self._load_credentials()
+        entry = store.get(device_id)
+        if not entry:
+            raise RuntimeError(
+                f"no saved credentials for {device_id}; pair first"
+            )
+        creds = entry.get("credentials")
+        if not creds:
+            raise RuntimeError(f"credentials for {device_id} are empty")
+        conf = await self._find_conf(device_id)
+        if conf is None:
+            raise RuntimeError(f"device {device_id} not found on network")
+        conf.set_credentials(Protocol.RAOP, creds)
+        loop = asyncio.get_event_loop()
+        atv = await pyatv.connect(conf, loop)
+
+        session = _ConnectedSession(
+            device_id=device_id,
+            atv=atv,
+            sample_rate=sample_rate,
+            channels=channels,
+            pcm_queue=queue.Queue(maxsize=64),
+            flac_buffer=RingBuffer(),
+        )
+
+        # Stand up a tiny LAN-reachable HTTP server just for this
+        # session's stream. See _StreamHTTPServer for why this is
+        # separate from FastAPI.
+        http_server = _start_stream_http_server(session.flac_buffer)
+        session.http_server = http_server
+        session.http_port = http_server.server_address[1]
+        log.info("airplay http server bound on port %s", session.http_port)
+
+        # Kick off the FLAC encoder loop on the AirPlay thread. It
+        # drains the pcm_queue and writes encoded bytes into the
+        # ring buffer the HTTP server reads from.
+        session.stream_task = loop.create_task(
+            self._encoder_loop(session, dtype)
+        )
+
+        with self._lock:
+            self._session = session
+
+        # Hand pyatv a LAN URL pointing at our dedicated HTTP
+        # server. `_drive_stream` awaits the long-running transfer.
+        loop.create_task(self._drive_stream(atv, session.http_port))
+
+    async def _drive_stream(self, atv, http_port: int) -> None:
+        """Call pyatv's stream_file against our dedicated stream
+        HTTP server. Runs for the duration of the connection."""
+        try:
+            # The URL has to be routable from the AirPlay receiver.
+            # For a home network that means the host's LAN IP rather
+            # than 127.0.0.1. We pick the first non-loopback IPv4
+            # address; good enough for the common "both devices on
+            # the same wifi" case. A future refinement is to let the
+            # user pick the interface or advertise via mDNS.
+            url = f"http://{_primary_lan_ip()}:{http_port}/stream"
+            log.info("airplay: opening stream against %s", url)
+            await atv.stream.stream_file(url)
+            log.info("airplay: stream_file returned")
+        except Exception as exc:
+            log.exception("airplay: stream_file failed: %s", exc)
+
+    async def _encoder_loop(self, session: _ConnectedSession, dtype: str) -> None:
+        encoder = FlacStreamEncoder(
+            sample_rate=session.sample_rate,
+            channels=session.channels,
+            dtype=dtype,
+        )
+        try:
+            while True:
+                await asyncio.sleep(0)  # yield to loop
+                try:
+                    raw = session.pcm_queue.get(timeout=0.5)
+                except queue.Empty:
+                    continue
+                if raw is None:
+                    break
+                # raw is a (frames, channels) interleaved int16 /
+                # int32 / float32 buffer serialized as bytes.
+                arr = np.frombuffer(raw, dtype=encoder.np_dtype)
+                if session.channels > 0:
+                    arr = arr.reshape(-1, session.channels)
+                encoded = encoder.encode(arr)
+                if encoded:
+                    session.flac_buffer.write(encoded)
+            tail = encoder.close()
+            if tail:
+                session.flac_buffer.write(tail)
+        finally:
+            session.flac_buffer.close()
+
+    def disconnect(self) -> None:
+        with self._lock:
+            sess = self._session
+            self._session = None
+        if sess is None:
+            return
+        try:
+            self._run_coro(self._disconnect(sess), timeout=5.0)
+        except Exception as exc:
+            log.warning("airplay disconnect hit: %s", exc)
+
+    async def _disconnect(self, sess: _ConnectedSession) -> None:
+        try:
+            sess.pcm_queue.put_nowait(None)  # sentinel to stop encoder
+        except Exception:
+            pass
+        try:
+            sess.atv.close()  # type: ignore[attr-defined]
+        except Exception:
+            pass
+        sess.flac_buffer.close()
+        if sess.http_server is not None:
+            try:
+                sess.http_server.shutdown()
+                sess.http_server.server_close()
+            except Exception:
+                pass
+
+    def is_connected(self) -> bool:
+        with self._lock:
+            return self._session is not None
+
+    def current_device_id(self) -> Optional[str]:
+        with self._lock:
+            return self._session.device_id if self._session else None
+
+    # ------------------------------------------------------------------
+    # PCM tap entrypoint
+    # ------------------------------------------------------------------
+
+    def push_pcm(self, pcm: np.ndarray) -> None:
+        """Called from the PCMPlayer audio callback on every chunk.
+        Copies into the active session's queue if there is one.
+        No-op when AirPlay is not connected."""
+        with self._lock:
+            sess = self._session
+        if sess is None:
+            return
+        # The audio callback runs on a realtime thread; we cannot
+        # block it. Use put_nowait and drop if the encoder can't
+        # keep up. A drop here would be audible on the AirPlay side
+        # but local playback keeps going. Shouldn't happen under
+        # normal load; the encoder is CPU-light.
+        try:
+            sess.pcm_queue.put_nowait(bytes(pcm))
+        except queue.Full:
+            pass
+
+    # ------------------------------------------------------------------
+    # HTTP endpoint support
+    # ------------------------------------------------------------------
+
+    def stream_iter(self, chunk_size: int = 16384):
+        """Generator yielding encoded FLAC bytes from the active
+        session. Used by the /api/airplay/stream endpoint.
+        Terminates when the session disconnects."""
+        with self._lock:
+            sess = self._session
+        if sess is None:
+            return
+        while True:
+            chunk = sess.flac_buffer.read(chunk_size, timeout=2.0)
+            if not chunk:
+                # Short idle: check whether the session was torn
+                # down. If yes, end the HTTP response so pyatv
+                # closes its connection.
+                with self._lock:
+                    if self._session is not sess:
+                        return
+                continue
+            yield chunk
+
+
+class _StreamHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+    """Dedicated HTTP server, bound to 0.0.0.0 on an ephemeral port,
+    used solely for AirPlay stream delivery.
+
+    Why not just expose the stream endpoint on the main FastAPI
+    server: FastAPI binds to 127.0.0.1 in both dev and packaged
+    builds. An AirPlay receiver is on the LAN and can't reach that
+    address. Binding FastAPI to 0.0.0.0 would fix the reachability
+    but would also expose every other /api/* endpoint to the LAN,
+    which is a security regression. Running a tiny dedicated
+    listener just for the stream endpoint keeps the blast radius
+    to exactly this one stream.
+
+    Lifecycle is bolted to the AirPlay session. Started on connect,
+    shut down on disconnect. Serves `GET /stream` and nothing else.
+    """
+
+    allow_reuse_address = True
+    daemon_threads = True
+
+    # Populated by the manager when binding so the handler can read
+    # the current session's ring buffer without plumbing it through
+    # the HTTP-server constructor chain.
+    buffer: Optional["RingBuffer"] = None
+
+
+class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
+    def log_message(self, format, *args):  # type: ignore[override]
+        # Quiet by default; switch to log.debug so `run.sh` doesn't
+        # drown in per-chunk access-log lines during streaming.
+        log.debug("airplay http: " + format, *args)
+
+    def do_GET(self) -> None:  # noqa: N802 - stdlib API
+        server = self.server  # type: ignore[assignment]
+        if not isinstance(server, _StreamHTTPServer) or server.buffer is None:
+            self.send_error(503, "airplay session not ready")
+            return
+        if self.path != "/stream":
+            self.send_error(404, "not found")
+            return
+        self.send_response(200)
+        self.send_header("Content-Type", "audio/flac")
+        # Chunked transfer lets us keep writing FLAC frames as long
+        # as the session is alive. Tells pyatv it's a stream, not a
+        # file with a known length.
+        self.send_header("Transfer-Encoding", "chunked")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        buf = server.buffer
+        try:
+            while True:
+                chunk = buf.read(16384, timeout=2.0)
+                if not chunk:
+                    # Idle read with a closed buffer ends the stream.
+                    if getattr(buf, "_closed", False):
+                        self._write_chunk(b"")
+                        return
+                    continue
+                self._write_chunk(chunk)
+        except (BrokenPipeError, ConnectionResetError):
+            # pyatv disconnected / receiver stopped pulling. Clean
+            # exit; the session-end path will tear down the server.
+            return
+
+    def _write_chunk(self, data: bytes) -> None:
+        """Write one HTTP chunked-transfer frame."""
+        header = f"{len(data):x}\r\n".encode()
+        self.wfile.write(header)
+        self.wfile.write(data)
+        self.wfile.write(b"\r\n")
+        self.wfile.flush()
+
+
+def _start_stream_http_server(buffer: "RingBuffer") -> _StreamHTTPServer:
+    server = _StreamHTTPServer(("0.0.0.0", 0), _StreamRequestHandler)
+    server.buffer = buffer
+    thread = threading.Thread(
+        target=server.serve_forever, name="airplay-http", daemon=True
+    )
+    thread.start()
+    return server
+
+
+def _primary_lan_ip() -> str:
+    """Best-effort local IP address for the AirPlay receiver to
+    reach back to this machine. Connecting a UDP socket to a public
+    address without sending forces the OS to populate the socket's
+    source address, which gives us the right interface. Falls back
+    to 127.0.0.1 if something blocks the lookup; that won't work
+    for a real AirPlay receiver but keeps the app from crashing on
+    disconnected networks."""
+    import socket
+
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except Exception:
+        return "127.0.0.1"
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass

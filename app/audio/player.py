@@ -1050,6 +1050,29 @@ class PCMPlayer:
             else:
                 self._callback_carry = self._callback_carry[take:]
 
+        # AirPlay tap. When an AirPlay session is active, push a
+        # copy of the raw decoded PCM to the AirPlay pipe BEFORE
+        # EQ / volume / mute run. The AirPlay receiver has its own
+        # volume control, so sending pre-volume audio keeps local
+        # mute from silencing the remote speaker. Import is lazy to
+        # avoid loading pyatv's import tree on machines that never
+        # use AirPlay, and to sidestep a circular-import risk
+        # between app.audio and server startup.
+        try:
+            from app.audio import airplay as _airplay_mod
+            if _airplay_mod.AirPlayManager.is_available():
+                mgr = _airplay_mod.AirPlayManager.instance()
+                if mgr.is_connected():
+                    # np.ascontiguousarray is a no-op when outdata is
+                    # already contiguous (which it always is coming
+                    # from sounddevice), so no copy cost on the hot
+                    # path. The encoder runs off-thread and is
+                    # tolerant of dropped chunks.
+                    mgr.push_pcm(np.ascontiguousarray(outdata))
+        except Exception:
+            # Never let AirPlay errors take down local playback.
+            pass
+
         # EQ (10-band biquad). Active only when the user has a
         # non-flat curve set — when disabled, `apply()` is an early
         # return and doesn't touch `outdata`, so bit-perfect
