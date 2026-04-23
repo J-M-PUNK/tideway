@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Link } from "react-router-dom";
 import { ChevronRight, Home, Music, Play } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -17,6 +18,7 @@ import type {
 import type { OnDownload } from "@/api/download";
 import { HeartButton } from "@/components/HeartButton";
 import { MediaCard } from "@/components/MediaCard";
+import { PlayMediaButton } from "@/components/PlayMediaButton";
 import { TrackList } from "@/components/TrackList";
 import { useColumnCount } from "@/hooks/useColumnCount";
 import { usePlayerActions, usePlayerMeta } from "@/hooks/PlayerContext";
@@ -387,12 +389,20 @@ function TrackCard({ track, rowTracks }: { track: Track; rowTracks: Track[] }) {
 }
 
 function MixCard({ mix }: { mix: MixItem }) {
+  // Same bottom-left hover-play treatment as MediaCard. Mixes don't
+  // have a backend favorite endpoint so the bottom-right heart slot is
+  // intentionally omitted — Tidal's own homepage renders mix cards the
+  // same way.
+  const [menuOpen, setMenuOpen] = useState(false);
+  const hoverGroup = menuOpen
+    ? "opacity-100"
+    : "opacity-0 group-hover:opacity-100 focus-within:opacity-100";
   return (
     <Link
       to={`/mix/${encodeURIComponent(mix.id)}`}
-      className="group flex flex-col gap-3 rounded-lg bg-card p-4 transition-colors hover:bg-accent"
+      className="group relative flex flex-col gap-3 rounded-lg bg-card p-4 transition-colors hover:bg-accent"
     >
-      <div className="aspect-square overflow-hidden rounded-md bg-secondary">
+      <div className="relative aspect-square overflow-hidden rounded-md bg-secondary">
         {mix.cover ? (
           <img
             src={imageProxy(mix.cover)}
@@ -402,6 +412,14 @@ function MixCard({ mix }: { mix: MixItem }) {
         ) : (
           <Music className="m-auto h-10 w-10 text-muted-foreground" />
         )}
+        <div className={`absolute bottom-2 left-2 transition-all ${hoverGroup}`}>
+          <PlayMediaButton
+            kind="mix"
+            id={mix.id}
+            className="h-10 w-10"
+            onOpenChange={setMenuOpen}
+          />
+        </div>
       </div>
       <div className="min-w-0">
         <div className="truncate font-semibold">{mix.name}</div>
