@@ -1,4 +1,3 @@
-import { useState } from "react";
 import { Link } from "react-router-dom";
 import { ChevronRight, MoreHorizontal, Music } from "lucide-react";
 import { api } from "@/api/client";
@@ -169,29 +168,27 @@ function filterHomeRows(page: TidalPage): {
 // list to pick from" than "browse editorial wall", specifically
 // Recently played and the merged Suggested new songs for you.
 // ---------------------------------------------------------------------------
-const COMPACT_COLLAPSED_COUNT = 9;
+const COMPACT_VISIBLE_COUNT = 9;
 
 function CompactRow({ category }: { category: PageCategory }) {
-  const [expanded, setExpanded] = useState(false);
-  if (category.items.length === 0) return null;
-  const items = expanded
-    ? category.items
-    : category.items.slice(0, COMPACT_COLLAPSED_COUNT);
-  const hasMore = category.items.length > COMPACT_COLLAPSED_COUNT;
+  const items = category.items.slice(0, COMPACT_VISIBLE_COUNT);
+  if (items.length === 0) return null;
+  // View more routes to the dedicated drill-down page Tidal emits for
+  // this row (same pattern the card rows use via SectionHeader). Only
+  // renders when there's more to see AND Tidal gave us a viewAllPath.
+  const hasMore =
+    category.items.length > COMPACT_VISIBLE_COUNT && !!category.viewAllPath;
   return (
     <div className="mb-10">
       <div className="mb-4 flex items-baseline justify-between gap-4">
         <h2 className="text-xl font-bold tracking-tight">{category.title}</h2>
-        {hasMore && (
-          <button
-            onClick={() => setExpanded((v) => !v)}
+        {hasMore && category.viewAllPath && (
+          <Link
+            to={`/browse/${encodeURIComponent(category.viewAllPath)}`}
             className="flex flex-shrink-0 items-center gap-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground transition-colors hover:text-foreground"
           >
-            {expanded ? "Show less" : "View more"}
-            <ChevronRight
-              className={`h-3.5 w-3.5 transition-transform ${expanded ? "rotate-90" : ""}`}
-            />
-          </button>
+            View more <ChevronRight className="h-3.5 w-3.5" />
+          </Link>
         )}
       </div>
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
