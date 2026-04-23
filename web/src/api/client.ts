@@ -764,6 +764,40 @@ export const api = {
         body: JSON.stringify({ device_id: deviceId }),
       }),
   },
+  airplay: {
+    devices: () =>
+      req<{
+        available: boolean;
+        reason?: string | null;
+        devices: {
+          id: string;
+          name: string;
+          address: string;
+          has_raop: boolean;
+          paired: boolean;
+        }[];
+        connected_id: string | null;
+      }>("/api/airplay/devices"),
+    pairStart: (deviceId: string) =>
+      req<{ ok: boolean }>("/api/airplay/pair/start", {
+        method: "POST",
+        body: JSON.stringify({ device_id: deviceId }),
+      }),
+    pairPin: (pin: string) =>
+      req<{ ok: boolean }>("/api/airplay/pair/pin", {
+        method: "POST",
+        body: JSON.stringify({ pin }),
+      }),
+    pairCancel: () =>
+      req<{ ok: boolean }>("/api/airplay/pair/cancel", { method: "POST" }),
+    connect: (deviceId: string) =>
+      req<{ ok: boolean; connected_id: string }>("/api/airplay/connect", {
+        method: "POST",
+        body: JSON.stringify({ device_id: deviceId }),
+      }),
+    disconnect: () =>
+      req<{ ok: boolean }>("/api/airplay/disconnect", { method: "POST" }),
+  },
   downloads: {
     list: () => req<DownloadItem[]>("/api/downloads"),
     enqueue: (kind: ContentKind, id: string, quality?: string) =>

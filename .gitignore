@@ -180,6 +180,7 @@ tidal_session.json
 settings.json
 watchlist.json
 download_queue.json
+airplay_credentials.json
 
 # AI assistant settings. These files can contain machine-local paths,
 # allow-listed commands, and other per-user state that should never
