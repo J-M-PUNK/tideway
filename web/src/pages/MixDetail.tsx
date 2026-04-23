@@ -1,8 +1,9 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { useParams } from "react-router-dom";
 import { api } from "@/api/client";
 import type { OnDownload } from "@/api/download";
 import { useApi } from "@/hooks/useApi";
+import { useTrackPrefetch } from "@/hooks/useTrackPrefetch";
 import { AddTracksToPlaylistButton } from "@/components/AddTracksToPlaylistButton";
 import { CollectionOverflowMenu } from "@/components/CollectionOverflowMenu";
 import { DetailHero } from "@/components/DetailHero";
@@ -17,6 +18,12 @@ export function MixDetail({ onDownload }: { onDownload: OnDownload }) {
   const { id = "" } = useParams();
   const { data: mix, loading, error } = useApi(() => api.mix(id), [id]);
   const [shuffleIntent, setShuffleIntent] = useState(false);
+  // Warm the stream-manifest cache for every track on this mix so
+  // the next click skips the Tidal playbackinfo round-trip.
+  const { prefetchMany } = useTrackPrefetch();
+  useEffect(() => {
+    if (mix?.tracks?.length) prefetchMany(mix.tracks.map((t) => t.id));
+  }, [mix, prefetchMany]);
 
   if (loading) {
     return (

@@ -1,10 +1,11 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { ChevronRight } from "lucide-react";
 import { api } from "@/api/client";
 import type { Album, Artist } from "@/api/types";
 import type { OnDownload } from "@/api/download";
 import { useApi } from "@/hooks/useApi";
+import { useTrackPrefetch } from "@/hooks/useTrackPrefetch";
 import { AddToLibraryButton } from "@/components/AddToLibraryButton";
 import { AlbumCreditsButton } from "@/components/AlbumCreditsButton";
 import { AlbumCreditsView } from "@/components/AlbumCreditsView";
@@ -26,6 +27,16 @@ import { cn, formatDuration, imageProxy } from "@/lib/utils";
 export function AlbumDetail({ onDownload }: { onDownload: OnDownload }) {
   const { id = "" } = useParams();
   const { data: album, loading, error } = useApi(() => api.album(id), [id]);
+  // Warm the stream-manifest cache for every track on this album as
+  // soon as the tracklist arrives. Makes clicking any row on an
+  // opened album effectively click-to-play because the backend
+  // already has the URLs cached by the time the click lands.
+  const { prefetchMany } = useTrackPrefetch();
+  useEffect(() => {
+    if (album?.tracks?.length) {
+      prefetchMany(album.tracks.map((t) => t.id));
+    }
+  }, [album, prefetchMany]);
   // Tidal-style Credits "tab": toggling the Credits button swaps the
   // normal TrackList body for a 2-column grid of per-track credits.
   const [showingCredits, setShowingCredits] = useState(false);

@@ -31,6 +31,7 @@ import os
 import queue
 import sys
 import threading
+import time
 from dataclasses import dataclass
 from typing import Callable, Optional, Union
 
@@ -174,6 +175,23 @@ class PCMPlayer:
         # callback at end-of-track.
         self._preload: Optional[_Preload] = None
 
+        # Stream-manifest cache. Keyed by (track_id, quality_or_None);
+        # value is (urls, duration_s, stream_info, cached_at_monotonic).
+        # Kept short (3 min) because Tidal's signed CDN URLs expire
+        # inside that window. Frontend hover / album-mount prefetch
+        # writes here so the first real click is free of the
+        # playbackinfo round-trip.
+        self._manifest_cache: dict[
+            tuple[str, Optional[str]],
+            tuple[list[str], Optional[float], StreamInfo, float],
+        ] = {}
+        self._manifest_cache_lock = threading.Lock()
+        self._manifest_cache_ttl = 180.0
+        # Hit / miss counters for the cache, surfaced by
+        # /api/player/cache-stats so you can watch them while testing.
+        self._manifest_cache_hits = 0
+        self._manifest_cache_misses = 0
+
         # 10-band biquad EQ applied in the audio callback. One
         # instance owned for the lifetime of the player; when the
         # output stream rate changes (cross-rate bridge) we rebuild
@@ -259,7 +277,9 @@ class PCMPlayer:
         # Fall through: no matching preload. Full teardown + fresh
         # resolve. This is the slow path (~300-800ms).
         self._dbg(f"load SLOW PATH: full teardown + fresh resolve for {track_id}")
+        load_t0 = time.monotonic()
         self._teardown()
+        t_teardown = time.monotonic()
         with self._lock:
             self._transition("loading", track_id=track_id)
 
@@ -267,8 +287,19 @@ class PCMPlayer:
             source_spec, duration_s, stream_info = self._resolve_source(
                 track_id, quality
             )
+            t_resolved = time.monotonic()
             initial_source = _build_source(source_spec)
             decoder = Decoder(initial_source)
+            t_decoder = time.monotonic()
+            print(
+                f"[perf] load track={track_id} "
+                f"total={(t_decoder - load_t0) * 1000.0:.0f}ms "
+                f"teardown={(t_teardown - load_t0) * 1000.0:.0f}ms "
+                f"resolve={(t_resolved - t_teardown) * 1000.0:.0f}ms "
+                f"decoder_init={(t_decoder - t_resolved) * 1000.0:.0f}ms",
+                file=sys.stderr,
+                flush=True,
+            )
         except Exception as exc:
             log.exception("failed to resolve/open source for %s", track_id)
             with self._lock:
@@ -785,24 +816,57 @@ class PCMPlayer:
             self._seq += 1
 
         self._stop_flag.set()
+        # Cancel the decoder's source BEFORE joining the thread.
+        # The thread is very often mid-HTTP-fetch inside SegmentReader
+        # when a track change fires, and stop_flag is only checked
+        # between reads. Closing the source aborts the in-flight
+        # request so read() raises on the thread and it exits in
+        # single-digit ms instead of ~400ms.
+        decoder = self._decoder
+        if decoder is not None:
+            try:
+                decoder.cancel_source()
+            except Exception:
+                pass
+
         stream = self._stream
         self._stream = None
         if stream is not None:
+            # abort() over stop(): stop() drains any buffered audio
+            # to the device before returning, which on track-change
+            # costs 400-900ms of nothing-is-happening. abort()
+            # discards the pending buffer immediately and we start
+            # the next track faster. Any in-flight tail audio just
+            # gets cut off, which is what the user already expects
+            # when clicking a new track.
+            t_abort0 = time.monotonic()
             try:
-                stream.stop()
+                stream.abort()
             except Exception:
                 pass
             try:
                 stream.close()
             except Exception:
                 pass
+            print(
+                f"[perf] teardown stream.abort+close="
+                f"{(time.monotonic() - t_abort0) * 1000.0:.0f}ms",
+                file=sys.stderr,
+                flush=True,
+            )
 
         thread = self._decoder_thread
         self._decoder_thread = None
         if thread is not None and thread.is_alive():
+            t_join0 = time.monotonic()
             thread.join(timeout=2.0)
+            print(
+                f"[perf] teardown thread.join="
+                f"{(time.monotonic() - t_join0) * 1000.0:.0f}ms",
+                file=sys.stderr,
+                flush=True,
+            )
 
-        decoder = self._decoder
         self._decoder = None
         if decoder is not None:
             try:
@@ -850,6 +914,24 @@ class PCMPlayer:
                     quality = clamped
             except Exception:
                 pass
+
+        # Cache hit path: skip the three serial Tidal round-trips
+        # (track → stream → manifest) when a recent prefetch or play
+        # already resolved this (track_id, quality) pair. 3-minute
+        # TTL stays well inside Tidal's signed-URL expiry window.
+        cache_key = (track_id, quality)
+        t0 = time.monotonic()
+        cached_urls_info = self._cache_lookup(cache_key)
+        if cached_urls_info is not None:
+            urls, duration, info = cached_urls_info
+            print(
+                f"[perf] resolve track={track_id} quality={quality} "
+                f"cache=HIT elapsed={(time.monotonic() - t0) * 1000.0:.0f}ms",
+                file=sys.stderr,
+                flush=True,
+            )
+            return (list(urls), duration, info)
+
         override = None
         if quality:
             try:
@@ -860,9 +942,15 @@ class PCMPlayer:
         if override is not None:
             session.config.quality = override
         try:
+            # Per-phase timings so we can see which of the three
+            # Tidal round-trips is the slow one on any given play.
+            t_track = time.monotonic()
             track = session.track(int(track_id))
+            t_stream = time.monotonic()
             stream = track.get_stream()
+            t_manifest = time.monotonic()
             manifest = stream.get_stream_manifest()
+            t_end = time.monotonic()
             if getattr(manifest, "is_encrypted", False):
                 raise RuntimeError("encrypted stream — can't decode")
             urls = list(getattr(manifest, "urls", []) or [])
@@ -880,10 +968,94 @@ class PCMPlayer:
                 audio_quality=getattr(stream, "audio_quality", None),
                 audio_mode=getattr(stream, "audio_mode", None),
             )
-            return (list(urls), float(duration) if duration else None, info)
+            duration_s = float(duration) if duration else None
+            self._cache_store(cache_key, list(urls), duration_s, info)
+            print(
+                f"[perf] resolve track={track_id} quality={quality} cache=MISS "
+                f"total={(t_end - t0) * 1000.0:.0f}ms "
+                f"track={(t_stream - t_track) * 1000.0:.0f}ms "
+                f"stream={(t_manifest - t_stream) * 1000.0:.0f}ms "
+                f"manifest={(t_end - t_manifest) * 1000.0:.0f}ms "
+                f"segments={len(urls)}",
+                file=sys.stderr,
+                flush=True,
+            )
+            return (list(urls), duration_s, info)
         finally:
             if override is not None:
                 session.config.quality = original
+
+    def _cache_lookup(
+        self, key: tuple[str, Optional[str]]
+    ) -> Optional[tuple[list[str], Optional[float], StreamInfo]]:
+        now = time.monotonic()
+        with self._manifest_cache_lock:
+            entry = self._manifest_cache.get(key)
+            if entry is None:
+                self._manifest_cache_misses += 1
+                return None
+            urls, duration, info, cached_at = entry
+            if now - cached_at > self._manifest_cache_ttl:
+                self._manifest_cache.pop(key, None)
+                self._manifest_cache_misses += 1
+                return None
+            self._manifest_cache_hits += 1
+            return list(urls), duration, info
+
+    def cache_stats(self) -> dict:
+        """Snapshot of the manifest cache for the /api/player/cache-stats
+        endpoint. Read while testing the prefetch path to confirm
+        hovers / album-mount prefetches are landing."""
+        with self._manifest_cache_lock:
+            now = time.monotonic()
+            entries = [
+                {
+                    "track_id": tid,
+                    "quality": q,
+                    "age_ms": int((now - cached_at) * 1000.0),
+                    "segments": len(urls),
+                }
+                for (tid, q), (urls, _dur, _info, cached_at) in list(
+                    self._manifest_cache.items()
+                )
+            ]
+            return {
+                "hits": self._manifest_cache_hits,
+                "misses": self._manifest_cache_misses,
+                "ttl_seconds": int(self._manifest_cache_ttl),
+                "size": len(self._manifest_cache),
+                "entries": entries,
+            }
+
+    def _cache_store(
+        self,
+        key: tuple[str, Optional[str]],
+        urls: list[str],
+        duration: Optional[float],
+        info: StreamInfo,
+    ) -> None:
+        with self._manifest_cache_lock:
+            self._manifest_cache[key] = (urls, duration, info, time.monotonic())
+            # Evict expired siblings while we have the lock; keeps
+            # memory bounded without a background janitor thread.
+            if len(self._manifest_cache) > 128:
+                cutoff = time.monotonic() - self._manifest_cache_ttl
+                stale = [k for k, v in self._manifest_cache.items() if v[3] < cutoff]
+                for k in stale:
+                    self._manifest_cache.pop(k, None)
+
+    def prefetch(self, track_id: str, quality: Optional[str] = None) -> bool:
+        """Populate the manifest cache for a track without starting
+        playback. Safe to call speculatively from hover / album-mount
+        warmers. Returns True if the cache now has an entry for this
+        (track_id, quality), False on any failure — callers are
+        fire-and-forget so errors are swallowed."""
+        try:
+            self._resolve_source(track_id, quality)
+            return True
+        except Exception as exc:
+            log.debug("prefetch %s@%s failed: %s", track_id, quality, exc)
+            return False
 
     def _open_output_stream(self, sample_rate: int, channels: int, dtype: str) -> None:
         # If the user picked a specific output device, use it;
@@ -1188,8 +1360,12 @@ class PCMPlayer:
             except Exception:
                 pass
         if old_stream is not None:
+            # abort() over stop() — same reason as _teardown above:
+            # stop() drains the buffer and stalls the cross-rate
+            # bridge by half a second. Any tail audio we discard
+            # is about to be drowned by the new stream anyway.
             try:
-                old_stream.stop()
+                old_stream.abort()
             except Exception:
                 pass
             try:

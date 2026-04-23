@@ -18,6 +18,7 @@ import type { PlaySource } from "@/hooks/usePlayer";
 import { useDownloadedIds, useIsDownloaded } from "@/hooks/useDownloadedSet";
 import { useLastfmTrackPlaycount } from "@/hooks/useLastfmPlaycount";
 import { useSpotifyTrackPlaycount } from "@/hooks/useSpotifyEnrichment";
+import { useHoverPrefetch } from "@/hooks/useTrackPrefetch";
 import { useTrackSelection } from "@/hooks/useTrackSelection";
 import { useUiPreferences } from "@/hooks/useUiPreferences";
 import { HeartButton } from "@/components/HeartButton";
@@ -417,6 +418,11 @@ function TrackRow({
     onShowCredits: () => setCreditsOpen(true),
   };
 
+  // Warm the stream manifest on hover so the click-to-play round-trip
+  // skips the track → stream → manifest fetch chain. 200ms delay in
+  // the hook filters out casual cursor drive-bys.
+  const hoverPrefetch = useHoverPrefetch();
+
   return (
     <ContextMenu>
       <ContextMenuTrigger asChild>
@@ -435,6 +441,8 @@ function TrackRow({
             sort.isDragging && "bg-accent shadow-lg",
           )}
           onDoubleClick={() => actions.play(track, context, source)}
+          onMouseEnter={() => hoverPrefetch.schedule(track.id)}
+          onMouseLeave={hoverPrefetch.cancel}
         >
           <RowLeadCell
             index={index}
