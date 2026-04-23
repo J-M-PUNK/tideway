@@ -5805,14 +5805,26 @@ def _fetch_v2_view_all(path: str) -> dict:
         # promotedArtists that Tidal drops from V2 view-all payloads,
         # so a playlist that renders fine on Home disappears here unless
         # we can bypass the strict parser.
-        if serialized is None:
-            serialized = _raw_entry_to_item(entry)
-        if serialized:
+        if serialized is None or _is_empty_shell(serialized):
+            serialized = _raw_entry_to_item(entry) or serialized
+        if serialized and not _is_empty_shell(serialized):
             out.append(serialized)
         else:
             dropped_types.append(
                 (entry.get("type") if isinstance(entry, dict) else None) or "?"
             )
+            if isinstance(entry, dict):
+                try:
+                    preview = json.dumps(entry)[:600]
+                except Exception:
+                    preview = repr(entry)[:600]
+                print(
+                    f"[page/resolve] could not build an item for "
+                    f"type={entry.get('type')!r}; entry keys={list(entry.keys())}; "
+                    f"sample={preview}",
+                    file=sys.stderr,
+                    flush=True,
+                )
 
     if dropped_types:
         print(
@@ -5850,7 +5862,7 @@ def _raw_entry_to_item(entry: Any) -> Optional[dict]:
     if not isinstance(entry, dict):
         return None
     item_type = (entry.get("type") or "").upper()
-    data = entry.get("data") if isinstance(entry.get("data"), dict) else entry
+    data = _resolve_entry_payload(entry, item_type)
 
     def _cover(uuid: Optional[str]) -> Optional[str]:
         return _cover_url_from_uuid(uuid, size=640) if uuid else None
@@ -5947,6 +5959,35 @@ def _release_year(date_str: Optional[str]) -> Optional[int]:
         return int(str(date_str)[:4])
     except Exception:
         return None
+
+
+def _is_empty_shell(item: dict) -> bool:
+    """True when an item dict has no id and no name — the card would
+    render as a blank placeholder with a music icon. Better to drop it
+    than to paint emptiness on the page."""
+    if not isinstance(item, dict):
+        return True
+    has_id = bool(str(item.get("id") or "").strip())
+    has_name = bool((item.get("name") or "").strip())
+    return not (has_id and has_name)
+
+
+def _resolve_entry_payload(entry: dict, item_type: str) -> dict:
+    """Find the inner object inside a V2 view-all entry. Tidal puts the
+    real payload in different slots depending on endpoint: some ship
+    `data`, others ship `item`, others stash a type-specific key like
+    `playlist`/`album`, and a few dump the fields straight onto the
+    entry. Try each candidate in turn."""
+    type_key = item_type.lower() if item_type else ""
+    candidate_keys = ("data", "item", type_key) if type_key else ("data", "item")
+    for key in candidate_keys:
+        if not key:
+            continue
+        candidate = entry.get(key)
+        if isinstance(candidate, dict) and candidate:
+            return candidate
+    # Fall through: treat the entry itself as the payload.
+    return entry
 
 
 def _collect_v2_items(body: Any) -> list:
