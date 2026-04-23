@@ -530,6 +530,7 @@ function ArtistCard({ rank, artist }: { rank: number; artist: LastFmTopArtist })
             src={img}
             alt=""
             className="h-full w-full object-cover transition-transform group-hover:scale-105"
+            loading="lazy"
           />
         ) : (
           <div className="flex h-full w-full items-center justify-center text-muted-foreground">
@@ -607,6 +608,7 @@ function AlbumCard({ rank, album }: { rank: number; album: LastFmTopAlbum }) {
             src={img}
             alt=""
             className="h-full w-full object-cover transition-transform group-hover:scale-105"
+            loading="lazy"
           />
         ) : (
           <div className="flex h-full w-full items-center justify-center text-muted-foreground">

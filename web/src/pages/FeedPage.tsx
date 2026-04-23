@@ -135,6 +135,7 @@ function FeedCard({ item, onDownload }: { item: FeedItem; onDownload: OnDownload
               src={cover}
               alt=""
               className="h-full w-full object-cover transition-transform group-hover:scale-105"
+              loading="lazy"
             />
           ) : (
             <div className="flex h-full w-full items-center justify-center text-muted-foreground">

@@ -130,7 +130,12 @@ function QueueRow({
         title="Jump to this track"
       >
         {cover ? (
-          <img src={cover} alt="" className="h-full w-full object-cover" />
+          <img
+            src={cover}
+            alt=""
+            className="h-full w-full object-cover"
+            loading="lazy"
+          />
         ) : (
           <div className="flex h-full w-full items-center justify-center text-muted-foreground">
             <Music className="h-4 w-4" />
