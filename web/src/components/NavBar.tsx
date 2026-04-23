@@ -91,7 +91,7 @@ export function NavBar({
       >
         <ChevronRight className="h-4 w-4" />
       </button>
-      <NavBarSearch />
+      <NavBarSearch className="ml-auto" />
       <UserMenu
         username={username}
         avatar={avatar}
@@ -110,7 +110,7 @@ export function NavBar({
  * URL so both stays in sync. Empty input on a non-Search route does
  * nothing — we only push once there's something to look for.
  */
-function NavBarSearch() {
+function NavBarSearch({ className }: { className?: string }) {
   const navigate = useNavigate();
   const location = useLocation();
   const [params] = useSearchParams();
@@ -142,7 +142,7 @@ function NavBarSearch() {
   };
 
   return (
-    <div className="relative ml-2 flex-1 max-w-md">
+    <div className={cn("relative w-72", className)}>
       <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
       <Input
         value={value}
