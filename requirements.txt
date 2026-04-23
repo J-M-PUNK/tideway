@@ -44,6 +44,13 @@ pystray>=0.19.5
 # import, so the actual libs stay off the dependency list — ~15 MB
 # smaller install.
 spotapi>=1.2.7
+# UPnP / DLNA MediaRenderer output. Same library Home Assistant's
+# DLNA integration uses. Covers SSDP discovery, AVTransport control
+# (play/pause/seek), RenderingControl (volume), and OpenHome for
+# the Linn / Naim side of the streamer market. Optional: if the
+# wheel fails to install, app/audio/upnp.py silently disables the
+# UPnP output path and the rest of the app keeps working.
+async-upnp-client>=0.38.0
 # Build-only: PyInstaller packages desktop.py + web/dist into a native
 # .exe / .app. Not needed at runtime but bundling keeps the build command
 # documented in a single place.
