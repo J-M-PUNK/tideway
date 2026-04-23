@@ -5791,22 +5791,43 @@ def _fetch_v2_view_all(path: str) -> dict:
     title = body.get("title") or ""
     raw_items = _collect_v2_items(body)
     out: list[dict] = []
+    dropped_types: list[str] = []
     for entry in raw_items:
+        serialized: Optional[dict] = None
+        # First try tidalapi's parsers + our existing serializer. They
+        # cover the common shape where Tidal includes every field the
+        # parser expects.
         obj = _parse_v2_item(session, entry)
-        if obj is None:
-            continue
-        serialized = _serialize_page_item(obj)
+        if obj is not None:
+            serialized = _serialize_page_item(obj)
+        # Fallback: map the raw JSON straight to our wire shape. tidalapi's
+        # parse methods insist on fields like numberOfVideos /
+        # promotedArtists that Tidal drops from V2 view-all payloads,
+        # so a playlist that renders fine on Home disappears here unless
+        # we can bypass the strict parser.
+        if serialized is None:
+            serialized = _raw_entry_to_item(entry)
         if serialized:
             out.append(serialized)
+        else:
+            dropped_types.append(
+                (entry.get("type") if isinstance(entry, dict) else None) or "?"
+            )
+
+    if dropped_types:
+        print(
+            f"[page/resolve] view-all dropped {len(dropped_types)} item(s) for "
+            f"path={path!r}; types={sorted(set(dropped_types))}",
+            file=sys.stderr,
+            flush=True,
+        )
 
     if not out:
-        # Log the body when parsing produced nothing so we can diagnose
-        # new Tidal response shapes without having to add tracing each
-        # time a row silently disappears from the UI.
         preview = json.dumps(body)[:800] if isinstance(body, (dict, list)) else str(body)[:800]
         print(
             f"[page/resolve] view-all produced zero items for path={path!r}; "
             f"body preview: {preview}",
+            file=sys.stderr,
             flush=True,
         )
 
@@ -5816,6 +5837,116 @@ def _fetch_v2_view_all(path: str) -> dict:
             {"type": "HorizontalList", "title": "", "items": out},
         ],
     }
+
+
+def _raw_entry_to_item(entry: Any) -> Optional[dict]:
+    """Map a raw Tidal V2 item entry straight onto our PageItem shape.
+
+    This is the fallback for when tidalapi's strict parsers reject a
+    payload that is missing a field. The UI only needs id, name, a cover
+    image, and enough metadata to render the card, so we can build that
+    from whichever fields Tidal did include without demanding the full
+    set tidalapi wants."""
+    if not isinstance(entry, dict):
+        return None
+    item_type = (entry.get("type") or "").upper()
+    data = entry.get("data") if isinstance(entry.get("data"), dict) else entry
+
+    def _cover(uuid: Optional[str]) -> Optional[str]:
+        return _cover_url_from_uuid(uuid, size=640) if uuid else None
+
+    def _artist_names(xs) -> list[dict]:
+        out: list[dict] = []
+        if not isinstance(xs, list):
+            return out
+        for a in xs:
+            if not isinstance(a, dict):
+                continue
+            name = a.get("name") or ""
+            aid = a.get("id")
+            if name or aid is not None:
+                out.append({"id": str(aid or ""), "name": name, "picture": a.get("picture")})
+        return out
+
+    try:
+        if item_type == "PLAYLIST":
+            return {
+                "kind": "playlist",
+                "id": str(data.get("uuid") or data.get("id") or ""),
+                "name": data.get("title") or "",
+                "description": data.get("description") or "",
+                "num_tracks": int(data.get("numberOfTracks") or 0),
+                "duration": int(data.get("duration") or 0),
+                "cover": _cover(data.get("squareImage") or data.get("image")),
+                "creator": (data.get("creator") or {}).get("name"),
+                "creator_id": str((data.get("creator") or {}).get("id") or "") or None,
+                "owned": False,
+                "share_url": None,
+            }
+        if item_type == "ALBUM":
+            return {
+                "kind": "album",
+                "id": str(data.get("id") or ""),
+                "name": data.get("title") or "",
+                "num_tracks": int(data.get("numberOfTracks") or 0),
+                "year": _release_year(data.get("releaseDate") or data.get("streamStartDate")),
+                "duration": int(data.get("duration") or 0),
+                "cover": _cover(data.get("cover")),
+                "artists": _artist_names(data.get("artists")),
+                "explicit": bool(data.get("explicit")),
+                "share_url": None,
+                "release_date": data.get("releaseDate"),
+                "copyright": data.get("copyright"),
+                "media_tags": data.get("mediaMetadata", {}).get("tags") or [],
+            }
+        if item_type == "ARTIST":
+            return {
+                "kind": "artist",
+                "id": str(data.get("id") or ""),
+                "name": data.get("name") or "",
+                "picture": _cover(data.get("picture")),
+            }
+        if item_type == "TRACK":
+            album = data.get("album") or {}
+            return {
+                "kind": "track",
+                "id": str(data.get("id") or ""),
+                "name": data.get("title") or "",
+                "duration": int(data.get("duration") or 0),
+                "track_num": int(data.get("trackNumber") or 0),
+                "explicit": bool(data.get("explicit")),
+                "artists": _artist_names(data.get("artists")),
+                "album": {
+                    "id": str(album.get("id") or ""),
+                    "name": album.get("title") or "",
+                    "cover": _cover(album.get("cover")),
+                } if album.get("id") else None,
+                "share_url": None,
+                "media_tags": data.get("mediaMetadata", {}).get("tags") or [],
+                "isrc": data.get("isrc"),
+            }
+        if item_type == "MIX":
+            images = data.get("images") or {}
+            sq = images.get("SQUARE") or images.get("MEDIUM") or {}
+            return {
+                "kind": "mix",
+                "id": str(data.get("id") or ""),
+                "name": data.get("title") or "",
+                "subtitle": data.get("subTitle") or data.get("subtitle") or "",
+                "cover": sq.get("url"),
+            }
+    except Exception:
+        return None
+    return None
+
+
+def _release_year(date_str: Optional[str]) -> Optional[int]:
+    if not date_str:
+        return None
+    try:
+        return int(str(date_str)[:4])
+    except Exception:
+        return None
 
 
 def _collect_v2_items(body: Any) -> list:
