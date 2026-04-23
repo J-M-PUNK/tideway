@@ -104,11 +104,11 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
+    # tkinter isn't imported by anything we ship, but Python's stdlib
+    # _includes_ it, so PyInstaller will happily bundle it unless we
+    # say otherwise. Exclude to keep the bundle lean.
     excludes=[
-        "customtkinter",
         "tkinter",
-        "app.gui",
-        "app.image_cache",
     ],
     cipher=block_cipher,
     noarchive=False,
