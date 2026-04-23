@@ -1,14 +1,15 @@
 import { Link } from "react-router-dom";
-import { ChevronRight, MoreHorizontal, Music } from "lucide-react";
+import { ChevronRight, MoreHorizontal, Music, Play } from "lucide-react";
 import { api } from "@/api/client";
 import type { OnDownload } from "@/api/download";
 import { useApi } from "@/hooks/useApi";
+import { usePlayerActions, usePlayerMeta } from "@/hooks/PlayerContext";
 import { PageView } from "@/components/PageView";
 import { ErrorView } from "@/components/ErrorView";
 import { GridSkeleton } from "@/components/Skeletons";
 import { LastfmConnectNudge } from "@/components/LastfmConnectNudge";
 import { imageProxy } from "@/lib/utils";
-import type { PageCategory, PageItem, TidalPage } from "@/api/types";
+import type { PageCategory, PageItem, TidalPage, Track } from "@/api/types";
 
 // Titles of Tidal editorial rows we do not want on our home page.
 // Matched case insensitively as a substring against the row title,
@@ -193,11 +194,22 @@ function CompactRow({ category }: { category: PageCategory }) {
       </div>
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
         {items.map((item, i) => (
-          <CompactPill key={`${item.kind}-${pillId(item, i)}`} item={item} />
+          <CompactPill
+            key={`${item.kind}-${pillId(item, i)}`}
+            item={item}
+            rowTracks={rowTracks(items)}
+          />
         ))}
       </div>
     </div>
   );
+}
+
+// Pull the row's tracks out once so every CompactPill that represents a
+// track shares the same context queue. Clicking a track's cover plays
+// that track and sets next/prev to walk the rest of the row's tracks.
+function rowTracks(items: PageItem[]): Track[] {
+  return items.filter((it): it is Track => it.kind === "track");
 }
 
 function pillId(item: PageItem, fallback: number): string {
@@ -257,14 +269,80 @@ function pillSubtitle(item: PageItem): string {
   }
 }
 
-function CompactPill({ item }: { item: PageItem }) {
+function CompactPill({
+  item,
+  rowTracks,
+}: {
+  item: PageItem;
+  rowTracks: Track[];
+}) {
+  // Tracks have three separate hit regions so the card behaves like
+  // Tidal's own client: cover plays, title opens the album, subtitle
+  // opens the artist. Non-track items (albums, artists, playlists,
+  // mixes) keep the simpler whole-pill-is-a-link behaviour.
+  if (item.kind === "track") {
+    return <TrackPill track={item} rowTracks={rowTracks} />;
+  }
+  return <EntityPill item={item} />;
+}
+
+const PILL_CLASS =
+  "flex items-center gap-3 rounded-md bg-card/60 p-2 pr-3 transition-colors hover:bg-accent";
+
+function EntityPill({ item }: { item: PageItem }) {
   const to = pillRoute(item);
   const cover = pillCover(item);
   const name = "name" in item ? item.name : "title" in item ? item.title : "";
   const subtitle = pillSubtitle(item);
   const inner = (
     <>
-      <div className="h-12 w-12 flex-shrink-0 overflow-hidden rounded bg-secondary">
+      <PillCover cover={cover} />
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-sm font-semibold">{name}</div>
+        {subtitle && (
+          <div className="truncate text-xs text-muted-foreground">
+            {subtitle}
+          </div>
+        )}
+      </div>
+      <MoreHorizontal className="h-4 w-4 flex-shrink-0 text-muted-foreground" />
+    </>
+  );
+  if (to) {
+    return (
+      <Link to={to} className={PILL_CLASS}>
+        {inner}
+      </Link>
+    );
+  }
+  return <div className={PILL_CLASS}>{inner}</div>;
+}
+
+function TrackPill({ track, rowTracks }: { track: Track; rowTracks: Track[] }) {
+  const actions = usePlayerActions();
+  const meta = usePlayerMeta();
+  const isCurrent = meta.track?.id === track.id;
+  const isPlaying = isCurrent && meta.playing;
+  const cover = track.album?.cover ?? null;
+  const albumPath = track.album ? `/album/${track.album.id}` : null;
+  const primaryArtist = track.artists[0];
+  const artistPath = primaryArtist ? `/artist/${primaryArtist.id}` : null;
+  const artistLabel = track.artists.map((a) => a.name).join(", ");
+  const handlePlay = () => {
+    if (isCurrent) {
+      actions.toggle();
+    } else {
+      actions.play(track, rowTracks);
+    }
+  };
+  return (
+    <div className={`${PILL_CLASS} group`}>
+      <button
+        type="button"
+        onClick={handlePlay}
+        aria-label={isPlaying ? `Pause ${track.name}` : `Play ${track.name}`}
+        className="relative h-12 w-12 flex-shrink-0 overflow-hidden rounded bg-secondary"
+      >
         {cover ? (
           <img
             src={imageProxy(cover)}
@@ -277,28 +355,64 @@ function CompactPill({ item }: { item: PageItem }) {
             <Music className="h-5 w-5" />
           </div>
         )}
-      </div>
+        <span
+          className={`absolute inset-0 flex items-center justify-center bg-black/50 transition-opacity ${
+            isPlaying
+              ? "opacity-100"
+              : "opacity-0 group-hover:opacity-100 focus-visible:opacity-100"
+          }`}
+        >
+          <Play className="h-5 w-5 text-foreground" fill="currentColor" />
+        </span>
+      </button>
       <div className="min-w-0 flex-1">
-        <div className="truncate text-sm font-semibold">{name}</div>
-        {subtitle && (
-          <div className="truncate text-xs text-muted-foreground">
-            {subtitle}
-          </div>
+        {albumPath ? (
+          <Link
+            to={albumPath}
+            className="block truncate text-sm font-semibold hover:underline"
+          >
+            {track.name}
+          </Link>
+        ) : (
+          <div className="truncate text-sm font-semibold">{track.name}</div>
+        )}
+        {artistLabel && (
+          artistPath ? (
+            <Link
+              to={artistPath}
+              className="block truncate text-xs text-muted-foreground hover:underline"
+            >
+              {artistLabel}
+            </Link>
+          ) : (
+            <div className="truncate text-xs text-muted-foreground">
+              {artistLabel}
+            </div>
+          )
         )}
       </div>
       <MoreHorizontal className="h-4 w-4 flex-shrink-0 text-muted-foreground" />
-    </>
+    </div>
   );
-  const className =
-    "flex items-center gap-3 rounded-md bg-card/60 p-2 pr-3 transition-colors hover:bg-accent";
-  if (to) {
-    return (
-      <Link to={to} className={className}>
-        {inner}
-      </Link>
-    );
-  }
-  return <div className={className}>{inner}</div>;
+}
+
+function PillCover({ cover }: { cover: string | null }) {
+  return (
+    <div className="h-12 w-12 flex-shrink-0 overflow-hidden rounded bg-secondary">
+      {cover ? (
+        <img
+          src={imageProxy(cover)}
+          alt=""
+          className="h-full w-full object-cover"
+          loading="lazy"
+        />
+      ) : (
+        <div className="flex h-full w-full items-center justify-center text-muted-foreground">
+          <Music className="h-5 w-5" />
+        </div>
+      )}
+    </div>
+  );
 }
 
 export function Home({ onDownload }: { onDownload: OnDownload }) {
