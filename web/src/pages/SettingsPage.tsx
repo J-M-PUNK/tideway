@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import {
-  Activity,
   Bell,
   Check,
   ChevronRight,
@@ -214,7 +213,7 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
         </Field>
       </Section>
 
-      <AirPlaySection />
+      {import.meta.env.VITE_SHOW_AIRPLAY === "1" && <AirPlaySection />}
 
       <Section
         title="Downloads"
@@ -346,8 +345,6 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
       </Section>
 
       <AutostartSection />
-
-      <PlayReportingSection />
 
       <LastFmSection />
 
@@ -1281,175 +1278,6 @@ function LastFmSection() {
  * / reinstalled / moved. Component fetches its own status and writes
  * directly; no coupling to the Settings dataclass.
  */
-/**
- * Diagnostic panel for Tidal play-reporting. Shows the recent report
- * log + a "Send test event" button that fires a synthetic playback
- * session through the same path a real play takes. If events are
- * being accepted by Tidal (HTTP 200) but not showing up on the
- * official Tidal app's Recently Played, that's a server-side quirk
- * (caching, delay, event format) rather than a bug in this client.
- */
-function PlayReportingSection() {
-  const toast = useToast();
-  const [entries, setEntries] = useState<
-    {
-      ts_ms: number;
-      phase: string;
-      track_id: string;
-      http_status: number | null;
-      listened_s?: number;
-      client_id?: string;
-      source_type?: string;
-      source_id?: string;
-      note?: string;
-      payload_preview?: string;
-    }[]
-  >([]);
-  const [busy, setBusy] = useState(false);
-  const [expandedIdx, setExpandedIdx] = useState<number | null>(null);
-
-  const refresh = async () => {
-    try {
-      const res = await api.playReportLog();
-      setEntries(res.entries);
-    } catch {
-      /* ignore — endpoint is optional in dev */
-    }
-  };
-
-  useEffect(() => {
-    refresh();
-    // Poll every 5 seconds so real plays (fired on track-end by the
-    // global hook) surface in the panel automatically.
-    const h = window.setInterval(refresh, 5000);
-    return () => window.clearInterval(h);
-  }, []);
-
-  const runTest = async () => {
-    setBusy(true);
-    try {
-      const res = await api.playReportDiagnose();
-      if (res.ok && res.entry) {
-        const status = res.entry.http_status;
-        if (status && status < 400) {
-          toast.show({
-            kind: "success",
-            title: "Tidal accepted the test event",
-            description:
-              "If the test track doesn't show up in Recently Played within a few minutes, Tidal is aggregating more slowly than usual.",
-          });
-        } else {
-          toast.show({
-            kind: "error",
-            title: `Tidal rejected the test event${status ? ` (HTTP ${status})` : ""}`,
-            description: res.entry.note || "Check the log below for details.",
-          });
-        }
-      } else {
-        toast.show({
-          kind: "error",
-          title: "Test didn't complete",
-          description: res.reason || "Reporter didn't process the event.",
-        });
-      }
-      await refresh();
-    } catch (err) {
-      toast.show({
-        kind: "error",
-        title: "Diagnose failed",
-        description: err instanceof Error ? err.message : String(err),
-      });
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const recent = entries.slice().reverse().slice(0, 15);
-  return (
-    <Section
-      title="Play reporting"
-      icon={Activity}
-      description="Every time a track plays here, an event is sent to Tidal so it appears in your Recently Played / feeds recommendations / credits the artist. If that's not working, send a test and watch the log below."
-    >
-      <div className="flex items-center gap-3">
-        <Button onClick={runTest} disabled={busy}>
-          {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Activity className="h-4 w-4" />}
-          Send test event
-        </Button>
-        <Button variant="outline" size="sm" onClick={refresh}>
-          Refresh log
-        </Button>
-      </div>
-      {recent.length === 0 ? (
-        <p className="text-xs text-muted-foreground">
-          No play events yet. Play a track for &gt; 30 seconds (or click
-          Send test event) to see activity here.
-        </p>
-      ) : (
-        <div className="flex flex-col gap-1 rounded-md border border-border/50 bg-card/40 p-2 text-xs font-mono">
-          {recent.map((e, i) => {
-            const ok = e.phase === "sent" && e.http_status !== null && e.http_status < 400;
-            const skipped = e.phase === "skipped";
-            const failed = !ok && !skipped;
-            const expanded = expandedIdx === i;
-            const hasPayload = !!e.payload_preview;
-            // Only reformat when the row is open — the list polls every
-            // 5s and re-renders all rows, so parsing every payload on
-            // every tick adds up once the buffer fills.
-            let prettyPayload = "";
-            if (expanded && e.payload_preview) {
-              try {
-                prettyPayload = JSON.stringify(JSON.parse(e.payload_preview), null, 2);
-              } catch {
-                prettyPayload = e.payload_preview;
-              }
-            }
-            return (
-              <div key={i} className="flex flex-col">
-                <button
-                  type="button"
-                  onClick={() => hasPayload && setExpandedIdx(expanded ? null : i)}
-                  className={cn(
-                    "flex items-start gap-2 px-2 py-1 text-left",
-                    hasPayload && "cursor-pointer hover:bg-card/60",
-                    ok && "text-foreground",
-                    skipped && "text-muted-foreground",
-                    failed && "text-destructive",
-                  )}
-                >
-                  <span className="w-16 tabular-nums text-muted-foreground">
-                    {new Date(e.ts_ms).toLocaleTimeString([], {
-                      hour: "2-digit",
-                      minute: "2-digit",
-                      second: "2-digit",
-                    })}
-                  </span>
-                  <span className="w-16 font-semibold">
-                    {ok ? `HTTP ${e.http_status}` : skipped ? "SKIP" : failed ? `HTTP ${e.http_status ?? "err"}` : e.phase}
-                  </span>
-                  <span className="w-24 truncate">track {e.track_id}</span>
-                  {e.listened_s != null && (
-                    <span className="w-16 tabular-nums text-muted-foreground">
-                      {e.listened_s}s
-                    </span>
-                  )}
-                  {e.note && <span className="min-w-0 flex-1 truncate">{e.note}</span>}
-                </button>
-                {expanded && prettyPayload && (
-                  <pre className="mx-2 mb-2 overflow-x-auto rounded bg-background/50 p-2 text-[10px] leading-tight text-muted-foreground">
-                    {prettyPayload}
-                  </pre>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      )}
-    </Section>
-  );
-}
-
-
 function AutostartSection() {
   const toast = useToast();
   const [status, setStatus] = useState<{
