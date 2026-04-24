@@ -462,12 +462,24 @@ def main(argv: Optional[list[str]] = None) -> int:
         _graceful_shutdown(server)
         return 0
 
+    # "Start minimized" — read via the FastAPI process's own settings
+    # module so we don't duplicate the on-disk file's format here.
+    # Fails open: if the setting module fails to import (fresh install,
+    # corrupted settings.json) we show the window normally.
+    start_hidden = False
+    try:
+        from app.settings import load_settings as _load_settings  # type: ignore
+        start_hidden = bool(getattr(_load_settings(), "start_minimized", False))
+    except Exception:
+        start_hidden = False
+
     window = webview.create_window(
         "Tideway",
         f"http://{HOST}:{PORT}/",
         width=1280,
         height=800,
         min_size=(800, 600),
+        hidden=start_hidden,
     )
 
     # --- Hide-on-close + tray wiring ---------------------------------
@@ -1064,13 +1076,20 @@ def main(argv: Optional[list[str]] = None) -> int:
     # player" control can spawn a second pywebview window.
     _server.register_mini_player_callback(_open_mini_player)
     # Register the in-app login callback so the frontend can kick off
-    # the PKCE flow without the user having to copy the Oops URL. On
-    # macOS we route through Safari (handles SSO natively, no
-    # WKWebView crash); on Windows/Linux we use the pywebview child
-    # window that intercepts the redirect inline.
-    if sys.platform == "darwin":
-        _server.register_inapp_login_callback(_start_safari_login)
-    else:
+    # the PKCE flow without the user having to copy the Oops URL.
+    # macOS has two complications the other platforms don't:
+    #   1. WKWebView hard-traps on appleid.apple.com, so the in-app
+    #      pywebview window can't host Sign-in-with-Apple.
+    #   2. The Safari + AppleScript auto-capture workaround relies on
+    #      the user granting Automation permission AND keeping Safari
+    #      as the tab owner, which empirically trips over enough
+    #      real-world setups that the plain paste-the-Oops-URL flow
+    #      is more reliable end-to-end.
+    # So on macOS we skip the callback — /api/auth/login/inapp/start
+    # returns `supported: false` and the frontend falls back to the
+    # paste flow, opening Safari itself via /api/open-external.
+    # Windows / Linux keep the inline pywebview child window.
+    if sys.platform != "darwin":
         _server.register_inapp_login_callback(_open_login_window)
 
     # Start the tray icon. Non-blocking (run_detached internally).
