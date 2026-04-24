@@ -227,6 +227,12 @@ export const api = {
       req<LastFmChartTrack[]>(
         `/api/lastfm/chart/top-tracks?limit=${limit}`,
       ),
+    /** Last.fm top tracks pre-resolved to Tidal Track objects. One
+     *  round-trip instead of the N+1 resolve-on-client pattern. */
+    chartTopTracksResolved: (limit = 50) =>
+      req<Track[]>(
+        `/api/lastfm/chart/top-tracks-resolved?limit=${limit}`,
+      ),
     chartTopTags: (limit = 50) =>
       req<LastFmChartTag[]>(`/api/lastfm/chart/top-tags?limit=${limit}`),
     nowPlaying: (track: {
@@ -271,6 +277,29 @@ export const api = {
     trackPlaycount: (isrc: string) =>
       req<{ playcount: number | null }>(
         `/api/spotify/track-playcount?isrc=${encodeURIComponent(isrc)}`,
+      ),
+    /** Batched playcount lookup with optional fuzzy fallback. Pass
+     *  the tracks in full so the server can fall back to a
+     *  title + primary-artist search when Spotify's ISRC index
+     *  doesn't have a given recording (common for feature-version
+     *  ISRCs and brand-new releases).
+     *
+     *  `refresh: true` drops stale null/zero cache entries first,
+     *  so pages where completeness matters (like Popular) self-heal
+     *  from an earlier throttle hit at the cost of extra Spotify
+     *  round-trips on this one call.
+     *
+     *  Returns `{playcounts: {ISRC: number | null}}`. */
+    trackPlaycounts: (
+      tracks: { isrc: string; title?: string; artist?: string }[],
+      opts?: { refresh?: boolean },
+    ) =>
+      req<{ playcounts: Record<string, number | null> }>(
+        `/api/spotify/track-playcounts`,
+        {
+          method: "POST",
+          body: JSON.stringify({ tracks, refresh: !!opts?.refresh }),
+        },
       ),
     /** Sum of per-track Spotify play counts across an album,
      *  computed server-side. Pass every track ISRC on the album.
@@ -921,4 +950,14 @@ export const api = {
         body: JSON.stringify({ media_id: mediaId, position }),
       }),
   },
+  /** Current Tidal request-gate cooldown. Populated after an HTTP
+   *  429 or an abuse-detected 403; the UI uses it to render a
+   *  banner so users know why nothing's loading. */
+  tidalBackoff: () =>
+    req<{
+      active: boolean;
+      seconds_remaining: number;
+      reason: string;
+      until_epoch: number;
+    }>("/api/tidal/backoff"),
 };

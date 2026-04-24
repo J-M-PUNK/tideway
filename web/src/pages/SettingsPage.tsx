@@ -277,6 +277,27 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
             aria-label="Concurrent downloads"
           />
         </Field>
+        <Field
+          label={
+            settings.download_rate_limit_mbps > 0
+              ? `Download speed limit — ${settings.download_rate_limit_mbps} MB/s`
+              : "Download speed limit — unlimited"
+          }
+          hint="Capping your download rate makes the pattern look like aggressive prefetch instead of a scrape, the single most effective thing you can do to keep your Tidal account out of the anti-abuse bucket. Default 10 MB/s downloads a 4-minute Max track in about 4 seconds. Set to 0 for unlimited if you've accepted the ban risk."
+        >
+          <input
+            type="range"
+            min={0}
+            max={50}
+            step={5}
+            value={settings.download_rate_limit_mbps}
+            onChange={(e) =>
+              patch({ download_rate_limit_mbps: Number(e.target.value) })
+            }
+            className="h-2 w-full cursor-pointer appearance-none rounded-full bg-secondary accent-primary"
+            aria-label="Download speed limit"
+          />
+        </Field>
       </Section>
 
       <Section
@@ -344,7 +365,7 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
         />
       </Section>
 
-      <AutostartSection />
+      <AutostartSection settings={settings} patch={patch} />
 
       <LastFmSection />
 
@@ -1278,7 +1299,13 @@ function LastFmSection() {
  * / reinstalled / moved. Component fetches its own status and writes
  * directly; no coupling to the Settings dataclass.
  */
-function AutostartSection() {
+function AutostartSection({
+  settings,
+  patch,
+}: {
+  settings: Settings;
+  patch: (p: Partial<Settings>) => void;
+}) {
   const toast = useToast();
   const [status, setStatus] = useState<{
     available: boolean;
@@ -1348,6 +1375,11 @@ function AutostartSection() {
           Will launch: <code className="rounded bg-secondary px-1.5 py-0.5">{status.path}</code>
         </div>
       )}
+      <Toggle
+        checked={settings.start_minimized}
+        onChange={(v) => patch({ start_minimized: v })}
+        label="Start in the tray without opening a window"
+      />
     </Section>
   );
 }

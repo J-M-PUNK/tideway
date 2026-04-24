@@ -191,3 +191,28 @@ export function setSpotifyEnrichmentEnabled(enabled: boolean): void {
     albumPlaysCache.clear();
   }
 }
+
+/**
+ * Seed the playcount cache with a batch of pre-fetched results. Used
+ * by the Popular page to avoid firing N concurrent per-track lookups
+ * from the browser — instead the page pulls every playcount in one
+ * server-side bounded-pool request and preseeds here so the per-row
+ * `useSpotifyTrackPlaycount` hook renders from cache on first paint.
+ */
+export function preseedSpotifyPlaycounts(
+  playcounts: Record<string, number | null>,
+): void {
+  if (!spotifyEnabled) return;
+  // Write every entry first, then notify — React's automatic batching
+  // coalesces the 50 subscriber setState calls into a single render
+  // pass instead of triggering a re-render after each key.
+  const keys: string[] = [];
+  for (const [rawIsrc, value] of Object.entries(playcounts)) {
+    const key = rawIsrc.toUpperCase();
+    playcountCache.set(key, value);
+    keys.push(key);
+  }
+  for (const key of keys) {
+    notify(playcountSubs, key);
+  }
+}

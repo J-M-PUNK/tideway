@@ -27,6 +27,7 @@ import { useTrackSelection } from "@/hooks/useTrackSelection";
 import { useQualities } from "@/hooks/useQualities";
 import { useToast } from "@/components/toast";
 import { CreatePlaylistDialog } from "@/components/CreatePlaylistDialog";
+import { effectiveFormatLabel } from "@/lib/quality";
 import { cn, imageProxy } from "@/lib/utils";
 import {
   ContextMenuItem,
@@ -372,7 +373,7 @@ function DownloadSubmenu({
       </SubTrigger>
       <SubContent>
         {qualities.map((q) => {
-          const effective = trackEffectiveFormat(q.value, mediaTags);
+          const effective = effectiveFormatLabel(q.value, mediaTags);
           return (
             <Item key={q.value} onSelect={() => onPick(q.value)}>
               <div className="flex flex-col">
@@ -396,24 +397,3 @@ function DownloadSubmenu({
   );
 }
 
-/**
- * Same logic as DownloadButton's effectiveFormatLabel. Duplicated
- * (rather than imported) because the TrackMenu's Radix submenu
- * primitives don't mount children eagerly — pulling in the full
- * DownloadButton for its helper would be overkill.
- */
-function trackEffectiveFormat(
-  quality: string,
-  tags: string[] | undefined,
-): string | null {
-  // Keep in sync with DownloadButton.effectiveFormatLabel. Only Max
-  // gets annotated; only tracks that actually ship as hi-res FLAC
-  // benefit from it. Immersive-audio tags aren't surfaced — see the
-  // note on the DownloadButton helper.
-  if (quality !== "hi_res_lossless") return null;
-  if (!tags || tags.length === 0) return null;
-  const T = new Set(tags.map((x) => x.toUpperCase()));
-  if (T.has("HIRES_LOSSLESS")) return "Hi-Res";
-  if (T.has("LOSSLESS")) return "Same as High";
-  return null;
-}

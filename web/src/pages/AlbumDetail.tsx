@@ -8,6 +8,7 @@ import { useApi } from "@/hooks/useApi";
 import { useTrackPrefetch } from "@/hooks/useTrackPrefetch";
 import { AddToLibraryButton } from "@/components/AddToLibraryButton";
 import { AlbumCreditsButton } from "@/components/AlbumCreditsButton";
+import { DownloadAlbumButton } from "@/components/DownloadAlbumButton";
 import { AlbumCreditsView } from "@/components/AlbumCreditsView";
 import { CollectionOverflowMenu } from "@/components/CollectionOverflowMenu";
 import { DetailHero } from "@/components/DetailHero";
@@ -111,6 +112,12 @@ export function AlbumDetail({ onDownload }: { onDownload: OnDownload }) {
             <ShuffleButton value={shuffleIntent} onChange={setShuffleIntent} />
             <div className="ml-auto flex items-center gap-6">
               <AddToLibraryButton kind="album" id={album.id} />
+              <DownloadAlbumButton
+                albumId={album.id}
+                tracks={album.tracks}
+                mediaTags={album.media_tags ?? []}
+                onDownload={onDownload}
+              />
               <AlbumCreditsButton
                 showing={showingCredits}
                 onToggle={() => setShowingCredits((v) => !v)}
