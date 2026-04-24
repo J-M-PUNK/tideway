@@ -864,7 +864,8 @@ _inapp_login_state: dict[str, object] = {"phase": "idle"}
 
 def set_inapp_login_phase(phase: str) -> None:
     """Called by desktop.py to flag state transitions on the in-
-    app login. Valid phases: idle, active, aborted_sso, closed."""
+    app login. Valid phases: idle, active, aborted_sso, closed,
+    unauthorized."""
     _inapp_login_state["phase"] = phase
 
 
@@ -1801,7 +1802,11 @@ def auth_login_inapp_state() -> dict:
       - active: window is open, user is signing in
       - aborted_sso: shell closed the window because it detected
         a navigation into an SSO provider WKWebView can't render
-      - closed: user or shell closed the window for another reason"""
+        (Windows / Linux fallback path only)
+      - closed: user or shell closed the window for another reason
+      - unauthorized: macOS Safari-polling path only. User denied
+        the Automation permission prompt, so we can't watch for the
+        redirect and the frontend falls back to the paste flow."""
     return {"phase": _inapp_login_state.get("phase", "idle")}
 
 

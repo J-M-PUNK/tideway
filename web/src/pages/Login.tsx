@@ -34,18 +34,19 @@ export function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
 /**
  * PKCE login — the only Tidal auth flow that unlocks Max (hi-res) downloads.
  *
- * Two paths, chosen automatically:
+ * Paths, chosen automatically by the desktop shell:
  *
- * 1. In-app: the packaged desktop shell opens a pywebview child window
- *    at Tidal's login URL and intercepts the `tidal://...` redirect
- *    after signin, no paste required. This is the default and lands
- *    the user in the signed-in shell as soon as the backend polls
- *    confirm logged_in.
- *
- * 2. Fallback: the dev-mode browser launch + paste the "Oops" URL.
- *    Only shown when the in-app start call returns supported=false,
- *    which happens when you run the app via ./run.sh without the
- *    packaged pywebview shell attached.
+ * 1. macOS packaged: Safari opens at Tidal's login URL and the shell
+ *    polls Safari via AppleScript. When it sees the post-signin
+ *    redirect (URL containing `code=` on tidal.com), it POSTs to
+ *    /api/auth/pkce/complete and the auth-status poll here flips the
+ *    UI to signed-in. Works with every SSO provider because Safari
+ *    handles them natively.
+ * 2. Windows / Linux packaged: a pywebview child window at the login
+ *    URL intercepts the redirect inline.
+ * 3. Fallback: dev-mode browser launch + paste the "Oops" URL. Shown
+ *    when the in-app start call returns supported=false (no shell),
+ *    or when the macOS user denied the Automation prompt.
  */
 function PkceLogin({
   onLoggedIn,
@@ -115,11 +116,31 @@ function PkceLogin({
           setWaiting(false);
           setFlow("paste");
           setError(
-            "Sign in with Apple / Google / Facebook can't run inside the "
-              + "app's login window. Use the paste flow below: click Open "
-              + "Tidal login, sign in in your normal browser, then paste "
-              + "the URL from the page Tidal sends you to.",
+            "Sign in with Apple / Google / Facebook can't run in the "
+              + "app's login window. We've opened your normal browser at "
+              + "Tidal's login page. Finish signing in there, then paste "
+              + "the URL from the page Tidal redirects you to into the "
+              + "field below.",
           );
+          return;
+        }
+        if (inapp.phase === "unauthorized") {
+          setWaiting(false);
+          setFlow("paste");
+          setError(
+            "Tideway can't watch Safari for the sign-in redirect "
+              + "without Automation permission. You can grant it in "
+              + "System Settings, Privacy & Security, Automation, Tideway "
+              + "and try again, or finish signing in below by pasting the "
+              + "URL from the page Tidal redirects you to.",
+          );
+          if (loginUrl) {
+            try {
+              await api.openExternal(loginUrl);
+            } catch {
+              /* ignored */
+            }
+          }
           return;
         }
         if (inapp.phase === "closed") {
@@ -136,7 +157,7 @@ function PkceLogin({
     return () => {
       if (pollRef.current !== null) window.clearTimeout(pollRef.current);
     };
-  }, [waiting, onLoggedIn]);
+  }, [waiting, onLoggedIn, loginUrl]);
 
   const openLoginInApp = async () => {
     if (!loginUrl) return;
@@ -184,9 +205,9 @@ function PkceLogin({
       {flow !== "paste" ? (
         <>
           <p className="text-sm text-muted-foreground">
-            Click below to sign in with Tidal. A small login window will
-            open; once you finish, it closes automatically and you&apos;re
-            in.
+            Click below to sign in with Tidal. Your browser opens at
+            Tidal&apos;s login page. When you finish, the app picks the
+            redirect up automatically and you&apos;re in.
           </p>
           <Button
             onClick={openLoginInApp}
