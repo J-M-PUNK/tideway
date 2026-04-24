@@ -53,6 +53,12 @@ log = logging.getLogger(__name__)
 # and keeps us well under any reasonable per-day request budget.
 _STATS_TTL_SEC = 7 * 24 * 3600
 
+# TTL for negative caches. When Spotify can't resolve an ISRC, or a
+# getTrack call fails transiently (rate limit, network blip, schema
+# drift), we cache the miss for a day so the next view retries
+# instead of sitting dark for a full week.
+_NULL_TTL_SEC = 24 * 3600
+
 # SpotAPI loads a bunch of unused deps at import time (pymongo, redis,
 # etc.) so we keep it lazy — a bare `from app.spotify_public import …`
 # at server startup shouldn't pay for it.
@@ -192,8 +198,15 @@ def playcount_by_isrc(isrc: str) -> Optional[int]:
             ).fetchone()
         finally:
             conn.close()
-    if row is not None and row[1] and (time.time() - row[1]) < _STATS_TTL_SEC:
-        return int(row[0]) if row[0] is not None else None
+    if row is not None and row[1]:
+        age = time.time() - row[1]
+        pc_cached = row[0]
+        if pc_cached is not None and age < _STATS_TTL_SEC:
+            return int(pc_cached)
+        # Negative hits retry after a day so a transient failure
+        # doesn't leave the track dark for a full week.
+        if pc_cached is None and age < _NULL_TTL_SEC:
+            return None
 
     track_id = _isrc_to_spotify_track(isrc)
     if not track_id:
@@ -355,20 +368,38 @@ def artist_stats(
 
 
 def _isrc_to_spotify_track(isrc: str) -> Optional[str]:
-    """Resolve an ISRC to a Spotify track id. Permanently cached —
-    ISRCs are stable."""
+    """Resolve an ISRC to a Spotify track id.
+
+    Popular songs have several Spotify entries for the same ISRC
+    (the single release, the album version, deluxe editions, regional
+    reissues), each with its own playcount. The canonical version
+    can have 2B plays while a reissue has 40M — so picking the first
+    search hit was a coin flip. When the search returns more than
+    one candidate we fetch each track's playcount and keep the
+    highest. The getTrack calls are bounded by the search's limit=5
+    and only happen once per ISRC (result cached forever).
+
+    Successful resolutions cache permanently. Misses are cached for
+    a day, so a failed lookup (rate limit, transient network, schema
+    drift) doesn't leave the track blank for a week.
+    """
     with _db_lock:
         conn = _db()
         try:
             row = conn.execute(
-                "SELECT spotify_track_id FROM isrc_to_spotify_track "
+                "SELECT spotify_track_id, fetched_at FROM isrc_to_spotify_track "
                 "WHERE isrc=?",
                 (isrc,),
             ).fetchone()
         finally:
             conn.close()
     if row is not None:
-        return row[0]
+        cached_id, fetched_at = row[0], row[1]
+        if cached_id is not None:
+            return cached_id
+        if fetched_at and (time.time() - fetched_at) < _NULL_TTL_SEC:
+            return None
+        # Stale negative — fall through to retry.
 
     try:
         song, _ = _ensure_client()
@@ -384,13 +415,41 @@ def _isrc_to_spotify_track(isrc: str) -> Optional[str]:
         .get("items")
         or []
     )
-    spotify_id: Optional[str] = None
+    candidate_ids: list[str] = []
     for entry in items:
         item = (entry.get("item") or {}).get("data") or {}
         uri = item.get("uri") or ""
         if uri.startswith("spotify:track:"):
-            spotify_id = uri.split(":")[-1]
-            break
+            candidate_ids.append(uri.split(":")[-1])
+
+    spotify_id: Optional[str] = None
+    if len(candidate_ids) == 1:
+        spotify_id = candidate_ids[0]
+    elif len(candidate_ids) > 1:
+        # Rank candidates by playcount. Fallback to the first if no
+        # candidate's playcount comes back (schema drift, all getTrack
+        # calls failed) so we still have a track id for artist-
+        # resolution callers.
+        best_id = candidate_ids[0]
+        best_pc = -1
+        for track_id in candidate_ids:
+            try:
+                payload = _song_info(track_id)
+            except Exception as exc:
+                log.warning(
+                    "spotify getTrack failed during ranking for %s: %s",
+                    track_id, exc,
+                )
+                continue
+            pc_raw = (payload.get("data") or {}).get("trackUnion", {}).get("playcount")
+            try:
+                pc = int(pc_raw) if pc_raw is not None else None
+            except (TypeError, ValueError):
+                pc = None
+            if pc is not None and pc > best_pc:
+                best_pc = pc
+                best_id = track_id
+        spotify_id = best_id
 
     with _db_lock:
         conn = _db()
