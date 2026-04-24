@@ -4,6 +4,7 @@ import { Loader2 } from "lucide-react";
 import { Sidebar } from "@/components/Sidebar";
 import { NavBar } from "@/components/NavBar";
 import { OfflineBanner } from "@/components/OfflineBanner";
+import { TidalBackoffBanner } from "@/components/TidalBackoffBanner";
 import { UpdateBanner } from "@/components/UpdateBanner";
 import { NowPlaying } from "@/components/NowPlaying";
 import { QueuePanel } from "@/components/QueuePanel";
@@ -469,6 +470,7 @@ function Shell({
             onSignInRequested={onSignInRequested}
           />
           <OfflineBanner />
+          <TidalBackoffBanner />
           <UpdateBanner />
           <div ref={fadeRef} className="animate-route px-8 py-6">
           <ErrorBoundary resetKey={location.pathname}>

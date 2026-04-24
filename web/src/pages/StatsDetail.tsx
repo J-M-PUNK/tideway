@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
-import { Link, useParams, useSearchParams } from "react-router-dom";
-import { ChevronLeft, Heart, Music, User as UserIcon } from "lucide-react";
+import { useParams, useSearchParams } from "react-router-dom";
+import { Heart, Music, User as UserIcon } from "lucide-react";
 import { api } from "@/api/client";
 import type {
   LastFmLovedTrack,
@@ -53,18 +53,9 @@ export function StatsDetail() {
   };
 
   const title = TITLES[kind] ?? "Stats";
-  const Back = (
-    <Link
-      to="/stats"
-      className="mb-4 inline-flex items-center gap-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground hover:text-foreground"
-    >
-      <ChevronLeft className="h-4 w-4" /> Back to stats
-    </Link>
-  );
 
   return (
     <div>
-      {Back}
       <h1 className="mb-6 text-3xl font-bold tracking-tight">{title}</h1>
       {kind !== "loved" && (
         <div className="mb-6">

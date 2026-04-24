@@ -1,6 +1,7 @@
-import { ChevronDown, Download } from "lucide-react";
-import type { ContentKind } from "@/api/types";
-import { Button, type ButtonProps } from "@/components/ui/button";
+import { useState } from "react";
+import { Check, Download } from "lucide-react";
+import type { OnDownload } from "@/api/download";
+import type { Track } from "@/api/types";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -9,43 +10,40 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { useDownloadedIds } from "@/hooks/useDownloadedSet";
 import { useQualities } from "@/hooks/useQualities";
 import { effectiveFormatLabel } from "@/lib/quality";
-import { cn } from "@/lib/utils";
 
-interface Props {
-  kind: Extract<ContentKind, "track" | "album" | "playlist">;
-  id: string;
-  onPick: (
-    kind: Extract<ContentKind, "track" | "album" | "playlist">,
-    id: string,
-    quality?: string,
-  ) => void;
-  variant?: ButtonProps["variant"];
-  size?: ButtonProps["size"];
-  label?: string;
-  iconOnly?: boolean;
-  className?: string;
-  onOpenChange?: (open: boolean) => void;
-  /** Optional — when supplied, the Max tier shows a small badge
-   *  saying whether the user will actually get hi-res FLAC for THIS
-   *  track or a duplicate of the Lossless stream. */
-  mediaTags?: string[];
-}
-
-export function DownloadButton({
-  kind,
-  id,
-  onPick,
-  variant,
-  size,
-  label,
-  iconOnly,
-  className,
-  onOpenChange,
+/**
+ * Album-level download button for a detail-page actions row. Visually
+ * matches AddToLibraryButton + ShareButton (icon above, small text
+ * below). Click opens the same quality picker the track-row download
+ * buttons use; selection forwards to onDownload(kind, id, quality)
+ * which enqueues via /api/downloads/enqueue. When every track on the
+ * album is already present locally the label flips to "Downloaded"
+ * with a check icon, but the menu is still openable for re-download.
+ */
+export function DownloadAlbumButton({
+  albumId,
+  tracks,
   mediaTags,
-}: Props) {
+  onDownload,
+}: {
+  albumId: string;
+  tracks: Track[];
+  mediaTags?: string[];
+  onDownload: OnDownload;
+}) {
+  const downloaded = useDownloadedIds();
   const qualities = useQualities() ?? [];
+  const [open, setOpen] = useState(false);
+
+  const have = tracks.filter((t) => downloaded.has(String(t.id))).length;
+  const total = tracks.length;
+  const allHave = total > 0 && have === total;
+
+  const Icon = allHave ? Check : Download;
+  const label = allHave ? "Downloaded" : "Download";
 
   const stop = (e: React.SyntheticEvent) => {
     e.preventDefault();
@@ -53,22 +51,16 @@ export function DownloadButton({
   };
 
   return (
-    <DropdownMenu onOpenChange={onOpenChange}>
+    <DropdownMenu open={open} onOpenChange={setOpen}>
       <DropdownMenuTrigger asChild onClick={stop}>
-        <Button
-          variant={variant}
-          size={iconOnly ? "icon" : size}
-          className={cn(className)}
-          title="Download…"
+        <button
+          className="flex flex-col items-center gap-1 text-muted-foreground transition-colors hover:text-foreground data-[state=open]:text-primary"
+          title={allHave ? "Re-download album" : "Download album"}
+          aria-label={allHave ? "Re-download album" : "Download album"}
         >
-          <Download className={iconOnly ? "h-4 w-4" : "h-4 w-4"} />
-          {!iconOnly && (
-            <>
-              {label ?? "Download"}
-              <ChevronDown className="h-3.5 w-3.5 opacity-70" />
-            </>
-          )}
-        </Button>
+          <Icon className="h-5 w-5" />
+          <div className="text-xs font-semibold">{label}</div>
+        </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent
         align="end"
@@ -82,7 +74,7 @@ export function DownloadButton({
           return (
             <DropdownMenuItem
               key={q.value}
-              onSelect={() => onPick(kind, id, q.value)}
+              onSelect={() => onDownload("album", albumId, q.value)}
             >
               <div className="flex min-w-0 flex-1 flex-col">
                 <div className="flex items-center gap-2">
@@ -106,3 +98,4 @@ export function DownloadButton({
     </DropdownMenu>
   );
 }
+

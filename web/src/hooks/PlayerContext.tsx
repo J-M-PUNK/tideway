@@ -41,6 +41,9 @@ interface PlayerMeta {
    *  like a single-track search result. Read by the Tidal play-log
    *  reporter to attribute plays to Recently Played. */
   source: PlaySource | null;
+  /** Mirror of the backend's force_volume flag so the UI can disable
+   *  the volume slider when the software volume is pinned at 100. */
+  forceVolume: boolean;
 }
 
 interface PlayerSleep {
@@ -101,6 +104,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       hasPrev: player.hasPrev,
       streamInfo: player.streamInfo,
       source: player.source,
+      forceVolume: player.forceVolume,
     }),
     [
       player.track,
@@ -116,6 +120,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       player.hasPrev,
       player.streamInfo,
       player.source,
+      player.forceVolume,
     ],
   );
 

@@ -8,14 +8,15 @@ import {
   User as UserIcon,
 } from "lucide-react";
 import { api } from "@/api/client";
-import type { LastFmChartArtist, LastFmChartTrack } from "@/api/types";
+import type { LastFmChartArtist, Track } from "@/api/types";
 import type { OnDownload } from "@/api/download";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/EmptyState";
 import { Skeleton, TrackListSkeleton } from "@/components/Skeletons";
 import { useToast } from "@/components/toast";
+import { preseedSpotifyPlaycounts } from "@/hooks/useSpotifyEnrichment";
 import { useTidalArt } from "@/hooks/useTidalArt";
-import { useTidalArtistId, useTidalTracksFor } from "@/hooks/useTidalResolve";
+import { useTidalArtistId } from "@/hooks/useTidalResolve";
 import { ChartsNav } from "@/components/ChartsNav";
 import { TrackList } from "@/components/TrackList";
 import { cn, imageProxy } from "@/lib/utils";
@@ -257,27 +258,56 @@ function ArtistChartCard({ rank, artist }: { rank: number; artist: LastFmChartAr
 // ---------------------------------------------------------------------------
 
 function ChartTracks({ onDownload }: { onDownload: OnDownload }) {
-  const [data, setData] = useState<LastFmChartTrack[] | null>(null);
+  const [data, setData] = useState<Track[] | null>(null);
   useEffect(() => {
     let cancelled = false;
-    api.lastfm
-      .chartTopTracks(50)
-      .then((rows) => !cancelled && setData(rows))
-      .catch(() => !cancelled && setData([]));
+    (async () => {
+      try {
+        const rows = await api.lastfm.chartTopTracksResolved(50);
+        if (cancelled) return;
+        setData(rows);
+        // Preseed Spotify playcounts in one bounded-pool server call
+        // so the 50 per-row hooks don't each fire a browser request
+        // and hit Spotify's throttle. We send title + primary artist
+        // alongside the ISRC so the server can fall back to a fuzzy
+        // search when Spotify doesn't have the exact ISRC (covers
+        // feature-version ISRCs and fresh releases).
+        const lookup = rows
+          .filter((t) => !!t.isrc)
+          .map((t) => ({
+            isrc: t.isrc as string,
+            title: t.name,
+            artist: t.artists[0]?.name ?? "",
+          }));
+        if (lookup.length > 0) {
+          try {
+            // `refresh: true` drops stale null/zero cache entries so
+            // chart tracks that missed their playcount on an earlier
+            // visit (Spotify throttle, release-week zero) get a retry
+            // instead of sitting dark.
+            const { playcounts } = await api.spotify.trackPlaycounts(
+              lookup,
+              { refresh: true },
+            );
+            if (!cancelled) preseedSpotifyPlaycounts(playcounts);
+          } catch {
+            /* fine — per-row hooks will fall back to their own fetch */
+          }
+        }
+      } catch {
+        if (!cancelled) setData([]);
+      }
+    })();
     return () => {
       cancelled = true;
     };
   }, []);
 
-  const queries = (data ?? []).map((t) => ({ title: t.name, artist: t.artist }));
-  const resolved = useTidalTracksFor(queries);
-
   if (!data) return <TrackListSkeleton />;
   if (data.length === 0) {
     return <EmptyState icon={Music} title="No data" description="Last.fm didn't return any results." />;
   }
-  if (resolved.length === 0) return <TrackListSkeleton />;
-  return <TrackList tracks={resolved} onDownload={onDownload} numbered showPlaycount />;
+  return <TrackList tracks={data} onDownload={onDownload} numbered showPlaycount />;
 }
 
 // ---------------------------------------------------------------------------

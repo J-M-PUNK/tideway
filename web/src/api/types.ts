@@ -137,6 +137,9 @@ export interface PlayerSnapshot {
   /** What's actually audible. Null when the player is idle or still
    *  loading; the UI hides the badge in that case. */
   stream_info: StreamInfo | null;
+  /** When true the backend is pinning volume at 100 %. Set via the
+   *  "Force volume" option in the bottom bar's output-device menu. */
+  force_volume?: boolean;
 }
 
 export interface SearchResponse {
@@ -252,6 +255,23 @@ export interface Settings {
    *  as Tidal returned. Mirrors the toggle Tidal's own client has
    *  under its "Explicit content" setting. */
   explicit_content_preference: "explicit" | "clean" | "both";
+  /** Bit-perfect audio output — CoreAudio change_device_parameters
+   *  + fail_if_conversion_required on macOS; WASAPI exclusive on
+   *  Windows. No effect on Linux. */
+  exclusive_mode: boolean;
+  /** Pin software volume at 100 %; let the user attenuate via their
+   *  DAC, speakers, or OS volume instead. Avoids software scaling
+   *  that would otherwise throw away bit-depth under Exclusive Mode. */
+  force_volume: boolean;
+  /** Launch directly to tray without opening a window. Pairs with
+   *  the Launch-on-login toggle so the app can run headlessly from
+   *  boot until the user clicks the tray icon. */
+  start_minimized: boolean;
+  /** Per-track download rate cap in MB/s. 0 = unlimited. Default 10
+   *  so downloads look like aggressive prefetch rather than a scrape
+   *  to Tidal's CDN — the single most effective ban-risk reduction
+   *  lever on the client. */
+  download_rate_limit_mbps: number;
 }
 
 export interface AuthStatus {

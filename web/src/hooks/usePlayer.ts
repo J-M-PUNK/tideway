@@ -78,6 +78,10 @@ export interface PlayerState {
    *  playlist / mix that started them. Null when the queue was
    *  started without container context. */
   source: PlaySource | null;
+  /** Mirror of the backend's Force Volume setting. When true the
+   *  volume slider should render disabled and the backend rejects
+   *  set_volume calls; the user attenuates via their DAC / OS. */
+  forceVolume: boolean;
 }
 
 interface PersistedState {
@@ -115,6 +119,7 @@ const INITIAL: PlayerState = {
   repeat: "off",
   streamInfo: null,
   source: null,
+  forceVolume: false,
 };
 
 /**
@@ -333,6 +338,7 @@ export function usePlayer() {
           currentTime,
           duration,
           streamInfo: snap.stream_info,
+          forceVolume: !!snap.force_volume,
         };
       });
       if (snap.state === "ended") advanceRef.current();

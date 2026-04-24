@@ -41,6 +41,7 @@ import {
 import { CreditsDialog } from "@/components/CreditsDialog";
 import { DownloadButton } from "@/components/DownloadButton";
 import { HeartButton } from "@/components/HeartButton";
+import { OutputDevicePicker } from "@/components/OutputDevicePicker";
 import { SleepTimerButton } from "@/components/SleepTimerButton";
 import { StreamQualityBadge } from "@/components/StreamQualityBadge";
 import { useIsDownloaded } from "@/hooks/useDownloadedSet";
@@ -75,6 +76,7 @@ export function NowPlaying({
     hasPrev,
     queue,
     streamInfo,
+    forceVolume,
   } = usePlayerMeta();
   const actions = usePlayerActions();
   const isLocal = useIsDownloaded(track?.id ?? "");
@@ -82,7 +84,10 @@ export function NowPlaying({
   // current-track info block. Kept at this level so closing the menu
   // doesn't tear down the dialog.
   const [creditsOpen, setCreditsOpen] = useState(false);
-  if (!track) return null;
+  // When nothing's loaded we still render the bar so the output-device
+  // picker + volume control + queue button are always reachable. The
+  // body is just a lighter empty state.
+  if (!track) return <EmptyPlayerBar onToggleQueue={onToggleQueue} />;
 
   const cover = imageProxy(track.album?.cover);
 
@@ -282,7 +287,12 @@ export function NowPlaying({
           </Button>
           <StreamingQualityPicker isLocal={isLocal} />
           <SleepTimerButton />
-          <VolumeControl value={volume} onChange={actions.setVolume} />
+          <OutputDevicePicker />
+          <VolumeControl
+            value={volume}
+            onChange={actions.setVolume}
+            disabled={forceVolume}
+          />
         </div>
       </div>
       {error && (
@@ -425,15 +435,27 @@ function StreamingQualityPicker({ isLocal }: { isLocal: boolean }) {
   );
 }
 
-function VolumeControl({ value, onChange }: { value: number; onChange: (v: number) => void }) {
+function VolumeControl({
+  value,
+  onChange,
+  disabled,
+}: {
+  value: number;
+  onChange: (v: number) => void;
+  disabled?: boolean;
+}) {
   const muted = value === 0;
   return (
-    <div className="flex items-center gap-2">
+    <div
+      className={cn("flex items-center gap-2", disabled && "opacity-50")}
+      title={disabled ? "Force Volume is on — attenuate on your output device" : undefined}
+    >
       <Button
         variant="ghost"
         size="icon"
         className="h-8 w-8"
         onClick={() => onChange(muted ? 1 : 0)}
+        disabled={disabled}
         title={muted ? "Unmute" : "Mute"}
       >
         {muted ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}
@@ -445,12 +467,48 @@ function VolumeControl({ value, onChange }: { value: number; onChange: (v: numbe
         step={0.01}
         value={value}
         onChange={(e) => onChange(Number(e.target.value))}
-        className="h-1 w-20 cursor-pointer appearance-none rounded-full bg-secondary accent-primary"
+        disabled={disabled}
+        className="h-1 w-20 cursor-pointer appearance-none rounded-full bg-secondary accent-primary disabled:cursor-not-allowed"
         style={{
           background: `linear-gradient(to right, hsl(var(--primary)) ${value * 100}%, hsl(var(--secondary)) ${value * 100}%)`,
         }}
         aria-label="Volume"
       />
+    </div>
+  );
+}
+
+/**
+ * Rendered when nothing is playing. Keeps the output-device picker
+ * and queue button reachable so users can set things up before
+ * starting playback, and gives the main layout a constant footer
+ * height so the viewport doesn't jump when the first track loads.
+ */
+function EmptyPlayerBar({ onToggleQueue }: { onToggleQueue: () => void }) {
+  return (
+    <div className="border-t border-border bg-[hsl(var(--now-playing-bg))] px-4 py-3">
+      <div className="flex items-center gap-4">
+        <div className="flex min-w-0 flex-1 items-center gap-3">
+          <div className="flex h-14 w-14 flex-shrink-0 items-center justify-center rounded bg-secondary text-muted-foreground">
+            <Music className="h-5 w-5" />
+          </div>
+          <div className="min-w-0 text-sm text-muted-foreground">
+            Nothing playing
+          </div>
+        </div>
+        <div className="flex flex-1 items-center justify-end gap-2">
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-8 w-8"
+            onClick={onToggleQueue}
+            title="Show queue"
+          >
+            <ListMusic className="h-4 w-4" />
+          </Button>
+          <OutputDevicePicker />
+        </div>
+      </div>
     </div>
   );
 }

@@ -32,21 +32,12 @@ export function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
 }
 
 /**
- * PKCE login — the only Tidal auth flow that unlocks Max (hi-res) downloads.
- *
- * Paths, chosen automatically by the desktop shell:
- *
- * 1. macOS packaged: Safari opens at Tidal's login URL and the shell
- *    polls Safari via AppleScript. When it sees the post-signin
- *    redirect (URL containing `code=` on tidal.com), it POSTs to
- *    /api/auth/pkce/complete and the auth-status poll here flips the
- *    UI to signed-in. Works with every SSO provider because Safari
- *    handles them natively.
- * 2. Windows / Linux packaged: a pywebview child window at the login
- *    URL intercepts the redirect inline.
- * 3. Fallback: dev-mode browser launch + paste the "Oops" URL. Shown
- *    when the in-app start call returns supported=false (no shell),
- *    or when the macOS user denied the Automation prompt.
+ * PKCE login — the only Tidal auth flow that unlocks Max (hi-res)
+ * downloads. Paste-the-Oops-URL flow: user clicks Open Tidal login,
+ * Safari / default browser handles sign-in (every SSO provider works
+ * natively there), Tidal redirects to an "Oops" page whose URL
+ * carries the PKCE code as a query param, user pastes that URL, we
+ * exchange the code server-side and drop into the signed-in shell.
  */
 function PkceLogin({
   onLoggedIn,
@@ -59,13 +50,6 @@ function PkceLogin({
   const [redirectUrl, setRedirectUrl] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // "inapp" is the zero-friction path the packaged app uses.
-  // "paste" shows the old copy-the-URL flow when we know the shell
-  // can't intercept (dev mode). Starts null until we know which
-  // to render.
-  const [flow, setFlow] = useState<"inapp" | "paste" | null>(null);
-  const [waiting, setWaiting] = useState(false);
-  const pollRef = useRef<number | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -82,102 +66,9 @@ function PkceLogin({
     };
   }, []);
 
-  // Auth-status poll: once the in-app shell captures the redirect
-  // and posts it to /api/auth/pkce/complete, the backend flips to
-  // logged_in. We notice via this poll and call onLoggedIn.
-  //
-  // Also watches the in-app login's own phase flag so when the
-  // shell aborts early (SSO provider detected, user closed the
-  // window) we bail out of the spinner state immediately and
-  // switch to the paste fallback instead of waiting for the
-  // 10-minute timeout.
-  useEffect(() => {
-    if (!waiting) return;
-    const startedAt = Date.now();
-    const TIMEOUT_MS = 10 * 60 * 1000;
-    const tick = async () => {
-      if (Date.now() - startedAt > TIMEOUT_MS) {
-        setWaiting(false);
-        setError("Login timed out. Please try again.");
-        return;
-      }
-      try {
-        const [status, inapp] = await Promise.all([
-          api.auth.status(),
-          api.auth.inappLoginState(),
-        ]);
-        if (status.logged_in) {
-          resetQualitiesCache();
-          setWaiting(false);
-          onLoggedIn();
-          return;
-        }
-        if (inapp.phase === "aborted_sso") {
-          setWaiting(false);
-          setFlow("paste");
-          setError(
-            "Sign in with Apple / Google / Facebook can't run in the "
-              + "app's login window. We've opened your normal browser at "
-              + "Tidal's login page. Finish signing in there, then paste "
-              + "the URL from the page Tidal redirects you to into the "
-              + "field below.",
-          );
-          return;
-        }
-        if (inapp.phase === "unauthorized") {
-          setWaiting(false);
-          setFlow("paste");
-          setError(
-            "Tideway can't watch Safari for the sign-in redirect "
-              + "without Automation permission. You can grant it in "
-              + "System Settings, Privacy & Security, Automation, Tideway "
-              + "and try again, or finish signing in below by pasting the "
-              + "URL from the page Tidal redirects you to.",
-          );
-          if (loginUrl) {
-            try {
-              await api.openExternal(loginUrl);
-            } catch {
-              /* ignored */
-            }
-          }
-          return;
-        }
-        if (inapp.phase === "closed") {
-          setWaiting(false);
-          setError("Login window closed. Click Sign in with Tidal to try again.");
-          return;
-        }
-      } catch {
-        // Transient — keep polling.
-      }
-      pollRef.current = window.setTimeout(tick, 500);
-    };
-    pollRef.current = window.setTimeout(tick, 500);
-    return () => {
-      if (pollRef.current !== null) window.clearTimeout(pollRef.current);
-    };
-  }, [waiting, onLoggedIn, loginUrl]);
-
-  const openLoginInApp = async () => {
+  const openTidalLogin = async () => {
     if (!loginUrl) return;
     setError(null);
-    try {
-      const res = await api.auth.inappLoginStart();
-      if (res.supported) {
-        // Shell is live — it will open the login window and post the
-        // redirect back for us. Start polling auth status for the
-        // state change.
-        setWaiting(true);
-        setFlow("inapp");
-        return;
-      }
-    } catch {
-      // Shell call failed — fall through to the paste path.
-    }
-    // No shell: fall back to the classic open-external-browser +
-    // paste flow.
-    setFlow("paste");
     try {
       await api.openExternal(loginUrl);
     } catch {
@@ -202,93 +93,54 @@ function PkceLogin({
 
   return (
     <div className="flex w-full flex-col gap-4">
-      {flow !== "paste" ? (
-        <>
-          <p className="text-sm text-muted-foreground">
-            Click below to sign in with Tidal. Your browser opens at
-            Tidal&apos;s login page. When you finish, the app picks the
-            redirect up automatically and you&apos;re in.
-          </p>
-          <Button
-            onClick={openLoginInApp}
-            disabled={!loginUrl || waiting}
-            size="lg"
-            className="w-full"
+      <ol className="list-decimal space-y-2 pl-5 text-sm text-muted-foreground">
+        <li>
+          <button
+            onClick={openTidalLogin}
+            disabled={!loginUrl}
+            className="text-primary hover:underline disabled:opacity-50"
           >
-            {waiting ? (
-              <>
-                <Loader2 className="h-4 w-4 animate-spin" /> Waiting for sign-in…
-              </>
-            ) : (
-              <>
-                <LogIn className="h-4 w-4" /> Sign in with Tidal
-              </>
-            )}
-          </Button>
-          {waiting && (
-            <button
-              onClick={() => {
-                setWaiting(false);
-                setFlow("paste");
-              }}
-              className="text-center text-xs text-muted-foreground hover:text-foreground"
-            >
-              Stuck? Switch to the manual paste flow.
-            </button>
-          )}
-        </>
-      ) : (
-        <>
-          <ol className="list-decimal space-y-2 pl-5 text-sm text-muted-foreground">
-            <li>
-              <button
-                onClick={openLoginInApp}
-                disabled={!loginUrl}
-                className="text-primary hover:underline disabled:opacity-50"
-              >
-                Open Tidal login
-              </button>{" "}
-              and sign in.
-            </li>
-            <li>
-              You&apos;ll land on a Tidal <strong>&quot;Oops&quot;</strong> page. That&apos;s expected.
-            </li>
-            <li>Copy the URL from that Oops page and paste it below.</li>
-          </ol>
+            Open Tidal login
+          </button>{" "}
+          and sign in.
+        </li>
+        <li>
+          You&apos;ll land on a Tidal <strong>&quot;Oops&quot;</strong> page. That&apos;s expected.
+        </li>
+        <li>Copy the URL from that Oops page and paste it below.</li>
+      </ol>
 
-          <Button onClick={openLoginInApp} disabled={!loginUrl} size="lg" className="w-full">
-            <ExternalLink className="h-4 w-4" /> Open Tidal login
-          </Button>
+      <Button onClick={openTidalLogin} disabled={!loginUrl} size="lg" className="w-full">
+        <ExternalLink className="h-4 w-4" /> Open Tidal login
+      </Button>
 
-          <div className="flex flex-col gap-2">
-            <label
-              htmlFor="redirect"
-              className="text-xs font-semibold uppercase tracking-wider text-muted-foreground"
-            >
-              Paste the Oops page URL
-            </label>
-            <Input
-              id="redirect"
-              value={redirectUrl}
-              onChange={(e) => setRedirectUrl(e.target.value)}
-              placeholder="https://tidal.com/android/login/auth?code=…"
-              onKeyDown={(e) => {
-                if (e.key === "Enter") submitPaste();
-              }}
-            />
-          </div>
+      <div className="flex flex-col gap-2">
+        <label
+          htmlFor="redirect"
+          className="text-xs font-semibold uppercase tracking-wider text-muted-foreground"
+        >
+          Paste the Oops page URL
+        </label>
+        <Input
+          id="redirect"
+          value={redirectUrl}
+          onChange={(e) => setRedirectUrl(e.target.value)}
+          placeholder="https://tidal.com/android/login/auth?code=…"
+          onKeyDown={(e) => {
+            if (e.key === "Enter") submitPaste();
+          }}
+        />
+      </div>
 
-          <Button
-            onClick={submitPaste}
-            disabled={!redirectUrl.trim() || submitting}
-            size="lg"
-            className="w-full"
-          >
-            {submitting && <Loader2 className="h-4 w-4 animate-spin" />}
-            Continue
-          </Button>
-        </>
-      )}
+      <Button
+        onClick={submitPaste}
+        disabled={!redirectUrl.trim() || submitting}
+        size="lg"
+        className="w-full"
+      >
+        {submitting && <Loader2 className="h-4 w-4 animate-spin" />}
+        Continue
+      </Button>
 
       {error && <p className="text-xs text-destructive">{error}</p>}
 
