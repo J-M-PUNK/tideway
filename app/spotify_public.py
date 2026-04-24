@@ -201,12 +201,17 @@ def playcount_by_isrc(isrc: str) -> Optional[int]:
     if row is not None and row[1]:
         age = time.time() - row[1]
         pc_cached = row[0]
-        if pc_cached is not None and age < _STATS_TTL_SEC:
+        # Treat cached `0` like a null: fresh-release tracks often
+        # show playcount=0 for a day or two after release before
+        # Spotify surfaces the real number. Holding that 0 for the
+        # full 7 days leaves brand-new charting tracks permanently
+        # reading zero even as they rocket into the millions. Refresh
+        # on the short TTL so the number catches up.
+        is_zeroish = pc_cached is None or int(pc_cached or 0) == 0
+        if not is_zeroish and age < _STATS_TTL_SEC:
             return int(pc_cached)
-        # Negative hits retry after a day so a transient failure
-        # doesn't leave the track dark for a full week.
-        if pc_cached is None and age < _NULL_TTL_SEC:
-            return None
+        if is_zeroish and age < _NULL_TTL_SEC:
+            return int(pc_cached) if pc_cached is not None else None
 
     track_id = _isrc_to_spotify_track(isrc)
     if not track_id:
@@ -468,22 +473,29 @@ def _isrc_to_spotify_track(isrc: str) -> Optional[str]:
 def _tidal_to_spotify_artist(
     tidal_artist_id: str, sample_isrc: str
 ) -> Optional[str]:
-    """Resolve a Tidal artist id to a Spotify artist id. Persistent
-    cache — artists don't change id. The sample ISRC is only used
-    on cache miss."""
+    """Resolve a Tidal artist id to a Spotify artist id. Successful
+    mappings cache forever (artist ids don't change). Negative hits
+    expire after a day so a transient flake (no ISRC available, ISRC
+    search rate-limited) doesn't leave the artist permanently
+    un-resolvable."""
     tidal_artist_id = str(tidal_artist_id)
     with _db_lock:
         conn = _db()
         try:
             row = conn.execute(
-                "SELECT spotify_artist_id FROM tidal_to_spotify_artist "
+                "SELECT spotify_artist_id, fetched_at FROM tidal_to_spotify_artist "
                 "WHERE tidal_artist_id=?",
                 (tidal_artist_id,),
             ).fetchone()
         finally:
             conn.close()
     if row is not None:
-        return row[0]
+        cached_id, fetched_at = row[0], row[1]
+        if cached_id is not None:
+            return cached_id
+        if fetched_at and (time.time() - fetched_at) < _NULL_TTL_SEC:
+            return None
+        # Stale negative — fall through and retry.
 
     # Chain: ISRC → Spotify track → primary artist on that track.
     spotify_track_id = _isrc_to_spotify_track(sample_isrc or "")
@@ -532,15 +544,61 @@ def _song_info(spotify_track_id: str) -> Mapping[str, Any]:
     return song.get_track_info(spotify_track_id)
 
 
-def _write_track_playcount(isrc: str, playcount: Optional[int]) -> None:
+def purge_null_playcounts(codes: list[str]) -> None:
+    """Drop null-or-zero cached playcounts for the given ISRCs so the
+    next lookup retries Spotify. Used by `?refresh=true` on the batch
+    endpoint when a page wants complete data badly enough to eat the
+    extra round-trips.
+    """
+    if not codes:
+        return
     with _db_lock:
         conn = _db()
         try:
+            placeholders = ",".join("?" for _ in codes)
             conn.execute(
-                "INSERT OR REPLACE INTO track_playcount "
-                "(isrc, playcount, fetched_at) VALUES (?, ?, ?)",
-                (isrc, playcount, int(time.time())),
+                f"DELETE FROM track_playcount WHERE "
+                f"(playcount IS NULL OR playcount = 0) "
+                f"AND isrc IN ({placeholders})",
+                codes,
             )
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def _write_track_playcount(isrc: str, playcount: Optional[int]) -> None:
+    _write_cache_rows(
+        (
+            "INSERT OR REPLACE INTO track_playcount "
+            "(isrc, playcount, fetched_at) VALUES (?, ?, ?)",
+            (isrc, playcount, int(time.time())),
+        ),
+    )
+
+
+def _write_isrc_mapping(isrc: str, spotify_track_id: Optional[str]) -> None:
+    _write_cache_rows(
+        (
+            "INSERT OR REPLACE INTO isrc_to_spotify_track "
+            "(isrc, spotify_track_id, fetched_at) VALUES (?, ?, ?)",
+            (isrc, spotify_track_id, int(time.time())),
+        ),
+    )
+
+
+def _write_cache_rows(*statements: tuple[str, tuple]) -> None:
+    """Execute one or more INSERT/UPDATE statements against the cache
+    DB inside a single connection + lock acquire, so callers writing
+    to multiple tables in one logical step don't pay for two
+    connection opens and two CREATE-TABLE sweeps."""
+    if not statements:
+        return
+    with _db_lock:
+        conn = _db()
+        try:
+            for sql, params in statements:
+                conn.execute(sql, params)
             conn.commit()
         finally:
             conn.close()
@@ -553,9 +611,316 @@ def _safe_int(v: object) -> Optional[int]:
         return None
 
 
+def playcount_with_fallback(
+    isrc: str, title: str, artist: str
+) -> Optional[int]:
+    """Like playcount_by_isrc, but on ISRC miss (Spotify doesn't index
+    this specific recording) falls back to a title + primary-artist
+    search. Used by the Popular page's batch fetch where we have
+    the Tidal track's full metadata anyway.
+
+    Match is strict: exact title, exact primary-artist name. The
+    resulting playcount is cached under the original ISRC so the next
+    visit doesn't repeat the fuzzy search.
+    """
+    isrc = (isrc or "").strip().upper()
+    if not isrc:
+        return None
+
+    pc = playcount_by_isrc(isrc)
+    if pc is not None and pc > 0:
+        return pc
+
+    # ISRC path returned null/0. Common causes: Spotify hasn't
+    # indexed this specific release (feature-version ISRCs often
+    # miss), track was released too recently for playcounts to
+    # aggregate, or the ISRC is a Tidal-only reissue. If we have
+    # the title + artist we can search Spotify for the canonical
+    # version instead.
+    title = (title or "").strip()
+    artist = (artist or "").strip()
+    if not title or not artist:
+        return pc
+
+    try:
+        song, _ = _ensure_client()
+        res = song.query_songs(f"{artist} {title}", limit=5)
+    except Exception as exc:
+        log.warning(
+            "spotify fallback search failed for %s / %s: %s",
+            title, artist, exc,
+        )
+        return pc
+
+    items = (
+        (res.get("data") or {})
+        .get("searchV2", {})
+        .get("tracksV2", {})
+        .get("items")
+        or []
+    )
+    wanted_title = title.lower()
+    wanted_artist = artist.lower()
+
+    best_pc = -1
+    best_id: Optional[str] = None
+    for entry in items[:5]:
+        item = (entry.get("item") or {}).get("data") or {}
+        uri = item.get("uri") or ""
+        if not uri.startswith("spotify:track:"):
+            continue
+        name = str(item.get("name") or "")
+        if name.lower() != wanted_title:
+            continue
+        track_id = uri.split(":")[-1]
+        # Confirm primary artist + read playcount via getTrack — more
+        # reliable than the search's inline artist block which varies
+        # by response version.
+        try:
+            payload = _song_info(track_id)
+        except Exception:
+            continue
+        union = (payload.get("data") or {}).get("trackUnion") or {}
+        first_items = (
+            (union.get("firstArtist") or {}).get("items")
+            or (union.get("artists") or {}).get("items")
+            or []
+        )
+        if not first_items:
+            continue
+        first_name = str(
+            (first_items[0].get("profile") or {}).get("name")
+            or first_items[0].get("name")
+            or ""
+        )
+        if first_name.lower() != wanted_artist:
+            continue
+        pc_raw = union.get("playcount")
+        try:
+            cand_pc = int(pc_raw) if pc_raw is not None else None
+        except (TypeError, ValueError):
+            cand_pc = None
+        if cand_pc is not None and cand_pc > best_pc:
+            best_pc = cand_pc
+            best_id = track_id
+
+    if best_id is not None and best_pc > 0:
+        # Cache the playcount AND the upgraded ISRC→track mapping in a
+        # single transaction. The mapping write unblocks downstream
+        # artist-resolution which walks `isrc_to_spotify_track` rather
+        # than `track_playcount` — without it, a stale NULL from the
+        # earlier direct-ISRC search would still force a re-resolve.
+        now_s = int(time.time())
+        _write_cache_rows(
+            (
+                "INSERT OR REPLACE INTO track_playcount "
+                "(isrc, playcount, fetched_at) VALUES (?, ?, ?)",
+                (isrc, best_pc, now_s),
+            ),
+            (
+                "INSERT OR REPLACE INTO isrc_to_spotify_track "
+                "(isrc, spotify_track_id, fetched_at) VALUES (?, ?, ?)",
+                (isrc, best_id, now_s),
+            ),
+        )
+        return best_pc
+    return pc
+
+
+def debug_resolve_artist(
+    tidal_artist_id: str,
+    tidal_artist_name: str,
+    sample_isrcs: list[str],
+) -> dict:
+    """Run the Tidal → Spotify artist resolution end-to-end WITHOUT
+    touching the cache, and return a structured report of what
+    happened at each step. Used by the /api/debug/artist-resolve
+    endpoint to diagnose artists whose monthly-listeners don't show
+    up on the artist page.
+
+    Does not mutate the cache. Exceptions are captured into the
+    report instead of raised.
+    """
+    report: dict = {
+        "tidal_artist_id": str(tidal_artist_id),
+        "tidal_artist_name": tidal_artist_name,
+        "sample_isrcs_available": list(sample_isrcs),
+        "steps": [],
+        "selected_spotify_artist_id": None,
+        "selected_spotify_artist_name": None,
+        "name_match": None,
+        "monthly_listeners": None,
+        "followers": None,
+        "world_rank": None,
+        "verdict": "unknown",
+        "errors": [],
+    }
+
+    if not sample_isrcs:
+        report["verdict"] = "no_isrc"
+        report["steps"].append(
+            {"stage": "isrc-selection", "detail": "No ISRCs on any top track"}
+        )
+        return report
+
+    wanted_name_norm = (tidal_artist_name or "").strip().lower()
+
+    selected_spotify_artist_id: Optional[str] = None
+    selected_source_isrc: Optional[str] = None
+    selected_track_artists: list[str] = []
+
+    for isrc in sample_isrcs[:5]:
+        isrc_clean = (isrc or "").strip().upper()
+        if not isrc_clean:
+            continue
+
+        step: dict = {
+            "stage": "isrc-resolve",
+            "isrc": isrc_clean,
+            "search_candidates": [],
+            "picked_track_id": None,
+            "picked_track_artists": [],
+            "first_artist_uri": None,
+        }
+
+        try:
+            song, _ = _ensure_client()
+            res = song.query_songs(f"isrc:{isrc_clean}", limit=5)
+        except Exception as exc:
+            step["error"] = f"search failed: {exc!r}"
+            report["steps"].append(step)
+            continue
+
+        items = (
+            (res.get("data") or {})
+            .get("searchV2", {})
+            .get("tracksV2", {})
+            .get("items")
+            or []
+        )
+        for entry in items:
+            item = (entry.get("item") or {}).get("data") or {}
+            uri = item.get("uri") or ""
+            if not uri.startswith("spotify:track:"):
+                continue
+            step["search_candidates"].append(
+                {
+                    "track_id": uri.split(":")[-1],
+                    "name": item.get("name") or "",
+                }
+            )
+
+        if not step["search_candidates"]:
+            step["detail"] = "Spotify returned no track candidates for this ISRC"
+            report["steps"].append(step)
+            continue
+
+        # Walk the first candidate to get its artists. (Ranking doesn't
+        # affect artist resolution — any candidate's primary-artist
+        # walk lands on the same artist, so we pick the first to keep
+        # this cheap and deterministic.)
+        picked_id = step["search_candidates"][0]["track_id"]
+        step["picked_track_id"] = picked_id
+        try:
+            payload = _song_info(picked_id)
+        except Exception as exc:
+            step["error"] = f"getTrack failed: {exc!r}"
+            report["steps"].append(step)
+            continue
+
+        union = (payload.get("data") or {}).get("trackUnion") or {}
+        first_items = (
+            (union.get("firstArtist") or {}).get("items")
+            or (union.get("artists") or {}).get("items")
+            or []
+        )
+        artist_uri: Optional[str] = None
+        for item in first_items:
+            uri = item.get("uri") or ""
+            name = str(item.get("profile", {}).get("name") or item.get("name") or "")
+            if name:
+                step["picked_track_artists"].append(name)
+            if not artist_uri and uri.startswith("spotify:artist:"):
+                artist_uri = uri
+                step["first_artist_uri"] = uri
+
+        if not artist_uri:
+            step["detail"] = "No spotify:artist URI found on the track"
+            report["steps"].append(step)
+            continue
+
+        candidate_artist_id = artist_uri.split(":")[-1]
+        step["candidate_spotify_artist_id"] = candidate_artist_id
+
+        # If this candidate's first listed name matches the Tidal
+        # artist's name we're done. Otherwise keep the first resolve
+        # as a fallback and try the next ISRC, which might come from
+        # a track where THIS artist is primary instead of a featured
+        # collaborator.
+        name_matches = (
+            len(step["picked_track_artists"]) > 0
+            and step["picked_track_artists"][0].strip().lower() == wanted_name_norm
+        )
+        step["name_matches_tidal"] = name_matches
+
+        if selected_spotify_artist_id is None:
+            selected_spotify_artist_id = candidate_artist_id
+            selected_source_isrc = isrc_clean
+            selected_track_artists = list(step["picked_track_artists"])
+
+        if name_matches:
+            selected_spotify_artist_id = candidate_artist_id
+            selected_source_isrc = isrc_clean
+            selected_track_artists = list(step["picked_track_artists"])
+            report["steps"].append(step)
+            break
+
+        report["steps"].append(step)
+
+    if not selected_spotify_artist_id:
+        report["verdict"] = "no_spotify_match"
+        return report
+
+    report["selected_spotify_artist_id"] = selected_spotify_artist_id
+    report["selected_source_isrc"] = selected_source_isrc
+    report["selected_track_artists"] = selected_track_artists
+    report["name_match"] = (
+        bool(selected_track_artists)
+        and selected_track_artists[0].strip().lower() == wanted_name_norm
+    )
+
+    try:
+        _, artist = _ensure_client()
+        payload = artist.get_artist(selected_spotify_artist_id)
+    except Exception as exc:
+        report["errors"].append(f"queryArtistOverview: {exc!r}")
+        report["verdict"] = "artist_overview_failed"
+        return report
+
+    union = (payload.get("data") or {}).get("artistUnion") or {}
+    profile = union.get("profile") or {}
+    stats = union.get("stats") or {}
+    report["selected_spotify_artist_name"] = str(profile.get("name") or "")
+    report["monthly_listeners"] = _safe_int(stats.get("monthlyListeners"))
+    report["followers"] = _safe_int(stats.get("followers"))
+    report["world_rank"] = _safe_int(stats.get("worldRank"))
+    report["stats_keys_present"] = sorted(stats.keys()) if isinstance(stats, dict) else []
+
+    if report["monthly_listeners"] is None:
+        report["verdict"] = "no_monthly_listeners"
+    elif not report["name_match"]:
+        report["verdict"] = "wrong_artist_possible"
+    else:
+        report["verdict"] = "ok"
+    return report
+
+
 __all__ = [
     "ArtistStats",
     "playcount_by_isrc",
+    "playcount_with_fallback",
+    "purge_null_playcounts",
     "album_total_plays",
     "artist_stats",
+    "debug_resolve_artist",
 ]
