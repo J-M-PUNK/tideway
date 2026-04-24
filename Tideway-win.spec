@@ -52,10 +52,16 @@ binaries: list[tuple[str, str]] = []
 # compiled .pyd; collect_all grabs data + binaries + submodules in one
 # call. Same pattern for any other package with a native extension that
 # the default hook doesn't cover.
-for pkg in ("pydantic", "pydantic_core"):
-    _d, _b, _h = collect_all(pkg)
-    datas += _d
-    binaries += _b
+for pkg in ("pydantic", "pydantic_core", "curl_cffi"):
+    try:
+        _d, _b, _h = collect_all(pkg)
+        datas += _d
+        binaries += _b
+    except Exception:
+        # curl-cffi is best-effort; if it isn't installed in the
+        # build environment the app falls back to plain requests at
+        # runtime instead of failing the build.
+        pass
 
 # tidalapi and uvicorn use dynamic imports that PyInstaller's static
 # analysis misses. Collect their submodules explicitly.

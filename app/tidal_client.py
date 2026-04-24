@@ -18,6 +18,162 @@ from app.paths import user_data_dir
 SESSION_FILE = user_data_dir() / "tidal_session.json"
 
 
+# --- Tidal request gate + abuse/rate-limit backoff ---------------------
+#
+# Tidal's anti-abuse layer responds to suspicious volume with either
+# HTTP 429 (soft rate-limit) or HTTP 403 + `"abuse_detected"` (account
+# suspension escalation path). When we see either signal we want to
+# stop hitting Tidal immediately: further requests only deepen the
+# suspension and can trigger permanent-ban. We install one interceptor
+# on tidalapi's central HTTP method so every call passes through the
+# gate. Module-level state so any place that instantiates a
+# TidalClient shares the same backoff window.
+_tidal_backoff_until: float = 0.0
+_tidal_backoff_reason: str = ""
+_tidal_backoff_lock = threading.Lock()
+
+
+class TidalBackoffError(Exception):
+    """Raised when we refuse to make a Tidal request because we're
+    still inside a backoff window. Contains the remaining seconds so
+    the API layer can surface a 503 with a Retry-After-style message."""
+
+    def __init__(self, seconds_remaining: float, reason: str):
+        self.seconds_remaining = seconds_remaining
+        self.reason = reason
+        super().__init__(
+            f"Tidal backoff active for another {seconds_remaining:.0f}s: {reason}"
+        )
+
+
+def tidal_backoff_state() -> dict:
+    """Snapshot for /api/tidal/backoff so the frontend can surface a
+    banner explaining why things are blocked."""
+    with _tidal_backoff_lock:
+        return {
+            "active": time.time() < _tidal_backoff_until,
+            "until_epoch": _tidal_backoff_until,
+            "seconds_remaining": max(0.0, _tidal_backoff_until - time.time()),
+            "reason": _tidal_backoff_reason,
+        }
+
+
+def _classify_tidal_error(status_code: Optional[int], body: str) -> None:
+    """Inspect a Tidal response's status + body and engage the
+    appropriate backoff. No-op on success / non-abuse failures.
+    Shared between the session request gate (for normal API calls)
+    and the PKCE token-endpoint exception handler (which bypasses
+    the gate because tidalapi uses its own requests.post for auth).
+    """
+    if status_code == 429:
+        _trigger_tidal_backoff(60.0, "rate-limited (HTTP 429)")
+        return
+    if status_code == 403:
+        body_lower = (body or "").lower()
+        if "abuse" in body_lower or "suspended" in body_lower:
+            _trigger_tidal_backoff(
+                30 * 60.0, f"abuse-detected (HTTP 403): {(body or '')[:200]}"
+            )
+
+
+def _trigger_tidal_backoff(duration_seconds: float, reason: str) -> None:
+    global _tidal_backoff_until, _tidal_backoff_reason
+    with _tidal_backoff_lock:
+        until = time.time() + duration_seconds
+        # Extend if we'd be setting a shorter window than already
+        # pending — never pull a backoff in early.
+        if until > _tidal_backoff_until:
+            _tidal_backoff_until = until
+            _tidal_backoff_reason = reason
+    import sys as _sys
+    print(
+        f"[tidal] backoff engaged for {duration_seconds:.0f}s: {reason}",
+        file=_sys.stderr,
+        flush=True,
+    )
+
+
+def tidal_jitter_sleep() -> None:
+    """Random 50-200 ms pause used inside parallel pools that hit
+    Tidal. Aligns bursts to look closer to human-paced navigation
+    than a mechanical fan-out — our five concurrent requests all
+    firing within 5 ms is a signature no real client produces."""
+    import random as _random
+    time.sleep(_random.uniform(0.05, 0.20))
+
+
+# Headers we apply on top of whatever curl-cffi's impersonation
+# profile already supplies. UA matches the real Tidal Android client;
+# Accept-Language pins us to en-US so personalized editorial doesn't
+# vary with the (often empty) system locale.
+_TIDAL_ANDROID_HEADERS: dict = {
+    "User-Agent": "TIDAL_ANDROID/2.88.0 okhttp/4.12.0",
+    "Accept-Language": "en-US",
+}
+
+
+def _install_tidal_request_gate(session: tidalapi.Session) -> None:
+    """Wrap tidalapi's Requests.basic_request so every HTTP call:
+      1. Refuses early with TidalBackoffError if we're still in a
+         backoff window (preserves the account — every request while
+         suspended extends the strike window).
+      2. On 429, engages a 60 s backoff.
+      3. On 403 with `abuse_detected` / `"abuse"` in the body, engages
+         a much longer (30-minute) backoff so we don't re-hit while
+         Tidal's fraud system is still watching.
+    """
+    requests_obj = session.request
+    original = requests_obj.basic_request
+
+    def wrapped(method, path, params=None, data=None, headers=None, base_url=None):
+        now = time.time()
+        with _tidal_backoff_lock:
+            remaining = _tidal_backoff_until - now
+            reason = _tidal_backoff_reason
+        if remaining > 0:
+            raise TidalBackoffError(remaining, reason)
+
+        resp = original(method, path, params=params, data=data, headers=headers, base_url=base_url)
+        body = ""
+        if getattr(resp, "status_code", None) == 403:
+            try:
+                body = resp.text[:400]
+            except Exception:
+                pass
+        _classify_tidal_error(getattr(resp, "status_code", None), body)
+        return resp
+
+    # Bind the wrapper on the instance so we don't leak patches
+    # across Session objects (the login flow rebuilds the session).
+    requests_obj.basic_request = wrapped
+
+
+def _swap_to_impersonated_transport(session: tidalapi.Session) -> None:
+    """Replace tidalapi's underlying request_session with a curl-cffi
+    session that matches a real mobile-Chrome TLS stack. urllib3's
+    ClientHello + HTTP/2 SETTINGS are a Python-specific fingerprint
+    Tidal's anti-abuse can match on without seeing any request
+    volume. Best-effort: keeps the plain requests.Session if
+    curl-cffi can't be loaded.
+    """
+    from app.http import build_impersonated_session
+
+    impersonated = build_impersonated_session()
+    if impersonated is None:
+        return
+    old = getattr(session, "request_session", None)
+    if old is not None and hasattr(old, "headers"):
+        try:
+            impersonated.headers.update(dict(old.headers))
+        except Exception:
+            pass
+    impersonated.headers["User-Agent"] = _TIDAL_ANDROID_HEADERS["User-Agent"]
+    impersonated.headers["Accept-Language"] = _TIDAL_ANDROID_HEADERS[
+        "Accept-Language"
+    ]
+    session.request_session = impersonated
+
+
 def _fetch_all_pages(method) -> list:
     """Exhaustively fetch every item from a paginated tidalapi list method.
 
@@ -174,6 +330,8 @@ class TidalClient:
     def __init__(self):
         config = tidalapi.Config(quality=tidalapi.Quality.high_lossless)
         self.session = tidalapi.Session(config)
+        _install_tidal_request_gate(self.session)
+        _swap_to_impersonated_transport(self.session)
         self._login_future: Optional[Future] = None
         # Cached subscription-tier result. Populated on first call and
         # refreshed every _SUB_TTL_SEC. Subscription almost never changes
@@ -505,10 +663,16 @@ class TidalClient:
             SESSION_FILE.unlink()
         config = tidalapi.Config(quality=tidalapi.Quality.high_lossless)
         self.session = tidalapi.Session(config)
+        _install_tidal_request_gate(self.session)
+        _swap_to_impersonated_transport(self.session)
         # The subscription-tier cache belongs to the previous session.
         # Bust it so the next login re-detects under the new client_id.
         with self._sub_lock:
             self._sub_cache = (0.0, None)
+        # The cached PKCE URL holds the OLD session's verifier. Without
+        # clearing it, the next login returns a stale URL for up to 10 min
+        # and its code exchange fails because the verifier is gone.
+        self._pkce_url_cache = None
 
     # ------------------------------------------------------------------
     # OAuth login
@@ -546,14 +710,43 @@ class TidalClient:
     # ------------------------------------------------------------------
 
     def pkce_login_url(self) -> str:
-        """URL the user should open in a browser to begin PKCE login."""
-        return self.session.pkce_login_url()
+        """URL the user should open in a browser to begin PKCE login.
 
-    def complete_pkce_login(self, redirect_url: str) -> bool:
+        Cached for 10 minutes after generation. tidalapi's
+        `session.pkce_login_url()` rotates the PKCE verifier on every
+        call — if the frontend fetches the URL twice (React strict-
+        mode double-render, a remount after coming back from Safari,
+        a reconnect), the second call overwrites the first verifier,
+        and the code the user pastes back (which was bound to the
+        first verifier) fails to exchange with a 401. Caching the
+        URL keeps the verifier stable across repeated fetches while
+        one login attempt is in progress.
+        """
+        cached = getattr(self, "_pkce_url_cache", None)
+        if cached is not None:
+            url, generated_at = cached
+            if time.time() - generated_at < 600:  # 10 min
+                return url
+        url = self.session.pkce_login_url()
+        self._pkce_url_cache = (url, time.time())
+        return url
+
+    def complete_pkce_login(self, redirect_url: str) -> tuple[bool, Optional[str]]:
         """Exchange the pasted 'Oops' redirect URL for access tokens,
         enable the hi-res client_id, and persist the session. Returns
-        True on success.
+        `(True, None)` on success, `(False, reason)` on failure so the
+        API layer can surface a concrete error to the user.
         """
+        # Respect any active backoff — pkce_get_auth_token hits
+        # auth.tidal.com/v1/oauth2/token via its own requests.post so
+        # the module-level request gate doesn't cover it. Refusing
+        # here stops "Continue" spam from compounding a suspension.
+        state = tidal_backoff_state()
+        if state["active"]:
+            return False, (
+                f"Tidal is holding us off for another "
+                f"{int(state['seconds_remaining'])}s ({state['reason']})"
+            )
         try:
             token = self.session.pkce_get_auth_token(redirect_url)
             self.session.process_auth_token(token, is_pkce_token=True)
@@ -575,15 +768,42 @@ class TidalClient:
                 # should re-detect at Max.
                 with self._sub_lock:
                     self._sub_cache = (0.0, None)
-                return True
+                # Clear the cached PKCE URL so a subsequent logout +
+                # re-login generates a fresh verifier.
+                self._pkce_url_cache = None
+                return True, None
+            return False, "check_login returned False"
         except Exception as exc:
             import sys as _sys
+            # If tidalapi's requests call raised, pull the response
+            # body out so we can see Tidal's actual error payload
+            # ("invalid_grant", "invalid_client", code-already-used,
+            # etc.) instead of just the 403 status.
+            resp_body = ""
+            resp = getattr(exc, "response", None)
+            status_code = None
+            if resp is not None:
+                status_code = getattr(resp, "status_code", None)
+                try:
+                    resp_body = resp.text[:500]
+                except Exception:
+                    pass
+            # tidalapi's pkce_get_auth_token uses its own requests.post
+            # so the session-level gate never sees the response. Run
+            # the shared classifier manually to keep the two paths in
+            # lockstep.
+            _classify_tidal_error(status_code, resp_body)
             print(
-                f"[tidal] complete_pkce_login failed: {exc!r}",
+                f"[tidal] complete_pkce_login failed: {exc!r}\n"
+                f"  redirect_url: {redirect_url[:200]}\n"
+                f"  response_body: {resp_body}",
                 file=_sys.stderr,
                 flush=True,
             )
-        return False
+            detail = f"{type(exc).__name__}: {exc}"
+            if resp_body:
+                detail = f"{detail} | body: {resp_body}"
+            return False, detail
 
     # ------------------------------------------------------------------
     # User info
@@ -718,10 +938,40 @@ class TidalClient:
         return out
 
     def get_artist_top_tracks(self, artist) -> list:
+        """Top tracks for an artist, with one retry and an album-tracks
+        fallback. Tidal's get_top_tracks is intermittently flaky for
+        very popular artists (Travis Scott, Drake, Taylor Swift in
+        casual testing) — the request succeeds but returns an empty
+        list ~30% of the time. Empty top tracks cascade into broken
+        Spotify monthly-listeners on the artist page (no ISRC to
+        pivot on), so we retry once, then fall back to walking the
+        first couple of albums for tracks if the API still gives us
+        nothing.
+        """
+        for _ in range(2):
+            try:
+                tracks = list(artist.get_top_tracks(limit=10))
+                if tracks:
+                    return tracks
+            except Exception:
+                pass
+
+        # Fallback: pull tracks off the first couple of releases.
+        # Anything with an ISRC works for the artist-resolve pivot
+        # downstream, and a couple of album cuts is plenty.
         try:
-            return list(artist.get_top_tracks(limit=10))
+            albums = list(artist.get_albums(limit=2))
         except Exception:
-            return []
+            albums = []
+        out: list = []
+        for alb in albums:
+            try:
+                out.extend(list(alb.tracks())[:5])
+            except Exception:
+                continue
+            if len(out) >= 10:
+                break
+        return out
 
     def get_album_tracks(self, album) -> list:
         try:

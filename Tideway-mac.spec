@@ -75,6 +75,11 @@ for pkg in (
     "defusedxml",
     "didl_lite",
     "voluptuous",
+    # curl-cffi ships its own libcurl-impersonate dylib + a CFFI
+    # binding that PyInstaller's static analysis routinely misses.
+    # Without this the packaged app falls back to plain requests
+    # silently, losing the TLS-fingerprint match.
+    "curl_cffi",
 ):
     try:
         _d, _b, _h = collect_all(pkg)

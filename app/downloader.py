@@ -1,6 +1,7 @@
 import json
 import os
 import queue
+import random
 import re
 import shutil
 import tempfile
@@ -28,6 +29,120 @@ QUEUE_STATE_FILE = user_data_dir() / "download_queue.json"
 # user can slide the setting up or down at runtime without restart.
 MAX_WORKER_THREADS = 10
 DEFAULT_CONCURRENT_DOWNLOADS = 3
+
+
+class _SharedRateLimiter:
+    """Process-global thread-safe pacer used to bound TOTAL download
+    throughput across all worker threads. Per-track `_RateLimiter`
+    instances cap each stream individually; this one caps the sum.
+    Without it, raising `concurrent_downloads` to 10 multiplies the
+    per-track cap directly — defeating the throttle the moment a
+    user wants more parallelism.
+
+    Token-bucket style with a one-second burst. `set_rate` reconfigures
+    live so the user can tune the per-track setting without restarting.
+    """
+
+    def __init__(self, bytes_per_sec: float):
+        self._lock = threading.Lock()
+        self.bytes_per_sec = max(0.0, bytes_per_sec)
+        self._tokens = self.bytes_per_sec
+        self._last = time.monotonic()
+
+    def set_rate(self, bytes_per_sec: float) -> None:
+        new_rate = max(0.0, bytes_per_sec)
+        with self._lock:
+            # Rate unchanged: don't wipe _tokens/_last. set_rate is
+            # called per-track from every worker, so a same-rate
+            # reset would let workers steal each other's accumulated
+            # debt and briefly un-throttle the aggregate while a new
+            # track was starting alongside in-flight ones.
+            if new_rate == self.bytes_per_sec:
+                return
+            self.bytes_per_sec = new_rate
+            self._tokens = new_rate
+            self._last = time.monotonic()
+
+    def consume(self, n: int) -> None:
+        while True:
+            with self._lock:
+                if self.bytes_per_sec <= 0:
+                    return
+                now = time.monotonic()
+                self._tokens = min(
+                    self.bytes_per_sec,
+                    self._tokens + (now - self._last) * self.bytes_per_sec,
+                )
+                self._last = now
+                if n <= self._tokens:
+                    self._tokens -= n
+                    return
+                deficit = n - self._tokens
+                self._tokens = 0
+                wait = deficit / self.bytes_per_sec
+            time.sleep(wait)
+
+
+# Aggregate cap is per-track × 3 — generous enough that the typical
+# 3-worker default sees no change, tight enough that cranking
+# concurrent_downloads to 10 doesn't 10× the throughput. Updated by
+# `_apply_aggregate_rate` whenever settings change.
+_AGGREGATE_LIMITER = _SharedRateLimiter(0)
+
+
+def _apply_aggregate_rate(per_track_mbps: int) -> None:
+    """Recompute the aggregate cap from the current per-track setting."""
+    if per_track_mbps and per_track_mbps > 0:
+        _AGGREGATE_LIMITER.set_rate(per_track_mbps * 3 * 1_000_000)
+    else:
+        _AGGREGATE_LIMITER.set_rate(0)
+
+
+# Smear consecutive bulk-enqueue calls across at least this much wall
+# clock so a "queue 50 albums in 2 seconds" binge doesn't hit Tidal's
+# CDN as a single burst. 3 s is short enough that users binging through
+# their library don't notice; 50 albums then take ~2.5 minutes to
+# enqueue instead of materializing instantly. The actual download
+# throughput is governed by the per-track + aggregate limiters above.
+_BULK_ENQUEUE_COOLDOWN_SEC = 3.0
+_bulk_enqueue_lock = threading.Lock()
+_last_bulk_enqueue_at: float = 0.0
+
+
+def _wait_for_bulk_cooldown() -> None:
+    global _last_bulk_enqueue_at
+    with _bulk_enqueue_lock:
+        now = time.monotonic()
+        wait = (_last_bulk_enqueue_at + _BULK_ENQUEUE_COOLDOWN_SEC) - now
+        _last_bulk_enqueue_at = now if wait <= 0 else now + wait
+    if wait > 0:
+        time.sleep(wait)
+
+
+class _RateLimiter:
+    """Per-chunk download pacer. Caps sustained throughput without
+    banking debt across stalls — if the socket pauses, the next
+    chunk is paced on its own merits instead of sleeping zero to
+    "catch up" like a cumulative-bytes-over-cumulative-time scheme
+    would. That stall-catchup behaviour would unmask the throttle
+    right when Tidal's anomaly detector is most likely to notice.
+    """
+
+    def __init__(self, bytes_per_sec: float):
+        self.bytes_per_sec = max(0.0, bytes_per_sec)
+        self._last = time.monotonic()
+
+    def consume(self, n: int) -> None:
+        if self.bytes_per_sec <= 0:
+            return
+        now = time.monotonic()
+        delta = now - self._last
+        required = n / self.bytes_per_sec
+        if delta < required:
+            time.sleep(required - delta)
+            self._last = time.monotonic()
+        else:
+            self._last = now
 # Minimum progress delta between SSE updates; prevents broadcasting every
 # 64KB chunk (~800 events per FLAC) while keeping the bar feeling live.
 PROGRESS_UPDATE_THRESHOLD = 0.01
@@ -269,6 +384,19 @@ class Downloader:
             )
             self._surface_preflight_failure(refusal)
             return
+
+        # Shuffle the work order so the CDN doesn't see a sequential
+        # 1, 2, 3, … fetch pattern across the album/playlist. Real
+        # users skip around; a strict in-order pull is a textbook
+        # scrape signature.
+        if len(pairs) > 1 and content_type in ("album", "playlist"):
+            random.shuffle(pairs)
+
+        # Smear back-to-back bulk enqueues across a small cooldown so
+        # binge-collecting 50 albums doesn't slam the queue in one
+        # tick. Single-track adds skip this — only album/playlist.
+        if content_type in ("album", "playlist"):
+            _wait_for_bulk_cooldown()
 
         print(
             f"[downloader] _enqueue_object enqueuing {len(pairs)} track(s)",
@@ -864,6 +992,17 @@ class Downloader:
                         last_published = item.progress
                         self._publish_update(item)
 
+                # Rate-limit per-track fetch so the CDN pattern looks
+                # like aggressive prefetch rather than bulk scrape. 0
+                # (or missing) means unlimited — backward-compatible
+                # with older settings blobs. The shared aggregate
+                # limiter (process-global) caps the sum across all
+                # workers; we reconfigure it here in case the user
+                # adjusted the setting since the last download.
+                rate_mbps = getattr(self.settings, "download_rate_limit_mbps", 0) or 0
+                _apply_aggregate_rate(rate_mbps)
+                limiter = _RateLimiter(rate_mbps * 1_000_000) if rate_mbps > 0 else None
+
                 with open(tmp_path, "wb") as f:
                     # Write the first URL we already opened.
                     got = 0
@@ -873,6 +1012,9 @@ class Downloader:
                         self._check_cancel(item.item_id)
                         f.write(chunk)
                         got += len(chunk)
+                        _AGGREGATE_LIMITER.consume(len(chunk))
+                        if limiter is not None:
+                            limiter.consume(len(chunk))
                         inner = (got / first_len) if first_len else 0.5
                         _bump(0, inner)
                     first_resp_cm.__exit__(None, None, None)
@@ -893,6 +1035,9 @@ class Downloader:
                                 self._check_cancel(item.item_id)
                                 f.write(chunk)
                                 seg_got += len(chunk)
+                                _AGGREGATE_LIMITER.consume(len(chunk))
+                                if limiter is not None:
+                                    limiter.consume(len(chunk))
                                 inner = (seg_got / seg_len) if seg_len else 0.5
                                 _bump(i, inner)
             finally:
