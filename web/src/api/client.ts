@@ -118,7 +118,7 @@ export const api = {
      *  bail out of the waiting spinner and show the paste fallback
      *  without waiting for the 10-minute timeout. */
     inappLoginState: () =>
-      req<{ phase: "idle" | "active" | "aborted_sso" | "closed" }>(
+      req<{ phase: "idle" | "active" | "aborted_sso" | "closed" | "unauthorized" }>(
         "/api/auth/login/inapp/state",
       ).catch(() => ({ phase: "idle" as const })),
   },

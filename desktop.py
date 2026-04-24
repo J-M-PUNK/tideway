@@ -540,7 +540,215 @@ def main(argv: Optional[list[str]] = None) -> int:
             pass
         mini_window["value"] = mw
 
-    # --- In-app PKCE login window ------------------------------------
+    # --- Safari-driven PKCE login (macOS) ----------------------------
+    # Preferred on macOS because WKWebView can't host appleid.apple.com
+    # (it hard-traps) and a huge share of Tidal accounts are Sign-in-
+    # with-Apple. Flow:
+    #
+    #   1. `open -a Safari <pkce_url>` hands the login URL to Safari,
+    #      which can handle every SSO provider natively.
+    #   2. A daemon thread polls Safari via AppleScript ("get URL of
+    #      every tab of every window") every 500 ms.
+    #   3. When a tab's URL contains `code=` and `tidal.com`, we grab
+    #      it and POST to /api/auth/pkce/complete just like the old
+    #      in-app path did. The user is logged in the moment Safari
+    #      lands on the Oops page, no paste required.
+    #
+    # First call triggers a macOS Automation permission prompt
+    # ("Tideway wants to control Safari"). If the user denies, we flag
+    # the phase as `unauthorized` and the frontend falls back to the
+    # classic paste flow so login is still reachable.
+    safari_login_state: dict[str, object] = {"running": False}
+
+    def _start_safari_login(pkce_url: str) -> None:
+        if safari_login_state.get("running"):
+            # A previous attempt is still polling — don't spawn a
+            # second thread. Just hand the user back to the already-
+            # opened Safari tab.
+            try:
+                import subprocess as _sp
+                _sp.Popen(
+                    ["/usr/bin/open", "-a", "Safari"],
+                    stdout=_sp.DEVNULL,
+                    stderr=_sp.DEVNULL,
+                )
+            except Exception:
+                pass
+            return
+
+        import re
+        import subprocess
+
+        print(
+            f"[desktop] safari-login: opening Safari at {pkce_url[:80]}...",
+            file=sys.stderr,
+            flush=True,
+        )
+        try:
+            subprocess.Popen(
+                ["/usr/bin/open", "-a", "Safari", pkce_url],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except Exception as exc:
+            print(
+                f"[desktop] safari-login: open Safari failed: {exc!r}",
+                file=sys.stderr,
+                flush=True,
+            )
+            try:
+                _server.set_inapp_login_phase("unauthorized")
+            except Exception:
+                pass
+            return
+
+        _TIMEOUT_S = 10 * 60
+        _APPLESCRIPT = (
+            'tell application "Safari"\n'
+            '    set urlList to {}\n'
+            '    repeat with w in windows\n'
+            '        repeat with t in tabs of w\n'
+            '            set end of urlList to URL of t\n'
+            '        end repeat\n'
+            '    end repeat\n'
+            '    return urlList\n'
+            'end tell\n'
+        )
+        _URL_RE = re.compile(r"https?://[^\s,]+")
+
+        def _poll() -> None:
+            safari_login_state["running"] = True
+            start = time.monotonic()
+            announced_authorized = False
+            try:
+                while True:
+                    if time.monotonic() - start > _TIMEOUT_S:
+                        print(
+                            "[desktop] safari-login: 10 minute timeout",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                        try:
+                            _server.set_inapp_login_phase("closed")
+                        except Exception:
+                            pass
+                        return
+                    try:
+                        result = subprocess.run(
+                            ["/usr/bin/osascript", "-e", _APPLESCRIPT],
+                            capture_output=True,
+                            text=True,
+                            timeout=5,
+                        )
+                    except Exception as exc:
+                        print(
+                            f"[desktop] safari-login: osascript exec failed: {exc!r}",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+                        time.sleep(0.5)
+                        continue
+
+                    if result.returncode != 0:
+                        err = (result.stderr or "").strip()
+                        denied = (
+                            "-1743" in err
+                            or "-128" in err
+                            or "not authorized" in err.lower()
+                            or "user canceled" in err.lower()
+                        )
+                        if denied:
+                            print(
+                                "[desktop] safari-login: automation denied: "
+                                f"{err[:200]}",
+                                file=sys.stderr,
+                                flush=True,
+                            )
+                            try:
+                                _server.set_inapp_login_phase("unauthorized")
+                            except Exception:
+                                pass
+                            return
+                        # Safari may still be launching ("application
+                        # isn't running" shows up for a second or two).
+                        time.sleep(0.5)
+                        continue
+
+                    if not announced_authorized:
+                        announced_authorized = True
+                        print(
+                            "[desktop] safari-login: automation ok, polling",
+                            file=sys.stderr,
+                            flush=True,
+                        )
+
+                    for url in _URL_RE.findall(result.stdout or ""):
+                        if "code=" in url and "tidal.com" in url:
+                            print(
+                                "[desktop] safari-login: captured redirect "
+                                f"{url[:120]}",
+                                file=sys.stderr,
+                                flush=True,
+                            )
+                            try:
+                                req = urllib.request.Request(
+                                    f"http://{HOST}:{PORT}/api/auth/pkce/complete",
+                                    data=json.dumps({"redirect_url": url}).encode(),
+                                    headers={"Content-Type": "application/json"},
+                                    method="POST",
+                                )
+                                with urllib.request.urlopen(req, timeout=30) as resp:
+                                    resp.read()
+                                print(
+                                    "[desktop] safari-login: pkce/complete posted",
+                                    file=sys.stderr,
+                                    flush=True,
+                                )
+                            except Exception as exc:
+                                print(
+                                    f"[desktop] safari-login: pkce/complete "
+                                    f"failed: {exc!r}",
+                                    file=sys.stderr,
+                                    flush=True,
+                                )
+                            try:
+                                _server.set_inapp_login_phase("idle")
+                            except Exception:
+                                pass
+                            # Tidy up the Oops tab. Best effort — if the
+                            # user already closed it, the script is a
+                            # no-op.
+                            try:
+                                subprocess.run(
+                                    [
+                                        "/usr/bin/osascript",
+                                        "-e",
+                                        'tell application "Safari" to close '
+                                        '(every tab of every window whose URL '
+                                        'contains "tidal.com/android/login/auth")',
+                                    ],
+                                    capture_output=True,
+                                    timeout=5,
+                                )
+                            except Exception:
+                                pass
+                            # Raise our own window so the user lands
+                            # back in Tideway signed in.
+                            try:
+                                from PyObjCTools import AppHelper
+                                AppHelper.callAfter(window.show)
+                            except Exception:
+                                pass
+                            return
+                    time.sleep(0.5)
+            finally:
+                safari_login_state["running"] = False
+
+        threading.Thread(
+            target=_poll, name="safari-login-poll", daemon=True
+        ).start()
+
+    # --- In-app PKCE login window (Windows / Linux fallback) ---------
     # State shared with the navigation hook so we only capture the
     # redirect once per attempt, and so we can destroy the window
     # from the hook without tripping pywebview's "window already
@@ -667,7 +875,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         def _abort_sso(url: str) -> None:
             print(
                 f"[desktop] inapp-login: SSO provider detected ({url[:80]}), "
-                "closing window — user should fall back to paste flow",
+                "opening system browser at the original Tidal login URL "
+                "and closing in-app window",
                 file=sys.stderr,
                 flush=True,
             )
@@ -676,6 +885,23 @@ def main(argv: Optional[list[str]] = None) -> int:
                 _server.set_inapp_login_phase("aborted_sso")
             except Exception:
                 pass
+            # Hand the user off to their default browser at Tidal's
+            # PKCE URL. Safari (or whatever they have set) handles
+            # appleid.apple.com just fine, so they can complete the
+            # SSO flow and end up on the Oops page where the URL is
+            # ready to paste back into the app. Without this auto-
+            # open the user just sees their click "do nothing" and
+            # has to manually find the paste flow.
+            try:
+                import webbrowser as _wb
+                _wb.open(pkce_url, new=2)
+            except Exception as exc:
+                print(
+                    f"[desktop] inapp-login: failed to open system "
+                    f"browser fallback: {exc!r}",
+                    file=sys.stderr,
+                    flush=True,
+                )
             try:
                 lw.destroy()
             except Exception:
@@ -747,32 +973,66 @@ def main(argv: Optional[list[str]] = None) -> int:
                 pass
 
         def _on_loaded_inject_css() -> None:
-            """Hide the SSO sign-in buttons on Tidal's login page so
-            the user physically can't click into a provider flow
-            WKWebView crashes on. Runs on every page load inside the
-            login window — cheap, idempotent, and bounces off non-
-            Tidal pages without doing any harm since the selectors
-            won't match anything."""
+            """Hide the SSO sign-in buttons on Tidal's login page and
+            paint a banner that tells the user this window is
+            email+password only. Runs on every page load inside the
+            login window. Tidal's React app hashes its class names so
+            attribute selectors miss; we walk the DOM by text content
+            instead, hide any element whose visible text is just an
+            SSO provider name, and re-run on mutations because Tidal
+            re-mounts the auth section after initial render."""
             try:
                 lw.evaluate_js(
                     """
                     (function () {
-                      var style = document.createElement('style');
-                      style.textContent = [
-                        'a[href*="apple"]',
-                        'a[href*="google"]',
-                        'a[href*="facebook"]',
-                        'button[class*="apple" i]',
-                        'button[class*="google" i]',
-                        'button[class*="facebook" i]',
-                        '[data-test*="apple"]',
-                        '[data-test*="google"]',
-                        '[data-test*="facebook"]',
-                        '[aria-label*="Apple" i]',
-                        '[aria-label*="Google" i]',
-                        '[aria-label*="Facebook" i]'
-                      ].join(',') + '{display:none !important;}';
-                      document.head.appendChild(style);
+                      var SSO_TEXTS = ['apple', 'google', 'facebook',
+                        'sign in with apple', 'sign in with google',
+                        'sign in with facebook', 'continue with apple',
+                        'continue with google', 'continue with facebook'];
+                      function hideSsoButtons() {
+                        // Walk every interactive element and check
+                        // its trimmed text against the SSO list.
+                        var nodes = document.querySelectorAll('button, a, [role="button"]');
+                        nodes.forEach(function (el) {
+                          var t = (el.textContent || '').trim().toLowerCase();
+                          if (SSO_TEXTS.indexOf(t) >= 0) {
+                            el.style.display = 'none';
+                            // Hide a couple of ancestors too — providers
+                            // are usually inside a wrapper that holds
+                            // the icon + label as siblings.
+                            var p = el.parentElement;
+                            for (var i = 0; i < 2 && p; i++) {
+                              if (p.children.length === 1) {
+                                p.style.display = 'none';
+                              }
+                              p = p.parentElement;
+                            }
+                          }
+                        });
+                      }
+                      function paintBanner() {
+                        if (document.getElementById('tideway-banner')) return;
+                        var b = document.createElement('div');
+                        b.id = 'tideway-banner';
+                        b.textContent = 'Use email + password only. ' +
+                          'Apple / Google / Facebook sign-in opens your ' +
+                          'normal browser instead.';
+                        b.style.cssText = 'position:fixed;top:0;left:0;right:0;' +
+                          'z-index:99999;background:#16BBF2;color:#000;' +
+                          'padding:8px 16px;font:600 12px -apple-system,' +
+                          'BlinkMacSystemFont,Helvetica,sans-serif;' +
+                          'text-align:center;';
+                        document.body.appendChild(b);
+                      }
+                      hideSsoButtons();
+                      paintBanner();
+                      // Tidal's React tree re-mounts the auth area after
+                      // first paint; observe and re-hide as nodes appear.
+                      var obs = new MutationObserver(function () {
+                        hideSsoButtons();
+                        paintBanner();
+                      });
+                      obs.observe(document.body, {childList: true, subtree: true});
                     })();
                     """
                 )
@@ -804,8 +1064,14 @@ def main(argv: Optional[list[str]] = None) -> int:
     # player" control can spawn a second pywebview window.
     _server.register_mini_player_callback(_open_mini_player)
     # Register the in-app login callback so the frontend can kick off
-    # the PKCE flow without the user having to copy the Oops URL.
-    _server.register_inapp_login_callback(_open_login_window)
+    # the PKCE flow without the user having to copy the Oops URL. On
+    # macOS we route through Safari (handles SSO natively, no
+    # WKWebView crash); on Windows/Linux we use the pywebview child
+    # window that intercepts the redirect inline.
+    if sys.platform == "darwin":
+        _server.register_inapp_login_callback(_start_safari_login)
+    else:
+        _server.register_inapp_login_callback(_open_login_window)
 
     # Start the tray icon. Non-blocking (run_detached internally).
     # `tray is None` when pystray's platform deps are missing, the icon
