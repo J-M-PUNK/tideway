@@ -52,7 +52,12 @@ from app.local_index import LocalIndex
 from app.paths import bundled_resource_dir
 from app.play_reporter import PlayReporter, PlaySession, recent_log as play_report_recent_log
 from app.settings import Settings, load_settings, save_settings
-from app.tidal_client import TidalClient
+from app.tidal_client import (
+    TidalBackoffError,
+    TidalClient,
+    tidal_backoff_state,
+    tidal_jitter_sleep,
+)
 
 
 logger = logging.getLogger("tidal-downloader.server")
@@ -537,6 +542,31 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 
 
 app = FastAPI(title="Tideway", lifespan=lifespan)
+
+
+# Any Tidal request inside a backoff window raises this. FastAPI would
+# otherwise render it as a raw 500 — convert to a clean 503 with a
+# Retry-After-style message. Anything asking for Tidal data lands here
+# so the UI can fail gracefully (and the TidalBackoffBanner is already
+# explaining the situation at the top of the screen).
+from fastapi.requests import Request as _FastAPIRequest
+from fastapi.responses import JSONResponse as _FastAPIJSONResponse
+@app.exception_handler(TidalBackoffError)
+async def _tidal_backoff_handler(request: _FastAPIRequest, exc: TidalBackoffError):
+    return _FastAPIJSONResponse(
+        status_code=503,
+        content={
+            "detail": (
+                "Tideway is holding off Tidal requests after a rate-limit "
+                "or abuse-detection response. Try again in "
+                f"{int(exc.seconds_remaining)}s."
+            ),
+            "tidal_backoff": True,
+            "seconds_remaining": exc.seconds_remaining,
+            "reason": exc.reason,
+        },
+        headers={"Retry-After": str(max(1, int(exc.seconds_remaining)))},
+    )
 
 # Localhost-only tool: restrict CORS to the Vite dev server origin and list
 # only the methods/headers we actually use. In production (single-origin
@@ -1871,11 +1901,15 @@ def auth_pkce_complete(req: PkceCompleteRequest) -> dict:
             status_code=400,
             detail="Paste the full URL from the Oops page (must contain a ?code=… query param).",
         )
-    ok = tidal.complete_pkce_login(req.redirect_url.strip())
+    ok, reason = tidal.complete_pkce_login(req.redirect_url.strip())
     if not ok:
+        base = (
+            "PKCE login failed. Double-check that you pasted the URL "
+            "from the Oops page immediately after logging in."
+        )
         raise HTTPException(
             status_code=401,
-            detail="PKCE login failed. Double-check that you pasted the URL from the Oops page immediately after logging in.",
+            detail=f"{base} ({reason})" if reason else base,
         )
     _invalidate_auth_cache()
     _invalidate_preview_cache()
@@ -2153,6 +2187,93 @@ def spotify_track_playcount(isrc: str) -> dict:
         return {"playcount": None}
 
 
+class _TrackPlaycountItem(BaseModel):
+    isrc: str
+    title: Optional[str] = None
+    artist: Optional[str] = None
+
+
+class _TrackPlaycountsRequest(BaseModel):
+    tracks: list[_TrackPlaycountItem]
+    refresh: Optional[bool] = False
+
+
+def _run_playcount_batch(
+    codes: list[str],
+    metadata: Optional[dict[str, tuple[str, str]]] = None,
+    refresh: bool = False,
+) -> dict[str, Optional[int]]:
+    """Resolve a list of ISRCs to Spotify playcounts through a bounded
+    thread pool. `metadata` supplies the optional title + artist per
+    ISRC so the fuzzy-fallback path can activate when Spotify's ISRC
+    search misses. `refresh=True` drops stale nulls/zeros first so
+    Popular-style pages self-heal entries cached as 0 during a
+    release-week lull. Shared between the POST and GET variants so
+    their pool size, error envelope, and caching semantics stay in
+    lockstep.
+    """
+    if not codes:
+        return {}
+    from app import spotify_public
+
+    if refresh:
+        try:
+            spotify_public.purge_null_playcounts(codes)
+        except Exception as exc:
+            logger.warning("playcount null-cache flush failed: %s", exc)
+
+    def _one(code: str) -> tuple[str, Optional[int]]:
+        try:
+            if metadata:
+                title, artist = metadata.get(code, ("", ""))
+                if title and artist:
+                    return code, spotify_public.playcount_with_fallback(
+                        code, title, artist
+                    )
+            return code, spotify_public.playcount_by_isrc(code)
+        except Exception:
+            return code, None
+
+    try:
+        with ThreadPoolExecutor(max_workers=min(5, len(codes))) as pool:
+            return dict(pool.map(_one, codes))
+    except Exception as exc:
+        logger.warning("spotify track-playcounts batch failed: %s", exc)
+        return {c: None for c in codes}
+
+
+@app.post("/api/spotify/track-playcounts")
+def spotify_track_playcounts_batch(body: _TrackPlaycountsRequest) -> dict:
+    """Batched Spotify playcount lookup with fuzzy title+artist
+    fallback when Spotify's ISRC search misses (covers
+    feature-version ISRCs that haven't been indexed yet)."""
+    _require_auth()
+    codes: list[str] = []
+    metadata: dict[str, tuple[str, str]] = {}
+    for t in body.tracks or []:
+        code = t.isrc.strip().upper()
+        if not code:
+            continue
+        codes.append(code)
+        metadata[code] = (t.title or "", t.artist or "")
+    return {
+        "playcounts": _run_playcount_batch(
+            codes, metadata=metadata, refresh=bool(body.refresh)
+        )
+    }
+
+
+@app.get("/api/spotify/track-playcounts")
+def spotify_track_playcounts(isrcs: str, refresh: bool = False) -> dict:
+    """Simpler GET variant without title/artist context — same
+    pooling and caching as the POST form, no fuzzy fallback."""
+    _require_auth()
+    if not isrcs:
+        raise HTTPException(status_code=400, detail="isrcs is required")
+    codes = [c.strip().upper() for c in isrcs.split(",") if c.strip()]
+    return {"playcounts": _run_playcount_batch(codes, refresh=refresh)}
+
+
 @app.get("/api/spotify/album-total-plays")
 def spotify_album_total_plays(isrcs: str) -> dict:
     """Sum Spotify's per-track play counts across an album.
@@ -2217,6 +2338,291 @@ def spotify_artist_stats(tidal_artist_id: str, sample_isrc: str) -> dict:
     return stats.to_dict()
 
 
+@app.get("/api/debug/playcount-trace")
+def debug_playcount_trace(q: str = "", isrc: str = "") -> dict:
+    """Diagnose a missing Spotify playcount for a specific track.
+
+    Pass either `?q=<title artist>` (searches Tidal, picks the first
+    track, reports its ISRC) or `?isrc=...` directly. The endpoint
+    then walks the ISRC-to-playcount resolution WITHOUT touching the
+    cache and also reports what's currently cached in the SQLite DB
+    so you can tell cached-null from transient-failure.
+    """
+    _require_auth()
+    report: dict = {"query": q, "requested_isrc": isrc}
+
+    resolved_isrc: str = ""
+    if isrc:
+        resolved_isrc = isrc.strip().upper()
+    elif q:
+        try:
+            results = tidal.search(q, limit=3)
+            tracks = results.get("tracks", []) or []
+            report["tidal_hits"] = [
+                {
+                    "id": getattr(t, "id", None),
+                    "name": getattr(t, "name", ""),
+                    "artists": [
+                        getattr(a, "name", "")
+                        for a in (getattr(t, "artists", None) or [])
+                    ],
+                    "isrc": (getattr(t, "isrc", "") or "").strip().upper() or None,
+                }
+                for t in tracks
+            ]
+            if tracks:
+                resolved_isrc = (
+                    (getattr(tracks[0], "isrc", "") or "").strip().upper()
+                )
+        except Exception as exc:
+            report["tidal_search_error"] = f"{exc!r}"
+    if not resolved_isrc:
+        report["verdict"] = "no_isrc"
+        return report
+
+    report["isrc"] = resolved_isrc
+
+    # Inspect the SQLite cache directly so we can distinguish "cached
+    # null keeping the track dark" from "uncached miss". sqlite3.connect
+    # creates an empty DB if the file doesn't exist; that's harmless
+    # here and avoids a TOCTOU window.
+    try:
+        import sqlite3 as _sqlite3
+        from app.paths import user_data_dir as _udir
+        db_path = _udir() / "spotify_public_cache.db"
+        conn = _sqlite3.connect(str(db_path), timeout=5.0)
+        try:
+            try:
+                row = conn.execute(
+                    "SELECT playcount, fetched_at FROM track_playcount WHERE isrc=?",
+                    (resolved_isrc,),
+                ).fetchone()
+            except _sqlite3.OperationalError:
+                # Table doesn't exist yet — the cache DB was just
+                # created by our connect() call. Treat as "no entry".
+                row = None
+            if row is not None:
+                report["cache"] = {
+                    "playcount": row[0],
+                    "fetched_at": row[1],
+                    "age_seconds": (
+                        int(time.time()) - int(row[1]) if row[1] else None
+                    ),
+                }
+            else:
+                report["cache"] = None
+            try:
+                row2 = conn.execute(
+                    "SELECT spotify_track_id, fetched_at FROM isrc_to_spotify_track "
+                    "WHERE isrc=?",
+                    (resolved_isrc,),
+                ).fetchone()
+            except _sqlite3.OperationalError:
+                row2 = None
+            if row2 is not None:
+                report["isrc_cache"] = {
+                    "spotify_track_id": row2[0],
+                    "fetched_at": row2[1],
+                }
+            else:
+                report["isrc_cache"] = None
+        finally:
+            conn.close()
+    except Exception as exc:
+        report["cache_error"] = f"{exc!r}"
+
+    # Live probe: search Spotify for this ISRC and walk each candidate.
+    from app import spotify_public
+
+    try:
+        song, _ = spotify_public._ensure_client()
+        res = song.query_songs(f"isrc:{resolved_isrc}", limit=5)
+    except Exception as exc:
+        report["spotify_search_error"] = f"{exc!r}"
+        return report
+
+    items = (
+        (res.get("data") or {})
+        .get("searchV2", {})
+        .get("tracksV2", {})
+        .get("items")
+        or []
+    )
+    candidates: list[dict] = []
+    for entry in items:
+        item = (entry.get("item") or {}).get("data") or {}
+        uri = item.get("uri") or ""
+        if not uri.startswith("spotify:track:"):
+            continue
+        track_id = uri.split(":")[-1]
+        info: dict = {
+            "spotify_track_id": track_id,
+            "name": item.get("name") or "",
+            "playcount": None,
+            "error": None,
+        }
+        try:
+            payload = spotify_public._song_info(track_id)
+            pc_raw = (payload.get("data") or {}).get("trackUnion", {}).get("playcount")
+            try:
+                info["playcount"] = int(pc_raw) if pc_raw is not None else None
+            except (TypeError, ValueError):
+                info["playcount"] = None
+            info["playcount_raw"] = pc_raw
+        except Exception as exc:
+            info["error"] = f"{exc!r}"
+        candidates.append(info)
+    report["spotify_candidates"] = candidates
+
+    if not candidates:
+        report["verdict"] = "spotify_no_hits"
+    elif all(c["playcount"] is None for c in candidates):
+        report["verdict"] = "spotify_no_playcount_field"
+    else:
+        report["verdict"] = "ok"
+    return report
+
+
+@app.post("/api/debug/clear-artist-cache/{tidal_artist_id}")
+def debug_clear_artist_cache(tidal_artist_id: str) -> dict:
+    """Force-reset the cached Tidal→Spotify artist mapping for one
+    artist. Use after the artist's stats line is showing as blank
+    because of a stale null cache from before the null-TTL fix."""
+    _require_auth()
+    import sqlite3
+    from app.paths import user_data_dir
+
+    db_path = user_data_dir() / "spotify_public_cache.db"
+    conn = sqlite3.connect(str(db_path), timeout=5.0)
+    try:
+        try:
+            cur = conn.execute(
+                "DELETE FROM tidal_to_spotify_artist WHERE tidal_artist_id=?",
+                (str(tidal_artist_id),),
+            )
+            deleted = cur.rowcount
+            conn.commit()
+        except sqlite3.OperationalError:
+            # DB or table didn't exist — nothing cached to clear.
+            return {"ok": False, "reason": "no cache db yet"}
+    finally:
+        conn.close()
+    return {"ok": True, "rows_deleted": deleted}
+
+
+@app.get("/api/tidal/backoff")
+def tidal_backoff() -> dict:
+    """Current Tidal-backoff state. The request gate in
+    app/tidal_client.py trips this after HTTP 429 or an
+    `abuse_detected` 403; every Tidal call raises TidalBackoffError
+    while it's active, so the UI needs to know to stop firing
+    non-essential fetches and surface a banner explaining why
+    things look frozen."""
+    return tidal_backoff_state()
+
+
+@app.get("/api/debug/artist-resolve/{tidal_artist_id}")
+def debug_artist_resolve(tidal_artist_id: str) -> dict:
+    """Diagnose why an artist page's monthly-listeners or personal
+    play-count line is blank.
+
+    Walks the full resolution pipeline for the given Tidal artist id
+    without hitting the Spotify cache, plus the Last.fm artist-play
+    lookup, and returns a structured JSON report showing where each
+    half of the hero stat line succeeded or fell over. Reachable at
+    `http://127.0.0.1:47823/api/debug/artist-resolve/<id>`.
+    """
+    _require_auth()
+    from app import spotify_public
+
+    report: dict = {"tidal_artist_id": str(tidal_artist_id)}
+
+    try:
+        artist = tidal.session.artist(int(tidal_artist_id))
+        artist_name = getattr(artist, "name", "") or ""
+    except Exception as exc:
+        return {
+            **report,
+            "error": f"Tidal session.artist failed: {exc!r}",
+        }
+    report["tidal_artist_name"] = artist_name
+
+    # Path A: top tracks via the tidalapi method directly. Capture the
+    # exception text instead of swallowing — that's the data we need
+    # to know whether Tidal returned [] or threw.
+    top_tracks: list = []
+    try:
+        top_tracks = list(artist.get_top_tracks(limit=10))
+        report["top_tracks_source"] = "artist.get_top_tracks"
+    except Exception as exc:
+        report["top_tracks_error"] = f"artist.get_top_tracks: {exc!r}"
+
+    # Path B fallback: walk the first few albums' tracks. Massive
+    # artists sometimes have a flaky top_tracks endpoint but their
+    # albums-list resolves fine.
+    if not top_tracks:
+        try:
+            albums = list(tidal.get_artist_albums(artist))[:2]
+            for alb in albums:
+                try:
+                    top_tracks.extend(list(alb.tracks())[:5])
+                except Exception as exc:
+                    report.setdefault("album_track_errors", []).append(
+                        f"{getattr(alb, 'name', '')}: {exc!r}"
+                    )
+                if len(top_tracks) >= 10:
+                    break
+            if top_tracks:
+                report["top_tracks_source"] = "fallback:album_tracks"
+        except Exception as exc:
+            report["album_walk_error"] = f"{exc!r}"
+
+    sample_isrcs: list[str] = []
+    top_tracks_preview: list[dict] = []
+    for t in top_tracks[:10]:
+        isrc = (getattr(t, "isrc", "") or "").strip().upper()
+        track_artists = [
+            getattr(a, "name", "") for a in (getattr(t, "artists", None) or [])
+        ]
+        top_tracks_preview.append(
+            {
+                "name": getattr(t, "name", ""),
+                "artists": track_artists,
+                "isrc": isrc or None,
+            }
+        )
+        if isrc and isrc not in sample_isrcs:
+            sample_isrcs.append(isrc)
+    report["top_tracks"] = top_tracks_preview
+    report["isrc_count"] = len(sample_isrcs)
+
+    report["spotify"] = spotify_public.debug_resolve_artist(
+        str(tidal_artist_id), artist_name, sample_isrcs
+    )
+
+    # Last.fm side — we query by artist name, so report exactly what
+    # we sent and what came back.
+    lastfm_info: dict = {"queried_name": artist_name, "enabled": False}
+    try:
+        status = lastfm.status()
+        lastfm_info["enabled"] = bool(status.get("has_credentials"))
+        lastfm_info["username"] = status.get("username")
+    except Exception as exc:
+        lastfm_info["status_error"] = f"{exc!r}"
+    if lastfm_info["enabled"] and artist_name:
+        try:
+            pc = lastfm.get_artist_playcount(artist_name)
+            lastfm_info["playcount_payload"] = pc
+            lastfm_info["userplaycount"] = (
+                pc.get("userplaycount") if isinstance(pc, dict) else None
+            )
+        except Exception as exc:
+            lastfm_info["playcount_error"] = f"{exc!r}"
+    report["lastfm"] = lastfm_info
+
+    return report
+
+
 @app.get("/api/lastfm/chart/top-artists")
 def lastfm_chart_top_artists(limit: int = 50) -> list[dict]:
     _require_auth()
@@ -2233,6 +2639,69 @@ def lastfm_chart_top_tracks(limit: int = 50) -> list[dict]:
         f"chart-top-tracks:{limit}",
         lambda: lastfm.get_chart_top_tracks(limit=limit),
     )
+
+
+@app.get("/api/lastfm/chart/top-tracks-resolved")
+def lastfm_chart_top_tracks_resolved(limit: int = 50) -> list[dict]:
+    """Last.fm top tracks already resolved to Tidal Track objects.
+
+    The Popular page's Tracks tab used to fire N separate search
+    requests from the browser to resolve each Last.fm entry —
+    cold-load was 5-10 s for 50 rows. We now do the whole fan-out
+    server-side with a bounded thread pool and cache the result, so
+    the client is back to one round-trip.
+    """
+    _require_auth()
+    limit = max(1, min(limit, 100))
+
+    def _resolve_all() -> list[dict]:
+        entries = lastfm.get_chart_top_tracks(limit=limit)
+
+        pref = (settings.explicit_content_preference or "explicit").lower()
+
+        def _one(entry: dict) -> Optional[dict]:
+            tidal_jitter_sleep()
+            title = (entry.get("name") or "").strip()
+            artist = (entry.get("artist") or "").strip()
+            if not title or not artist:
+                return None
+            try:
+                results = tidal.search(f"{artist} {title}", limit=5)
+            except Exception:
+                return None
+            tracks = filter_explicit_dupes(
+                results.get("tracks", []), pref, kind="track"
+            )
+            if not tracks:
+                return None
+            # Exact title + artist first; fall back to Tidal's top hit.
+            wt = title.lower()
+            wa = artist.lower()
+            exact = next(
+                (
+                    t for t in tracks
+                    if getattr(t, "name", "").lower() == wt
+                    and any(
+                        getattr(a, "name", "").lower() == wa
+                        for a in (getattr(t, "artists", None) or [])
+                    )
+                ),
+                None,
+            )
+            return track_to_dict(exact or tracks[0])
+
+        # 3 workers. The whole-chart resolve was one of the heavier
+        # bursts of Tidal traffic per user session — 50 searches in
+        # ~7 s is exactly the kind of pattern that trips abuse
+        # detection over time. Slower wall-clock (~18 s cold load)
+        # but the result is cached for 5 min by _lastfm_cached so
+        # subsequent visits are instant.
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            results = list(pool.map(_one, entries))
+
+        return [r for r in results if r is not None]
+
+    return _lastfm_cached(f"chart-top-tracks-resolved:{limit}", _resolve_all)
 
 
 @app.get("/api/lastfm/chart/top-tags")
@@ -2954,6 +3423,10 @@ def _native_player() -> PCMPlayer:
                 _pcm_player_singleton.set_output_device(
                     settings.audio_output_device
                 )
+            if getattr(settings, "exclusive_mode", False):
+                _pcm_player_singleton.set_exclusive_mode(True)
+            if getattr(settings, "force_volume", False):
+                _pcm_player_singleton.set_force_volume(True)
         except Exception as exc:
             print(f"[player] bootstrap failed: {exc}", flush=True)
     return _pcm_player_singleton
@@ -2982,6 +3455,7 @@ def _snapshot_dict(snap) -> dict:
         "error": snap.error,
         "seq": snap.seq,
         "stream_info": stream_info,
+        "force_volume": getattr(snap, "force_volume", False),
     }
 
 
@@ -3086,7 +3560,7 @@ def player_prefetch(req: _PlayerPrefetchRequest) -> dict:
     if prefetch is None:
         return {"prefetched": 0, "total": len(ids)}
     with ThreadPoolExecutor(
-        max_workers=min(10, len(ids)), thread_name_prefix="prefetch"
+        max_workers=min(3, len(ids)), thread_name_prefix="prefetch"
     ) as pool:
         results = list(
             pool.map(
@@ -4102,7 +4576,11 @@ def album_detail(album_id: int) -> dict:
             [],
         )
 
-    with ThreadPoolExecutor(max_workers=5) as pool:
+    # 2 workers on album page — slower than 5 but the difference is
+    # barely perceptible (the slowest single call is the bottleneck)
+    # and we avoid firing five concurrent Tidal requests per album
+    # click.
+    with ThreadPoolExecutor(max_workers=2) as pool:
         f_tracks = pool.submit(
             _safe,
             lambda: [track_to_dict(t) for t in tidal.get_album_tracks(album)],
@@ -4150,8 +4628,17 @@ def artist_detail(artist_id: int) -> dict:
         except Exception:
             return default
 
-    with ThreadPoolExecutor(max_workers=9) as pool:
-        f_bio = pool.submit(_safe, artist.get_bio, None)
+    # 3 workers instead of 9 so we don't fire nine concurrent Tidal
+    # requests per artist click. Nine-in-a-second looks scrape-y to
+    # Tidal's abuse layer; three with the natural latency spread
+    # still finishes in roughly the same wall-clock because the
+    # slowest single fetch (top tracks / albums) dominates.
+    def _jittered(fn, default):
+        tidal_jitter_sleep()
+        return _safe(fn, default)
+
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        f_bio = pool.submit(_jittered, artist.get_bio, None)
         f_similar = pool.submit(
             _safe,
             lambda: [artist_to_dict(a) for a in artist.get_similar()][:12],
@@ -5888,6 +6375,11 @@ class SettingsPayload(BaseModel):
     offline_mode: Optional[bool] = None
     notify_on_complete: Optional[bool] = None
     notify_on_track_change: Optional[bool] = None
+    exclusive_mode: Optional[bool] = None
+    force_volume: Optional[bool] = None
+    start_minimized: Optional[bool] = None
+    explicit_content_preference: Optional[str] = None
+    download_rate_limit_mbps: Optional[int] = None
 
 
 @app.get("/api/settings")
@@ -5962,12 +6454,24 @@ def update_settings(payload: SettingsPayload) -> dict:
 
     with _settings_lock:
         data = asdict(settings)
+        prev_exclusive = bool(data.get("exclusive_mode", False))
+        prev_force_volume = bool(data.get("force_volume", False))
         data.update(patch)
         new_settings = Settings(**data)
         save_settings(new_settings)
         settings = new_settings
         downloader.settings = new_settings
     downloader.gate.set_limit(new_settings.concurrent_downloads)
+    if "exclusive_mode" in patch and bool(new_settings.exclusive_mode) != prev_exclusive:
+        try:
+            _native_player().set_exclusive_mode(new_settings.exclusive_mode)
+        except Exception as exc:
+            logger.warning("exclusive-mode toggle failed: %s", exc)
+    if "force_volume" in patch and bool(new_settings.force_volume) != prev_force_volume:
+        try:
+            _native_player().set_force_volume(new_settings.force_volume)
+        except Exception as exc:
+            logger.warning("force-volume toggle failed: %s", exc)
     return asdict(new_settings)
 
 
@@ -6835,6 +7339,7 @@ def _build_feed() -> list[dict]:
         return []
 
     def _fetch(aid: str) -> list:
+        tidal_jitter_sleep()
         try:
             artist = tidal.session.artist(int(aid))
             # get_artist_releases includes albums + EPs + singles. The
@@ -6844,10 +7349,13 @@ def _build_feed() -> list[dict]:
         except Exception:
             return []
 
-    # Cap fan-out: tidalapi isn't documented thread-safe so keep it modest.
+    # Cap fan-out aggressively — this path walks every followed artist
+    # for fresh releases, which can be dozens of requests per refresh.
+    # Three workers is slower but keeps the pattern from tripping
+    # Tidal's abuse detection on users with large follow lists.
     seen_album_ids: set[str] = set()
     items: list[dict] = []
-    with ThreadPoolExecutor(max_workers=6) as pool:
+    with ThreadPoolExecutor(max_workers=3) as pool:
         for albums in pool.map(_fetch, artist_ids):
             for album in albums:
                 aid = str(getattr(album, "id", "") or "")

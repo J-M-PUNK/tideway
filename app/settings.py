@@ -14,10 +14,10 @@ SETTINGS_FILE = user_data_dir() / "settings.json"
 def _default_videos_dir() -> str:
     """Reasonable per-OS default for music-video downloads.
 
-    macOS / Linux → ~/Movies/Tideway (macOS convention; Linux also
+    macOS / Linux → ~/Movies/Tidal (macOS convention; Linux also
     uses ~/Movies in recent XDG setups and falls back to ~/Videos
     via the user-dirs config if they're redirected it). Windows →
-    %USERPROFILE%\\Videos\\Tideway.
+    %USERPROFILE%\\Videos\\Tidal.
 
     Kept separate from the audio `output_dir` so video files don't
     intermix with album folders and iTunes-style music libraries that
@@ -27,18 +27,18 @@ def _default_videos_dir() -> str:
     videos = home / "Videos"
     movies = home / "Movies"
     if sys.platform == "darwin":
-        return str(movies / "Tideway")
+        return str(movies / "Tidal")
     if sys.platform.startswith("win"):
-        return str(videos / "Tideway")
+        return str(videos / "Tidal")
     # Linux — pick whichever exists, prefer Videos which is XDG standard.
     if videos.is_dir() or not movies.is_dir():
-        return str(videos / "Tideway")
-    return str(movies / "Tideway")
+        return str(videos / "Tidal")
+    return str(movies / "Tidal")
 
 
 @dataclass
 class Settings:
-    output_dir: str = str(Path.home() / "Music" / "Tideway")
+    output_dir: str = str(Path.home() / "Music" / "Tidal")
     videos_dir: str = field(default_factory=_default_videos_dir)
     filename_template: str = "{artist} - {title}"
     create_album_folders: bool = True
@@ -46,6 +46,13 @@ class Settings:
     # How many downloads may run in parallel. Gated by the Downloader's
     # semaphore so changing this doesn't require a process restart.
     concurrent_downloads: int = 3
+    # Per-track download rate cap in MB/s. 0 = unlimited. Default 10
+    # MB/s keeps the CDN fetch cadence in the neighborhood of
+    # "aggressive prefetch during playback" rather than "scrape as
+    # fast as possible". A 4-minute track at Max (~40 MB) downloads in
+    # ~4 s, at a steady rate the CDN treats as a normal streaming
+    # session instead of flagging as suspicious bulk transfer.
+    download_rate_limit_mbps: int = 10
     # When True, the UI hides everything that needs a live Tidal session
     # (search, editorial, favorites, streaming fallback) and the server
     # stops requiring auth on the handful of endpoints that only touch
@@ -82,6 +89,28 @@ class Settings:
     # the system default". Persisted so USB DAC / Bluetooth
     # choices survive relaunch.
     audio_output_device: str = ""
+    # Exclusive Mode — bypass the OS mixer and push PCM straight at
+    # the device at the track's native rate / bit depth. On macOS
+    # this sets CoreAudio's change_device_parameters +
+    # fail_if_conversion_required so the device is reconfigured for
+    # bit-perfect playback and the stream fails loudly rather than
+    # silently resampling. On Windows it opens WASAPI in exclusive
+    # mode. No effect on Linux (ALSA routes straight to hardware
+    # already once PulseAudio is out of the way). Some devices
+    # (certain USB DACs at certain rates) will refuse — stream open
+    # raises and the player surfaces the error.
+    exclusive_mode: bool = False
+    # Force Volume — pin the software volume at 100 % and rely on the
+    # user's DAC, speakers, or OS volume to attenuate. Pairs naturally
+    # with Exclusive Mode: once you're pushing bit-perfect samples to
+    # an external converter, any software volume scaling re-introduces
+    # bit-depth loss. Implemented by clamping set_volume() to 100 and
+    # hiding the slider in the UI.
+    force_volume: bool = False
+    # Don't restore the main window on launch; go straight to the
+    # tray. Useful for "Launch on login" users who want Tideway
+    # running without grabbing focus each reboot.
+    start_minimized: bool = False
     # Spotify Developer app client_id, used by the Spotify → Tidal
     # playlist importer. Users register their own app at
     # developer.spotify.com and paste the id here. PKCE OAuth so we
@@ -97,13 +126,49 @@ class Settings:
     explicit_content_preference: str = "explicit"
 
 
+def _migrate_default_paths(s: Settings) -> bool:
+    """Update persisted settings whose download folders still point at
+    the old "Tideway" default subfolder. The app-rename default was
+    "Tidal" to match Tidal's own desktop convention, but existing
+    installs already had the old value saved. Only touches paths that
+    match a previously-shipped default — custom paths stay untouched.
+    Returns True if anything changed so the caller knows to re-save."""
+    changed = False
+    home = Path.home()
+
+    legacy_music = str(home / "Music" / "Tideway")
+    new_music = str(home / "Music" / "Tidal")
+    if s.output_dir == legacy_music:
+        s.output_dir = new_music
+        changed = True
+
+    legacy_videos = {
+        str(home / "Movies" / "Tideway"),
+        str(home / "Videos" / "Tideway"),
+    }
+    if s.videos_dir in legacy_videos:
+        s.videos_dir = _default_videos_dir()
+        changed = True
+
+    return changed
+
+
 def load_settings() -> Settings:
     if SETTINGS_FILE.exists():
         try:
             with open(SETTINGS_FILE) as f:
                 data = json.load(f)
             valid = {k: v for k, v in data.items() if k in Settings.__dataclass_fields__}
-            return Settings(**valid)
+            settings = Settings(**valid)
+            if _migrate_default_paths(settings):
+                try:
+                    save_settings(settings)
+                except Exception:
+                    # Migration is cosmetic — if we can't re-save
+                    # right now, let the next genuine save pick up
+                    # the updated values.
+                    pass
+            return settings
         except Exception:
             pass
     return Settings()

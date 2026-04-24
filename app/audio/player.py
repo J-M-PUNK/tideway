@@ -107,6 +107,10 @@ class PlayerSnapshot:
     error: Optional[str] = None
     seq: int = 0
     stream_info: Optional[StreamInfo] = None
+    # Force Volume: when true the volume slider in the UI should
+    # render disabled (value pinned at 100) because the backend
+    # rejects changes while it's on.
+    force_volume: bool = False
 
 
 class PCMPlayer:
@@ -157,6 +161,14 @@ class PCMPlayer:
         # Applied on the next _open_output_stream(). Device-switch
         # live is a Phase 6 refinement.
         self._selected_device_id: str = ""
+        # Exclusive Mode: request bit-perfect output from the OS audio
+        # layer. Applied on the next _open_output_stream() so toggling
+        # mid-track waits for the next stream open.
+        self._exclusive_mode: bool = False
+        # Force Volume: pin software volume at 100; set_volume becomes
+        # a no-op while this is on. User attenuates via DAC/OS instead
+        # so bit-depth isn't scaled away before the stream leaves us.
+        self._force_volume: bool = False
 
         # Remembered source for restart-based seek. For DASH streams
         # we store the full URL list (index 0 = init segment, 1+ =
@@ -649,7 +661,22 @@ class PCMPlayer:
     def set_volume(self, volume: int) -> PlayerSnapshot:
         volume = max(0, min(100, int(volume)))
         with self._lock:
-            self._volume = volume
+            # Force Volume wins over caller requests — keeps the
+            # signal chain bit-perfect. UI disables the slider in
+            # that state, but external clients can still try and
+            # we just ignore them.
+            if not self._force_volume:
+                self._volume = volume
+            self._seq += 1
+        return self.snapshot()
+
+    def set_force_volume(self, enabled: bool) -> PlayerSnapshot:
+        """Toggle Force Volume. Turning it on pins _volume to 100
+        immediately so any subsequent playback is at full scale."""
+        with self._lock:
+            self._force_volume = bool(enabled)
+            if self._force_volume:
+                self._volume = 100
             self._seq += 1
         return self.snapshot()
 
@@ -787,6 +814,49 @@ class PCMPlayer:
             except Exception:
                 log.exception("set_output_device: stream start failed")
 
+    def set_exclusive_mode(self, enabled: bool) -> None:
+        """Flip exclusive-mode on the audio output stream. If a stream
+        is open the reopen applies immediately (~50 ms of silence,
+        same as a device switch); otherwise the flag kicks in on the
+        next track load."""
+        enabled = bool(enabled)
+        with self._pipeline_lock:
+            with self._lock:
+                prev = self._exclusive_mode
+                self._exclusive_mode = enabled
+                current_stream = self._stream
+                sample_rate = self._stream_sample_rate
+                channels = self._stream_channels
+                sd_dtype = self._stream_sd_dtype
+                was_playing = (
+                    self._state == "playing" and current_stream is not None
+                )
+            if (
+                prev == enabled
+                or not was_playing
+                or sample_rate is None
+                or channels is None
+                or sd_dtype is None
+            ):
+                return
+
+            try:
+                current_stream.stop()
+            except Exception:
+                pass
+            try:
+                current_stream.close()
+            except Exception:
+                pass
+            with self._lock:
+                self._stream = None
+                self._callback_carry = None
+                self._open_output_stream(sample_rate, channels, sd_dtype)
+            try:
+                self._stream.start()
+            except Exception:
+                log.exception("set_exclusive_mode: stream start failed")
+
     def snapshot(self) -> PlayerSnapshot:
         with self._lock:
             pos_ms = 0
@@ -809,6 +879,7 @@ class PCMPlayer:
                 error=self._last_error,
                 seq=self._seq,
                 stream_info=self._current_stream_info,
+                force_volume=self._force_volume,
             )
 
     # --- internals --------------------------------------------------
@@ -1213,7 +1284,29 @@ class PCMPlayer:
                 device = int(self._selected_device_id)
             except ValueError:
                 device = None
-        self._stream = sd.OutputStream(
+
+        # Exclusive Mode — push PCM straight at the device at its
+        # native rate / bit depth. On macOS the CoreAudio flags ask
+        # the driver to reconfigure the device and fail loudly
+        # instead of silently resampling. On Windows we open WASAPI
+        # exclusive. On other platforms the flag is a no-op.
+        extra_settings = None
+        if self._exclusive_mode:
+            try:
+                if sys.platform == "darwin":
+                    extra_settings = sd.CoreAudioSettings(
+                        change_device_parameters=True,
+                        fail_if_conversion_required=True,
+                    )
+                elif sys.platform.startswith("win"):
+                    extra_settings = sd.WasapiSettings(exclusive=True)
+            except AttributeError:
+                # Older sounddevice / PortAudio without these helpers.
+                # Fall through to the shared-mode stream so the user
+                # still gets audio, just without the exclusive guarantee.
+                extra_settings = None
+
+        stream_kwargs: dict = dict(
             samplerate=sample_rate,
             channels=channels,
             dtype=dtype,
@@ -1221,6 +1314,24 @@ class PCMPlayer:
             callback=self._audio_callback,
             finished_callback=self._on_stream_finished,
         )
+        if extra_settings is not None:
+            stream_kwargs["extra_settings"] = extra_settings
+
+        try:
+            self._stream = sd.OutputStream(**stream_kwargs)
+        except Exception:
+            # Exclusive Mode can fail on devices that refuse the
+            # requested rate / format (e.g. a USB DAC pinned to 48k
+            # when the track is 44.1k). Fall back to shared mode so
+            # playback keeps working; caller can surface the error.
+            if extra_settings is not None:
+                log.warning(
+                    "Exclusive-mode stream open failed; falling back to shared"
+                )
+                stream_kwargs.pop("extra_settings", None)
+                self._stream = sd.OutputStream(**stream_kwargs)
+            else:
+                raise
         # Rebuild the EQ against the new sample rate. Preserves the
         # user's bands / preamp across tracks.
         self._eq = Equalizer(sample_rate=sample_rate, channels=channels)
