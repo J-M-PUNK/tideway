@@ -1,21 +1,20 @@
 import { useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
-import { ChevronRight, Play, Video as VideoIcon } from "lucide-react";
+import { Video as VideoIcon } from "lucide-react";
 import { api } from "@/api/client";
 import type { Album, Artist, Video } from "@/api/types";
 import type { OnDownload } from "@/api/download";
 import { useApi } from "@/hooks/useApi";
 import { useColumnCount } from "@/hooks/useColumnCount";
 import { useVideoPlayer } from "@/hooks/useVideoPlayer";
-import { prefetchVideoStream } from "@/hooks/useVideoStream";
 import { ArtistHero } from "@/components/ArtistHero";
 import { ArtistTopCities } from "@/components/ArtistTopCities";
-import { Grid, SectionHeader } from "@/components/Grid";
+import { Grid, SectionHeader, ViewMoreLink } from "@/components/Grid";
 import { MediaCard } from "@/components/MediaCard";
 import { TrackList } from "@/components/TrackList";
 import { ErrorView } from "@/components/ErrorView";
 import { GridSkeleton, HeroSkeleton, TrackListSkeleton } from "@/components/Skeletons";
-import { formatDuration, imageProxy } from "@/lib/utils";
+import { VideoCard } from "@/components/VideoCard";
 
 export function ArtistDetail({ onDownload }: { onDownload: OnDownload }) {
   const { id = "" } = useParams();
@@ -24,10 +23,6 @@ export function ArtistDetail({ onDownload }: { onDownload: OnDownload }) {
   // so the frontend doesn't waterfall three separate fetches on
   // mount like it used to.
   const { data: artist, loading, error } = useApi(() => api.artist(id), [id]);
-  // Default to top-5; reveal the full top-10 on click. Matches
-  // Spotify / Apple Music's "Show more" behavior on artist pages
-  // where the first five tracks are the headline and the rest are
-  // discoverable with one extra interaction.
   const [popularExpanded, setPopularExpanded] = useState(false);
 
   if (loading) {
@@ -79,7 +74,7 @@ export function ArtistDetail({ onDownload }: { onDownload: OnDownload }) {
               onClick={() => setPopularExpanded((v) => !v)}
               className="mb-8 mt-2 text-xs font-semibold uppercase tracking-wider text-muted-foreground hover:text-foreground"
             >
-              {popularExpanded ? "Show less" : "Show more"}
+              {popularExpanded ? "Show less" : "View more"}
             </button>
           )}
         </>
@@ -88,20 +83,29 @@ export function ArtistDetail({ onDownload }: { onDownload: OnDownload }) {
       <MediaRow
         title="Albums"
         items={artist.albums}
+        viewMoreTo={`/artist/${id}/all/albums`}
         onDownload={onDownload}
       />
       <MediaRow
         title="EPs & Singles"
         items={artist.ep_singles}
+        viewMoreTo={`/artist/${id}/all/eps`}
         onDownload={onDownload}
       />
       <MediaRow
         title="Appears on"
         items={artist.appears_on}
+        viewMoreTo={`/artist/${id}/all/appears-on`}
         onDownload={onDownload}
       />
-      {artist.videos.length > 0 && <VideoRow videos={artist.videos} />}
-      <MediaRow title="Fans also like" items={artist.similar} />
+      {artist.videos.length > 0 && (
+        <VideoRow videos={artist.videos} viewMoreTo={`/artist/${id}/all/videos`} />
+      )}
+      <MediaRow
+        title="Fans also like"
+        items={artist.similar}
+        viewMoreTo={`/artist/${id}/all/similar`}
+      />
 
       {artist.credits.length > 0 && (
         <>
@@ -127,26 +131,23 @@ export function ArtistDetail({ onDownload }: { onDownload: OnDownload }) {
 
 /**
  * One artist-page section (Albums, EPs/Singles, Appears on, similar
- * artists) — capped to a single row of cards at the current breakpoint
- * with a "Show all" toggle. The toggle reveals the rest inline;
- * clicking it again collapses back to a single row. Matches the
- * one-row-with-view-more pattern used on Home.
+ * artists) — single row of cards at the current breakpoint with a
+ * "View more" link that lands on the dedicated section page. Matches
+ * the one-row + view-more convention used on Home, Album, Stats.
  */
 function MediaRow<T extends Album | Artist>({
   title,
   items,
+  viewMoreTo,
   onDownload,
 }: {
   title: string;
   items: T[];
+  viewMoreTo: string;
   onDownload?: OnDownload;
 }) {
   const cols = useColumnCount();
-  const [expanded, setExpanded] = useState(false);
-  const visible = useMemo(
-    () => (expanded ? items : items.slice(0, cols)),
-    [items, cols, expanded],
-  );
+  const visible = useMemo(() => items.slice(0, cols), [items, cols]);
   if (items.length === 0) return null;
   const hasMore = items.length > cols;
 
@@ -154,17 +155,7 @@ function MediaRow<T extends Album | Artist>({
     <div>
       <div className="mb-4 mt-8 flex items-baseline justify-between gap-4">
         <h2 className="text-2xl font-bold tracking-tight">{title}</h2>
-        {hasMore && (
-          <button
-            onClick={() => setExpanded((v) => !v)}
-            className="flex flex-shrink-0 items-center gap-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground hover:text-foreground"
-          >
-            {expanded ? "Show less" : "Show all"}
-            <ChevronRight
-              className={`h-3.5 w-3.5 transition-transform ${expanded ? "rotate-90" : ""}`}
-            />
-          </button>
-        )}
+        {hasMore && <ViewMoreLink to={viewMoreTo} />}
       </div>
       <Grid>
         {visible.map((item) => (
@@ -176,17 +167,20 @@ function MediaRow<T extends Album | Artist>({
 }
 
 /**
- * Videos row — one row capped at the current breakpoint with a
- * Show all toggle, matching the Albums/EPs layout. Cards are
- * video-shaped (wider-than-tall thumbnails) and clicking opens the
- * shared video modal instead of navigating, since there's no per-
- * video detail page.
+ * Videos row — single row capped at the current breakpoint with a
+ * "View more" link. Cards are wider-than-tall thumbnails; clicking
+ * opens the shared video modal since there's no per-video detail page.
  */
-function VideoRow({ videos }: { videos: Video[] }) {
+function VideoRow({
+  videos,
+  viewMoreTo,
+}: {
+  videos: Video[];
+  viewMoreTo: string;
+}) {
   const cols = useColumnCount();
-  const [expanded, setExpanded] = useState(false);
   const { open } = useVideoPlayer();
-  const visible = expanded ? videos : videos.slice(0, cols);
+  const visible = videos.slice(0, cols);
   const hasMore = videos.length > cols;
   return (
     <div>
@@ -194,17 +188,7 @@ function VideoRow({ videos }: { videos: Video[] }) {
         <h2 className="flex items-center gap-2 text-2xl font-bold tracking-tight">
           <VideoIcon className="h-6 w-6" /> Videos
         </h2>
-        {hasMore && (
-          <button
-            onClick={() => setExpanded((v) => !v)}
-            className="flex flex-shrink-0 items-center gap-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground hover:text-foreground"
-          >
-            {expanded ? "Show less" : "Show all"}
-            <ChevronRight
-              className={`h-3.5 w-3.5 transition-transform ${expanded ? "rotate-90" : ""}`}
-            />
-          </button>
-        )}
+        {hasMore && <ViewMoreLink to={viewMoreTo} />}
       </div>
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
         {visible.map((v) => (
@@ -219,46 +203,6 @@ function VideoRow({ videos }: { videos: Video[] }) {
   );
 }
 
-function VideoCard({ video, onPlay }: { video: Video; onPlay: () => void }) {
-  const cover = video.cover ? imageProxy(video.cover) : undefined;
-  return (
-    <button
-      onClick={onPlay}
-      onMouseEnter={() => prefetchVideoStream(video.id)}
-      onFocus={() => prefetchVideoStream(video.id)}
-      className="group flex flex-col gap-2 rounded-lg p-2 text-left transition-colors hover:bg-accent"
-    >
-      <div className="relative aspect-video overflow-hidden rounded-md bg-secondary">
-        {cover ? (
-          <img
-            src={cover}
-            alt=""
-            className="h-full w-full object-cover transition-transform group-hover:scale-105"
-            loading="lazy"
-          />
-        ) : (
-          <div className="flex h-full w-full items-center justify-center text-muted-foreground">
-            <VideoIcon className="h-8 w-8" />
-          </div>
-        )}
-        <span className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 transition-opacity group-hover:opacity-100">
-          <Play className="h-8 w-8 text-foreground" fill="currentColor" />
-        </span>
-        {video.duration > 0 && (
-          <span className="absolute bottom-2 right-2 rounded bg-black/70 px-1.5 py-0.5 text-[10px] font-semibold text-foreground">
-            {formatDuration(video.duration)}
-          </span>
-        )}
-      </div>
-      <div className="min-w-0">
-        <div className="truncate text-sm font-semibold">{video.name}</div>
-        {video.artist && (
-          <div className="truncate text-xs text-muted-foreground">{video.artist.name}</div>
-        )}
-      </div>
-    </button>
-  );
-}
 
 function ArtistBio({ bio }: { bio: string }) {
   const [expanded, setExpanded] = useState(false);

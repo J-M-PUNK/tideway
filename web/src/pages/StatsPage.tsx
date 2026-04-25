@@ -3,7 +3,6 @@ import { Link, useNavigate } from "react-router-dom";
 import {
   BarChart3,
   Calendar,
-  ChevronRight,
   ExternalLink,
   Heart,
   Music,
@@ -26,6 +25,7 @@ import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/EmptyState";
 import { LastFmActivityChart } from "@/components/LastFmActivityChart";
 import { Skeleton } from "@/components/Skeletons";
+import { ViewMoreLink } from "@/components/Grid";
 import { useToast } from "@/components/toast";
 import { usePlayerActions } from "@/hooks/PlayerContext";
 import { useTidalArt } from "@/hooks/useTidalArt";
@@ -286,20 +286,6 @@ function useGridCols(): number {
   return cols;
 }
 
-/**
- * Header-right "View more" link, styled to match the home page's
- * SectionHeader so the two pages feel consistent.
- */
-function ViewMoreLink({ to }: { to: string }) {
-  return (
-    <Link
-      to={to}
-      className="flex flex-shrink-0 items-center gap-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground transition-colors hover:text-foreground"
-    >
-      View more <ChevronRight className="h-3 w-3" />
-    </Link>
-  );
-}
 
 function TopArtistsSection({ period }: { period: LastFmPeriod }) {
   const [data, setData] = useState<LastFmTopArtist[] | null>(null);
