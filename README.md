@@ -85,8 +85,8 @@ runs it.
 Grab the latest from the Releases page for whichever fork of this
 repo you are installing from.
 
-On macOS, download `Tideway-macOS.zip`, unzip it, and drag the
-`.app` into `/Applications`.
+On macOS, download `Tideway-<version>.dmg`, double-click it, and
+drag the `Tideway` app into `/Applications`.
 
 On Windows, download `Tideway-Windows.zip`, unzip it anywhere, and
 run `Tideway.exe` from inside the folder.
