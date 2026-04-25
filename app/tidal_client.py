@@ -316,6 +316,17 @@ _SUB_QUALITY_MAP = {
 _DEVICE_CODE_MAX = "high_lossless"
 
 
+# Device-code (Limited Input Device) credentials. tidalapi 0.8.x ships a
+# default client_id that Tidal has revoked Limited Input Device
+# entitlement on; calling /v1/oauth2/device_authorization with it now
+# 400s with `Client is not a Limited Input Device client`. The legacy
+# tidalapi <=0.7.x default — Tidal's "TV" client — still has the
+# entitlement, so we override at TidalClient construction. PKCE uses
+# `client_id_pkce`, which we leave on tidalapi's bundled value.
+_DEVICE_CODE_CLIENT_ID = "zU4XHVVkc2tDPo4t"
+_DEVICE_CODE_CLIENT_SECRET = "VJKhDFqJPqvsPVNBV6ukXTJmwlvbttP7wlMlrc72se4="
+
+
 class TidalClient:
     # Proactive refresh window: if the stored expiry is within this many
     # seconds of "now" when the watchdog ticks, refresh the token.
@@ -329,6 +340,12 @@ class TidalClient:
 
     def __init__(self):
         config = tidalapi.Config(quality=tidalapi.Quality.high_lossless)
+        # Pin the device-code client_id to the legacy "TV" client that
+        # still has Limited Input Device entitlement. tidalapi's
+        # bundled default has been revoked by Tidal — see the constants
+        # above. PKCE uses `client_id_pkce`, untouched by this override.
+        config.client_id = _DEVICE_CODE_CLIENT_ID
+        config.client_secret = _DEVICE_CODE_CLIENT_SECRET
         self.session = tidalapi.Session(config)
         _install_tidal_request_gate(self.session)
         _swap_to_impersonated_transport(self.session)
@@ -662,6 +679,8 @@ class TidalClient:
         if SESSION_FILE.exists():
             SESSION_FILE.unlink()
         config = tidalapi.Config(quality=tidalapi.Quality.high_lossless)
+        config.client_id = _DEVICE_CODE_CLIENT_ID
+        config.client_secret = _DEVICE_CODE_CLIENT_SECRET
         self.session = tidalapi.Session(config)
         _install_tidal_request_gate(self.session)
         _swap_to_impersonated_transport(self.session)
@@ -680,7 +699,16 @@ class TidalClient:
 
     def start_oauth_login(self) -> Tuple[str, str, Future]:
         """Initiate device-code OAuth. Returns (url, user_code, future).
-        The future resolves when the user completes browser auth."""
+        The future resolves when the user completes browser auth.
+
+        Force the device-code client_id back into the config first.
+        If a previous PKCE session was loaded at boot,
+        `client_enable_hires` will have swapped `config.client_id` to
+        the PKCE client — which Tidal rejects on the device-code
+        endpoint with "Client is not a Limited Input Device client".
+        """
+        self.session.config.client_id = _DEVICE_CODE_CLIENT_ID
+        self.session.config.client_secret = _DEVICE_CODE_CLIENT_SECRET
         login, future = self.session.login_oauth()
         self._login_future = future
         url = f"https://{login.verification_uri_complete}"

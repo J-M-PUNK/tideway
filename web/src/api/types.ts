@@ -487,6 +487,11 @@ export interface LocalFile {
   title: string;
   artist: string;
   album: string;
+  /** Canonical album-level artist (FLAC `albumartist` / MP4 `aART`).
+   *  Older downloads predate this tag, so it can be null; the UI
+   *  falls back to deriving a primary artist from the per-track
+   *  `artist` field when this is missing. */
+  album_artist: string | null;
   track_num: number;
   tidal_id: string | null;
   duration: number;

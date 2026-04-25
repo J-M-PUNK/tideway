@@ -2905,6 +2905,15 @@ def play_report_diagnose(req: _PlayReportDiagnoseRequest) -> dict:
 
 @app.post("/api/auth/logout")
 def auth_logout() -> dict:
+    # Stop playback before the session goes away. Without this, an
+    # already-buffered track keeps playing after logout — disorienting,
+    # and the next track-end auto-advance fails (no session to resolve
+    # the next stream URL).
+    if _pcm_player_singleton is not None:
+        try:
+            _pcm_player_singleton.stop()
+        except Exception:
+            pass
     # Order matters: tear down the session, then invalidate every cache that
     # could still vend data tied to it.
     tidal.logout()
@@ -4488,6 +4497,7 @@ def library_local() -> dict:
                             "title": title,
                             "artist": artist,
                             "album": album,
+                            "album_artist": tags.get("album_artist"),
                             "track_num": tags.get("track_num") or 0,
                             "tidal_id": tags.get("tidal_id"),
                             "duration": tags.get("duration") or 0,

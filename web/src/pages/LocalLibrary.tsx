@@ -25,6 +25,19 @@ type MusicSort = "albums" | "artists" | "recent";
 type VideoSort = "artists" | "recent";
 type Tab = "music" | "videos";
 
+/** Return the album-level "primary" artist for a track, used to keep
+ *  guest-credited tracks grouped with the rest of their album. New
+ *  downloads carry an explicit `album_artist` tag (FLAC `albumartist`
+ *  / MP4 `aART`); older downloads predate that tag, so we fall back
+ *  to the first comma-separated entry of the per-track `artist`
+ *  string, since `_artist_names` joins with ", " at download time. */
+function primaryArtist(f: LocalFile): string {
+  const aa = f.album_artist?.trim();
+  if (aa) return aa;
+  const first = f.artist?.split(",")[0]?.trim();
+  return first || "(Unknown)";
+}
+
 /**
  * Browse the user's downloaded files directly off disk — complement to
  * /library/* which show what Tidal considers favorited. Music can be
@@ -91,14 +104,18 @@ export function LocalLibrary({ onDownload: _onDownload }: { onDownload: OnDownlo
     }
     const m = new Map<string, LocalFile[]>();
     for (const f of filtered) {
-      // Albums view keys on "Artist · Album" so two albums with the
-      // same name by different artists don't merge (Greatest Hits
-      // edge case). Section header still reads nicely because we
-      // split the key when rendering.
+      // Albums view keys on "AlbumArtist · Album" so two albums with
+      // the same name by different artists don't merge (Greatest
+      // Hits edge case), and tracks with guest credits still group
+      // under their album's primary artist instead of splitting off
+      // (e.g. "Michael Jackson, Paul McCartney" on Thriller). Section
+      // header still reads nicely because we split the key when
+      // rendering.
+      const primary = primaryArtist(f);
       const key =
         musicSort === "albums"
-          ? `${f.artist || "(Unknown)"} • ${f.album || "(Untitled album)"}`
-          : f.artist || "(Unknown)";
+          ? `${primary} • ${f.album || "(Untitled album)"}`
+          : primary;
       const list = m.get(key);
       if (list) list.push(f);
       else m.set(key, [f]);

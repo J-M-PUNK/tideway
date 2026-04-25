@@ -9,6 +9,8 @@ feeling desktop app that packages a FastAPI backend, a React and
 Tailwind frontend, and a PyAV and sounddevice audio engine behind
 a single pywebview window.
 
+![Home page](assets/screenshots/home.png)
+
 ## What's inside
 
 **Playback.** Audio plays through a pipeline built on PyAV for
@@ -41,6 +43,8 @@ for artists and tracks. The Stats page is backed by Last.fm and
 surfaces your top tracks, artists, and albums, along with a
 listening activity chart that responds to period filters.
 
+![Artist page](assets/screenshots/artist-page.png)
+
 **Data enrichment.** Last.fm powers scrobbling and per-user or
 global playcounts on every track, album, and artist page. Spotify
 contributes a separate layer of public data through its anonymous
@@ -49,12 +53,29 @@ listeners, and top listening cities. The two services complement
 each other. Last.fm gives you your own history, and Spotify fills
 in the global popularity signal.
 
+![Stats page](assets/screenshots/stats.png)
+
 **Downloads.** Hi-res stereo FLAC and music video downloads all
 run through a concurrent queue that you can tune. Metadata and
 artwork are embedded with mutagen. Any track you have downloaded
 plays straight from disk without touching the Tidal streaming
 path. A filename template, a toggle for per album folders, and a
 skip existing option cover the common download preferences.
+
+![Download quality picker](assets/screenshots/download-quality.png)
+
+![Downloads queue](assets/screenshots/downloads-queue.png)
+
+**On this device.** Everything you've downloaded is browsable from
+a dedicated page that reads tags directly off disk. Music groups
+by album (or by artist, or sorted by date added), and videos sit
+on their own tab. Tracks play locally without round-tripping
+through Tidal's streaming endpoints, so they keep working offline
+and don't count toward any per-day stream cap.
+
+![On this device, music](assets/screenshots/local-music.png)
+
+![On this device, videos](assets/screenshots/local-videos.png)
 
 **Import.** You can transfer playlists from Spotify using PKCE
 OAuth, which requires a Spotify Developer client id that you
