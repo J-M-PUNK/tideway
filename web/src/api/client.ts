@@ -33,6 +33,7 @@ import type {
   QualityOption,
   SearchResponse,
   Settings,
+  SubscriptionStatus,
   TidalPage,
   TidalUser,
   Track,
@@ -710,6 +711,10 @@ export const api = {
   trackRadio: (id: string) => req<Track[]>(`/api/track/${id}/radio`),
   trackCredits: (id: string) => req<CreditEntry[]>(`/api/track/${id}/credits`),
   qualities: () => req<QualityOption[]>("/api/qualities"),
+  /** Subscription tier + download eligibility. UI uses this to gate
+   *  the Download buttons — lossy-only accounts get a tooltip
+   *  explaining why downloads aren't enabled. */
+  subscription: () => req<SubscriptionStatus>("/api/subscription"),
   page: (name: "home" | "explore" | "genres" | "moods" | "hires") =>
     req<TidalPage>(`/api/page/${name}`),
   pagePath: (path: string) =>

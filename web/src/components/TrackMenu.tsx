@@ -25,6 +25,7 @@ import { useFavorites } from "@/hooks/useFavorites";
 import { useMyPlaylists } from "@/hooks/useMyPlaylists";
 import { useTrackSelection } from "@/hooks/useTrackSelection";
 import { useQualities } from "@/hooks/useQualities";
+import { DOWNLOAD_GATE_TOOLTIP, useSubscription } from "@/hooks/useSubscription";
 import { useToast } from "@/components/toast";
 import { CreatePlaylistDialog } from "@/components/CreatePlaylistDialog";
 import { effectiveFormatLabel } from "@/lib/quality";
@@ -366,6 +367,19 @@ function DownloadSubmenu({
 }) {
   const { Item, Sub, SubTrigger, SubContent } = parts;
   const qualities = useQualities() ?? [];
+  const sub = useSubscription();
+
+  if (!sub.canDownload) {
+    return (
+      <Item
+        disabled
+        title={sub.reason ?? DOWNLOAD_GATE_TOOLTIP}
+      >
+        <Download className="h-3.5 w-3.5" /> Download…
+      </Item>
+    );
+  }
+
   return (
     <Sub>
       <SubTrigger>

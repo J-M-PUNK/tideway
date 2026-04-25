@@ -281,6 +281,16 @@ export interface AuthStatus {
   user_id: string | null;
 }
 
+/** Tidal subscription tiers Tideway maps `get_max_quality()` to. The
+ *  download buttons gate on `can_download`, derived from this. */
+export type SubscriptionTier = "max" | "lossless" | "lossy" | "unknown";
+
+export interface SubscriptionStatus {
+  tier: SubscriptionTier;
+  can_download: boolean;
+  reason: string | null;
+}
+
 export interface LastFmStatus {
   /** True once the user has pasted API key + secret from last.fm,
    *  OR the build ships with baked-in default credentials. */

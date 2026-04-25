@@ -10,6 +10,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useQualities } from "@/hooks/useQualities";
+import { DOWNLOAD_GATE_TOOLTIP, useSubscription } from "@/hooks/useSubscription";
 import { effectiveFormatLabel } from "@/lib/quality";
 import { cn } from "@/lib/utils";
 
@@ -46,11 +47,27 @@ export function DownloadButton({
   mediaTags,
 }: Props) {
   const qualities = useQualities() ?? [];
+  const sub = useSubscription();
 
   const stop = (e: React.SyntheticEvent) => {
     e.preventDefault();
     e.stopPropagation();
   };
+
+  if (!sub.canDownload) {
+    return (
+      <Button
+        variant={variant}
+        size={iconOnly ? "icon" : size}
+        className={cn(className, "cursor-not-allowed opacity-50")}
+        disabled
+        title={sub.reason ?? DOWNLOAD_GATE_TOOLTIP}
+      >
+        <Download className="h-4 w-4" />
+        {!iconOnly && <>{label ?? "Download"}</>}
+      </Button>
+    );
+  }
 
   return (
     <DropdownMenu onOpenChange={onOpenChange}>
