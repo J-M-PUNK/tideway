@@ -124,6 +124,9 @@ const AlbumDetail = lazy(() =>
 const ArtistDetail = lazy(() =>
   import("@/pages/ArtistDetail").then((m) => ({ default: m.ArtistDetail })),
 );
+const ArtistSection = lazy(() =>
+  import("@/pages/ArtistSection").then((m) => ({ default: m.ArtistSection })),
+);
 const MixDetail = lazy(() =>
   import("@/pages/MixDetail").then((m) => ({ default: m.MixDetail })),
 );
@@ -506,6 +509,7 @@ function Shell({
                 <Route path="/library/:section" element={<Library onDownload={enqueue} />} />
                 <Route path="/album/:id" element={<AlbumDetail onDownload={enqueue} />} />
                 <Route path="/artist/:id" element={<ArtistDetail onDownload={enqueue} />} />
+                <Route path="/artist/:id/all/:section" element={<ArtistSection onDownload={enqueue} />} />
                 <Route path="/playlist/:id" element={<PlaylistDetail onDownload={enqueue} />} />
                 <Route path="/mix/:id" element={<MixDetail onDownload={enqueue} />} />
                 <Route

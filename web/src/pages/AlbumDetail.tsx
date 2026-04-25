@@ -1,6 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link, useParams } from "react-router-dom";
-import { ChevronRight } from "lucide-react";
+import { useParams } from "react-router-dom";
 import { api } from "@/api/client";
 import type { Album, Artist } from "@/api/types";
 import type { OnDownload } from "@/api/download";
@@ -17,7 +16,7 @@ import { ShuffleButton } from "@/components/ShuffleButton";
 import { PlayAllButton } from "@/components/PlayAllButton";
 import { TrackList } from "@/components/TrackList";
 import { ErrorView } from "@/components/ErrorView";
-import { SectionHeader } from "@/components/Grid";
+import { SectionHeader, ViewMoreLink } from "@/components/Grid";
 import { MediaCard } from "@/components/MediaCard";
 import { HeroSkeleton, TrackListSkeleton } from "@/components/Skeletons";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
@@ -254,14 +253,7 @@ function SingleRowSection({
     <div className="mb-10">
       <div className="mb-4 flex items-baseline justify-between gap-4">
         <h2 className="text-xl font-bold tracking-tight">{title}</h2>
-        {viewAllHref && (
-          <Link
-            to={viewAllHref}
-            className="flex flex-shrink-0 items-center gap-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground transition-colors hover:text-foreground"
-          >
-            View more <ChevronRight className="h-3 w-3" />
-          </Link>
-        )}
+        {viewAllHref && <ViewMoreLink to={viewAllHref} />}
       </div>
       <div className="grid gap-4 grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 2xl:grid-cols-6">
         {items.slice(0, 6).map((it, i) => (

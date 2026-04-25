@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { ChevronRight, Heart, Home, Music, Play } from "lucide-react";
+import { Heart, Home, Music, Play } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/EmptyState";
 import type {
@@ -17,6 +17,7 @@ import type {
 } from "@/api/types";
 import type { OnDownload } from "@/api/download";
 import { useFavorites } from "@/hooks/useFavorites";
+import { ViewMoreLink } from "@/components/Grid";
 import { MediaCard } from "@/components/MediaCard";
 import { PlayMediaButton } from "@/components/PlayMediaButton";
 import { TrackList } from "@/components/TrackList";
@@ -261,12 +262,7 @@ function SectionHeader({
         </div>
       </div>
       {viewAllPath && (
-        <Link
-          to={`/browse/${encodeURIComponent(viewAllPath)}`}
-          className="flex flex-shrink-0 items-center gap-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground transition-colors hover:text-foreground"
-        >
-          View more <ChevronRight className="h-3 w-3" />
-        </Link>
+        <ViewMoreLink to={`/browse/${encodeURIComponent(viewAllPath)}`} />
       )}
     </div>
   );

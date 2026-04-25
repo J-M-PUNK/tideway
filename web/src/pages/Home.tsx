@@ -1,10 +1,11 @@
 import { useState } from "react";
 import { Link } from "react-router-dom";
-import { ChevronRight, Loader2, MoreHorizontal, Music, Play } from "lucide-react";
+import { Loader2, MoreHorizontal, Music, Play } from "lucide-react";
 import { api } from "@/api/client";
 import type { OnDownload } from "@/api/download";
 import { useApi } from "@/hooks/useApi";
 import { usePlayerActions, usePlayerMeta } from "@/hooks/PlayerContext";
+import { ViewMoreLink } from "@/components/Grid";
 import { PageView } from "@/components/PageView";
 import { ErrorView } from "@/components/ErrorView";
 import { GridSkeleton } from "@/components/Skeletons";
@@ -190,12 +191,7 @@ function CompactRow({ category }: { category: PageCategory }) {
       <div className="mb-4 flex items-baseline justify-between gap-4">
         <h2 className="text-xl font-bold tracking-tight">{category.title}</h2>
         {hasMore && category.viewAllPath && (
-          <Link
-            to={`/browse/${encodeURIComponent(category.viewAllPath)}`}
-            className="flex flex-shrink-0 items-center gap-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground transition-colors hover:text-foreground"
-          >
-            View more <ChevronRight className="h-3.5 w-3.5" />
-          </Link>
+          <ViewMoreLink to={`/browse/${encodeURIComponent(category.viewAllPath)}`} />
         )}
       </div>
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
