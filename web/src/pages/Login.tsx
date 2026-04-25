@@ -4,6 +4,7 @@ import { api } from "@/api/client";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { resetQualitiesCache } from "@/hooks/useQualities";
+import { refreshSubscription } from "@/hooks/useSubscription";
 
 type Mode = "pkce" | "device";
 
@@ -83,6 +84,7 @@ function PkceLogin({
     try {
       await api.auth.pkceComplete(redirectUrl.trim());
       resetQualitiesCache();
+      refreshSubscription();
       onLoggedIn();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -197,6 +199,7 @@ function DeviceLogin({
         const r = await api.auth.loginPoll();
         if (cancelled) return;
         if (r.status === "ok") {
+          refreshSubscription();
           onLoggedIn();
           return;
         }

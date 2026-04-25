@@ -12,6 +12,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { useDownloadedIds } from "@/hooks/useDownloadedSet";
 import { useQualities } from "@/hooks/useQualities";
+import { DOWNLOAD_GATE_TOOLTIP, useSubscription } from "@/hooks/useSubscription";
 import { effectiveFormatLabel } from "@/lib/quality";
 
 /**
@@ -36,6 +37,7 @@ export function DownloadAlbumButton({
 }) {
   const downloaded = useDownloadedIds();
   const qualities = useQualities() ?? [];
+  const sub = useSubscription();
   const [open, setOpen] = useState(false);
 
   const have = tracks.filter((t) => downloaded.has(String(t.id))).length;
@@ -44,6 +46,19 @@ export function DownloadAlbumButton({
 
   const Icon = allHave ? Check : Download;
   const label = allHave ? "Downloaded" : "Download";
+
+  if (!sub.canDownload) {
+    return (
+      <button
+        disabled
+        className="flex cursor-not-allowed flex-col items-center gap-1 text-muted-foreground opacity-50"
+        title={sub.reason ?? DOWNLOAD_GATE_TOOLTIP}
+      >
+        <Download className="h-5 w-5" />
+        <div className="text-xs font-semibold">Download</div>
+      </button>
+    );
+  }
 
   const stop = (e: React.SyntheticEvent) => {
     e.preventDefault();

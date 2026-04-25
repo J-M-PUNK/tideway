@@ -4605,9 +4605,20 @@ def album_detail(album_id: int) -> dict:
     }
 
 
+_artist_detail_cache: dict[str, tuple[float, dict]] = {}
+_artist_detail_cache_lock = threading.Lock()
+_ARTIST_DETAIL_CACHE_TTL_SEC = 300.0
+
+
 @app.get("/api/artist/{artist_id}")
 def artist_detail(artist_id: int) -> dict:
     _require_auth()
+    cache_key = str(artist_id)
+    now = time.monotonic()
+    with _artist_detail_cache_lock:
+        cached = _artist_detail_cache.get(cache_key)
+    if cached and (now - cached[0]) < _ARTIST_DETAIL_CACHE_TTL_SEC:
+        return cached[1]
     try:
         artist = tidal.session.artist(artist_id)
     except Exception as exc:
@@ -4767,7 +4778,7 @@ def artist_detail(artist_id: int) -> dict:
     ep_singles_objs = filter_explicit_dupes(ep_singles_objs, pref, kind="album")
     appears_on_objs = filter_explicit_dupes(appears_on_objs, pref, kind="album")
 
-    return {
+    result = {
         **artist_to_dict(artist),
         "top_tracks": top_tracks,
         "albums": [album_to_dict(a) for a in albums_objs],
@@ -4782,6 +4793,9 @@ def artist_detail(artist_id: int) -> dict:
         "share_url": getattr(artist, "share_url", None)
         or f"https://tidal.com/browse/artist/{artist.id}",
     }
+    with _artist_detail_cache_lock:
+        _artist_detail_cache[cache_key] = (time.monotonic(), result)
+    return result
 
 
 @app.get("/api/artist/{artist_id}/radio")
@@ -6321,6 +6335,51 @@ QUALITIES = [
         "description": "Up to 24-bit, 192 kHz.",
     },
 ]
+
+
+@app.get("/api/subscription")
+def subscription_status() -> dict:
+    """The user's Tidal subscription tier in the form the UI needs to
+    decide whether to enable the Download buttons.
+
+    `tier` is one of:
+      - "max"      — HiFi Plus / Max, hi-res FLAC available
+      - "lossless" — HiFi, 16-bit FLAC available
+      - "lossy"    — Free / ad-supported, only 96k or 320k AAC
+      - "unknown"  — subscription endpoint failed; assume capable so
+                     we don't lock the user out on a transient error
+
+    `can_download` is True for "lossless" and "max" (and the
+    optimistic "unknown") because Tideway is built around lossless+
+    downloads. Lossy-only accounts still get a "look, but no
+    download" experience with an explanatory tooltip.
+    """
+    _require_local_access()
+    if not _is_logged_in():
+        return {
+            "tier": "unknown",
+            "can_download": False,
+            "reason": "Sign in to Tidal to check subscription status.",
+        }
+    max_quality = tidal.get_max_quality()
+    if max_quality is None:
+        return {
+            "tier": "unknown",
+            "can_download": True,
+            "reason": None,
+        }
+    if max_quality == "hi_res_lossless":
+        return {"tier": "max", "can_download": True, "reason": None}
+    if max_quality == "high_lossless":
+        return {"tier": "lossless", "can_download": True, "reason": None}
+    return {
+        "tier": "lossy",
+        "can_download": False,
+        "reason": (
+            "Tideway downloads need a Tidal HiFi or HiFi Plus subscription. "
+            "Your current tier streams lossy audio only."
+        ),
+    }
 
 
 @app.get("/api/qualities")
