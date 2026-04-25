@@ -57,6 +57,36 @@ def test_app_http_session_falls_back_when_curl_cffi_missing(monkeypatch):
         importlib.import_module("app.http")
 
 
+def test_curl_cffi_session_post_accepts_positional_data():
+    """tidalapi's pkce_get_auth_token calls
+    `self.request_session.post(url, data)` — passes the body as a
+    second POSITIONAL argument. curl-cffi's native Session.post is
+    keyword-only and would raise TypeError without the requests-
+    compatible shim. Regression guard for the login-broken-after-TLS-
+    fingerprint-swap bug."""
+    import inspect
+
+    import app.http  # noqa: F401  ensure shim is applied
+
+    try:
+        from curl_cffi.requests.session import Session as CurlSession
+    except Exception:
+        pytest.skip("curl-cffi not available")
+
+    sig = inspect.signature(CurlSession.post)
+    params = list(sig.parameters.values())
+    # (self, url, data, **kwargs)
+    assert len(params) >= 3
+    assert params[1].name == "url"
+    assert params[2].name == "data"
+    # data must be a positional-or-keyword param so the second
+    # positional call site keeps working.
+    assert params[2].kind in (
+        inspect.Parameter.POSITIONAL_OR_KEYWORD,
+        inspect.Parameter.POSITIONAL_ONLY,
+    )
+
+
 def test_curl_cffi_response_supports_with_statement():
     """The downloader uses `with SESSION.get(...) as resp:` extensively.
     curl-cffi's Response doesn't ship a context manager out of the
