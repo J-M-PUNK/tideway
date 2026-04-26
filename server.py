@@ -1045,11 +1045,34 @@ def _match_release_asset(release_data: dict) -> Optional[str]:
     return None
 
 
+def _fetch_latest_release(timeout: float = 8.0) -> dict:
+    """GET the latest GitHub release for the configured update repo,
+    using `requests` so the call goes through certifi's CA bundle
+    instead of urllib's system-resolved store.
+
+    The bundled-Python urllib path was hitting cert verification
+    failures on real installs (the symptom: /api/update-check
+    returning `latest: null` with no logs). requests bundles its own
+    CA file, so it works regardless of whether the OS-level cert path
+    is plumbed through to the embedded interpreter.
+    """
+    import requests as _requests
+
+    resp = _requests.get(
+        f"https://api.github.com/repos/{_UPDATE_REPO}/releases/latest",
+        headers={"Accept": "application/vnd.github+json"},
+        timeout=timeout,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
 @app.get("/api/update-check")
 def update_check() -> dict:
     """Compare the running app's version against the latest GitHub
-    Release. Returns {available, latest, url, notes} for the UI banner.
-    Cached so repeated frontend probes don't spam GitHub's API.
+    Release. Returns {available, latest, url, notes, error} for the
+    UI banner. Cached so repeated frontend probes don't spam GitHub's
+    API.
 
     `available` is gated on (newer-tag AND installer-for-this-platform-
     in-the-release). The platform check matters when a point release
@@ -1057,6 +1080,10 @@ def update_check() -> dict:
     only fix release. macOS / Linux users on the older version would
     otherwise see a banner that points at a release with no asset they
     can install.
+
+    `error` is non-null when the GitHub fetch itself failed. We were
+    silently swallowing those exceptions, which made cert / network
+    failures invisible to the user — the banner just never appeared.
     """
     now = time.monotonic()
     with _update_cache_lock:
@@ -1070,6 +1097,7 @@ def update_check() -> dict:
         "latest": None,
         "url": None,
         "notes": None,
+        "error": None,
     }
     asset_url: Optional[str] = None
     # Auto update is off unless the fork sets TIDEWAY_UPDATE_REPO to
@@ -1081,14 +1109,7 @@ def update_check() -> dict:
             _update_cache["asset_url"] = (now, asset_url)
         return payload
     try:
-        import urllib.request
-
-        req = urllib.request.Request(
-            f"https://api.github.com/repos/{_UPDATE_REPO}/releases/latest",
-            headers={"Accept": "application/vnd.github+json"},
-        )
-        with urllib.request.urlopen(req, timeout=4) as resp:  # noqa: S310
-            data = json.load(resp)
+        data = _fetch_latest_release(timeout=4.0)
         latest_tag = (data.get("tag_name") or "").strip()
         latest_url = data.get("html_url") or None
         latest_notes = data.get("body") or None
@@ -1100,10 +1121,15 @@ def update_check() -> dict:
                 asset_url = _match_release_asset(data)
                 if asset_url is not None:
                     payload["available"] = True
-    except Exception:
-        # Offline / rate-limited / repo private — silently report no
-        # update so the UI doesn't flash an error on every startup.
-        pass
+    except Exception as exc:
+        # Offline / rate-limited / cert verify failure / repo private.
+        # Surface the reason on the response so support can see what's
+        # actually wrong and log it server-side. Old behavior was to
+        # silently report no update, which made the cert-verify
+        # failure on bundled Python invisible.
+        msg = f"{type(exc).__name__}: {exc}"
+        payload["error"] = msg
+        logger.warning("update_check failed: %s", msg)
 
     with _update_cache_lock:
         _update_cache["latest"] = (now, payload)
@@ -1127,15 +1153,9 @@ def _update_asset_url() -> Optional[str]:
         if cached and now - cached[0] < _UPDATE_CACHE_TTL_SEC:
             return cached[1]
     try:
-        import urllib.request
-
-        req = urllib.request.Request(
-            f"https://api.github.com/repos/{_UPDATE_REPO}/releases/latest",
-            headers={"Accept": "application/vnd.github+json"},
-        )
-        with urllib.request.urlopen(req, timeout=8) as resp:  # noqa: S310
-            data = json.load(resp)
-    except Exception:
+        data = _fetch_latest_release(timeout=8.0)
+    except Exception as exc:
+        logger.warning("_update_asset_url fetch failed: %s", exc)
         return None
     asset_url = _match_release_asset(data)
     with _update_cache_lock:
@@ -1173,14 +1193,19 @@ def update_install() -> dict:
     filename = url.rsplit("/", 1)[-1] or "Tideway-update"
     target = target_dir / filename
     try:
-        import urllib.request
+        # Use requests so the download goes through certifi's CA
+        # bundle — same reason as _fetch_latest_release. urllib's
+        # cert path doesn't always resolve in the bundled Python.
+        import requests as _requests
 
-        with urllib.request.urlopen(url, timeout=60) as resp, open(target, "wb") as f:  # noqa: S310
-            # 1 MB chunks — keeps memory flat on 100 MB+ installers.
-            while True:
-                chunk = resp.read(1024 * 1024)
+        with _requests.get(url, stream=True, timeout=60) as resp, open(
+            target, "wb"
+        ) as f:
+            resp.raise_for_status()
+            # 1 MB chunks keep memory flat on 100 MB+ installers.
+            for chunk in resp.iter_content(chunk_size=1024 * 1024):
                 if not chunk:
-                    break
+                    continue
                 f.write(chunk)
     except Exception as exc:
         raise HTTPException(
