@@ -116,7 +116,11 @@ export function ArtistDetail({ onDownload }: { onDownload: OnDownload }) {
 
       <ArtistTopCities
         artistId={artist.id}
-        sampleIsrc={artist.top_tracks.find((t) => t.isrc)?.isrc ?? null}
+        artistName={artist.name}
+        sampleIsrcs={artist.top_tracks
+          .map((t) => t.isrc)
+          .filter((s): s is string => !!s)
+          .slice(0, 5)}
       />
 
       {artist.bio && (

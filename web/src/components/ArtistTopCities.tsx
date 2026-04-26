@@ -16,12 +16,14 @@ import { useSpotifyArtistStats } from "@/hooks/useSpotifyEnrichment";
  */
 export function ArtistTopCities({
   artistId,
-  sampleIsrc,
+  artistName,
+  sampleIsrcs,
 }: {
   artistId: string;
-  sampleIsrc: string | null;
+  artistName: string;
+  sampleIsrcs: string[];
 }) {
-  const stats = useSpotifyArtistStats(artistId, sampleIsrc);
+  const stats = useSpotifyArtistStats(artistId, artistName, sampleIsrcs);
   const cities = stats?.top_cities ?? [];
   if (cities.length === 0) return null;
 

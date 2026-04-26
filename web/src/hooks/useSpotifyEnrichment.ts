@@ -87,19 +87,29 @@ export function useSpotifyTrackPlaycount(
 
 export function useSpotifyArtistStats(
   tidalArtistId: string | null | undefined,
-  sampleIsrc: string | null | undefined,
+  tidalArtistName: string | null | undefined,
+  sampleIsrcs: string[] | null | undefined,
 ): ArtistStats | null {
   const [, force] = useState(0);
+  // Cache key uses the artist id, the (lowercased) artist name, and
+  // the sorted+normalised ISRC list. The name belongs in the key
+  // because the resolver's pick depends on it; without it, two
+  // artists with overlapping ISRC samples would alias each other.
+  const cleanedIsrcs = (sampleIsrcs || [])
+    .map((s) => s.trim().toUpperCase())
+    .filter(Boolean);
+  const sortedIsrcs = [...cleanedIsrcs].sort();
   const key =
-    tidalArtistId && sampleIsrc
-      ? `${tidalArtistId}:${sampleIsrc.toUpperCase()}`
+    tidalArtistId && cleanedIsrcs.length > 0
+      ? `${tidalArtistId}:${(tidalArtistName || "").toLowerCase()}:${sortedIsrcs.join(",")}`
       : null;
   useEffect(() => {
-    if (!key || !tidalArtistId || !sampleIsrc || !spotifyEnabled) return;
+    if (!key || !tidalArtistId || cleanedIsrcs.length === 0 || !spotifyEnabled)
+      return;
     const off = subscribe(statsSubs, key, () => force((n) => n + 1));
     if (!statsCache.has(key) && !statsInflight.has(key)) {
       const p = api.spotify
-        .artistStats(tidalArtistId, sampleIsrc)
+        .artistStats(tidalArtistId, tidalArtistName || "", cleanedIsrcs)
         .then(
           (r): ArtistStats => ({
             monthly_listeners: r.monthly_listeners,
@@ -125,7 +135,7 @@ export function useSpotifyArtistStats(
       statsInflight.set(key, p);
     }
     return off;
-  }, [key, tidalArtistId, sampleIsrc]);
+  }, [key, tidalArtistId, tidalArtistName, sortedIsrcs.join(",")]);
   return key ? statsCache.get(key) ?? null : null;
 }
 
