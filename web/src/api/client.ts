@@ -357,6 +357,11 @@ export const api = {
       latest: string | null;
       url: string | null;
       notes: string | null;
+      // Non-null when the GitHub fetch itself failed (offline, cert
+      // verification problem, rate limit, repo private). The banner
+      // doesn't display this, but it's useful for `/api/health`-style
+      // diagnosis when a user reports "I'm not seeing update banners".
+      error?: string | null;
     }>("/api/update-check"),
   /** Download the current-platform installer from the latest release
    *  and open it. Caller should quit the app shortly after so the old
