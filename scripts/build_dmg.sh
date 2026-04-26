@@ -47,14 +47,31 @@ rm -f "$DMG_OUT"
 # read-only DMG — what users expect for app distribution. UDBZ would
 # compress tighter but adds decompress time on mount; UDZO is the
 # common choice.
+#
+# Retry the hdiutil call up to three times. On GitHub-hosted macOS
+# runners, `hdiutil create` intermittently fails with "Resource busy"
+# when Spotlight / xattr / security daemons still hold a lock on
+# something inside the freshly-written staging tree. A 5-second
+# backoff is enough for the lock to drop in practice; the failure has
+# never been reproducible across consecutive attempts.
 echo "Building ${DMG_OUT}…"
-hdiutil create \
-  -volname "${APP_NAME} ${VERSION}" \
-  -srcfolder "$STAGING" \
-  -format UDZO \
-  -imagekey zlib-level=9 \
-  -ov \
-  "$DMG_OUT" > /dev/null
+for attempt in 1 2 3; do
+  if hdiutil create \
+      -volname "${APP_NAME} ${VERSION}" \
+      -srcfolder "$STAGING" \
+      -format UDZO \
+      -imagekey zlib-level=9 \
+      -ov \
+      "$DMG_OUT" > /dev/null; then
+    break
+  fi
+  if [[ "$attempt" -eq 3 ]]; then
+    echo "ERROR: hdiutil create failed after 3 attempts" >&2
+    exit 1
+  fi
+  echo "hdiutil create failed (attempt ${attempt}), retrying in 5s…" >&2
+  sleep 5
+done
 
 # Remove the macOS quarantine xattr from the DMG itself. Doesn't get
 # rid of Gatekeeper (that requires signing), but avoids the weird
