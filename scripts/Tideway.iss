@@ -24,6 +24,19 @@
 ; it once and trim the trailing newline.
 #define MyAppVersion Trim(FileRead(FileOpen(SourcePath + "..\VERSION")))
 
+; Architecture suffix. Pass /DBuildArch=arm64 from the command line for
+; the ARM64 build. Empty default = the x64 build, which keeps the file
+; name (Tideway-setup-<version>.exe) unchanged so older auto-updaters
+; that don't know about arch suffixes still find it.
+#ifndef BuildArch
+  #define BuildArch ""
+#endif
+#if BuildArch == ""
+  #define ArchSuffix ""
+#else
+  #define ArchSuffix "-" + BuildArch
+#endif
+
 [Setup]
 AppId={{C2BFB2A0-1D3C-4B4E-AB17-5F8C3F1A7A2C}}
 AppName={#MyAppName}
@@ -38,12 +51,24 @@ DefaultGroupName={#MyAppName}
 ; If the user opts for AllUsers, Inno elevates automatically.
 PrivilegesRequiredOverridesAllowed=dialog
 OutputDir=..\dist
-OutputBaseFilename=Tideway-setup-{#MyAppVersion}
+OutputBaseFilename=Tideway-setup-{#MyAppVersion}{#ArchSuffix}
 SetupIconFile=..\assets\icon.ico
 Compression=lzma2/max
 SolidCompression=yes
 WizardStyle=modern
 UninstallDisplayIcon={app}\{#MyAppExeName}
+; Pin the installer to the matching CPU. The x64 build refuses to run
+; on ARM64 hosts (sounddevice tries to load libportaudioarm64.dll which
+; the wheel doesn't ship for x64 Python) and vice versa, so blocking
+; the wrong-arch install is friendlier than letting users hit a runtime
+; crash later.
+#if BuildArch == "arm64"
+ArchitecturesAllowed=arm64
+ArchitecturesInstallIn64BitMode=arm64
+#else
+ArchitecturesAllowed=x64compatible
+ArchitecturesInstallIn64BitMode=x64compatible
+#endif
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
