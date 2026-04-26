@@ -20,11 +20,34 @@ decoder.
 from __future__ import annotations
 
 import logging
+import os
+import sys
 import threading
 from typing import Callable, Optional
 from urllib import request as urlrequest
 
 log = logging.getLogger(__name__)
+
+
+def _hotkeys_disabled() -> bool:
+    """Skip the listener in environments where it's known to misbehave.
+
+    The macOS pynput backend SIGABRTs the whole process if it tries to
+    open a keycode_context without Accessibility permission — which is
+    exactly the situation under pytest, where the FastAPI lifespan
+    fires during `with TestClient(app)`. The crash takes the test
+    runner down with it before any real test gets to run. Set
+    `TIDEWAY_DISABLE_HOTKEYS=1` (or run under pytest, which is auto-
+    detected via PYTEST_VERSION) to keep the listener quiescent.
+    """
+    if os.environ.get("TIDEWAY_DISABLE_HOTKEYS"):
+        return True
+    # pytest sets PYTEST_VERSION at session start. Checking sys.modules
+    # alone misses early-import paths where pytest is loaded but the env
+    # var isn't set yet (it isn't in our case, but belt-and-suspenders).
+    if "PYTEST_VERSION" in os.environ or "pytest" in sys.modules:
+        return True
+    return False
 
 try:
     from pynput import keyboard  # type: ignore
@@ -118,7 +141,14 @@ _build_handlers()
 
 def start_global_hotkeys(port: int) -> Optional[Callable[[], None]]:
     """Convenience helper. Returns a stop() callback or None when the
-    listener couldn't start (e.g. pynput missing)."""
+    listener couldn't start (e.g. pynput missing, running in a test
+    environment where pynput's macOS backend would SIGABRT)."""
+    if _hotkeys_disabled():
+        log.info(
+            "global media-key listener skipped "
+            "(test environment or TIDEWAY_DISABLE_HOTKEYS set)"
+        )
+        return None
     if keyboard is None:
         log.warning(
             "pynput not available — global media keys disabled (%s)",
