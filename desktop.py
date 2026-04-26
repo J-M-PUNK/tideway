@@ -14,6 +14,7 @@ hung blank webview.
 from __future__ import annotations
 
 import argparse
+import io
 import os
 import sys
 import threading
@@ -22,6 +23,19 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Optional
+
+
+# PyInstaller's windowed mode on Windows (`console=False` in the spec)
+# starts the process with no console attached, so `sys.stdout` and
+# `sys.stderr` come up as `None`. Anything that calls `.write()` or
+# `.isatty()` on them then crashes — uvicorn's DefaultFormatter is the
+# canonical victim, but every `print(..., file=sys.stderr, ...)` we have
+# would trip the same wire. Wire both streams to os.devnull so logging
+# is silently dropped instead of bringing the app down at startup.
+if sys.stdout is None:
+    sys.stdout = io.TextIOWrapper(open(os.devnull, "wb"), write_through=True)
+if sys.stderr is None:
+    sys.stderr = io.TextIOWrapper(open(os.devnull, "wb"), write_through=True)
 
 
 def _configure_webview2_autoplay() -> None:

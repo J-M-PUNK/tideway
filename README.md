@@ -109,8 +109,9 @@ repo you are installing from.
 On macOS, download `Tideway-<version>.dmg`, double-click it, and
 drag the `Tideway` app into `/Applications`.
 
-On Windows, download `Tideway-Windows.zip`, unzip it anywhere, and
-run `Tideway.exe` from inside the folder.
+On Windows, download `Tideway-setup-<version>.exe` and run it. The
+installer drops the app under your user profile, registers a Start
+Menu entry, and offers an optional desktop shortcut.
 
 ### Why the OS warns you on first launch
 
