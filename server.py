@@ -2042,16 +2042,20 @@ _lastfm_cache_lock = threading.Lock()
 _LASTFM_CACHE_TTL_SEC = 300.0
 
 
-def _lastfm_cached(key: str, fetch):
+def _lastfm_cached(key: str, fetch, ttl_sec: float = _LASTFM_CACHE_TTL_SEC):
     """Scope the cache to (username, endpoint, args). Username is part
     of the key so reconnecting to a different account doesn't serve
-    the previous user's data, and disconnect clears the whole map."""
+    the previous user's data, and disconnect clears the whole map.
+
+    `ttl_sec` defaults to the shared 5-minute TTL but callers can override
+    when the underlying data changes slowly enough that a longer cache is
+    worthwhile (e.g. the resolved chart, whose cold load takes ~18 s)."""
     username = lastfm.status().get("username") or ""
     full_key = f"{username}|{key}"
     now = time.monotonic()
     with _lastfm_cache_lock:
         cached = _lastfm_cache.get(full_key)
-        if cached and (now - cached[0]) < _LASTFM_CACHE_TTL_SEC:
+        if cached and (now - cached[0]) < ttl_sec:
             return cached[1]
     data = fetch()
     with _lastfm_cache_lock:
@@ -2721,14 +2725,19 @@ def lastfm_chart_top_tracks_resolved(limit: int = 50) -> list[dict]:
         # bursts of Tidal traffic per user session — 50 searches in
         # ~7 s is exactly the kind of pattern that trips abuse
         # detection over time. Slower wall-clock (~18 s cold load)
-        # but the result is cached for 5 min by _lastfm_cached so
-        # subsequent visits are instant.
+        # but the result is cached so subsequent visits are instant.
         with ThreadPoolExecutor(max_workers=3) as pool:
             results = list(pool.map(_one, entries))
 
         return [r for r in results if r is not None]
 
-    return _lastfm_cached(f"chart-top-tracks-resolved:{limit}", _resolve_all)
+    # 1-hour TTL (vs the default 5 min). The Last.fm global chart
+    # turns over slowly, and the cold load is expensive enough that
+    # any user who lands on the page twice within an hour really
+    # shouldn't pay for it twice.
+    return _lastfm_cached(
+        f"chart-top-tracks-resolved:{limit}", _resolve_all, ttl_sec=3600.0
+    )
 
 
 @app.get("/api/lastfm/chart/top-tags")

@@ -33,11 +33,16 @@ const Ctx = createContext<FavoritesContextValue>({
 });
 
 /**
- * Tracks which Tidal entities the user has favorited. Hydrated once from
- * /api/favorites; mutations are optimistic and roll back on server error.
+ * Tracks which Tidal entities the user has favorited. Hydrated from
+ * /api/favorites on mount; mutations are optimistic and roll back on
+ * server error.
  *
- * The snapshot endpoint is moderately expensive (it page-scrapes each kind's
- * favorites), so we only call it once per session.
+ * Re-hydrates whenever the tab becomes visible again so library changes
+ * made on another Tidal client (mobile/web/desktop) propagate without
+ * needing a manual reload. The snapshot endpoint is moderately
+ * expensive (it page-scrapes each kind's favorites), but tab-visibility
+ * fires only on real focus events, not while the user is actively using
+ * the app, so the cost is bounded.
  */
 export function FavoritesProvider({ children }: { children: ReactNode }) {
   const [sets, setSets] = useState<Sets>(EMPTY);
@@ -50,43 +55,74 @@ export function FavoritesProvider({ children }: { children: ReactNode }) {
     setsRef.current = sets;
   }, [sets]);
 
-  // `mutatedBeforeSnapshot` guards against a late snapshot clobbering an
-  // optimistic toggle that the user fired before the initial fetch
-  // resolved. Without this, a user who hearts a track within the first
-  // 200ms of page load sees the heart revert when the snapshot lands.
+  // `mutatedBeforeSnapshot` guards against the very first snapshot
+  // clobbering an optimistic toggle the user fired before it resolved.
+  // Subsequent refetches use `inFlightMutations` instead.
   const mutatedBeforeSnapshot = useRef(false);
+  // Counter of in-flight POST/DELETE /api/favorites calls. A refetch
+  // that lands while a mutation is racing would either re-add a just-
+  // unhearted track or drop a just-hearted one, so we skip refetches
+  // while any mutation is pending and let the next visibility event
+  // catch up.
+  const inFlightMutations = useRef(0);
+  // Latch for the first fetch so the initial-mount path runs the
+  // merge-if-needed logic but later visibility-driven refetches just
+  // replace.
+  const initialFetchDone = useRef(false);
+
   useEffect(() => {
     let cancelled = false;
-    api.favorites
-      .snapshot()
-      .then((snap) => {
-        if (cancelled) return;
-        if (mutatedBeforeSnapshot.current) {
-          // User already interacted; merge the snapshot without dropping
-          // their optimistic changes. Server is authoritative for
-          // entries the user didn't touch.
-          setSets((prev) => ({
-            track: mergeSets(new Set(snap.tracks), prev.track),
-            album: mergeSets(new Set(snap.albums), prev.album),
-            artist: mergeSets(new Set(snap.artists), prev.artist),
-            playlist: mergeSets(new Set(snap.playlists), prev.playlist),
-            mix: mergeSets(new Set(snap.mixes), prev.mix),
-          }));
-          return;
-        }
-        setSets({
-          track: new Set(snap.tracks),
-          album: new Set(snap.albums),
-          artist: new Set(snap.artists),
-          playlist: new Set(snap.playlists),
-          mix: new Set(snap.mixes),
+
+    const refetch = () => {
+      if (cancelled) return;
+      if (initialFetchDone.current && inFlightMutations.current > 0) {
+        // Mutation in flight — skip this round; next focus catches it.
+        return;
+      }
+      api.favorites
+        .snapshot()
+        .then((snap) => {
+          if (cancelled) return;
+          const isInitial = !initialFetchDone.current;
+          initialFetchDone.current = true;
+          if (isInitial && mutatedBeforeSnapshot.current) {
+            // Initial fetch raced an early click. Union so the user's
+            // optimistic adds aren't dropped; server is authoritative
+            // for entries the user didn't touch.
+            setSets((prev) => ({
+              track: mergeSets(new Set(snap.tracks), prev.track),
+              album: mergeSets(new Set(snap.albums), prev.album),
+              artist: mergeSets(new Set(snap.artists), prev.artist),
+              playlist: mergeSets(new Set(snap.playlists), prev.playlist),
+              mix: mergeSets(new Set(snap.mixes), prev.mix),
+            }));
+            return;
+          }
+          setSets({
+            track: new Set(snap.tracks),
+            album: new Set(snap.albums),
+            artist: new Set(snap.artists),
+            playlist: new Set(snap.playlists),
+            mix: new Set(snap.mixes),
+          });
+        })
+        .catch(() => {
+          /* non-critical — render unfilled hearts */
         });
-      })
-      .catch(() => {
-        /* non-critical — render unfilled hearts */
-      });
+    };
+
+    refetch();
+
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") {
+        refetch();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+
     return () => {
       cancelled = true;
+      document.removeEventListener("visibilitychange", onVisibility);
     };
   }, []);
 
@@ -101,6 +137,7 @@ export function FavoritesProvider({ children }: { children: ReactNode }) {
   const toggle = useCallback(
     async (kind: FavoriteKind, id: string) => {
       mutatedBeforeSnapshot.current = true;
+      inFlightMutations.current += 1;
       const already = setsRef.current[kind].has(id);
       const apply = (add: boolean) =>
         setSets((prev) => {
@@ -127,6 +164,8 @@ export function FavoritesProvider({ children }: { children: ReactNode }) {
           title: already ? "Couldn't unlike" : "Couldn't like",
           description: err instanceof Error ? err.message : String(err),
         });
+      } finally {
+        inFlightMutations.current -= 1;
       }
     },
     [toast],

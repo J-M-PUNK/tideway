@@ -53,6 +53,16 @@ _FORMAT_MAP = {
     "dblp": ("flt", np.float32, "float32", None),
 }
 
+# 10 ** (-1/20). Applied to the decoder's float32 output when the
+# decoder is doing internal sample-rate conversion (source rate
+# differs from target rate). Reconstruction across an SRC stage can
+# produce intersample peaks slightly above 0 dBFS on loud-mastered
+# tracks; a 1 dB attenuation in front of the resampler keeps those
+# peaks under full scale without the heavy hand of full loudness
+# normalization. When source rate equals target rate, no resampling
+# happens and headroom stays at 1.0 (bit-perfect).
+_RESAMPLE_HEADROOM = 0.8912509381337456
+
 
 class Decoder:
     """One `Decoder` = one track.
@@ -131,10 +141,21 @@ class Decoder:
             src_fmt_name or "", ("flt", np.float32, "float32", None)
         )
         self._source_format = src_fmt_name
+        # Source-derived format/dtype, captured once at construction
+        # time so set_target_rate can flip back to bit-perfect by
+        # restoring these values.
+        self._source_format_packed = out_fmt
+        self._source_dtype = dtype
+        self._source_sd_dtype = sd_dtype
+        self._bit_depth = bit_depth
+        # Output state. Starts equal to the source side; if the
+        # player calls set_target_rate with a rate different from
+        # the source rate, these flip to float32 at the target rate.
+        self._target_rate: Optional[int] = None
         self._output_format = out_fmt
         self._output_dtype = dtype
         self._sd_dtype = sd_dtype
-        self._bit_depth = bit_depth
+        self._headroom = 1.0
         self._resampler = self._make_resampler()
         self._iter: Optional[Iterator[av.AudioFrame]] = None
         self._done = False
@@ -145,7 +166,17 @@ class Decoder:
 
     @property
     def sample_rate(self) -> int:
+        """The source's native sample rate. Used by codec_info and
+        anywhere the UI wants to display "this track is 96 kHz."
+        Stays the same regardless of internal resampling."""
         return self._sample_rate
+
+    @property
+    def output_sample_rate(self) -> int:
+        """The rate the decoder is currently emitting at. Equals the
+        source rate unless set_target_rate has reconfigured the
+        resampler, in which case it equals the target rate."""
+        return self._target_rate if self._target_rate else self._sample_rate
 
     @property
     def channels(self) -> int:
@@ -158,6 +189,48 @@ class Decoder:
     @property
     def sounddevice_dtype(self) -> str:
         return self._sd_dtype
+
+    @property
+    def is_resampling_internally(self) -> bool:
+        """True when set_target_rate switched us out of bit-perfect
+        passthrough into rate-converted output. Player uses this to
+        decide whether to advertise a "bit-perfect" stream info."""
+        return self._target_rate is not None
+
+    def set_target_rate(self, rate: int) -> None:
+        """Reconfigure the decoder's output rate.
+
+        If `rate` equals the source sample rate we stay in bit-perfect
+        passthrough: source format, source dtype, no attenuation. If
+        it differs we flip to float32 at the target rate and apply a
+        small input attenuation so the resampler has headroom for
+        intersample-peak overshoot, the only thing that audibly
+        clipped under the previous "let the OS resample" behavior.
+
+        Idempotent. Calling with the rate we're already configured
+        for is a no-op and does NOT rebuild the resampler — important
+        for the gapless-bridge path where the preload's decoder
+        thread is mid-decode and a resampler rebuild would drop any
+        samples buffered inside libav."""
+        rate = int(rate)
+        wants_passthrough = rate <= 0 or rate == self._sample_rate
+        if wants_passthrough:
+            if self._target_rate is None:
+                return
+            self._target_rate = None
+            self._output_format = self._source_format_packed
+            self._output_dtype = self._source_dtype
+            self._sd_dtype = self._source_sd_dtype
+            self._headroom = 1.0
+        else:
+            if self._target_rate == rate:
+                return
+            self._target_rate = rate
+            self._output_format = "flt"
+            self._output_dtype = np.float32
+            self._sd_dtype = "float32"
+            self._headroom = _RESAMPLE_HEADROOM
+        self._resampler = self._make_resampler()
 
     def codec_info(self) -> CodecInfo:
         return CodecInfo(
@@ -225,12 +298,21 @@ class Decoder:
                 tail = self._resampler.resample(None)
                 self._done = True
                 if tail:
-                    return _frames_to_stereo(tail, self._output_dtype)
+                    return self._emit(tail)
                 return None
             resampled = self._resampler.resample(frame)
             if not resampled:
                 continue
-            return _frames_to_stereo(resampled, self._output_dtype)
+            return self._emit(resampled)
+
+    def _emit(self, frames: list) -> np.ndarray:
+        """Pack libav frames into a numpy array, applying headroom
+        when the decoder is doing internal SRC. Headroom is a no-op
+        (and skipped entirely) in the bit-perfect passthrough case."""
+        arr = _frames_to_stereo(frames, self._output_dtype)
+        if self._headroom != 1.0:
+            arr *= self._headroom
+        return arr
 
     def cancel_source(self) -> None:
         """Close just the underlying file-like source, without touching
@@ -259,14 +341,16 @@ class Decoder:
     # --- internals --------------------------------------------------
 
     def _make_resampler(self) -> av.AudioResampler:
-        # layout="stereo" packs 2 channels; rate=source rate means
-        # no SRC. format=source-packed means no format conversion
-        # for lossless sources. End result is a lossless
-        # planar→packed repack.
+        # layout="stereo" packs 2 channels. Rate is whatever the
+        # current output target is — equal to the source rate by
+        # default (lossless planar→packed repack, no SRC), or the
+        # device's mixer rate after set_target_rate flips us into
+        # internal-SRC mode. Format mirrors that decision: source
+        # format when bit-perfect, "flt" (float32) when resampling.
         return av.AudioResampler(
             format=self._output_format,
             layout="stereo",
-            rate=self._sample_rate,
+            rate=self._target_rate if self._target_rate else self._sample_rate,
         )
 
     def _duration_seconds(self) -> Optional[float]:
