@@ -99,8 +99,10 @@ export function OutputDevicePicker() {
           <div className="flex flex-col">
             <span className="font-semibold">Use Exclusive Mode</span>
             <span className="text-[11px] text-muted-foreground">
-              Tideway takes exclusive use of the audio device. Only has
-              an effect for Lossless and Max playback.
+              Tideway takes exclusive use of the audio device. Default
+              playback is already bit-perfect when the source rate
+              matches the device, so leave this off unless you also
+              want to lock other apps out of the device.
             </span>
           </div>
         </DropdownMenuCheckboxItem>
