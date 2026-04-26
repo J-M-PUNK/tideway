@@ -19,8 +19,10 @@
 #define MyAppPublisher "Tideway"
 #define MyAppURL "https://example.com/tideway"
 
-; VERSION is read from the repo-root VERSION file.
-#define MyAppVersion ReadIni(SourcePath + "..\VERSION", "", "") == "" ? Trim(ReadFileString(SourcePath + "..\VERSION")) : "0.0.0"
+; VERSION is read from the repo-root VERSION file. ISPP's FileRead
+; returns one line at a time; the file is single-line so we just read
+; it once and trim the trailing newline.
+#define MyAppVersion Trim(FileRead(FileOpen(SourcePath + "..\VERSION")))
 
 [Setup]
 AppId={{C2BFB2A0-1D3C-4B4E-AB17-5F8C3F1A7A2C}}
