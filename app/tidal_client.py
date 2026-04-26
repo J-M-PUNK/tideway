@@ -174,6 +174,56 @@ def _swap_to_impersonated_transport(session: tidalapi.Session) -> None:
     session.request_session = impersonated
 
 
+def _friendly_pkce_error(exc: BaseException) -> Optional[str]:
+    """Translate the cryptic exceptions tidalapi can raise during the
+    PKCE token exchange into something a non-developer can act on.
+    Returns None when the exception isn't one we have a friendlier
+    string for, so the caller can fall back to the raw message.
+
+    The big one is `ConnectionError("Connection aborted!", PermissionError(13, ...))`,
+    which on Windows almost always means an antivirus or firewall is
+    blocking outbound TCP from the bundled Python. The user gets a
+    401 with no idea what to fix; we want them to know it's a local
+    security product, not a Tidal-side rejection.
+    """
+    text = repr(exc)
+    chain: list[BaseException] = []
+    seen: set[int] = set()
+    cur: Optional[BaseException] = exc
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        chain.append(cur)
+        cur = cur.__cause__ or cur.__context__
+    # The PermissionError is sometimes nested as the inner-args entry of
+    # the requests ConnectionError rather than via __cause__, so also
+    # walk .args looking for it. Same id-tracking dedupe so a wrapped
+    # arg already on the cause chain doesn't trigger reprocessing.
+    for item in list(chain):
+        for a in getattr(item, "args", ()) or ():
+            if isinstance(a, BaseException) and id(a) not in seen:
+                seen.add(id(a))
+                chain.append(a)
+
+    for inner in chain:
+        if isinstance(inner, PermissionError):
+            return (
+                "The login request was blocked by your computer before it "
+                "reached Tidal. This is almost always antivirus or firewall "
+                "software (Bitdefender, Sophos, McAfee, Norton, Windows "
+                "Defender, etc) refusing to let Tideway open a network "
+                "connection. Add Tideway (or Tideway.exe) to your security "
+                "software's allow list and try again."
+            )
+    if "Connection aborted" in text and "Permission denied" in text:
+        return (
+            "The login request was blocked by your computer before it "
+            "reached Tidal. This is almost always antivirus or firewall "
+            "software refusing to let Tideway open a network connection. "
+            "Add Tideway to your security software's allow list and try again."
+        )
+    return None
+
+
 def _fetch_all_pages(method) -> list:
     """Exhaustively fetch every item from a paginated tidalapi list method.
 
@@ -828,6 +878,9 @@ class TidalClient:
                 file=_sys.stderr,
                 flush=True,
             )
+            friendly = _friendly_pkce_error(exc)
+            if friendly:
+                return False, friendly
             detail = f"{type(exc).__name__}: {exc}"
             if resp_body:
                 detail = f"{detail} | body: {resp_body}"

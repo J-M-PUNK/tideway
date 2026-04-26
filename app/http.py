@@ -85,3 +85,11 @@ def _build_requests_session():
 
 
 SESSION = build_impersonated_session() or _build_requests_session()
+
+# Whether the active SESSION is the curl-cffi impersonated transport
+# (True) or the plain requests fallback (False). Surfaced via
+# /api/health so support reports can tell at a glance whether the
+# user's machine has the TLS-fingerprint-resistant path active.
+# When False, login and other Tidal calls are more likely to be
+# blocked by anti-abuse heuristics or local AV that targets Python.
+IMPERSONATED = type(SESSION).__module__.startswith("curl_cffi")

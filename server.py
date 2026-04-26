@@ -9,6 +9,7 @@ import asyncio
 import json
 import logging
 import os
+import platform
 import re
 import subprocess
 import tempfile
@@ -951,11 +952,11 @@ APP_VERSION = _read_app_version()
 # unauthenticated, so the rate limit is 60 requests per hour per IP,
 # which is plenty for a startup-time probe.
 #
-# The value can be overridden with the TIDEWAY_UPDATE_REPO env var
-# so forks or private builds can point the update check at their own
-# releases without editing the source. Empty means auto update is
-# disabled.
-_UPDATE_REPO = os.environ.get("TIDEWAY_UPDATE_REPO", "")
+# Defaults to the upstream repo so packaged builds get update checks
+# without any extra config. Forks and private builds can point the
+# check at their own releases by setting TIDEWAY_UPDATE_REPO. Set it
+# to an empty string to disable auto update entirely.
+_UPDATE_REPO = os.environ.get("TIDEWAY_UPDATE_REPO", "J-M-PUNK/tideway")
 
 # Cache the latest-release lookup so mashing F5 in the frontend doesn't
 # burn the GitHub rate limit. 1 hour TTL — update checks don't need to
@@ -996,22 +997,51 @@ def _match_release_asset(release_data: dict) -> Optional[str]:
 
     Naming convention (matches scripts/build_dmg.sh and the Inno Setup
     script):
-      - macOS:   Tideway-<version>.dmg
-      - Windows: Tideway-setup-<version>.exe
+      - macOS:           Tideway-<version>.dmg
+      - Windows x64:     Tideway-setup-<version>.exe
+      - Windows ARM64:   Tideway-setup-<version>-arm64.exe
+
+    On Windows we pick the asset matching the host CPU rather than the
+    process arch. platform.machine() reflects the underlying CPU even
+    when we're running as an emulated x64 process on an ARM64 host
+    (Prism exposes PROCESSOR_ARCHITEW6432=ARM64), so an ARM64 user who
+    accidentally installed the x64 build will still be offered the
+    correct ARM64 installer on the next update.
 
     Linux falls through to None because we don't package a Linux
     installer today.
     """
+    want_arm64 = False
     if sys.platform == "darwin":
         suffix = ".dmg"
     elif sys.platform.startswith("win"):
         suffix = ".exe"
+        want_arm64 = platform.machine().lower() in ("arm64", "aarch64")
     else:
         return None
-    for a in release_data.get("assets") or []:
+
+    assets = release_data.get("assets") or []
+    candidates: list[tuple[bool, str]] = []
+    for a in assets:
         name = (a.get("name") or "").lower()
-        if name.endswith(suffix) and name.startswith("tideway"):
-            return a.get("browser_download_url")
+        if not (name.endswith(suffix) and name.startswith("tideway")):
+            continue
+        url = a.get("browser_download_url")
+        if not url:
+            continue
+        is_arm64 = name.endswith("-arm64" + suffix)
+        candidates.append((is_arm64, url))
+
+    # Strict pass: only an asset with the matching arch suffix.
+    for is_arm64, url in candidates:
+        if is_arm64 == want_arm64:
+            return url
+    # Fallback: any matching extension. Lets older releases that
+    # predate the ARM64 build still expose their single x64 asset to
+    # ARM64 hosts (the install will fail at runtime, but that is the
+    # pre-fix status quo and not a regression).
+    if candidates:
+        return candidates[0][1]
     return None
 
 
@@ -1522,8 +1552,20 @@ def health() -> dict:
     port; an existing healthy response (with `app` == _HEALTH_MARKER)
     means another copy is already running and the second launch should
     exit instead of crashing on EADDRINUSE.
+
+    Also reports whether the curl-cffi impersonated transport loaded.
+    When False, the app is on the plain-requests fallback, which is
+    more likely to be flagged by anti-abuse heuristics and is the
+    transport that surfaces the cryptic
+    `ConnectionError(PermissionError(13))` chain when a user's AV
+    blocks the socket. Surface it here so support can ask the user
+    to hit /api/health and read back one boolean.
     """
-    return {"ok": True, "app": _HEALTH_MARKER}
+    try:
+        from app.http import IMPERSONATED as _impersonated
+    except Exception:
+        _impersonated = False
+    return {"ok": True, "app": _HEALTH_MARKER, "impersonated": _impersonated}
 
 
 @app.post("/api/_internal/focus", include_in_schema=False)

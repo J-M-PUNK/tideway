@@ -127,12 +127,74 @@ jobs:
           if-no-files-found: error
 
   # -------------------------------------------------------------------
+  # Windows ARM64. Same flow as build-windows but on a native ARM64
+  # runner so PyInstaller produces an ARM64 binary and pip pulls the
+  # win_arm64 wheels (sounddevice ships separate per-arch wheels with
+  # the matching libportaudio*.dll, so an x64 build cannot be used on
+  # an ARM64 host even under Prism emulation).
+  #
+  # Output: Tideway-setup-<version>-arm64.exe.
+  # -------------------------------------------------------------------
+  build-windows-arm64:
+    runs-on: windows-11-arm
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: "arm64"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build web bundle
+        working-directory: web
+        shell: bash
+        run: |
+          npm ci
+          npm run build
+
+      - name: Run PyInstaller
+        run: pyinstaller Tideway-win.spec --noconfirm
+
+      - name: Install Inno Setup
+        # Chocolatey on the ARM64 runner installs the x86 ISCC.exe; it
+        # runs fine under Prism emulation and the installer it produces
+        # is the architecture we tell it to target via /DBuildArch.
+        shell: pwsh
+        run: choco install innosetup -y --no-progress
+
+      - name: Build installer
+        # /DBuildArch=arm64 makes the .iss script append "-arm64" to the
+        # output filename and pin ArchitecturesAllowed to arm64.
+        shell: pwsh
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DBuildArch=arm64 scripts\Tideway.iss
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Tideway-Windows-arm64
+          path: dist/Tideway-setup-*-arm64.exe
+          if-no-files-found: error
+
+  # -------------------------------------------------------------------
   # Attach the artifacts to the GitHub Release. Only runs on a real
   # tag push — manual dispatch still produces the zips as workflow
   # artifacts but doesn't create a release.
   # -------------------------------------------------------------------
   publish:
-    needs: [build-macos, build-windows]
+    needs: [build-macos, build-windows, build-windows-arm64]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
@@ -146,13 +208,18 @@ jobs:
         with:
           name: Tideway-Windows
           path: artifacts
+      - uses: actions/download-artifact@v4
+        with:
+          name: Tideway-Windows-arm64
+          path: artifacts
 
       - name: Create / update release
         uses: softprops/action-gh-release@v2
         with:
           # Glob rather than explicit filename so the version-stamped
-          # asset names (Tideway-0.1.0.dmg, Tideway-setup-0.1.0.exe)
-          # land without hardcoding the version in two places.
+          # asset names (Tideway-0.1.0.dmg, Tideway-setup-0.1.0.exe,
+          # Tideway-setup-0.1.0-arm64.exe) land without hardcoding the
+          # version in two places.
           files: |
             artifacts/Tideway-*.dmg
             artifacts/Tideway-setup-*.exe
