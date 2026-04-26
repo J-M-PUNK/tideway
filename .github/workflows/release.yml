@@ -67,10 +67,12 @@ jobs:
           if-no-files-found: error
 
   # -------------------------------------------------------------------
-  # Windows onedir bundle. Produces Tideway-Windows.zip with
-  # the full dist/Tideway/ folder inside. Users unzip and run
-  # Tideway.exe. SmartScreen warning on first launch; README
-  # covers "More info → Run anyway."
+  # Windows. Produces Tideway-setup-<version>.exe — the Inno Setup
+  # installer. Users double-click it, click through the wizard, get a
+  # Start Menu entry + uninstaller registered with Apps & features.
+  # SmartScreen warning on first launch (build is unsigned); README
+  # covers "More info → Run anyway." The auto-update install button
+  # downloads and runs this same .exe.
   # -------------------------------------------------------------------
   build-windows:
     runs-on: windows-latest
@@ -104,20 +106,24 @@ jobs:
       - name: Run PyInstaller
         run: pyinstaller Tideway-win.spec --noconfirm
 
-      - name: Zip dist folder
-        # Compress-Archive is built-in on windows-latest — no need to
-        # shell out to 7zip. `-CompressionLevel Optimal` trims ~20% off
-        # the archive vs. the default Fastest.
+      - name: Install Inno Setup
+        # Chocolatey is preinstalled on windows-latest. The package
+        # name is `innosetup`; --no-progress keeps the log readable.
+        shell: pwsh
+        run: choco install innosetup -y --no-progress
+
+      - name: Build installer
+        # ISCC.exe lives in the standard Program Files (x86) location
+        # after the choco install. Output filename
+        # (Tideway-setup-<version>.exe) is set by scripts/Tideway.iss.
         shell: pwsh
         run: |
-          Compress-Archive -Path dist/Tideway/* `
-            -DestinationPath dist/Tideway-Windows.zip `
-            -CompressionLevel Optimal
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" scripts\Tideway.iss
 
       - uses: actions/upload-artifact@v4
         with:
           name: Tideway-Windows
-          path: dist/Tideway-Windows.zip
+          path: dist/Tideway-setup-*.exe
           if-no-files-found: error
 
   # -------------------------------------------------------------------
@@ -144,13 +150,12 @@ jobs:
       - name: Create / update release
         uses: softprops/action-gh-release@v2
         with:
-          # Glob rather than explicit filename so the Mac DMG's
-          # version-stamped name (Tideway-0.1.0.dmg, etc.) lands
-          # alongside the Windows zip without hardcoding the
-          # version in two places.
+          # Glob rather than explicit filename so the version-stamped
+          # asset names (Tideway-0.1.0.dmg, Tideway-setup-0.1.0.exe)
+          # land without hardcoding the version in two places.
           files: |
             artifacts/Tideway-*.dmg
-            artifacts/Tideway-Windows.zip
+            artifacts/Tideway-setup-*.exe
           # draft: true preserves an existing draft's state. If the
           # release doesn't exist yet (a push with no manually-created
           # draft), one is created as a draft for the maintainer to
