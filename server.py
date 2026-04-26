@@ -2374,25 +2374,55 @@ def spotify_album_total_plays(isrcs: str) -> dict:
 
 
 @app.get("/api/spotify/artist-stats")
-def spotify_artist_stats(tidal_artist_id: str, sample_isrc: str) -> dict:
+def spotify_artist_stats(
+    tidal_artist_id: str,
+    sample_isrc: str = "",
+    sample_isrcs: str = "",
+    tidal_artist_name: str = "",
+) -> dict:
     """Spotify artist overview — monthly listeners, followers, world
-    rank, top cities. `tidal_artist_id` keys the cache; `sample_isrc`
-    is only used on the first lookup (any track by the artist works)
-    to pivot from Tidal to Spotify's namespace.
+    rank, top cities. `tidal_artist_id` keys the cache.
+
+    The newer client passes `tidal_artist_name` plus a comma-separated
+    `sample_isrcs` so the resolver can prefer the ISRC whose primary
+    Spotify artist actually matches the Tidal artist's name. The
+    older single-`sample_isrc` form is still accepted for back-compat
+    and silently falls back to the legacy "first candidate from one
+    ISRC" path, which gets the wrong artist when the chosen track is
+    a feature credit.
 
     Returns an empty-ish dict (`{monthly_listeners: null, ...}`) when
     Spotify can't resolve the artist so the frontend can render the
     section as "not available" rather than throwing.
     """
     _require_auth()
-    if not tidal_artist_id or not sample_isrc:
+    isrcs: list[str] = [
+        c.strip().upper()
+        for c in (sample_isrcs or "").split(",")
+        if c.strip()
+    ]
+    if not isrcs and sample_isrc:
+        isrcs = [sample_isrc.strip().upper()]
+    if not tidal_artist_id or not isrcs:
         raise HTTPException(
             status_code=400,
-            detail="tidal_artist_id and sample_isrc are required",
+            detail=(
+                "tidal_artist_id is required, plus at least one of "
+                "sample_isrc or sample_isrcs"
+            ),
         )
     try:
         from app import spotify_public
-        stats = spotify_public.artist_stats(tidal_artist_id, sample_isrc)
+
+        if tidal_artist_name:
+            stats = spotify_public.artist_stats_v2(
+                tidal_artist_id, tidal_artist_name, isrcs
+            )
+        else:
+            # Legacy single-ISRC, no-name path — preserved for older
+            # cached clients still on /api/spotify/artist-stats?sample_isrc=.
+            # Known to mis-resolve when the sample track is a feature.
+            stats = spotify_public.artist_stats(tidal_artist_id, isrcs[0])
     except Exception as exc:
         logger.warning("spotify artist-stats fetch failed: %s", exc)
         return {

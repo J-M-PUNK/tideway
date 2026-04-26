@@ -114,13 +114,30 @@ def _ensure_client() -> tuple[Any, Any]:
 _db_lock = threading.Lock()
 _db_path = user_data_dir() / "spotify_public_cache.db"
 
+# Bumped when a code change makes existing cached data unreliable. The
+# resolver fix (canonical-track search + name-matched artist mapping)
+# means rows written by the old code can be wrong: a Thriller playcount
+# cached at 40M from the reissue's ISRC, or a Tidal artist mapped to a
+# featured collaborator. The version sentinel at the top of `_db()`
+# wipes those tables on first open after the bump so users see the
+# corrected numbers without having to manually clear the cache.
+_CACHE_SCHEMA_VERSION = 2
+
 
 def _db() -> sqlite3.Connection:
-    """Open the cache DB. Tables are created on demand; migrations
-    are additive (new columns via ALTER TABLE) so an older DB from a
-    previous version still opens.
+    """Open the cache DB. Tables are created on demand. A version
+    sentinel in `cache_meta` lets us invalidate existing rows when
+    a code change makes them unsafe to reuse — bump
+    `_CACHE_SCHEMA_VERSION` and the affected tables get cleared on
+    next open.
     """
     conn = sqlite3.connect(str(_db_path), timeout=5.0)
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS cache_meta ("
+        "  key TEXT PRIMARY KEY,"
+        "  value TEXT"
+        ")"
+    )
     conn.execute(
         "CREATE TABLE IF NOT EXISTS isrc_to_spotify_track ("
         "  isrc TEXT PRIMARY KEY,"
@@ -149,6 +166,28 @@ def _db() -> sqlite3.Connection:
         "  fetched_at INTEGER"
         ")"
     )
+
+    row = conn.execute(
+        "SELECT value FROM cache_meta WHERE key='schema_version'"
+    ).fetchone()
+    stored = int(row[0]) if row and str(row[0]).isdigit() else 0
+    if stored < _CACHE_SCHEMA_VERSION:
+        # Wipe the rows the resolver fix invalidated. The ID-mapping
+        # tables and the playcount cache can all carry wrong values
+        # from the pre-fix code; the artist_stats table is keyed by
+        # Spotify artist id so its rows are still accurate, but they
+        # may be referenced by a now-cleared (and re-resolving)
+        # tidal_to_spotify_artist mapping — leaving them avoids a
+        # round trip when the new resolver lands on the same id.
+        conn.execute("DELETE FROM tidal_to_spotify_artist")
+        conn.execute("DELETE FROM isrc_to_spotify_track")
+        conn.execute("DELETE FROM track_playcount")
+        conn.execute(
+            "INSERT OR REPLACE INTO cache_meta (key, value) VALUES "
+            "('schema_version', ?)",
+            (str(_CACHE_SCHEMA_VERSION),),
+        )
+        conn.commit()
     return conn
 
 
@@ -282,6 +321,195 @@ def album_total_plays(isrcs: list[str]) -> dict:
         "resolved": resolved,
         "total": len(cleaned),
     }
+
+
+def _resolve_artist_via_name_match(
+    tidal_artist_name: str, sample_isrcs: list[str]
+) -> Optional[str]:
+    """Walk a list of sample ISRCs and return the Spotify artist id
+    of the first track whose primary artist's name matches the Tidal
+    artist's name. Returns None if no candidate matches.
+
+    The single-ISRC path missed any artist whose top track on Tidal
+    was a feature credit — Spotify lists the host as primary, we
+    cached that host's id, and the page silently rendered the wrong
+    person's monthly listeners (or nothing, when the names later
+    failed a sanity check). Walking multiple ISRCs and requiring an
+    exact name match recovers in the common case where at least one
+    of the artist's top tracks is theirs as primary.
+    """
+    wanted = (tidal_artist_name or "").strip().lower()
+    if not wanted:
+        return None
+    for isrc in sample_isrcs[:5]:
+        ic = (isrc or "").strip().upper()
+        if not ic:
+            continue
+        for tid, _name in _search_track_candidates(f"isrc:{ic}"):
+            try:
+                payload = _song_info(tid)
+            except Exception as exc:
+                log.warning("spotify getTrack failed for %s: %s", tid, exc)
+                continue
+            union = (payload.get("data") or {}).get("trackUnion") or {}
+            first_items = (
+                (union.get("firstArtist") or {}).get("items")
+                or (union.get("artists") or {}).get("items")
+                or []
+            )
+            for item in first_items:
+                uri = item.get("uri") or ""
+                if not uri.startswith("spotify:artist:"):
+                    continue
+                name = str(
+                    (item.get("profile") or {}).get("name")
+                    or item.get("name")
+                    or ""
+                )
+                if name.strip().lower() == wanted:
+                    return uri.split(":")[-1]
+    return None
+
+
+def _read_cached_tidal_artist_mapping(
+    tidal_artist_id: str,
+) -> Optional[tuple[Optional[str], Optional[float]]]:
+    """Return the cached `(spotify_artist_id, fetched_at)` for the
+    Tidal artist, or `None` when no row exists. Splitting this out
+    keeps `artist_stats_v2` and the legacy `_tidal_to_spotify_artist`
+    aligned on cache shape."""
+    with _db_lock:
+        conn = _db()
+        try:
+            row = conn.execute(
+                "SELECT spotify_artist_id, fetched_at FROM tidal_to_spotify_artist "
+                "WHERE tidal_artist_id=?",
+                (str(tidal_artist_id),),
+            ).fetchone()
+        finally:
+            conn.close()
+    if row is None:
+        return None
+    return row[0], row[1]
+
+
+def _write_tidal_artist_mapping(
+    tidal_artist_id: str, spotify_artist_id: Optional[str]
+) -> None:
+    _write_cache_rows(
+        (
+            "INSERT OR REPLACE INTO tidal_to_spotify_artist "
+            "(tidal_artist_id, spotify_artist_id, fetched_at) VALUES (?, ?, ?)",
+            (str(tidal_artist_id), spotify_artist_id, int(time.time())),
+        ),
+    )
+
+
+def _fetch_artist_overview(
+    spotify_artist_id: str,
+) -> Optional[ArtistStats]:
+    """Cached read of `queryArtistOverview`. Caches the JSON-serialized
+    ArtistStats under the Spotify artist id for 7 days."""
+    with _db_lock:
+        conn = _db()
+        try:
+            row = conn.execute(
+                "SELECT payload, fetched_at FROM artist_stats "
+                "WHERE spotify_artist_id=?",
+                (spotify_artist_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+    if row is not None and row[1] and (time.time() - row[1]) < _STATS_TTL_SEC:
+        try:
+            return ArtistStats(**json.loads(row[0]))
+        except Exception:
+            pass  # fall through and refetch
+
+    try:
+        _, artist = _ensure_client()
+        payload = artist.get_artist(spotify_artist_id)
+    except Exception as exc:
+        log.warning(
+            "spotify queryArtistOverview failed for %s: %s",
+            spotify_artist_id, exc,
+        )
+        return None
+
+    union = (payload.get("data") or {}).get("artistUnion") or {}
+    profile = union.get("profile") or {}
+    stats = union.get("stats") or {}
+    cities_raw = (stats.get("topCities") or {}).get("items") or []
+    cities: list[dict] = []
+    for c in cities_raw[:5]:
+        try:
+            cities.append(
+                {
+                    "city": str(c.get("city") or ""),
+                    "country": str(c.get("country") or ""),
+                    "listeners": int(c.get("numberOfListeners") or 0),
+                }
+            )
+        except (TypeError, ValueError):
+            continue
+
+    result = ArtistStats(
+        spotify_artist_id=spotify_artist_id,
+        name=str(profile.get("name") or ""),
+        monthly_listeners=_safe_int(stats.get("monthlyListeners")),
+        followers=_safe_int(stats.get("followers")),
+        world_rank=_safe_int(stats.get("worldRank")),
+        top_cities=cities,
+    )
+    _write_cache_rows(
+        (
+            "INSERT OR REPLACE INTO artist_stats "
+            "(spotify_artist_id, payload, fetched_at) VALUES (?, ?, ?)",
+            (
+                spotify_artist_id,
+                json.dumps(result.to_dict()),
+                int(time.time()),
+            ),
+        ),
+    )
+    return result
+
+
+def artist_stats_v2(
+    tidal_artist_id: str,
+    tidal_artist_name: str,
+    sample_isrcs: list[str],
+) -> Optional[ArtistStats]:
+    """Return Spotify's artist-level stats for a Tidal artist,
+    resolved via a list of sample ISRCs and a strict name match.
+
+    Walks the ISRCs in order, pivots through Spotify's getTrack to
+    the primary artist, and only accepts the result when the primary
+    artist's name matches `tidal_artist_name` (case-insensitive).
+    Returns None when nothing matches — showing the wrong artist's
+    monthly listeners is worse than showing none.
+
+    The Tidal → Spotify artist mapping persists permanently once
+    resolved; subsequent calls only hit `queryArtistOverview` (which
+    is itself cached for 7 days under the Spotify artist id).
+    """
+    cached = _read_cached_tidal_artist_mapping(tidal_artist_id)
+    if cached is not None:
+        cached_id, fetched_at = cached
+        if cached_id is not None:
+            return _fetch_artist_overview(cached_id)
+        # Negative cache hit on the short TTL — don't re-walk yet.
+        if fetched_at and (time.time() - fetched_at) < _NULL_TTL_SEC:
+            return None
+        # Stale negative — fall through and retry.
+
+    spotify_artist_id = _resolve_artist_via_name_match(
+        tidal_artist_name, sample_isrcs
+    )
+    _write_tidal_artist_mapping(tidal_artist_id, spotify_artist_id)
+    if not spotify_artist_id:
+        return None
+    return _fetch_artist_overview(spotify_artist_id)
 
 
 def artist_stats(
@@ -611,47 +839,18 @@ def _safe_int(v: object) -> Optional[int]:
         return None
 
 
-def playcount_with_fallback(
-    isrc: str, title: str, artist: str
-) -> Optional[int]:
-    """Like playcount_by_isrc, but on ISRC miss (Spotify doesn't index
-    this specific recording) falls back to a title + primary-artist
-    search. Used by the Popular page's batch fetch where we have
-    the Tidal track's full metadata anyway.
-
-    Match is strict: exact title, exact primary-artist name. The
-    resulting playcount is cached under the original ISRC so the next
-    visit doesn't repeat the fuzzy search.
+def _search_track_candidates(query: str) -> list[tuple[str, str]]:
+    """Run a Spotify GraphQL track search and return
+    `[(track_id, display_name), ...]` for hits whose URI is a
+    spotify:track:. Errors are logged and swallowed — callers
+    treat an empty list as "search produced nothing useful".
     """
-    isrc = (isrc or "").strip().upper()
-    if not isrc:
-        return None
-
-    pc = playcount_by_isrc(isrc)
-    if pc is not None and pc > 0:
-        return pc
-
-    # ISRC path returned null/0. Common causes: Spotify hasn't
-    # indexed this specific release (feature-version ISRCs often
-    # miss), track was released too recently for playcounts to
-    # aggregate, or the ISRC is a Tidal-only reissue. If we have
-    # the title + artist we can search Spotify for the canonical
-    # version instead.
-    title = (title or "").strip()
-    artist = (artist or "").strip()
-    if not title or not artist:
-        return pc
-
     try:
         song, _ = _ensure_client()
-        res = song.query_songs(f"{artist} {title}", limit=5)
+        res = song.query_songs(query, limit=5)
     except Exception as exc:
-        log.warning(
-            "spotify fallback search failed for %s / %s: %s",
-            title, artist, exc,
-        )
-        return pc
-
+        log.warning("spotify track search failed for %r: %s", query, exc)
+        return []
     items = (
         (res.get("data") or {})
         .get("searchV2", {})
@@ -659,42 +858,85 @@ def playcount_with_fallback(
         .get("items")
         or []
     )
-    wanted_title = title.lower()
-    wanted_artist = artist.lower()
-
-    best_pc = -1
-    best_id: Optional[str] = None
-    for entry in items[:5]:
+    out: list[tuple[str, str]] = []
+    for entry in items:
         item = (entry.get("item") or {}).get("data") or {}
         uri = item.get("uri") or ""
         if not uri.startswith("spotify:track:"):
             continue
-        name = str(item.get("name") or "")
+        out.append((uri.split(":")[-1], str(item.get("name") or "")))
+    return out
+
+
+def _track_primary_artist_name(payload: Mapping[str, Any]) -> str:
+    """Pull the primary-artist display name out of a getTrack payload.
+    Handles both shapes the GraphQL response has shipped — the newer
+    `firstArtist.items[0]` and the older `artists.items[0]`."""
+    union = (payload.get("data") or {}).get("trackUnion") or {}
+    first_items = (
+        (union.get("firstArtist") or {}).get("items")
+        or (union.get("artists") or {}).get("items")
+        or []
+    )
+    if not first_items:
+        return ""
+    first = first_items[0]
+    return str(
+        (first.get("profile") or {}).get("name")
+        or first.get("name")
+        or ""
+    )
+
+
+def _resolve_canonical_track(
+    isrc: str, title: str, artist: str
+) -> tuple[Optional[int], Optional[str]]:
+    """Find the highest-playcount Spotify track that has the right
+    title and primary artist, considering BOTH an `isrc:` search and
+    a `<artist> <title>` search.
+
+    Tidal's metadata sometimes carries the ISRC of a less-played
+    reissue, so an `isrc:` search alone caps us at that reissue's
+    candidates and misses the canonical 1.6B-play original (which
+    has its own ISRC that Spotify will never alias). The title
+    search reaches across reissues. The strict primary-artist filter
+    keeps us from picking a same-titled track by a different artist
+    (Adele's "Hello" vs Lionel Richie's "Hello").
+
+    Returns `(playcount, spotify_track_id)` or `(None, None)` when
+    nothing matches.
+    """
+    wanted_title = (title or "").strip().lower()
+    wanted_artist = (artist or "").strip().lower()
+    if not wanted_title or not wanted_artist:
+        return None, None
+
+    # Insertion-ordered dedupe across both searches. The ISRC pass
+    # often produces zero or one candidate; the title pass covers
+    # reissues with unrelated ISRCs.
+    candidates: dict[str, str] = {}
+    for tid, name in _search_track_candidates(f"isrc:{isrc}"):
+        candidates.setdefault(tid, name)
+    for tid, name in _search_track_candidates(f"{artist} {title}"):
+        candidates.setdefault(tid, name)
+
+    best_pc = -1
+    best_id: Optional[str] = None
+    for tid, name in candidates.items():
+        # Title check at the search-result level — getTrack doesn't
+        # always echo the same display name verbatim, and we want
+        # to skip "Thriller (Live)" / "Thriller - Remastered" before
+        # paying for a getTrack round trip.
         if name.lower() != wanted_title:
             continue
-        track_id = uri.split(":")[-1]
-        # Confirm primary artist + read playcount via getTrack — more
-        # reliable than the search's inline artist block which varies
-        # by response version.
         try:
-            payload = _song_info(track_id)
-        except Exception:
+            payload = _song_info(tid)
+        except Exception as exc:
+            log.warning("spotify getTrack failed for %s: %s", tid, exc)
+            continue
+        if _track_primary_artist_name(payload).strip().lower() != wanted_artist:
             continue
         union = (payload.get("data") or {}).get("trackUnion") or {}
-        first_items = (
-            (union.get("firstArtist") or {}).get("items")
-            or (union.get("artists") or {}).get("items")
-            or []
-        )
-        if not first_items:
-            continue
-        first_name = str(
-            (first_items[0].get("profile") or {}).get("name")
-            or first_items[0].get("name")
-            or ""
-        )
-        if first_name.lower() != wanted_artist:
-            continue
         pc_raw = union.get("playcount")
         try:
             cand_pc = int(pc_raw) if pc_raw is not None else None
@@ -702,29 +944,83 @@ def playcount_with_fallback(
             cand_pc = None
         if cand_pc is not None and cand_pc > best_pc:
             best_pc = cand_pc
-            best_id = track_id
+            best_id = tid
 
-    if best_id is not None and best_pc > 0:
-        # Cache the playcount AND the upgraded ISRC→track mapping in a
-        # single transaction. The mapping write unblocks downstream
-        # artist-resolution which walks `isrc_to_spotify_track` rather
-        # than `track_playcount` — without it, a stale NULL from the
-        # earlier direct-ISRC search would still force a re-resolve.
-        now_s = int(time.time())
+    if best_id is None or best_pc <= 0:
+        return None, None
+    return best_pc, best_id
+
+
+def playcount_with_fallback(
+    isrc: str, title: str, artist: str
+) -> Optional[int]:
+    """Return the canonical playcount for the Tidal track identified
+    by `(isrc, title, artist)`. Searches both the supplied ISRC and
+    `<artist> <title>` so a reissue's lower-trafficked ISRC doesn't
+    cap us below the canonical 1.6B-play number. Result is cached
+    under the original ISRC for 7 days, so the doubled search cost
+    is paid once per track.
+
+    Falls back to ISRC-only when title or artist is missing — in
+    that mode the function behaves exactly like `playcount_by_isrc`.
+    """
+    isrc = (isrc or "").strip().upper()
+    if not isrc:
+        return None
+
+    # Cache fast path. Same zero-aware semantics as playcount_by_isrc:
+    # a fresh non-zero playcount is honored for the full 7-day TTL,
+    # but zeroes get retried on the short 1-day negative TTL because
+    # that's the release-week-aggregation lull.
+    with _db_lock:
+        conn = _db()
+        try:
+            row = conn.execute(
+                "SELECT playcount, fetched_at FROM track_playcount WHERE isrc=?",
+                (isrc,),
+            ).fetchone()
+        finally:
+            conn.close()
+    if row is not None and row[1]:
+        age = time.time() - row[1]
+        pc_cached = row[0]
+        is_zeroish = pc_cached is None or int(pc_cached or 0) == 0
+        if not is_zeroish and age < _STATS_TTL_SEC:
+            return int(pc_cached)
+        if is_zeroish and age < _NULL_TTL_SEC:
+            return int(pc_cached) if pc_cached is not None else None
+
+    title = (title or "").strip()
+    artist = (artist or "").strip()
+    if not title or not artist:
+        # No metadata = no canonical search; fall back to ISRC-only.
+        return playcount_by_isrc(isrc)
+
+    pc, track_id = _resolve_canonical_track(isrc, title, artist)
+    now_s = int(time.time())
+    if pc is not None and track_id:
+        # Cache the canonical playcount AND map the original ISRC to
+        # the canonical track id so downstream artist-resolution can
+        # reuse the mapping rather than re-walking the searches.
         _write_cache_rows(
             (
                 "INSERT OR REPLACE INTO track_playcount "
                 "(isrc, playcount, fetched_at) VALUES (?, ?, ?)",
-                (isrc, best_pc, now_s),
+                (isrc, pc, now_s),
             ),
             (
                 "INSERT OR REPLACE INTO isrc_to_spotify_track "
                 "(isrc, spotify_track_id, fetched_at) VALUES (?, ?, ?)",
-                (isrc, best_id, now_s),
+                (isrc, track_id, now_s),
             ),
         )
-        return best_pc
-    return pc
+        return pc
+
+    # Nothing matched. Cache as null on the negative TTL so we don't
+    # refire on every pageview but DO retry tomorrow (cf. the
+    # release-week zero behavior).
+    _write_track_playcount(isrc, None)
+    return None
 
 
 def debug_resolve_artist(
@@ -922,5 +1218,6 @@ __all__ = [
     "purge_null_playcounts",
     "album_total_plays",
     "artist_stats",
+    "artist_stats_v2",
     "debug_resolve_artist",
 ]

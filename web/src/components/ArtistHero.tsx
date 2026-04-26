@@ -103,7 +103,10 @@ export function ArtistHero({
         <ArtistPlaycountLine
           artistName={artistName}
           artistId={artistId}
-          sampleIsrc={topTracks.find((t) => t.isrc)?.isrc ?? null}
+          sampleIsrcs={topTracks
+            .map((t) => t.isrc)
+            .filter((s): s is string => !!s)
+            .slice(0, 5)}
         />
 
         <div className="mt-6 flex flex-wrap items-center gap-4">
@@ -299,18 +302,18 @@ function ArtistMoreMenu({
 function ArtistPlaycountLine({
   artistName,
   artistId,
-  sampleIsrc,
+  sampleIsrcs,
 }: {
   artistName: string;
   artistId: string;
-  sampleIsrc: string | null;
+  sampleIsrcs: string[];
 }) {
   // Monthly listeners from Spotify (global popularity) + personal
   // scrobble count from Last.fm (user's own listening history).
   // The Last.fm-wide "listeners / plays" fields are dropped — they
   // under-sample by ~100x relative to Spotify and just add noise.
   const pc = useLastfmArtistPlaycount(artistName);
-  const spotify = useSpotifyArtistStats(artistId, sampleIsrc);
+  const spotify = useSpotifyArtistStats(artistId, artistName, sampleIsrcs);
   const monthly = spotify?.monthly_listeners ?? 0;
   const user = pc?.userplaycount ?? 0;
 
