@@ -314,22 +314,39 @@ export const api = {
         )}`,
       ),
     /** Artist-level stats from Spotify: monthly listeners, followers,
-     *  world rank, top cities. `sampleIsrc` is any ISRC from a track
-     *  by the artist — used once to resolve Tidal artist → Spotify
-     *  artist, then the mapping is cached indefinitely. */
-    artistStats: (tidalArtistId: string, sampleIsrc: string) =>
-      req<{
+     *  world rank, top cities. Pass the Tidal artist's name plus a
+     *  list of ISRCs from their top tracks; the resolver picks the
+     *  ISRC whose Spotify primary artist matches the Tidal name, so
+     *  feature-credits don't pivot us onto the host's stats. */
+    artistStats: (
+      tidalArtistId: string,
+      tidalArtistName: string,
+      sampleIsrcs: string[],
+    ) => {
+      const params = new URLSearchParams({
+        tidal_artist_id: tidalArtistId,
+      });
+      if (tidalArtistName) {
+        params.set("tidal_artist_name", tidalArtistName);
+      }
+      const cleaned = (sampleIsrcs || [])
+        .map((s) => s.trim().toUpperCase())
+        .filter(Boolean);
+      if (cleaned.length > 0) {
+        params.set("sample_isrcs", cleaned.join(","));
+        // Keep `sample_isrc` for the very-old server case, harmless
+        // to send when the new params are also set.
+        params.set("sample_isrc", cleaned[0]);
+      }
+      return req<{
         spotify_artist_id?: string;
         name?: string;
         monthly_listeners: number | null;
         followers: number | null;
         world_rank: number | null;
         top_cities: { city: string; country: string; listeners: number }[];
-      }>(
-        `/api/spotify/artist-stats?tidal_artist_id=${encodeURIComponent(
-          tidalArtistId,
-        )}&sample_isrc=${encodeURIComponent(sampleIsrc)}`,
-      ),
+      }>(`/api/spotify/artist-stats?${params.toString()}`);
+    },
   },
   me: () => req<{ username: string }>("/api/me"),
   version: () => req<{ version: string }>("/api/version"),
