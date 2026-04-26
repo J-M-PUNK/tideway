@@ -1,6 +1,16 @@
 tidalapi>=0.7.0
 mutagen>=1.47.0
 requests>=2.31.0
+# TLS-impersonation HTTP client. We patch tidalapi's request_session to
+# use a curl-cffi Session whose ClientHello and HTTP/2 SETTINGS match a
+# real mobile-Chrome stack, so anti-abuse layers can't fingerprint us
+# at the handshake. Without this, every request goes out with urllib3's
+# default fingerprint — the most-flagged Python signature there is.
+# `app/http.py` falls back to plain requests if the load fails, but
+# THAT fallback is the bug we're fixing here: shipping it as the
+# production transport meant every Tideway install looked like a
+# scraper to Tidal's anti-abuse layer.
+curl-cffi>=0.7.0
 pillow>=10.0.0
 fastapi>=0.110.0
 uvicorn[standard]>=0.27.0
