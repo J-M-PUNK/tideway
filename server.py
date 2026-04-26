@@ -989,11 +989,45 @@ def app_version() -> dict:
     return {"version": APP_VERSION}
 
 
+def _match_release_asset(release_data: dict) -> Optional[str]:
+    """Return the download URL of the current platform's installer in
+    a GitHub /releases/latest response, or None if the release ships
+    no matching asset.
+
+    Naming convention (matches scripts/build_dmg.sh and the Inno Setup
+    script):
+      - macOS:   Tideway-<version>.dmg
+      - Windows: Tideway-setup-<version>.exe
+
+    Linux falls through to None because we don't package a Linux
+    installer today.
+    """
+    if sys.platform == "darwin":
+        suffix = ".dmg"
+    elif sys.platform.startswith("win"):
+        suffix = ".exe"
+    else:
+        return None
+    for a in release_data.get("assets") or []:
+        name = (a.get("name") or "").lower()
+        if name.endswith(suffix) and name.startswith("tideway"):
+            return a.get("browser_download_url")
+    return None
+
+
 @app.get("/api/update-check")
 def update_check() -> dict:
     """Compare the running app's version against the latest GitHub
     Release. Returns {available, latest, url, notes} for the UI banner.
-    Cached so repeated frontend probes don't spam GitHub's API."""
+    Cached so repeated frontend probes don't spam GitHub's API.
+
+    `available` is gated on (newer-tag AND installer-for-this-platform-
+    in-the-release). The platform check matters when a point release
+    ships an installer for some OSes but not others — e.g. a Windows-
+    only fix release. macOS / Linux users on the older version would
+    otherwise see a banner that points at a release with no asset they
+    can install.
+    """
     now = time.monotonic()
     with _update_cache_lock:
         cached = _update_cache.get("latest")
@@ -1007,12 +1041,14 @@ def update_check() -> dict:
         "url": None,
         "notes": None,
     }
+    asset_url: Optional[str] = None
     # Auto update is off unless the fork sets TIDEWAY_UPDATE_REPO to
     # its own org/repo. Return the idle payload instead of hitting a
     # 404 on an empty repo path.
     if not _UPDATE_REPO:
         with _update_cache_lock:
             _update_cache["latest"] = (now, payload)
+            _update_cache["asset_url"] = (now, asset_url)
         return payload
     try:
         import urllib.request
@@ -1031,7 +1067,9 @@ def update_check() -> dict:
             payload["url"] = latest_url
             payload["notes"] = latest_notes
             if _parse_semver(latest_tag) > _parse_semver(APP_VERSION):
-                payload["available"] = True
+                asset_url = _match_release_asset(data)
+                if asset_url is not None:
+                    payload["available"] = True
     except Exception:
         # Offline / rate-limited / repo private — silently report no
         # update so the UI doesn't flash an error on every startup.
@@ -1039,26 +1077,25 @@ def update_check() -> dict:
 
     with _update_cache_lock:
         _update_cache["latest"] = (now, payload)
+        _update_cache["asset_url"] = (now, asset_url)
     return payload
 
 
 def _update_asset_url() -> Optional[str]:
-    """Find the download URL for the current-platform installer in the
-    latest GitHub release. Returns None if the release has no asset
-    matching our naming convention.
+    """Return the download URL for this platform's installer in the
+    latest GitHub release, or None if there isn't one.
 
-    Naming convention (matches scripts/build_dmg.sh and the Inno Setup
-    script):
-      - macOS:   Tideway-<version>.dmg
-      - Windows: Tideway-setup-<version>.exe
-
-    Runs a fresh GitHub fetch rather than reusing the cached update
-    check; the cache stores html_url (release page), not the asset
-    list. Adds about 300 ms to the "Install" click, which is fine
-    because it is user initiated.
+    Reuses the cache populated by /api/update-check when warm — the
+    "Install now" click otherwise pays a second GitHub round trip
+    against the same data update_check just fetched.
     """
     if not _UPDATE_REPO:
         return None
+    now = time.monotonic()
+    with _update_cache_lock:
+        cached = _update_cache.get("asset_url")
+        if cached and now - cached[0] < _UPDATE_CACHE_TTL_SEC:
+            return cached[1]
     try:
         import urllib.request
 
@@ -1070,20 +1107,10 @@ def _update_asset_url() -> Optional[str]:
             data = json.load(resp)
     except Exception:
         return None
-    assets = data.get("assets") or []
-    if sys.platform == "darwin":
-        suffix = ".dmg"
-    elif sys.platform.startswith("win"):
-        suffix = ".exe"
-    else:
-        # Linux: no packaged installer today. Caller falls back to the
-        # release page URL.
-        return None
-    for a in assets:
-        name = (a.get("name") or "").lower()
-        if name.endswith(suffix) and "tidaldownloader" in name.replace("-", ""):
-            return a.get("browser_download_url")
-    return None
+    asset_url = _match_release_asset(data)
+    with _update_cache_lock:
+        _update_cache["asset_url"] = (now, asset_url)
+    return asset_url
 
 
 @app.post("/api/update/install")
