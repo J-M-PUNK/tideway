@@ -590,6 +590,18 @@ class PCMPlayer:
                 log.exception("preload resolve failed for %s", track_id)
                 return {"ok": False, "error": str(exc)}
 
+            # Configure the preload's output rate to match the active
+            # stream so the gapless splice works for any source-rate
+            # combination. In shared mode that's the device's mixer
+            # rate, so a preloaded 96 k track decoded against a 48 k
+            # stream produces 48 k output and joins seamlessly. In
+            # exclusive mode we keep the preload at its own source
+            # rate; if it doesn't match the active stream, the adopt
+            # path reopens the stream (same ~50 ms gap as before).
+            current_stream_rate = self._stream_sample_rate
+            if not self._exclusive_mode and current_stream_rate:
+                decoder.set_target_rate(current_stream_rate)
+
             q: queue.Queue[Optional[np.ndarray]] = queue.Queue(
                 maxsize=_PCM_QUEUE_MAX
             )
@@ -609,7 +621,7 @@ class PCMPlayer:
 
             self._dbg(
                 f"preload READY track={track_id} "
-                f"rate={decoder.sample_rate} dtype={decoder.sounddevice_dtype} "
+                f"rate={decoder.output_sample_rate} dtype={decoder.sounddevice_dtype} "
                 f"(current stream rate={self._stream_sample_rate} "
                 f"dtype={self._stream_sd_dtype})"
             )
@@ -625,7 +637,7 @@ class PCMPlayer:
                 thread=thread,
                 stop_flag=stop_flag,
                 done=done,
-                sample_rate=decoder.sample_rate,
+                sample_rate=decoder.output_sample_rate,
                 channels=decoder.channels,
                 sd_dtype=decoder.sounddevice_dtype,
             )
@@ -1285,6 +1297,29 @@ class PCMPlayer:
             except ValueError:
                 device = None
 
+        # Decide the rate we'll actually feed sounddevice.
+        # ─ Exclusive Mode: push the source rate straight at the device.
+        #   The OS or driver is asked to reconfigure to that rate, and
+        #   either succeeds (bit-perfect) or fails (we fall back below).
+        # ─ Shared mode: ask the device for its mixer rate and resample
+        #   to that rate inside the decoder. The OS then receives audio
+        #   that already matches its mixer's rate, so its own resampler
+        #   is a no-op and the only resampler in the chain is ours,
+        #   where we control the headroom. When the source rate already
+        #   matches the device's mixer rate (e.g. 44.1 source on a 44.1
+        #   device), set_target_rate is a no-op and we stay bit-perfect
+        #   even in shared mode.
+        decoder = self._decoder
+        if decoder is not None:
+            if self._exclusive_mode:
+                target_rate = decoder.sample_rate
+            else:
+                target_rate = self._query_device_mixer_rate(device, decoder.sample_rate)
+            decoder.set_target_rate(target_rate)
+            sample_rate = decoder.output_sample_rate
+            dtype = decoder.sounddevice_dtype
+            channels = decoder.channels
+
         # Exclusive Mode — push PCM straight at the device at its
         # native rate / bit depth. On macOS the CoreAudio flags ask
         # the driver to reconfigure the device and fail loudly
@@ -1323,15 +1358,37 @@ class PCMPlayer:
             # Exclusive Mode can fail on devices that refuse the
             # requested rate / format (e.g. a USB DAC pinned to 48k
             # when the track is 44.1k). Fall back to shared mode so
-            # playback keeps working; caller can surface the error.
+            # playback keeps working. We also need to switch the
+            # decoder to mixer-rate output for the same intersample-
+            # peak reason as above, since the fallback puts us in
+            # shared mode.
             if extra_settings is not None:
                 log.warning(
                     "Exclusive-mode stream open failed; falling back to shared"
                 )
                 stream_kwargs.pop("extra_settings", None)
+                if decoder is not None:
+                    fallback_rate = self._query_device_mixer_rate(
+                        device, decoder.sample_rate
+                    )
+                    decoder.set_target_rate(fallback_rate)
+                    stream_kwargs["samplerate"] = decoder.output_sample_rate
+                    stream_kwargs["dtype"] = decoder.sounddevice_dtype
+                    sample_rate = decoder.output_sample_rate
+                    channels = decoder.channels
                 self._stream = sd.OutputStream(**stream_kwargs)
             else:
                 raise
+
+        # Pin the cached stream-state to whatever we actually opened
+        # at. set_exclusive_mode and set_output_device read these to
+        # decide gapless compatibility, so the values must reflect
+        # the post-reconfig rate, not the source rate. Doing this
+        # here (vs. at every callsite) keeps the rule in one place.
+        self._stream_sample_rate = sample_rate
+        self._stream_sd_dtype = dtype
+        self._stream_channels = channels
+
         # Rebuild the EQ against the new sample rate. Preserves the
         # user's bands / preamp across tracks.
         self._eq = Equalizer(sample_rate=sample_rate, channels=channels)
@@ -1341,6 +1398,22 @@ class PCMPlayer:
             except Exception:
                 log.exception("eq coefficient build failed")
                 self._eq.clear()
+
+    @staticmethod
+    def _query_device_mixer_rate(device: Optional[int], fallback: int) -> int:
+        """Look up the rate the OS will mix at for `device` in shared
+        mode. If sounddevice can't tell us, return `fallback` so the
+        decoder stays at source rate (the previous behavior). Rounded
+        to int because PortAudio reports it as a float."""
+        try:
+            info = sd.query_devices(device, kind="output")
+        except Exception:
+            log.warning("query_devices failed; using source rate as fallback")
+            return fallback
+        rate = info.get("default_samplerate") if isinstance(info, dict) else None
+        if not rate or rate <= 0:
+            return fallback
+        return int(round(rate))
 
     def _start_decoder_thread(self) -> None:
         # Bind the decoder / queue / flags to the thread's locals at
@@ -1527,7 +1600,10 @@ class PCMPlayer:
                 outdata[:] = np.rint(buf).astype(outdata.dtype)
 
         # Volume + mute post-processing. At volume=100 and not muted
-        # (and no EQ above), bit-perfect pass-through still holds.
+        # (and no EQ above), bit-perfect pass-through still holds when
+        # the decoder isn't doing internal SRC; when it is, the
+        # decoder has already attenuated by ~1 dB upstream so peaks
+        # land below full scale.
         if self._muted or self._volume <= 0:
             outdata.fill(0)
         elif self._volume < 100:

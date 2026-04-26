@@ -9,6 +9,24 @@ feeling desktop app that packages a FastAPI backend, a React and
 Tailwind frontend, and a PyAV and sounddevice audio engine behind
 a single pywebview window.
 
+> ### About your Tidal account
+>
+> This app is not made by Tidal. It talks to the same private
+> endpoints the official Tidal apps use, but with traffic patterns
+> that can look unusual to Tidal's anti-abuse system. Heavy use,
+> especially mass downloads or rapid browsing, has triggered both
+> soft rate limits and longer "abuse detected" cooldowns.
+>
+> A soft rate limit pauses playback and search for about a minute.
+> The abuse-detected variant pauses everything for thirty minutes
+> and counts as a strike. Repeated strikes can escalate to account
+> suspension or a permanent ban.
+>
+> The app throttles itself in normal use and surfaces a banner the
+> moment a backoff engages, but you are using your own account at
+> your own risk. If you cannot accept any chance of a Tidal action
+> against your account, do not use this app.
+
 ![Home page](assets/screenshots/home.png)
 
 ## What's inside
