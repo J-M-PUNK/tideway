@@ -756,8 +756,39 @@ class PCMPlayer:
         """Enumerate output-capable audio devices via sounddevice.
         Returns `[{"id": "<int-as-str>", "name": "<human>"}]`, with
         an empty-id "System default" entry first.
+
+        PortAudio caches its CoreAudio device list at the time of
+        initialization. Devices plugged in after Tideway launched
+        (USB DACs, Bluetooth headphones, etc.) wouldn't appear
+        without a refresh — and there's no public PortAudio API
+        for "rescan." The standard workaround across PortAudio-
+        based apps is to terminate and re-initialize the library;
+        the next query then re-enumerates from CoreAudio.
+
+        We only do the terminate + reinit when no stream is open.
+        Tearing PortAudio out from under an active stream causes
+        the audio callback thread to die mid-flight, which we never
+        want during playback. When a stream is active the device
+        list reflects whatever was visible at stream-open time.
         """
         out: list[dict] = [{"id": "", "name": "System default"}]
+        # Refresh PortAudio's device list when no stream is open.
+        # We're holding the pipeline-level lock so set_output_device
+        # / new stream opens can't race us.
+        with self._lock:
+            stream_active = self._stream is not None
+        if not stream_active:
+            try:
+                sd._terminate()
+            except Exception:
+                # Already-terminated / never-initialized are both
+                # fine — the next query_devices below will re-init
+                # lazily.
+                pass
+            try:
+                sd._initialize()
+            except Exception:
+                log.exception("sd._initialize after refresh failed")
         try:
             devices = sd.query_devices()
         except Exception:

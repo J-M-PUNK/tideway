@@ -52,7 +52,18 @@ export function OutputDevicePicker() {
     opts.devices.find((d) => d.id === opts.current)?.name ?? "System default";
 
   return (
-    <DropdownMenu>
+    <DropdownMenu
+      onOpenChange={(open) => {
+        // Refetch the device list each time the dropdown opens, so a
+        // user who plugs in headphones (or pairs a Bluetooth speaker)
+        // after launching Tideway sees the new device without having
+        // to restart. The backend re-enumerates CoreAudio when this
+        // call lands; cost is one HTTP round-trip per open.
+        if (open) {
+          void opts.refresh();
+        }
+      }}
+    >
       <DropdownMenuTrigger asChild>
         <Button
           variant="ghost"
