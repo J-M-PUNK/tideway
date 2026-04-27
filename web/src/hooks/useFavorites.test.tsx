@@ -5,7 +5,9 @@ import { createRoot, type Root } from "react-dom/client";
 
 // React 18 nags when act() is used without this flag set on the
 // global. happy-dom is fine, we just have to opt in explicitly.
-(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+(
+  globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
+).IS_REACT_ACT_ENVIRONMENT = true;
 
 /**
  * Verifies the visibility-driven refetch behavior added to fix the
@@ -127,16 +129,21 @@ describe("FavoritesProvider visibility refetch", () => {
     // mid-flight.
     let releaseAdd: () => void = () => {};
     addMock.mockImplementation(
-      () => new Promise<{ ok: true }>((resolve) => {
-        releaseAdd = () => resolve({ ok: true });
-      }),
+      () =>
+        new Promise<{ ok: true }>((resolve) => {
+          releaseAdd = () => resolve({ ok: true });
+        }),
     );
 
     let probe: ProbeHandle | null = null;
     await act(async () => {
       root.render(
         <FavoritesProvider>
-          <Probe onMount={(h) => { probe = h; }} />
+          <Probe
+            onMount={(h) => {
+              probe = h;
+            }}
+          />
         </FavoritesProvider>,
       );
       await flush();

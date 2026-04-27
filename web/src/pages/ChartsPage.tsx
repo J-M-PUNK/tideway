@@ -43,7 +43,10 @@ const CHARTS: Record<ChartKey, ChartSpec> = {
 export function ChartsPage({ onDownload }: { onDownload: OnDownload }) {
   const { chart = "new" } = useParams<{ chart: ChartKey }>();
   const spec = CHARTS[chart as ChartKey] ?? CHARTS.new;
-  const { data, loading, error } = useApi(() => api.pagePath(spec.path), [spec.path]);
+  const { data, loading, error } = useApi(
+    () => api.pagePath(spec.path),
+    [spec.path],
+  );
 
   // New Releases stays standalone; only Top and Rising share the
   // Charts tab strip (Popular lives on its own route).
@@ -57,7 +60,8 @@ export function ChartsPage({ onDownload }: { onDownload: OnDownload }) {
       </div>
     );
   }
-  if (error || !data) return <ErrorView error={error ?? `Couldn't load ${spec.title}`} />;
+  if (error || !data)
+    return <ErrorView error={error ?? `Couldn't load ${spec.title}`} />;
 
   return (
     <div>

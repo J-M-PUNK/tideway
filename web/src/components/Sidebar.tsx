@@ -58,7 +58,9 @@ const library = [
 
 // In offline mode the only link we keep in the "Your Library" section
 // is the local file list — everything else is Tidal-session-dependent.
-const offlineLibrary = [{ to: "/library/local", label: "On this device", icon: HardDrive }];
+const offlineLibrary = [
+  { to: "/library/local", label: "On this device", icon: HardDrive },
+];
 
 export function Sidebar({
   activeDownloads,

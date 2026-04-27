@@ -52,7 +52,8 @@ export function FolderDetail({ onDownload }: { onDownload: OnDownload }) {
         const pls = await api.library.folders.playlists(id);
         if (!cancelled) setPlaylists(pls);
       } catch (err) {
-        if (!cancelled) setError(err instanceof Error ? err.message : String(err));
+        if (!cancelled)
+          setError(err instanceof Error ? err.message : String(err));
       }
     })();
     return () => {
@@ -105,7 +106,11 @@ export function FolderDetail({ onDownload }: { onDownload: OnDownload }) {
           </h1>
         </div>
         <div className="flex items-center gap-2">
-          <Button variant="outline" size="sm" onClick={() => setRenameOpen(true)}>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => setRenameOpen(true)}
+          >
             <Pencil className="h-4 w-4" /> Rename
           </Button>
           <Button
@@ -238,8 +243,8 @@ function DeleteDialog({
         <DialogHeader>
           <DialogTitle>Delete "{name}"?</DialogTitle>
           <DialogDescription>
-            The folder is removed from your Tidal account. Any playlists
-            inside move back to the top level — they aren't deleted.
+            The folder is removed from your Tidal account. Any playlists inside
+            move back to the top level — they aren't deleted.
           </DialogDescription>
         </DialogHeader>
         <div className="flex justify-end gap-2">

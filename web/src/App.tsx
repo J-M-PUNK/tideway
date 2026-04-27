@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { BrowserRouter, Navigate, Route, Routes, useLocation } from "react-router-dom";
+import {
+  BrowserRouter,
+  Navigate,
+  Route,
+  Routes,
+  useLocation,
+} from "react-router-dom";
 import { Loader2 } from "lucide-react";
 import { Sidebar } from "@/components/Sidebar";
 import { NavBar } from "@/components/NavBar";
@@ -222,7 +228,8 @@ function AppInner() {
   // is decided before Shell's hooks (and its large component tree)
   // pay render cost.
   const isMiniRoute =
-    typeof window !== "undefined" && window.location.pathname.startsWith("/mini");
+    typeof window !== "undefined" &&
+    window.location.pathname.startsWith("/mini");
 
   return (
     <BrowserRouter>
@@ -303,10 +310,12 @@ function Shell({
     // Settings page dispatches this event after every successful save,
     // so toggling the pref there updates the shell in real time.
     const onUpdate = (e: Event) => {
-      const detail = (e as CustomEvent<{
-        notify_on_complete?: boolean;
-        notify_on_track_change?: boolean;
-      }>).detail;
+      const detail = (
+        e as CustomEvent<{
+          notify_on_complete?: boolean;
+          notify_on_track_change?: boolean;
+        }>
+      ).detail;
       if (!detail) return;
       if (typeof detail.notify_on_complete === "boolean") {
         setNotifyEnabled(detail.notify_on_complete);
@@ -321,7 +330,11 @@ function Shell({
       window.removeEventListener("tidal-settings-updated", onUpdate);
     };
   }, []);
-  useDownloadNotifications(notifyEnabled, downloads.active, downloads.completed);
+  useDownloadNotifications(
+    notifyEnabled,
+    downloads.active,
+    downloads.completed,
+  );
   useTrackChangeNotifications(notifyTrackEnabled, playerMeta.track);
   const [queueOpen, setQueueOpen] = useState(false);
   const [lyricsOpen, setLyricsOpen] = useState(false);
@@ -476,67 +489,171 @@ function Shell({
           <TidalBackoffBanner />
           <UpdateBanner />
           <div ref={fadeRef} className="animate-route px-8 py-6">
-          <ErrorBoundary resetKey={location.pathname}>
-          <Suspense fallback={<HeroSkeleton />}>
-          <Routes>
-            {offline ? (
-              <>
-                {/* Offline mode: only show pages that don't need a live
+            <ErrorBoundary resetKey={location.pathname}>
+              <Suspense fallback={<HeroSkeleton />}>
+                <Routes>
+                  {offline ? (
+                    <>
+                      {/* Offline mode: only show pages that don't need a live
                     Tidal session. Everything else redirects to the local
                     library so a stale bookmark / typed URL doesn't land
                     the user on a page that'll immediately 401. */}
-                <Route path="/" element={<Navigate to="/library/local" replace />} />
-                <Route path="/library" element={<Navigate to="/library/local" replace />} />
-                <Route path="/library/local" element={<LocalLibrary onDownload={enqueue} />} />
-                <Route path="/downloads" element={<Downloads items={downloads.items} offline={offline} />} />
-                <Route path="/settings" element={<SettingsPage onLogout={onLogout} />} />
-                <Route path="*" element={<Navigate to="/library/local" replace />} />
-              </>
-            ) : (
-              <>
-                <Route path="/" element={<Home onDownload={enqueue} />} />
-                <Route path="/search" element={<Search onDownload={enqueue} />} />
-                <Route path="/explore" element={<Explore onDownload={enqueue} />} />
-                <Route path="/genres" element={<GenresPage onDownload={enqueue} />} />
-                <Route path="/moods" element={<MoodsPage onDownload={enqueue} />} />
-                <Route path="/mixes" element={<MixesPage />} />
-                <Route path="/charts" element={<Navigate to="/charts/new" replace />} />
-                <Route path="/charts/:chart" element={<ChartsPage onDownload={enqueue} />} />
-                <Route path="/browse/:path" element={<BrowsePage onDownload={enqueue} />} />
-                <Route path="/library" element={<Navigate to="/library/albums" replace />} />
-                <Route path="/library/local" element={<LocalLibrary onDownload={enqueue} />} />
-                <Route path="/library/folder/:id" element={<FolderDetail onDownload={enqueue} />} />
-                <Route path="/library/:section" element={<Library onDownload={enqueue} />} />
-                <Route path="/album/:id" element={<AlbumDetail onDownload={enqueue} />} />
-                <Route path="/artist/:id" element={<ArtistDetail onDownload={enqueue} />} />
-                <Route path="/artist/:id/all/:section" element={<ArtistSection onDownload={enqueue} />} />
-                <Route path="/playlist/:id" element={<PlaylistDetail onDownload={enqueue} />} />
-                <Route path="/mix/:id" element={<MixDetail onDownload={enqueue} />} />
-                <Route
-                  path="/radio/artist/:id"
-                  element={<RadioPage kind="artist" onDownload={enqueue} />}
-                />
-                <Route
-                  path="/radio/track/:id"
-                  element={<RadioPage kind="track" onDownload={enqueue} />}
-                />
-                <Route path="/feed" element={<FeedPage onDownload={enqueue} />} />
-                <Route path="/history" element={<HistoryPage onDownload={enqueue} />} />
-                <Route path="/stats" element={<StatsPage />} />
-                <Route path="/stats/:kind" element={<StatsDetail />} />
-                <Route path="/import" element={<ImportPage />} />
-                <Route path="/user/:id" element={<ProfilePage onDownload={enqueue} />} />
-                <Route path="/user/:id/followers" element={<FollowListPage kind="followers" />} />
-                <Route path="/user/:id/following" element={<FollowListPage kind="following" />} />
-                <Route path="/popular" element={<PopularPage onDownload={enqueue} />} />
-                <Route path="/downloads" element={<Downloads items={downloads.items} offline={offline} />} />
-                <Route path="/settings" element={<SettingsPage onLogout={onLogout} />} />
-                <Route path="*" element={<Navigate to="/" replace />} />
-              </>
-            )}
-          </Routes>
-          </Suspense>
-          </ErrorBoundary>
+                      <Route
+                        path="/"
+                        element={<Navigate to="/library/local" replace />}
+                      />
+                      <Route
+                        path="/library"
+                        element={<Navigate to="/library/local" replace />}
+                      />
+                      <Route
+                        path="/library/local"
+                        element={<LocalLibrary onDownload={enqueue} />}
+                      />
+                      <Route
+                        path="/downloads"
+                        element={
+                          <Downloads
+                            items={downloads.items}
+                            offline={offline}
+                          />
+                        }
+                      />
+                      <Route
+                        path="/settings"
+                        element={<SettingsPage onLogout={onLogout} />}
+                      />
+                      <Route
+                        path="*"
+                        element={<Navigate to="/library/local" replace />}
+                      />
+                    </>
+                  ) : (
+                    <>
+                      <Route path="/" element={<Home onDownload={enqueue} />} />
+                      <Route
+                        path="/search"
+                        element={<Search onDownload={enqueue} />}
+                      />
+                      <Route
+                        path="/explore"
+                        element={<Explore onDownload={enqueue} />}
+                      />
+                      <Route
+                        path="/genres"
+                        element={<GenresPage onDownload={enqueue} />}
+                      />
+                      <Route
+                        path="/moods"
+                        element={<MoodsPage onDownload={enqueue} />}
+                      />
+                      <Route path="/mixes" element={<MixesPage />} />
+                      <Route
+                        path="/charts"
+                        element={<Navigate to="/charts/new" replace />}
+                      />
+                      <Route
+                        path="/charts/:chart"
+                        element={<ChartsPage onDownload={enqueue} />}
+                      />
+                      <Route
+                        path="/browse/:path"
+                        element={<BrowsePage onDownload={enqueue} />}
+                      />
+                      <Route
+                        path="/library"
+                        element={<Navigate to="/library/albums" replace />}
+                      />
+                      <Route
+                        path="/library/local"
+                        element={<LocalLibrary onDownload={enqueue} />}
+                      />
+                      <Route
+                        path="/library/folder/:id"
+                        element={<FolderDetail onDownload={enqueue} />}
+                      />
+                      <Route
+                        path="/library/:section"
+                        element={<Library onDownload={enqueue} />}
+                      />
+                      <Route
+                        path="/album/:id"
+                        element={<AlbumDetail onDownload={enqueue} />}
+                      />
+                      <Route
+                        path="/artist/:id"
+                        element={<ArtistDetail onDownload={enqueue} />}
+                      />
+                      <Route
+                        path="/artist/:id/all/:section"
+                        element={<ArtistSection onDownload={enqueue} />}
+                      />
+                      <Route
+                        path="/playlist/:id"
+                        element={<PlaylistDetail onDownload={enqueue} />}
+                      />
+                      <Route
+                        path="/mix/:id"
+                        element={<MixDetail onDownload={enqueue} />}
+                      />
+                      <Route
+                        path="/radio/artist/:id"
+                        element={
+                          <RadioPage kind="artist" onDownload={enqueue} />
+                        }
+                      />
+                      <Route
+                        path="/radio/track/:id"
+                        element={
+                          <RadioPage kind="track" onDownload={enqueue} />
+                        }
+                      />
+                      <Route
+                        path="/feed"
+                        element={<FeedPage onDownload={enqueue} />}
+                      />
+                      <Route
+                        path="/history"
+                        element={<HistoryPage onDownload={enqueue} />}
+                      />
+                      <Route path="/stats" element={<StatsPage />} />
+                      <Route path="/stats/:kind" element={<StatsDetail />} />
+                      <Route path="/import" element={<ImportPage />} />
+                      <Route
+                        path="/user/:id"
+                        element={<ProfilePage onDownload={enqueue} />}
+                      />
+                      <Route
+                        path="/user/:id/followers"
+                        element={<FollowListPage kind="followers" />}
+                      />
+                      <Route
+                        path="/user/:id/following"
+                        element={<FollowListPage kind="following" />}
+                      />
+                      <Route
+                        path="/popular"
+                        element={<PopularPage onDownload={enqueue} />}
+                      />
+                      <Route
+                        path="/downloads"
+                        element={
+                          <Downloads
+                            items={downloads.items}
+                            offline={offline}
+                          />
+                        }
+                      />
+                      <Route
+                        path="/settings"
+                        element={<SettingsPage onLogout={onLogout} />}
+                      />
+                      <Route path="*" element={<Navigate to="/" replace />} />
+                    </>
+                  )}
+                </Routes>
+              </Suspense>
+            </ErrorBoundary>
           </div>
         </main>
       </div>

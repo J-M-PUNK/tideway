@@ -1,5 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
-import { ChevronDown, ChevronRight, Clock, Disc3, Film, FolderOpen, Music, Play, User } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronRight,
+  Clock,
+  Disc3,
+  Film,
+  FolderOpen,
+  Music,
+  Play,
+  User,
+} from "lucide-react";
 import { api } from "@/api/client";
 import type { LocalFile, LocalVideo, Track } from "@/api/types";
 import type { OnDownload } from "@/api/download";
@@ -45,7 +55,11 @@ function primaryArtist(f: LocalFile): string {
  * or Recent. "Recent" is a flat list sorted by mtime so the user can
  * answer "what did I just download?" without scrolling.
  */
-export function LocalLibrary({ onDownload: _onDownload }: { onDownload: OnDownload }) {
+export function LocalLibrary({
+  onDownload: _onDownload,
+}: {
+  onDownload: OnDownload;
+}) {
   const [data, setData] = useState<{
     output_dir: string;
     videos_dir: string;
@@ -67,7 +81,8 @@ export function LocalLibrary({ onDownload: _onDownload }: { onDownload: OnDownlo
         if (!cancelled) setData(d);
       })
       .catch((err) => {
-        if (!cancelled) setLoadError(err instanceof Error ? err : new Error(String(err)));
+        if (!cancelled)
+          setLoadError(err instanceof Error ? err : new Error(String(err)));
       });
     return () => {
       cancelled = true;
@@ -187,9 +202,7 @@ export function LocalLibrary({ onDownload: _onDownload }: { onDownload: OnDownlo
     <div>
       <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
         <div>
-          {data && (
-            <p className="text-sm text-muted-foreground">{countText}</p>
-          )}
+          {data && <p className="text-sm text-muted-foreground">{countText}</p>}
         </div>
         <div className="flex items-center gap-2">
           <Input
@@ -240,7 +253,11 @@ export function LocalLibrary({ onDownload: _onDownload }: { onDownload: OnDownlo
             />
           )}
           {data && data.files.length > 0 && filtered.length === 0 && (
-            <EmptyState icon={Music} title="No matches" description={`Nothing matches "${filter}".`} />
+            <EmptyState
+              icon={Music}
+              title="No matches"
+              description={`Nothing matches "${filter}".`}
+            />
           )}
           {musicGroups.length > 0 && (
             <div className="flex flex-col gap-6">
@@ -268,7 +285,11 @@ export function LocalLibrary({ onDownload: _onDownload }: { onDownload: OnDownlo
             />
           )}
           {data && data.videos.length > 0 && filteredVideos.length === 0 && (
-            <EmptyState icon={Film} title="No matches" description={`Nothing matches "${filter}".`} />
+            <EmptyState
+              icon={Film}
+              title="No matches"
+              description={`Nothing matches "${filter}".`}
+            />
           )}
           {videoGroups.length > 0 && (
             <div className="flex flex-col gap-6">
@@ -300,10 +321,11 @@ function TabStrip({
   musicCount: number;
   videoCount: number;
 }) {
-  const tabs: { id: Tab; label: string; icon: typeof Music; count: number }[] = [
-    { id: "music", label: "Music", icon: Music, count: musicCount },
-    { id: "videos", label: "Videos", icon: Film, count: videoCount },
-  ];
+  const tabs: { id: Tab; label: string; icon: typeof Music; count: number }[] =
+    [
+      { id: "music", label: "Music", icon: Music, count: musicCount },
+      { id: "videos", label: "Videos", icon: Film, count: videoCount },
+    ];
   return (
     <div className="mb-6 flex border-b border-border">
       {tabs.map((t) => {
@@ -342,7 +364,13 @@ function LocalVideoGroupList({ videos }: { videos: LocalVideo[] }) {
   );
 }
 
-function LocalVideoRow({ video, rowIndex }: { video: LocalVideo; rowIndex: number }) {
+function LocalVideoRow({
+  video,
+  rowIndex,
+}: {
+  video: LocalVideo;
+  rowIndex: number;
+}) {
   const toast = useToast();
   const reveal = async () => {
     try {
@@ -367,7 +395,9 @@ function LocalVideoRow({ video, rowIndex }: { video: LocalVideo; rowIndex: numbe
       </div>
       <div className="min-w-0">
         <div className="truncate font-medium">{video.title}</div>
-        <div className="truncate text-xs text-muted-foreground">{video.artist}</div>
+        <div className="truncate text-xs text-muted-foreground">
+          {video.artist}
+        </div>
       </div>
       <div className="truncate text-xs uppercase tracking-wider text-muted-foreground">
         {video.ext.replace(".", "")} · {formatBytes(video.size_bytes)}
@@ -386,11 +416,23 @@ function LocalVideoRow({ video, rowIndex }: { video: LocalVideo; rowIndex: numbe
   );
 }
 
-function LocalGroupList({ files, allFiles }: { files: LocalFile[]; allFiles: LocalFile[] }) {
+function LocalGroupList({
+  files,
+  allFiles,
+}: {
+  files: LocalFile[];
+  allFiles: LocalFile[];
+}) {
   return (
     <div className="overflow-hidden rounded-md border border-border/50">
       {files.map((f, i) => (
-        <LocalRow key={f.path} file={f} rowIndex={i} files={files} allFiles={allFiles} />
+        <LocalRow
+          key={f.path}
+          file={f}
+          rowIndex={i}
+          files={files}
+          allFiles={allFiles}
+        />
       ))}
     </div>
   );
@@ -423,9 +465,7 @@ function LocalRow({
     // Build synthetic Track objects for the whole group so the player's
     // queue works (prev/next within this artist or folder). Tracks without
     // tidal_id are dropped — the player can't stream them.
-    const queue = files
-      .filter((f) => f.tidal_id)
-      .map(toTrack);
+    const queue = files.filter((f) => f.tidal_id).map(toTrack);
     const start = queue.find((t) => t.id === file.tidal_id) ?? queue[0];
     if (start) actions.play(start, queue);
   };
@@ -464,7 +504,9 @@ function LocalRow({
       </div>
       <div className="min-w-0">
         <div className="truncate font-medium">{file.title}</div>
-        <div className="truncate text-xs text-muted-foreground">{file.artist}</div>
+        <div className="truncate text-xs text-muted-foreground">
+          {file.artist}
+        </div>
       </div>
       <div className="flex min-w-0 items-center gap-1.5 text-muted-foreground">
         <Disc3 className="h-3.5 w-3.5 flex-shrink-0" />

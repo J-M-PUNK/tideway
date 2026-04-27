@@ -15,7 +15,13 @@ import {
   User,
 } from "lucide-react";
 import { api } from "@/api/client";
-import type { Album, Artist, Playlist, SearchResponse, Track } from "@/api/types";
+import type {
+  Album,
+  Artist,
+  Playlist,
+  SearchResponse,
+  Track,
+} from "@/api/types";
 import { imageProxy, cn } from "@/lib/utils";
 
 type Action = {
@@ -184,7 +190,11 @@ export function CommandPalette({
   const rows = useMemo<Row[]>(() => {
     const q = query.trim().toLowerCase();
     const filteredActions = q
-      ? actions.filter((a) => a.title.toLowerCase().includes(q) || a.hint.toLowerCase().includes(q))
+      ? actions.filter(
+          (a) =>
+            a.title.toLowerCase().includes(q) ||
+            a.hint.toLowerCase().includes(q),
+        )
       : actions;
     const content: Row[] = [];
     if (tidalResults) {

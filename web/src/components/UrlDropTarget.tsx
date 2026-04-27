@@ -9,8 +9,7 @@ import { cn } from "@/lib/utils";
 //   https://www.tidal.com/...
 //   https://listen.tidal.com/...
 //   https://link.tidal.com/abcd (share links)
-const TIDAL_URL_RE =
-  /https?:\/\/(?:www\.|listen\.|link\.)?tidal\.com\/[^\s]+/i;
+const TIDAL_URL_RE = /https?:\/\/(?:www\.|listen\.|link\.)?tidal\.com\/[^\s]+/i;
 
 /**
  * Listens at the window level for drag-and-drop of Tidal URLs. The user

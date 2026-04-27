@@ -64,8 +64,17 @@ import { cn, formatDuration, imageProxy } from "@/lib/utils";
  * ↑/↓ adjust volume, F toggles fullscreen.
  */
 export function VideoPlayerModal() {
-  const { current, queue, queueIndex, close, next, prev, hasNext, hasPrev, open } =
-    useVideoPlayer();
+  const {
+    current,
+    queue,
+    queueIndex,
+    close,
+    next,
+    prev,
+    hasNext,
+    hasPrev,
+    open,
+  } = useVideoPlayer();
   // Default to HIGH (1080p). Chrome/Firefox/Safari all handle a
   // 1080p HLS manifest fine on modern hardware and this matches
   // Tidal's own desktop-client default.
@@ -214,7 +223,11 @@ export function VideoPlayerModal() {
     const onKey = (e: KeyboardEvent) => {
       const target = e.target as HTMLElement | null;
       // Don't hijack typing in input/textarea fields.
-      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA")) return;
+      if (
+        target &&
+        (target.tagName === "INPUT" || target.tagName === "TEXTAREA")
+      )
+        return;
       switch (e.key) {
         case "Escape":
           e.preventDefault();
@@ -292,7 +305,9 @@ export function VideoPlayerModal() {
     const elem = modal as HTMLDivElement & {
       webkitRequestFullscreen?: () => void;
     };
-    const inFullscreen = !!(document.fullscreenElement || doc.webkitFullscreenElement);
+    const inFullscreen = !!(
+      document.fullscreenElement || doc.webkitFullscreenElement
+    );
     try {
       if (inFullscreen) {
         (document.exitFullscreen || doc.webkitExitFullscreen)?.call(document);
@@ -403,7 +418,9 @@ export function VideoPlayerModal() {
 
   if (!current) return null;
 
-  const poster = current.cover ? imageProxy(current.cover) ?? undefined : undefined;
+  const poster = current.cover
+    ? (imageProxy(current.cover) ?? undefined)
+    : undefined;
 
   // Single-branch layout — minimized vs full mode change the
   // wrapping chrome but NOT the position of the `<video>` element.
@@ -412,49 +429,48 @@ export function VideoPlayerModal() {
   // the HLS or reset playback position. An earlier version rendered
   // two completely different trees; that caused a remount on every
   // toggle.
-  const videoEl =
-    error ? (
-      <div className="text-sm text-destructive">Couldn't load video: {error}</div>
-    ) : !url ? (
-      <>
-        {poster && (
-          <img
-            src={poster}
-            alt=""
-            className="max-h-full max-w-full object-contain opacity-70"
-          />
-        )}
-        <div className="absolute inset-0 flex items-center justify-center gap-2 text-sm text-muted-foreground">
-          {loading && <Loader2 className="h-5 w-5 animate-spin" />}
-          Loading…
-        </div>
-      </>
-    ) : (
-      <video
-        ref={videoRef}
-        key={current.id}
-        poster={poster}
-        autoPlay
-        playsInline
-        preload="auto"
-        loop={repeat}
-        onPlay={() => setPlaying(true)}
-        onPause={() => setPlaying(false)}
-        onTimeUpdate={(e) =>
-          setCurrentTime((e.target as HTMLVideoElement).currentTime)
-        }
-        onLoadedMetadata={(e) =>
-          setDuration((e.target as HTMLVideoElement).duration || 0)
-        }
-        onEnded={() => {
-          if (repeat) return;
-          advance();
-        }}
-        className={cn(
-          minimized ? "h-full w-full object-contain" : "max-h-full max-w-full",
-        )}
-      />
-    );
+  const videoEl = error ? (
+    <div className="text-sm text-destructive">Couldn't load video: {error}</div>
+  ) : !url ? (
+    <>
+      {poster && (
+        <img
+          src={poster}
+          alt=""
+          className="max-h-full max-w-full object-contain opacity-70"
+        />
+      )}
+      <div className="absolute inset-0 flex items-center justify-center gap-2 text-sm text-muted-foreground">
+        {loading && <Loader2 className="h-5 w-5 animate-spin" />}
+        Loading…
+      </div>
+    </>
+  ) : (
+    <video
+      ref={videoRef}
+      key={current.id}
+      poster={poster}
+      autoPlay
+      playsInline
+      preload="auto"
+      loop={repeat}
+      onPlay={() => setPlaying(true)}
+      onPause={() => setPlaying(false)}
+      onTimeUpdate={(e) =>
+        setCurrentTime((e.target as HTMLVideoElement).currentTime)
+      }
+      onLoadedMetadata={(e) =>
+        setDuration((e.target as HTMLVideoElement).duration || 0)
+      }
+      onEnded={() => {
+        if (repeat) return;
+        advance();
+      }}
+      className={cn(
+        minimized ? "h-full w-full object-contain" : "max-h-full max-w-full",
+      )}
+    />
+  );
 
   return (
     <div
@@ -657,7 +673,11 @@ function TopBar({
           onClick={onFullscreen}
           title="Fullscreen (F)"
         />
-        <TopBarButton icon={ChevronDown} onClick={onMinimize} title="Minimize" />
+        <TopBarButton
+          icon={ChevronDown}
+          onClick={onMinimize}
+          title="Minimize"
+        />
         <TopBarButton icon={X} onClick={onClose} title="Close (Esc)" />
       </div>
     </div>
@@ -888,7 +908,9 @@ function ControlButton({
 }
 
 function VideoInfo({ video }: { video: Video }) {
-  const cover = video.cover ? imageProxy(video.cover) ?? undefined : undefined;
+  const cover = video.cover
+    ? (imageProxy(video.cover) ?? undefined)
+    : undefined;
   return (
     <div className="flex w-[280px] min-w-0 flex-shrink-0 items-center gap-3">
       {cover && (
@@ -998,10 +1020,18 @@ function QualityPicker({
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="z-[65] w-40">
-        <DropdownMenuItem onSelect={() => onChange(undefined)}>Auto</DropdownMenuItem>
-        <DropdownMenuItem onSelect={() => onChange("HIGH")}>1080p</DropdownMenuItem>
-        <DropdownMenuItem onSelect={() => onChange("MEDIUM")}>720p</DropdownMenuItem>
-        <DropdownMenuItem onSelect={() => onChange("LOW")}>480p</DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => onChange(undefined)}>
+          Auto
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => onChange("HIGH")}>
+          1080p
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => onChange("MEDIUM")}>
+          720p
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => onChange("LOW")}>
+          480p
+        </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>
   );
@@ -1191,7 +1221,9 @@ function VideoCreditsDialog({
       <DialogContent className="z-[65] max-h-[80vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>Credits</DialogTitle>
-          <DialogDescription className="truncate">{videoName}</DialogDescription>
+          <DialogDescription className="truncate">
+            {videoName}
+          </DialogDescription>
         </DialogHeader>
         {!credits && (
           <div className="flex items-center gap-2 py-6 text-sm text-muted-foreground">
@@ -1213,7 +1245,9 @@ function VideoCreditsDialog({
                 <div className="text-sm">
                   {entry.contributors.map((c, i) => (
                     <span key={`${c.name}-${i}`}>
-                      {i > 0 && <span className="text-muted-foreground">, </span>}
+                      {i > 0 && (
+                        <span className="text-muted-foreground">, </span>
+                      )}
                       {c.id ? (
                         <Link
                           to={`/artist/${c.id}`}

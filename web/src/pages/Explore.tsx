@@ -15,7 +15,8 @@ export function Explore({ onDownload }: { onDownload: OnDownload }) {
       </div>
     );
   }
-  if (error || !data) return <ErrorView error={error ?? "Couldn't load explore"} />;
+  if (error || !data)
+    return <ErrorView error={error ?? "Couldn't load explore"} />;
 
   return (
     <div>

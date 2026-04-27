@@ -24,11 +24,16 @@ import { HeroSkeleton, GridSkeleton } from "@/components/Skeletons";
  */
 export function ProfilePage({ onDownload }: { onDownload: OnDownload }) {
   const { id = "" } = useParams();
-  const { data: user, loading, error } = useApi(() => api.user.profile(id), [id]);
+  const {
+    data: user,
+    loading,
+    error,
+  } = useApi(() => api.user.profile(id), [id]);
   const [playlists, setPlaylists] = useState<Playlist[] | null>(null);
-  const [counts, setCounts] = useState<{ followers: number; following: number } | null>(
-    null,
-  );
+  const [counts, setCounts] = useState<{
+    followers: number;
+    following: number;
+  } | null>(null);
   const auth = useAuth();
 
   useEffect(() => {
@@ -103,7 +108,9 @@ export function ProfilePage({ onDownload }: { onDownload: OnDownload }) {
             )}
           </div>
         }
-        actions={<FollowButton userId={user.id} currentUserId={currentUserId} />}
+        actions={
+          <FollowButton userId={user.id} currentUserId={currentUserId} />
+        }
       />
 
       <SectionHeader title="Public playlists" />
@@ -136,8 +143,7 @@ function UserLinkStat({
 }) {
   return (
     <Link to={to} className="hover:text-foreground hover:underline">
-      <span className="font-semibold text-foreground">{count}</span>{" "}
-      {label}
+      <span className="font-semibold text-foreground">{count}</span> {label}
     </Link>
   );
 }

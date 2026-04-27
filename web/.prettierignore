@@ -1,0 +1,8 @@
+# Build output and lockfiles — Prettier shouldn't reformat these.
+dist
+node_modules
+package-lock.json
+*.min.js
+*.min.css
+# Vite generates this; we don't ship it through prettier.
+src/vite-env.d.ts

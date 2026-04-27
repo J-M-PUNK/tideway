@@ -33,7 +33,9 @@ export function CreditsDialog({
       <DialogContent className="max-h-[80vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>Credits</DialogTitle>
-          <DialogDescription className="truncate">{trackName}</DialogDescription>
+          <DialogDescription className="truncate">
+            {trackName}
+          </DialogDescription>
         </DialogHeader>
 
         {loading && (
@@ -56,7 +58,9 @@ export function CreditsDialog({
                 <div className="text-sm">
                   {entry.contributors.map((c, i) => (
                     <span key={`${c.name}-${i}`}>
-                      {i > 0 && <span className="text-muted-foreground">, </span>}
+                      {i > 0 && (
+                        <span className="text-muted-foreground">, </span>
+                      )}
                       {c.id ? (
                         <Link
                           to={`/artist/${c.id}`}

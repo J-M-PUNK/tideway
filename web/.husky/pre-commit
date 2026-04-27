@@ -1,0 +1,10 @@
+# lint-staged config + the npm tooling live in web/, so cd in
+# before invoking. Husky runs hooks from the repo root regardless of
+# where the user typed `git commit`, so this cd works in either case.
+#
+# lint-staged picks up the staged files, runs Prettier + ESLint
+# (with --fix) on TS/TSX, Prettier on JSON/CSS/HTML/MD, Stylelint
+# on CSS, HTMLHint on the entry HTML — touching ONLY the files
+# you've staged. Auto-fixes are re-staged, so a clean commit
+# typically produces zero output.
+cd web && npx --no-install lint-staged

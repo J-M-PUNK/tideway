@@ -57,9 +57,9 @@ export function LastfmConnectNudge() {
         <div className="font-semibold">Connect Last.fm for full stats</div>
         <p className="mt-0.5 text-sm text-muted-foreground">
           Every track you play here gets scrobbled, and your full listening
-          history — across this app and any other player you've used — shows
-          up on the Stats page. Tidal's "Rewind" only goes back one year;
-          Last.fm keeps everything.
+          history — across this app and any other player you've used — shows up
+          on the Stats page. Tidal's "Rewind" only goes back one year; Last.fm
+          keeps everything.
         </p>
         <Link
           to="/settings"

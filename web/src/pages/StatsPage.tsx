@@ -127,9 +127,9 @@ export function StatsPage() {
     <div>
       <UserHeader user={user} />
       <p className="mb-6 text-xs text-muted-foreground">
-        Stats provided by Last.fm. Numbers reflect every scrobble from
-        your connected Last.fm account, including plays from this app
-        and from any other client tied to the same account.
+        Stats provided by Last.fm. Numbers reflect every scrobble from your
+        connected Last.fm account, including plays from this app and from any
+        other client tied to the same account.
       </p>
       <LastFmActivityChart period={period} />
       <PeriodPicker period={period} onChange={setPeriod} />
@@ -286,7 +286,6 @@ function useGridCols(): number {
   return cols;
 }
 
-
 function TopArtistsSection({ period }: { period: LastFmPeriod }) {
   const [data, setData] = useState<LastFmTopArtist[] | null>(null);
   const [loading, setLoading] = useState(false);
@@ -309,12 +308,20 @@ function TopArtistsSection({ period }: { period: LastFmPeriod }) {
     <Section
       title="Top artists"
       subtitle="Ranked by plays"
-      action={hasData ? <ViewMoreLink to={`/stats/artists?period=${period}`} /> : undefined}
+      action={
+        hasData ? (
+          <ViewMoreLink to={`/stats/artists?period=${period}`} />
+        ) : undefined
+      }
     >
       {loading && !data ? (
         <GridSkeleton />
       ) : !data || data.length === 0 ? (
-        <EmptyState icon={UserIcon} title="No data" description="No plays in this range yet." />
+        <EmptyState
+          icon={UserIcon}
+          title="No data"
+          description="No plays in this range yet."
+        />
       ) : (
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6">
           {shown.map((a, i) => (
@@ -347,16 +354,28 @@ function TopTracksSection({ period }: { period: LastFmPeriod }) {
     <Section
       title="Top tracks"
       subtitle="Ranked by plays"
-      action={hasData ? <ViewMoreLink to={`/stats/tracks?period=${period}`} /> : undefined}
+      action={
+        hasData ? (
+          <ViewMoreLink to={`/stats/tracks?period=${period}`} />
+        ) : undefined
+      }
     >
       {loading && !data ? (
         <ListSkeleton />
       ) : !data || data.length === 0 ? (
-        <EmptyState icon={Music} title="No data" description="No plays in this range yet." />
+        <EmptyState
+          icon={Music}
+          title="No data"
+          description="No plays in this range yet."
+        />
       ) : (
         <div className="flex flex-col gap-1">
           {shown.map((t, i) => (
-            <TrackRow key={`${t.name}-${t.artist}-${i}`} rank={i + 1} track={t} />
+            <TrackRow
+              key={`${t.name}-${t.artist}-${i}`}
+              rank={i + 1}
+              track={t}
+            />
           ))}
         </div>
       )}
@@ -386,16 +405,28 @@ function TopAlbumsSection({ period }: { period: LastFmPeriod }) {
     <Section
       title="Top albums"
       subtitle="Ranked by plays"
-      action={hasData ? <ViewMoreLink to={`/stats/albums?period=${period}`} /> : undefined}
+      action={
+        hasData ? (
+          <ViewMoreLink to={`/stats/albums?period=${period}`} />
+        ) : undefined
+      }
     >
       {loading && !data ? (
         <GridSkeleton />
       ) : !data || data.length === 0 ? (
-        <EmptyState icon={Music} title="No data" description="No plays in this range yet." />
+        <EmptyState
+          icon={Music}
+          title="No data"
+          description="No plays in this range yet."
+        />
       ) : (
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6">
           {shown.map((a, i) => (
-            <AlbumCard key={`${a.name}-${a.artist}-${i}`} rank={i + 1} album={a} />
+            <AlbumCard
+              key={`${a.name}-${a.artist}-${i}`}
+              rank={i + 1}
+              album={a}
+            />
           ))}
         </div>
       )}
@@ -447,7 +478,13 @@ function LovedTracksSection() {
 // Item cards
 // ---------------------------------------------------------------------------
 
-export function ArtistCard({ rank, artist }: { rank: number; artist: LastFmTopArtist }) {
+export function ArtistCard({
+  rank,
+  artist,
+}: {
+  rank: number;
+  artist: LastFmTopArtist;
+}) {
   const play = usePlayArtist();
   const navigate = useNavigate();
   const toast = useToast();
@@ -523,7 +560,13 @@ export function ArtistCard({ rank, artist }: { rank: number; artist: LastFmTopAr
   );
 }
 
-export function AlbumCard({ rank, album }: { rank: number; album: LastFmTopAlbum }) {
+export function AlbumCard({
+  rank,
+  album,
+}: {
+  rank: number;
+  album: LastFmTopAlbum;
+}) {
   const play = usePlayAlbum();
   const navigate = useNavigate();
   const toast = useToast();
@@ -536,7 +579,9 @@ export function AlbumCard({ rank, album }: { rank: number; album: LastFmTopAlbum
       const exact = res.albums.find(
         (a) =>
           a.name.toLowerCase() === album.name.toLowerCase() &&
-          a.artists.some((ar) => ar.name.toLowerCase() === album.artist.toLowerCase()),
+          a.artists.some(
+            (ar) => ar.name.toLowerCase() === album.artist.toLowerCase(),
+          ),
       );
       const match = exact ?? res.albums[0];
       if (!match) {
@@ -593,7 +638,9 @@ export function AlbumCard({ rank, album }: { rank: number; album: LastFmTopAlbum
       </div>
       <div className="min-w-0">
         <div className="truncate font-semibold">{album.name}</div>
-        <div className="truncate text-xs text-muted-foreground">{album.artist}</div>
+        <div className="truncate text-xs text-muted-foreground">
+          {album.artist}
+        </div>
         <div className="text-[11px] text-muted-foreground/70">
           {album.playcount.toLocaleString()} plays
         </div>
@@ -602,7 +649,13 @@ export function AlbumCard({ rank, album }: { rank: number; album: LastFmTopAlbum
   );
 }
 
-export function TrackRow({ rank, track }: { rank: number; track: LastFmTopTrack }) {
+export function TrackRow({
+  rank,
+  track,
+}: {
+  rank: number;
+  track: LastFmTopTrack;
+}) {
   const play = usePlayTrack();
   const tidalArt = useTidalArt("track", track.name, track.artist);
   const img = imageProxy(track.image || tidalArt || undefined);
@@ -617,7 +670,12 @@ export function TrackRow({ rank, track }: { rank: number; track: LastFmTopTrack 
       </span>
       <div className="relative h-12 w-12 flex-shrink-0 overflow-hidden rounded bg-secondary">
         {img ? (
-          <img src={img} alt="" className="h-full w-full object-cover" loading="lazy" />
+          <img
+            src={img}
+            alt=""
+            className="h-full w-full object-cover"
+            loading="lazy"
+          />
         ) : (
           <div className="flex h-full w-full items-center justify-center text-muted-foreground">
             <Music className="h-5 w-5" />
@@ -637,7 +695,9 @@ export function TrackRow({ rank, track }: { rank: number; track: LastFmTopTrack 
       </div>
       <div className="min-w-0">
         <div className="truncate font-medium">{track.name}</div>
-        <div className="truncate text-xs text-muted-foreground">{track.artist}</div>
+        <div className="truncate text-xs text-muted-foreground">
+          {track.artist}
+        </div>
       </div>
       <div className="text-xs text-muted-foreground">
         {track.playcount.toLocaleString()} plays
@@ -670,7 +730,12 @@ export function LovedRow({ row }: { row: LastFmLovedTrack }) {
     >
       <div className="relative h-12 w-12 flex-shrink-0 overflow-hidden rounded bg-secondary">
         {img ? (
-          <img src={img} alt="" className="h-full w-full object-cover" loading="lazy" />
+          <img
+            src={img}
+            alt=""
+            className="h-full w-full object-cover"
+            loading="lazy"
+          />
         ) : (
           <div className="flex h-full w-full items-center justify-center text-muted-foreground">
             <Heart className="h-5 w-5" />
@@ -690,10 +755,15 @@ export function LovedRow({ row }: { row: LastFmLovedTrack }) {
       </div>
       <div className="min-w-0">
         <div className="flex items-center gap-2 truncate font-medium">
-          <Heart className="h-3.5 w-3.5 flex-shrink-0 text-primary" fill="currentColor" />
+          <Heart
+            className="h-3.5 w-3.5 flex-shrink-0 text-primary"
+            fill="currentColor"
+          />
           <span className="truncate">{row.name}</span>
         </div>
-        <div className="truncate text-xs text-muted-foreground">{row.artist}</div>
+        <div className="truncate text-xs text-muted-foreground">
+          {row.artist}
+        </div>
       </div>
       {row.loved_at && (
         <div className="text-[11px] text-muted-foreground">
@@ -765,7 +835,9 @@ function usePlayArtist() {
         return;
       }
       const tracks = res.tracks
-        .filter((t) => t.artists.some((a) => a.name.toLowerCase() === name.toLowerCase()))
+        .filter((t) =>
+          t.artists.some((a) => a.name.toLowerCase() === name.toLowerCase()),
+        )
         .slice(0, 20);
       const queue = tracks.length > 0 ? tracks : res.tracks.slice(0, 20);
       actions.play(queue[0], queue);
@@ -878,4 +950,3 @@ function ListSkeleton() {
     </div>
   );
 }
-

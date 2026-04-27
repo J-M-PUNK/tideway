@@ -39,7 +39,11 @@ interface Props {
   downloadId?: string;
 }
 
-export function CollectionOverflowMenu({ tracks, downloadKind, downloadId }: Props) {
+export function CollectionOverflowMenu({
+  tracks,
+  downloadKind,
+  downloadId,
+}: Props) {
   const toast = useToast();
   const actions = usePlayerActions();
   const { playlists } = useMyPlaylists();
@@ -83,7 +87,9 @@ export function CollectionOverflowMenu({ tracks, downloadKind, downloadId }: Pro
     if (tracks.length === 0) return;
     try {
       if (downloadKind && downloadId) {
-        await api.downloads.enqueueBulk([{ kind: downloadKind, id: downloadId }]);
+        await api.downloads.enqueueBulk([
+          { kind: downloadKind, id: downloadId },
+        ]);
       } else {
         await api.downloads.enqueueBulk(
           tracks.map((t) => ({ kind: "track" as const, id: t.id })),
@@ -133,7 +139,10 @@ export function CollectionOverflowMenu({ tracks, downloadKind, downloadId }: Pro
             />
             {playlists.length > 0 && <DropdownMenuSeparator />}
             {playlists.map((p) => (
-              <DropdownMenuItem key={p.id} onSelect={() => addToPlaylist(p.id, p.name)}>
+              <DropdownMenuItem
+                key={p.id}
+                onSelect={() => addToPlaylist(p.id, p.name)}
+              >
                 <span className="truncate">{p.name}</span>
               </DropdownMenuItem>
             ))}

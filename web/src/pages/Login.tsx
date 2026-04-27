@@ -23,9 +23,15 @@ export function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
         </div>
 
         {mode === "pkce" ? (
-          <PkceLogin onLoggedIn={onLoggedIn} onSwitchMode={() => setMode("device")} />
+          <PkceLogin
+            onLoggedIn={onLoggedIn}
+            onSwitchMode={() => setMode("device")}
+          />
         ) : (
-          <DeviceLogin onLoggedIn={onLoggedIn} onSwitchMode={() => setMode("pkce")} />
+          <DeviceLogin
+            onLoggedIn={onLoggedIn}
+            onSwitchMode={() => setMode("pkce")}
+          />
         )}
       </div>
     </div>
@@ -107,12 +113,18 @@ function PkceLogin({
           and sign in.
         </li>
         <li>
-          You&apos;ll land on a Tidal <strong>&quot;Oops&quot;</strong> page. That&apos;s expected.
+          You&apos;ll land on a Tidal <strong>&quot;Oops&quot;</strong> page.
+          That&apos;s expected.
         </li>
         <li>Copy the URL from that Oops page and paste it below.</li>
       </ol>
 
-      <Button onClick={openTidalLogin} disabled={!loginUrl} size="lg" className="w-full">
+      <Button
+        onClick={openTidalLogin}
+        disabled={!loginUrl}
+        size="lg"
+        className="w-full"
+      >
         <ExternalLink className="h-4 w-4" /> Open Tidal login
       </Button>
 
@@ -168,8 +180,12 @@ function DeviceLogin({
   onLoggedIn: () => void;
   onSwitchMode: () => void;
 }) {
-  const [status, setStatus] = useState<"idle" | "starting" | "waiting" | "failed">("idle");
-  const [info, setInfo] = useState<{ url: string; user_code: string } | null>(null);
+  const [status, setStatus] = useState<
+    "idle" | "starting" | "waiting" | "failed"
+  >("idle");
+  const [info, setInfo] = useState<{ url: string; user_code: string } | null>(
+    null,
+  );
   const pollRef = useRef<number | null>(null);
 
   const startLogin = useCallback(async () => {
@@ -251,7 +267,8 @@ function DeviceLogin({
             {info.url}
           </a>
           <div className="mt-2 flex items-center gap-2 text-xs text-muted-foreground">
-            <Loader2 className="h-3 w-3 animate-spin" /> Waiting for authentication…
+            <Loader2 className="h-3 w-3 animate-spin" /> Waiting for
+            authentication…
           </div>
         </div>
       )}

@@ -37,9 +37,7 @@ import { imageProxy, cn } from "@/lib/utils";
  * OAuth plumbing — nothing below the match step has to change.
  */
 
-type SpotifyStatus = Awaited<
-  ReturnType<typeof api.import.spotify.status>
->;
+type SpotifyStatus = Awaited<ReturnType<typeof api.import.spotify.status>>;
 type SpotifyPlaylist = Awaited<
   ReturnType<typeof api.import.spotify.playlists>
 >[number];
@@ -131,13 +129,11 @@ function SourceTabs({
 }) {
   return (
     <div className="mb-6 inline-flex rounded-md border border-border bg-secondary p-0.5">
-      {(
-        [
-          { id: "spotify" as const, label: "Spotify", icon: Music },
-          { id: "deezer" as const, label: "Deezer", icon: Music },
-          { id: "text" as const, label: "File / Text", icon: FileText },
-        ]
-      ).map(({ id, label, icon: Icon }) => (
+      {[
+        { id: "spotify" as const, label: "Spotify", icon: Music },
+        { id: "deezer" as const, label: "Deezer", icon: Music },
+        { id: "text" as const, label: "File / Text", icon: FileText },
+      ].map(({ id, label, icon: Icon }) => (
         <button
           key={id}
           type="button"
@@ -203,7 +199,10 @@ function SpotifyFlow({
       <ConnectForm
         status={status}
         onConnected={() =>
-          api.import.spotify.status().then(setStatus).catch(() => {})
+          api.import.spotify
+            .status()
+            .then(setStatus)
+            .catch(() => {})
         }
       />
     );
@@ -453,8 +452,8 @@ function ConnectForm({
     <div className="max-w-xl rounded-lg border border-border/50 bg-card/40 p-6">
       <h2 className="text-lg font-semibold">Connect your Spotify account</h2>
       <p className="mt-1 text-sm text-muted-foreground">
-        One-time setup. Register a free Spotify Developer app, paste its
-        client ID, authorize in your browser, and your playlists show up here.
+        One-time setup. Register a free Spotify Developer app, paste its client
+        ID, authorize in your browser, and your playlists show up here.
       </p>
 
       <ol className="mt-4 list-decimal space-y-2 pl-5 text-sm">
@@ -522,11 +521,7 @@ function ConnectForm({
   );
 }
 
-function PlaylistPicker({
-  onPick,
-}: {
-  onPick: (p: SpotifyPlaylist) => void;
-}) {
+function PlaylistPicker({ onPick }: { onPick: (p: SpotifyPlaylist) => void }) {
   const toast = useToast();
   const [lists, setLists] = useState<SpotifyPlaylist[] | null>(null);
 
@@ -704,9 +699,9 @@ function DeezerFlow({
       <h2 className="text-lg font-semibold">From a Deezer playlist</h2>
       <p className="mt-1 text-sm text-muted-foreground">
         Paste the link to any <strong>public</strong> Deezer playlist. No
-        sign-in needed on our end — we just fetch the track list from
-        Deezer's public API and match it against Tidal. Private playlists:
-        open the playlist in Deezer, set it to public, import, set it back.
+        sign-in needed on our end — we just fetch the track list from Deezer's
+        public API and match it against Tidal. Private playlists: open the
+        playlist in Deezer, set it to public, import, set it back.
       </p>
 
       <div className="mt-5 flex flex-col gap-2">
@@ -799,8 +794,7 @@ function TextFlow({
       <h2 className="text-lg font-semibold">From a playlist file</h2>
       <p className="mt-1 text-sm text-muted-foreground">
         Works with .m3u / .m3u8 files from iTunes, MusicBee, Plex, or any
-        exporter that produces the standard format. Plain text also works —
-        one{" "}
+        exporter that produces the standard format. Plain text also works — one{" "}
         <code className="rounded bg-secondary px-1">Artist - Title</code> per
         line.
       </p>
@@ -826,7 +820,9 @@ function TextFlow({
           rows={10}
           spellCheck={false}
           className="rounded-md border border-input bg-secondary px-3 py-2 text-xs font-mono"
-          placeholder={"#EXTM3U\n#EXTINF:183,The Beatles - Something\n...\n\nOr just:\nThe Beatles - Something\nRadiohead - Paranoid Android"}
+          placeholder={
+            "#EXTM3U\n#EXTINF:183,The Beatles - Something\n...\n\nOr just:\nThe Beatles - Something\nRadiohead - Paranoid Android"
+          }
         />
       </div>
 
@@ -967,10 +963,7 @@ function MatchReview({
   // input; library imports show a summary line instead. Row noun
   // (track / album / artist) matches the kind for plural-correct
   // counters.
-  const rowNoun =
-    action.kind === "favorite"
-      ? action.favoriteKind
-      : "track";
+  const rowNoun = action.kind === "favorite" ? action.favoriteKind : "track";
   const confirmLabel =
     action.kind === "playlist"
       ? `Create "${name || "playlist"}" with ${selected.size} ${pluralize(rowNoun, selected.size)}`
@@ -1022,17 +1015,15 @@ function MatchReview({
           </div>
         </div>
         <div className="inline-flex w-fit rounded-md border border-border bg-secondary p-0.5 text-xs">
-          {(
-            [
-              { id: "all" as const, label: `All (${rows.length})` },
-              { id: "matches" as const, label: `Matched (${matched})` },
-              {
-                id: "unmatched" as const,
-                label: `Unmatched (${unmatched})`,
-                disabled: unmatched === 0,
-              },
-            ]
-          ).map((opt) => (
+          {[
+            { id: "all" as const, label: `All (${rows.length})` },
+            { id: "matches" as const, label: `Matched (${matched})` },
+            {
+              id: "unmatched" as const,
+              label: `Unmatched (${unmatched})`,
+              disabled: unmatched === 0,
+            },
+          ].map((opt) => (
             <button
               key={opt.id}
               type="button"
@@ -1066,9 +1057,10 @@ function MatchReview({
           sweep, or pick individual rows.
           {action.kind === "favorite" && action.favoriteKind === "artist" && (
             <>
-              {" "}Artist matching is fuzzier than track matching — identical-
-              name artists exist (e.g. multiple acts called "Beach House"),
-              so double-check the low-confidence rows before confirming.
+              {" "}
+              Artist matching is fuzzier than track matching — identical- name
+              artists exist (e.g. multiple acts called "Beach House"), so
+              double-check the low-confidence rows before confirming.
             </>
           )}
         </div>
@@ -1091,7 +1083,9 @@ function MatchReview({
               key={rowKey(row)}
               row={row}
               checked={row.match ? selected.has(row.match.tidal_id) : false}
-              onToggle={row.match ? () => toggle(row.match!.tidal_id) : undefined}
+              onToggle={
+                row.match ? () => toggle(row.match!.tidal_id) : undefined
+              }
             />
           ))
         )}

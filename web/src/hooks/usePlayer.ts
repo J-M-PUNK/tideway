@@ -46,12 +46,7 @@ export type RepeatMode = "off" | "all" | "one";
  *    aggregates like "My Most Listened" but do not appear in
  *    Recently Played.
  */
-export type PlaySourceType =
-  | "ALBUM"
-  | "PLAYLIST"
-  | "MIX"
-  | "ARTIST"
-  | "TRACK";
+export type PlaySourceType = "ALBUM" | "PLAYLIST" | "MIX" | "ARTIST" | "TRACK";
 
 export interface PlaySource {
   type: PlaySourceType;
@@ -136,7 +131,10 @@ const INITIAL: PlayerState = {
  * case `repeat: "one"` loops the same index. When the user hits Next
  * manually we always advance regardless of repeat mode.
  */
-export function pickNextIndex(state: PlayerState, onEnded = false): number | null {
+export function pickNextIndex(
+  state: PlayerState,
+  onEnded = false,
+): number | null {
   if (state.queue.length === 0) return null;
   if (onEnded && state.repeat === "one") return state.queueIndex;
   // Single-track queue: a natural end shouldn't loop unless the user
@@ -193,7 +191,9 @@ export function usePlayer() {
       persisted.repeat === "all" || persisted.repeat === "one"
         ? persisted.repeat
         : "off";
-    const queue: Track[] = Array.isArray(persisted.queue) ? persisted.queue : [];
+    const queue: Track[] = Array.isArray(persisted.queue)
+      ? persisted.queue
+      : [];
 
     // Restore "now playing" only when the persisted queueIndex points
     // at a track whose id still matches what we wrote out at quit.
@@ -212,7 +212,10 @@ export function usePlayer() {
     ) {
       restoreIndex = persisted.queueIndex;
       restoreTrack = queue[persisted.queueIndex];
-      if (typeof persisted.currentTime === "number" && persisted.currentTime > 0) {
+      if (
+        typeof persisted.currentTime === "number" &&
+        persisted.currentTime > 0
+      ) {
         restoreCurrentTime = persisted.currentTime;
       }
     }
@@ -329,7 +332,8 @@ export function usePlayer() {
         const id = snap.track_id;
         rehydratingTrackIdRef.current = id;
         expectedTrackIdRef.current = id;
-        api.track(id)
+        api
+          .track(id)
           .then((t) => {
             setState((s) => {
               // Race guard: if the backend has since moved on to a
@@ -377,7 +381,8 @@ export function usePlayer() {
           ...s,
           playing: snap.state === "playing",
           loading: snap.state === "loading",
-          error: snap.error ?? (snap.state === "error" ? "Playback failed" : null),
+          error:
+            snap.error ?? (snap.state === "error" ? "Playback failed" : null),
           currentTime,
           duration,
           streamInfo: snap.stream_info,
@@ -420,12 +425,10 @@ export function usePlayer() {
             const nextTrack = s.queue[nextIdx];
             if (nextTrack && nextTrack.id !== snap.track_id) {
               preloadedForTrackIdRef.current = snap.track_id;
-              api.player
-                .preload(nextTrack.id, qualityRef.current)
-                .catch(() => {
-                  /* fire-and-forget; failure falls back to the
+              api.player.preload(nextTrack.id, qualityRef.current).catch(() => {
+                /* fire-and-forget; failure falls back to the
                      normal slow-path load on track-end. */
-                });
+              });
             }
           }
         }
@@ -508,11 +511,15 @@ export function usePlayer() {
         /* default: false */
       });
     const handler = (event: Event) => {
-      const detail = (event as CustomEvent).detail as
-        | { continue_with_artist_radio_after_album?: boolean }
-        | null;
-      if (detail && typeof detail.continue_with_artist_radio_after_album === "boolean") {
-        continueRadioRef.current = detail.continue_with_artist_radio_after_album;
+      const detail = (event as CustomEvent).detail as {
+        continue_with_artist_radio_after_album?: boolean;
+      } | null;
+      if (
+        detail &&
+        typeof detail.continue_with_artist_radio_after_album === "boolean"
+      ) {
+        continueRadioRef.current =
+          detail.continue_with_artist_radio_after_album;
       }
     };
     window.addEventListener("tidal-settings-updated", handler);
@@ -588,7 +595,11 @@ export function usePlayer() {
   }, []);
 
   const playAtIndex = useCallback(
-    (index: number, queueOverride?: Track[], sourceOverride?: PlaySource | null) => {
+    (
+      index: number,
+      queueOverride?: Track[],
+      sourceOverride?: PlaySource | null,
+    ) => {
       // Bounds-check against the queue before the optimistic state
       // update so we can set refs up front without worrying about
       // rolling them back on a no-op. setState reducers should be
@@ -651,7 +662,11 @@ export function usePlayer() {
   // state. Used at album-end so we can show track 0 ready-to-play
   // without immediately starting it (Spotify / Apple Music default).
   const loadAtIndexPaused = useCallback(
-    (index: number, queueOverride?: Track[], sourceOverride?: PlaySource | null) => {
+    (
+      index: number,
+      queueOverride?: Track[],
+      sourceOverride?: PlaySource | null,
+    ) => {
       const resolvedQueue = queueOverride ?? stateRef.current.queue;
       if (index < 0 || index >= resolvedQueue.length) return;
       const track = resolvedQueue[index];
@@ -980,8 +995,7 @@ export function usePlayer() {
 
   return {
     ...state,
-    hasNext:
-      state.queueIndex >= 0 && state.queueIndex < state.queue.length - 1,
+    hasNext: state.queueIndex >= 0 && state.queueIndex < state.queue.length - 1,
     hasPrev: state.queueIndex > 0,
     sleepRemaining,
     play,

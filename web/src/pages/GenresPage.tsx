@@ -19,7 +19,8 @@ export function GenresPage({ onDownload }: { onDownload: OnDownload }) {
       </div>
     );
   }
-  if (error || !data) return <ErrorView error={error ?? "Couldn't load genres"} />;
+  if (error || !data)
+    return <ErrorView error={error ?? "Couldn't load genres"} />;
 
   return (
     <div>

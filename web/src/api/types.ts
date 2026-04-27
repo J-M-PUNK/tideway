@@ -453,7 +453,13 @@ export interface PageLinkItem {
   icon: string;
 }
 
-export type PageItem = Track | Album | Artist | Playlist | MixItem | PageLinkItem;
+export type PageItem =
+  | Track
+  | Album
+  | Artist
+  | Playlist
+  | MixItem
+  | PageLinkItem;
 
 /** Clickable entity reference for category headers like
  *  "Because you liked X" — lets the UI show a thumbnail next to the
