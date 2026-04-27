@@ -6,7 +6,9 @@ describe("effectiveFormatLabel", () => {
   it("returns null for non-Max qualities regardless of tags", () => {
     expect(effectiveFormatLabel("low_96k", ["HIRES_LOSSLESS"])).toBeNull();
     expect(effectiveFormatLabel("low_320k", ["HIRES_LOSSLESS"])).toBeNull();
-    expect(effectiveFormatLabel("high_lossless", ["HIRES_LOSSLESS"])).toBeNull();
+    expect(
+      effectiveFormatLabel("high_lossless", ["HIRES_LOSSLESS"]),
+    ).toBeNull();
   });
 
   it("returns null when tags list is missing or empty", () => {
@@ -42,8 +44,6 @@ describe("effectiveFormatLabel", () => {
   });
 
   it("returns null for an unrecognized tag on Max", () => {
-    expect(
-      effectiveFormatLabel("hi_res_lossless", ["DOLBY_ATMOS"]),
-    ).toBeNull();
+    expect(effectiveFormatLabel("hi_res_lossless", ["DOLBY_ATMOS"])).toBeNull();
   });
 });

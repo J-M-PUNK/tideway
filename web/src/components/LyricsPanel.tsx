@@ -1,7 +1,11 @@
 import { useEffect, useMemo, useRef } from "react";
 import { Loader2, Mic2, Music, X } from "lucide-react";
 import { useLyrics } from "@/hooks/useLyrics";
-import { usePlayerActions, usePlayerMeta, usePlayerTime } from "@/hooks/PlayerContext";
+import {
+  usePlayerActions,
+  usePlayerMeta,
+  usePlayerTime,
+} from "@/hooks/PlayerContext";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/EmptyState";
 import { cn, imageProxy } from "@/lib/utils";
@@ -11,11 +15,17 @@ import { cn, imageProxy } from "@/lib/utils";
  * if synced lyrics are available the currently-playing line highlights and
  * auto-scrolls to center.
  */
-export function LyricsPanel({ open, onClose }: { open: boolean; onClose: () => void }) {
+export function LyricsPanel({
+  open,
+  onClose,
+}: {
+  open: boolean;
+  onClose: () => void;
+}) {
   const { track } = usePlayerMeta();
   const { currentTime } = usePlayerTime();
   const actions = usePlayerActions();
-  const { lyrics, loading } = useLyrics(open ? track?.id ?? null : null);
+  const { lyrics, loading } = useLyrics(open ? (track?.id ?? null) : null);
 
   const activeIdx = useMemo(() => {
     if (!lyrics?.synced) return -1;
@@ -49,7 +59,12 @@ export function LyricsPanel({ open, onClose }: { open: boolean; onClose: () => v
             <Mic2 className="h-4 w-4" />
             <h2 className="text-sm font-semibold">Lyrics</h2>
           </div>
-          <Button variant="ghost" size="icon" className="h-7 w-7" onClick={onClose}>
+          <Button
+            variant="ghost"
+            size="icon"
+            className="h-7 w-7"
+            onClick={onClose}
+          >
             <X className="h-4 w-4" />
           </Button>
         </div>
@@ -80,13 +95,21 @@ export function LyricsPanel({ open, onClose }: { open: boolean; onClose: () => v
 
         <div className="min-h-0 flex-1 overflow-y-auto scrollbar-thin px-6 py-8">
           {!track ? (
-            <EmptyState icon={Mic2} title="Play a track" description="Lyrics appear when a track is playing." />
+            <EmptyState
+              icon={Mic2}
+              title="Play a track"
+              description="Lyrics appear when a track is playing."
+            />
           ) : loading ? (
             <div className="flex items-center justify-center py-12 text-muted-foreground">
               <Loader2 className="h-5 w-5 animate-spin" />
             </div>
           ) : lyrics?.synced && lyrics.synced.length > 0 ? (
-            <SyncedLyrics lines={lyrics.synced} active={activeIdx} onSeek={actions.seek} />
+            <SyncedLyrics
+              lines={lyrics.synced}
+              active={activeIdx}
+              onSeek={actions.seek}
+            />
           ) : lyrics?.text ? (
             <pre className="whitespace-pre-wrap font-sans text-base leading-relaxed text-foreground">
               {lyrics.text}
@@ -146,7 +169,9 @@ function SyncedLyrics({
   // An auto-scroll we just triggered also fires this event — the
   // timestamp check distinguishes human vs programmatic scrolls.
   useEffect(() => {
-    const el = containerRef.current?.closest(".scrollbar-thin") as HTMLElement | null;
+    const el = containerRef.current?.closest(
+      ".scrollbar-thin",
+    ) as HTMLElement | null;
     if (!el) return;
     const onScroll = () => {
       if (Date.now() - lastAutoScrollRef.current < 400) return;

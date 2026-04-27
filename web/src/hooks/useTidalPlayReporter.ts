@@ -70,7 +70,10 @@ export function useTidalPlayReporter(): void {
     const prev = sessionRef.current;
     if (prev) {
       sessionRef.current = null;
-      const listened = Math.max(0, lastKnownPositionRef.current - prev.startPositionS);
+      const listened = Math.max(
+        0,
+        lastKnownPositionRef.current - prev.startPositionS,
+      );
       const meetsThreshold =
         listened >= 30 || (prev.duration > 0 && listened >= prev.duration / 2);
       if (meetsThreshold) {
@@ -148,7 +151,10 @@ export function useTidalPlayReporter(): void {
     const flush = () => {
       const prev = sessionRef.current;
       if (!prev) return;
-      const listened = Math.max(0, lastKnownPositionRef.current - prev.startPositionS);
+      const listened = Math.max(
+        0,
+        lastKnownPositionRef.current - prev.startPositionS,
+      );
       const meetsThreshold =
         listened >= 30 || (prev.duration > 0 && listened >= prev.duration / 2);
       if (!meetsThreshold) return;

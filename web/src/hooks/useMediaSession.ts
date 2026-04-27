@@ -1,5 +1,9 @@
 import { useEffect, useRef } from "react";
-import { usePlayerActions, usePlayerMeta, usePlayerTime } from "./PlayerContext";
+import {
+  usePlayerActions,
+  usePlayerMeta,
+  usePlayerTime,
+} from "./PlayerContext";
 import { imageProxy } from "@/lib/utils";
 
 /**
@@ -58,14 +62,21 @@ export function useMediaSession() {
 
   useEffect(() => {
     if (!("mediaSession" in navigator)) return;
-    navigator.mediaSession.playbackState = playing ? "playing" : track ? "paused" : "none";
+    navigator.mediaSession.playbackState = playing
+      ? "playing"
+      : track
+        ? "paused"
+        : "none";
   }, [playing, track]);
 
   // Install action handlers once. They read live state through refs.
   useEffect(() => {
     if (!("mediaSession" in navigator)) return;
 
-    const set = (action: MediaSessionAction, handler: MediaSessionActionHandler | null) => {
+    const set = (
+      action: MediaSessionAction,
+      handler: MediaSessionActionHandler | null,
+    ) => {
       try {
         navigator.mediaSession.setActionHandler(action, handler);
       } catch {
@@ -84,7 +95,8 @@ export function useMediaSession() {
     set("nexttrack", () => actionsRef.current.next());
     set("previoustrack", () => actionsRef.current.prev());
     set("seekto", (details) => {
-      if (typeof details.seekTime === "number") actionsRef.current.seek(details.seekTime);
+      if (typeof details.seekTime === "number")
+        actionsRef.current.seek(details.seekTime);
     });
     set("seekforward", (details) => {
       const offset = details.seekOffset ?? 10;
@@ -114,7 +126,11 @@ export function useMediaSession() {
   // only fire once per real clock second, not on every 250ms timeupdate.
   const wholeSecond = Math.floor(currentTime);
   useEffect(() => {
-    if (!("mediaSession" in navigator) || !navigator.mediaSession.setPositionState) return;
+    if (
+      !("mediaSession" in navigator) ||
+      !navigator.mediaSession.setPositionState
+    )
+      return;
     if (!track || !duration) return;
     try {
       navigator.mediaSession.setPositionState({

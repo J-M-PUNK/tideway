@@ -50,7 +50,9 @@ export function MixDetail({ onDownload }: { onDownload: OnDownload }) {
         cover={mix.cover}
         meta={
           <div className="flex flex-col gap-2">
-            {mix.subtitle && <p className="text-muted-foreground">{mix.subtitle}</p>}
+            {mix.subtitle && (
+              <p className="text-muted-foreground">{mix.subtitle}</p>
+            )}
             <span>{mix.tracks.length} tracks</span>
           </div>
         }
@@ -62,7 +64,10 @@ export function MixDetail({ onDownload }: { onDownload: OnDownload }) {
                 source={{ type: "MIX", id: mix.id }}
                 shuffleIntent={shuffleIntent}
               />
-              <ShuffleButton value={shuffleIntent} onChange={setShuffleIntent} />
+              <ShuffleButton
+                value={shuffleIntent}
+                onChange={setShuffleIntent}
+              />
               <div className="ml-auto flex items-center gap-6">
                 <AddTracksToPlaylistButton tracks={mix.tracks} />
                 <ShareButton shareUrl={shareUrl} />

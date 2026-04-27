@@ -100,7 +100,7 @@ function fetchOnce(key: string, request: () => Promise<LastFmPlaycount>) {
   if (cache.has(key)) return;
   if (inflight.has(key)) return;
   const promise = request()
-    .catch(() => ({} as LastFmPlaycount))
+    .catch(() => ({}) as LastFmPlaycount)
     .then((val) => {
       cache.set(key, val);
       schedulePersist();
@@ -209,7 +209,7 @@ export function useLastfmArtistPlaycount(
     fetchOnce(key, () => api.lastfm.artistPlaycount(artist));
     return off;
   }, [key, artist]);
-  return key ? cache.get(key) ?? null : null;
+  return key ? (cache.get(key) ?? null) : null;
 }
 
 export function useLastfmAlbumPlaycount(
@@ -217,14 +217,17 @@ export function useLastfmAlbumPlaycount(
   album: string | null | undefined,
 ): LastFmPlaycount | null {
   const [, force] = useState(0);
-  const key = artist && album ? `album:${artist.toLowerCase()}:${album.toLowerCase()}` : null;
+  const key =
+    artist && album
+      ? `album:${artist.toLowerCase()}:${album.toLowerCase()}`
+      : null;
   useEffect(() => {
     if (!key || !artist || !album || !lastfmEnabled) return;
     const off = subscribe(key, () => force((n) => n + 1));
     fetchOnce(key, () => api.lastfm.albumPlaycount(artist, album));
     return off;
   }, [key, artist, album]);
-  return key ? cache.get(key) ?? null : null;
+  return key ? (cache.get(key) ?? null) : null;
 }
 
 export function useLastfmTrackPlaycount(
@@ -232,14 +235,17 @@ export function useLastfmTrackPlaycount(
   track: string | null | undefined,
 ): LastFmPlaycount | null {
   const [, force] = useState(0);
-  const key = artist && track ? `track:${artist.toLowerCase()}:${track.toLowerCase()}` : null;
+  const key =
+    artist && track
+      ? `track:${artist.toLowerCase()}:${track.toLowerCase()}`
+      : null;
   useEffect(() => {
     if (!key || !artist || !track || !lastfmEnabled) return;
     const off = subscribe(key, () => force((n) => n + 1));
     enqueueTrackPlaycountRequest(key, artist, track);
     return off;
   }, [key, artist, track]);
-  return key ? cache.get(key) ?? null : null;
+  return key ? (cache.get(key) ?? null) : null;
 }
 
 /** Gates whether playcount hooks fire at all. Set to true as long as

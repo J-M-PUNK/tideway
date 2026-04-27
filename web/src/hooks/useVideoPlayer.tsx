@@ -1,4 +1,10 @@
-import { createContext, useCallback, useContext, useMemo, useState } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useMemo,
+  useState,
+} from "react";
 import type { ReactNode } from "react";
 import type { Video } from "@/api/types";
 
@@ -85,6 +91,7 @@ export function VideoPlayerProvider({ children }: { children: ReactNode }) {
 
 export function useVideoPlayer(): VideoPlayerState {
   const v = useContext(Ctx);
-  if (!v) throw new Error("useVideoPlayer must be used inside VideoPlayerProvider");
+  if (!v)
+    throw new Error("useVideoPlayer must be used inside VideoPlayerProvider");
   return v;
 }

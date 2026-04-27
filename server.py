@@ -4767,32 +4767,30 @@ def artist_detail(artist_id: int) -> dict:
     except Exception as exc:
         raise HTTPException(status_code=404, detail=str(exc))
 
-    # Nine Tidal calls feed the artist page: bio, similar artists,
+    # Ten Tidal calls feed the artist page: bio, similar artists,
     # top tracks, albums, EPs/singles, "other" (compilations only,
     # per tidalapi's COMPILATIONS filter), the Tidal-curated artist
     # page (for the real "Appears on" entries), the Artist Radio
     # mix id, videos, and credits. Each hits tidal.com over HTTPS
-    # with a typical round-trip of 150-400ms, so running them
-    # sequentially used to stack to 2-3 seconds per artist page
-    # load. Fanning out across a small worker pool cuts the
-    # wall-clock down to the slowest single call.
+    # with a typical round-trip of 150-400ms.
     def _safe(fn, default):
         try:
             return fn()
         except Exception:
             return default
 
-    # 3 workers instead of 9 so we don't fire nine concurrent Tidal
-    # requests per artist click. Nine-in-a-second looks scrape-y to
-    # Tidal's abuse layer; three with the natural latency spread
-    # still finishes in roughly the same wall-clock because the
-    # slowest single fetch (top tracks / albums) dominates.
-    def _jittered(fn, default):
-        tidal_jitter_sleep()
-        return _safe(fn, default)
-
-    with ThreadPoolExecutor(max_workers=3) as pool:
-        f_bio = pool.submit(_jittered, artist.get_bio, None)
+    # 5 workers — the page load is dominated by perceived wait when
+    # the user clicks "Artist" from an album, and the previous 3
+    # workers stretched it to ~1.5s. Five concurrent fetches still
+    # don't look like a scrape to Tidal's abuse layer (a real client
+    # opening an artist page does similar volume), and the wall-clock
+    # drops to roughly two waves of the slowest single call.
+    with ThreadPoolExecutor(max_workers=5) as pool:
+        # Bio used to be jittered to spread the burst, but that was
+        # premature: bio is a small text fetch, not a stream-manifest
+        # request, and the 50-200ms sleep added directly to the
+        # critical path with no observable behavior benefit.
+        f_bio = pool.submit(_safe, artist.get_bio, None)
         f_similar = pool.submit(
             _safe,
             lambda: [artist_to_dict(a) for a in artist.get_similar()][:12],
@@ -6579,6 +6577,7 @@ class SettingsPayload(BaseModel):
     notify_on_track_change: Optional[bool] = None
     exclusive_mode: Optional[bool] = None
     force_volume: Optional[bool] = None
+    continue_with_artist_radio_after_album: Optional[bool] = None
     start_minimized: Optional[bool] = None
     explicit_content_preference: Optional[str] = None
     download_rate_limit_mbps: Optional[int] = None

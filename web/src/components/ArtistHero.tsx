@@ -119,7 +119,10 @@ export function ArtistHero({
 
           <div className="flex flex-1 items-center justify-end gap-6">
             <FollowToggle artistId={artistId} />
-            <ArtistRadioButton artistId={artistId} mixId={artistMixId ?? null} />
+            <ArtistRadioButton
+              artistId={artistId}
+              mixId={artistMixId ?? null}
+            />
             <ShareButton shareUrl={shareUrl} />
             <ArtistMoreMenu
               artistId={artistId}
@@ -145,7 +148,11 @@ function FollowToggle({ artistId }: { artistId: string }) {
       title={following ? "Unfollow" : "Follow"}
     >
       <div className={cn("flex h-5 items-center", following && "text-primary")}>
-        {following ? <Check className="h-5 w-5" /> : <Heart className="h-5 w-5" />}
+        {following ? (
+          <Check className="h-5 w-5" />
+        ) : (
+          <Heart className="h-5 w-5" />
+        )}
       </div>
       <div className={cn("text-xs font-semibold", following && "text-primary")}>
         {following ? "Following" : "Follow"}
@@ -342,6 +349,7 @@ function ArtistPlaycountLine({
 function formatCompact(n: number): string {
   if (n < 1000) return n.toLocaleString();
   if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}K`;
-  if (n < 1_000_000_000) return `${(n / 1_000_000).toFixed(n < 10_000_000 ? 1 : 0)}M`;
+  if (n < 1_000_000_000)
+    return `${(n / 1_000_000).toFixed(n < 10_000_000 ? 1 : 0)}M`;
   return `${(n / 1_000_000_000).toFixed(1)}B`;
 }

@@ -54,7 +54,9 @@ export function VideoCard({
       <div className="min-w-0">
         <div className="truncate text-sm font-semibold">{video.name}</div>
         {video.artist && (
-          <div className="truncate text-xs text-muted-foreground">{video.artist.name}</div>
+          <div className="truncate text-xs text-muted-foreground">
+            {video.artist.name}
+          </div>
         )}
       </div>
     </button>

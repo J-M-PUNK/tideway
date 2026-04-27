@@ -1,4 +1,11 @@
-import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react";
+import {
+  createContext,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
 import { api } from "@/api/client";
 import { useDownloadStream } from "./useDownloadStream";
 
@@ -10,7 +17,10 @@ interface DownloadedContextValue {
 }
 
 const EMPTY_SET = new Set<string>();
-const Ctx = createContext<DownloadedContextValue>({ has: () => false, ids: EMPTY_SET });
+const Ctx = createContext<DownloadedContextValue>({
+  has: () => false,
+  ids: EMPTY_SET,
+});
 
 /**
  * Tracks which Tidal track IDs we have as local files. Hydrated once from

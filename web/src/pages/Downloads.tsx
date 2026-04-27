@@ -1,5 +1,18 @@
 import { useEffect, useMemo, useState } from "react";
-import { CheckCircle2, ChevronDown, Download, FolderOpen, HardDrive, Loader2, Pause, Play, RefreshCw, Trash2, X, XCircle } from "lucide-react";
+import {
+  CheckCircle2,
+  ChevronDown,
+  Download,
+  FolderOpen,
+  HardDrive,
+  Loader2,
+  Pause,
+  Play,
+  RefreshCw,
+  Trash2,
+  X,
+  XCircle,
+} from "lucide-react";
 import type { DownloadItem, VideoDownloadJob } from "@/api/types";
 import { api } from "@/api/client";
 import { Button } from "@/components/ui/button";
@@ -60,7 +73,9 @@ export function Downloads({
         kind: "error",
         title: "Retries failed",
         description:
-          lastError instanceof Error ? lastError.message : "Couldn't re-queue any items.",
+          lastError instanceof Error
+            ? lastError.message
+            : "Couldn't re-queue any items.",
       });
       return;
     }
@@ -68,7 +83,8 @@ export function Downloads({
     toast.show({
       kind: failedCount > 0 ? "info" : "success",
       title: `Re-queued ${succeeded} download${succeeded === 1 ? "" : "s"}`,
-      description: failedCount > 0 ? `${failedCount} couldn't be re-queued.` : undefined,
+      description:
+        failedCount > 0 ? `${failedCount} couldn't be re-queued.` : undefined,
     });
   };
 
@@ -334,11 +350,7 @@ function VideoRow({ job }: { job: VideoDownloadJob }) {
   const active = !failed && !done;
   const pct = job.progress != null ? Math.round(job.progress * 100) : 0;
   const title = job.title || `Video ${job.video_id}`;
-  const statusLabel = done
-    ? "Complete"
-    : failed
-      ? "Failed"
-      : "Downloading";
+  const statusLabel = done ? "Complete" : failed ? "Failed" : "Downloading";
   return (
     <div
       className={cn(
@@ -430,7 +442,9 @@ function Row({
       </div>
       <div className="min-w-0">
         <div className="truncate font-medium">{item.title}</div>
-        <div className="truncate text-xs text-muted-foreground">{item.artist}</div>
+        <div className="truncate text-xs text-muted-foreground">
+          {item.artist}
+        </div>
       </div>
       <div className="truncate text-sm text-muted-foreground">{item.album}</div>
       <div className="flex flex-col gap-1">
@@ -444,7 +458,9 @@ function Row({
         )}
       </div>
       <div className="flex items-center justify-end gap-2">
-        {failed && !offline && <RetryButton onRetry={(q) => onRetry(item, q)} />}
+        {failed && !offline && (
+          <RetryButton onRetry={(q) => onRetry(item, q)} />
+        )}
         {done && item.file_path && (
           <Button
             size="sm"
@@ -478,7 +494,10 @@ function Row({
  * number grows visibly as the queue drains.
  */
 function DiskUsage({ terminalCount }: { terminalCount: number }) {
-  const [stats, setStats] = useState<{ total_bytes: number; file_count: number } | null>(null);
+  const [stats, setStats] = useState<{
+    total_bytes: number;
+    file_count: number;
+  } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -499,7 +518,8 @@ function DiskUsage({ terminalCount }: { terminalCount: number }) {
   return (
     <p className="mt-1 flex items-center gap-1.5 text-sm text-muted-foreground">
       <HardDrive className="h-3.5 w-3.5" />
-      {formatBytes(stats.total_bytes)} · {stats.file_count.toLocaleString()} file
+      {formatBytes(stats.total_bytes)} · {stats.file_count.toLocaleString()}{" "}
+      file
       {stats.file_count === 1 ? "" : "s"}
     </p>
   );
@@ -621,7 +641,9 @@ function RetryButton({ onRetry }: { onRetry: (quality?: string) => void }) {
                 <span className="font-semibold">
                   {q.label} — {q.codec}
                 </span>
-                <span className="text-[11px] text-muted-foreground">{q.bitrate}</span>
+                <span className="text-[11px] text-muted-foreground">
+                  {q.bitrate}
+                </span>
               </div>
             </DropdownMenuItem>
           ))}

@@ -40,11 +40,11 @@ function setState(next: AudioOptions): void {
   // or toggling an already-on option doesn't wake every subscriber
   // and re-render consumers.
   if (
-    next.current === state.current
-    && next.exclusiveMode === state.exclusiveMode
-    && next.forceVolume === state.forceVolume
-    && next.loaded === state.loaded
-    && next.devices === state.devices
+    next.current === state.current &&
+    next.exclusiveMode === state.exclusiveMode &&
+    next.forceVolume === state.forceVolume &&
+    next.loaded === state.loaded &&
+    next.devices === state.devices
   ) {
     return;
   }
@@ -80,6 +80,38 @@ async function loadOnce(): Promise<void> {
       });
     } catch {
       setState({ ...initial, loaded: true });
+    } finally {
+      inflight = null;
+    }
+  })();
+  return inflight;
+}
+
+/**
+ * Re-fetch the device list so newly-attached devices (USB DACs,
+ * Bluetooth headphones, etc) show up in the picker. The backend's
+ * `/api/player/output-devices` triggers a PortAudio terminate +
+ * re-initialize when no stream is active so CoreAudio's current
+ * device set is re-enumerated server-side too.
+ *
+ * Guarded against concurrent refreshes via the `inflight` slot the
+ * initial `loadOnce()` already uses, so spamming the dropdown open/
+ * close doesn't pile up requests.
+ */
+async function refresh(): Promise<void> {
+  if (inflight) return inflight;
+  inflight = (async () => {
+    try {
+      const d = await api.player.outputDevices();
+      setState({
+        ...state,
+        devices: d.devices,
+        current: d.current,
+        loaded: true,
+      });
+    } catch {
+      // Keep whatever we already had — a transient backend failure
+      // shouldn't blow away the user's currently-selected device.
     } finally {
       inflight = null;
     }
@@ -136,5 +168,5 @@ export function useAudioOptions() {
     [],
   );
 
-  return { ...snap, setDevice, setExclusiveMode, setForceVolume };
+  return { ...snap, setDevice, setExclusiveMode, setForceVolume, refresh };
 }

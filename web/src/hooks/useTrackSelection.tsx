@@ -90,7 +90,10 @@ export function TrackSelectionProvider({ children }: { children: ReactNode }) {
     });
   }, []);
 
-  const has = useCallback((trackId: string) => selected.has(trackId), [selected]);
+  const has = useCallback(
+    (trackId: string) => selected.has(trackId),
+    [selected],
+  );
 
   const value = useMemo(
     () => ({ selected, has, toggle, toggleRange, removeMany, clear }),

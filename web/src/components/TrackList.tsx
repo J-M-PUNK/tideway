@@ -304,7 +304,6 @@ function VirtualRows({
   );
 }
 
-
 function SortableTracks({
   ids,
   tracks,
@@ -318,7 +317,9 @@ function SortableTracks({
 }) {
   const sensors = useSensors(
     useSensor(PointerSensor, { activationConstraint: { distance: 6 } }),
-    useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates }),
+    useSensor(KeyboardSensor, {
+      coordinateGetter: sortableKeyboardCoordinates,
+    }),
   );
 
   const handleDragEnd = (e: DragEndEvent) => {
@@ -333,7 +334,11 @@ function SortableTracks({
   };
 
   return (
-    <DndContext sensors={sensors} collisionDetection={closestCenter} onDragEnd={handleDragEnd}>
+    <DndContext
+      sensors={sensors}
+      collisionDetection={closestCenter}
+      onDragEnd={handleDragEnd}
+    >
       <SortableContext items={ids} strategy={verticalListSortingStrategy}>
         {children}
       </SortableContext>
@@ -388,7 +393,10 @@ function TrackRow({
 
   // useSortable is safe to call unconditionally — outside a SortableContext
   // it returns inert defaults so non-sortable callers render normally.
-  const sort = useSortable({ id: sortableId ?? `static-${index}`, disabled: !sortable });
+  const sort = useSortable({
+    id: sortableId ?? `static-${index}`,
+    disabled: !sortable,
+  });
   const sortableStyle = sortable
     ? {
         transform: CSS.Transform.toString(sort.transform),
@@ -396,7 +404,9 @@ function TrackRow({
         zIndex: sort.isDragging ? 20 : undefined,
       }
     : undefined;
-  const dragHandleProps = sortable ? { ...sort.attributes, ...sort.listeners } : {};
+  const dragHandleProps = sortable
+    ? { ...sort.attributes, ...sort.listeners }
+    : {};
 
   const onPlayToggle = () => {
     if (isPlaying) {
@@ -457,9 +467,9 @@ function TrackRow({
               if (shiftKey && selection.selected.size > 0) {
                 // Anchor on the first selected track that exists in this
                 // list. If none is in the list, fall back to a plain toggle.
-                const firstAnchorId = Array.from(selection.selected.keys()).find(
-                  (id) => context.some((t) => t.id === id),
-                );
+                const firstAnchorId = Array.from(
+                  selection.selected.keys(),
+                ).find((id) => context.some((t) => t.id === id));
                 if (firstAnchorId) {
                   selection.toggleRange(context, firstAnchorId, track.id);
                   return;
@@ -534,7 +544,12 @@ function TrackRow({
               related control group instead of four separate columns. */}
           <div className="flex items-center justify-end gap-2">
             <div className="flex h-8 w-8 items-center justify-center">
-              <HeartButton kind="track" id={track.id} size="sm" visibility="hover" />
+              <HeartButton
+                kind="track"
+                id={track.id}
+                size="sm"
+                visibility="hover"
+              />
             </div>
             <span className="w-12 text-left text-xs tabular-nums text-muted-foreground">
               {formatDuration(track.duration)}
@@ -724,7 +739,7 @@ function TrackPlaycountCell({
 function formatCompact(n: number): string {
   if (n < 1000) return n.toLocaleString();
   if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}K`;
-  if (n < 1_000_000_000) return `${(n / 1_000_000).toFixed(n < 10_000_000 ? 1 : 0)}M`;
+  if (n < 1_000_000_000)
+    return `${(n / 1_000_000).toFixed(n < 10_000_000 ? 1 : 0)}M`;
   return `${(n / 1_000_000_000).toFixed(1)}B`;
 }
-

@@ -13,7 +13,11 @@ import { Grid, SectionHeader, ViewMoreLink } from "@/components/Grid";
 import { MediaCard } from "@/components/MediaCard";
 import { TrackList } from "@/components/TrackList";
 import { ErrorView } from "@/components/ErrorView";
-import { GridSkeleton, HeroSkeleton, TrackListSkeleton } from "@/components/Skeletons";
+import {
+  GridSkeleton,
+  HeroSkeleton,
+  TrackListSkeleton,
+} from "@/components/Skeletons";
 import { VideoCard } from "@/components/VideoCard";
 
 export function ArtistDetail({ onDownload }: { onDownload: OnDownload }) {
@@ -36,7 +40,8 @@ export function ArtistDetail({ onDownload }: { onDownload: OnDownload }) {
       </div>
     );
   }
-  if (error || !artist) return <ErrorView error={error ?? "Artist not found"} />;
+  if (error || !artist)
+    return <ErrorView error={error ?? "Artist not found"} />;
 
   // "Download full discography" needs a single merged list of everything
   // the artist has released (albums + EPs + singles; skip appears-on
@@ -99,7 +104,10 @@ export function ArtistDetail({ onDownload }: { onDownload: OnDownload }) {
         onDownload={onDownload}
       />
       {artist.videos.length > 0 && (
-        <VideoRow videos={artist.videos} viewMoreTo={`/artist/${id}/all/videos`} />
+        <VideoRow
+          videos={artist.videos}
+          viewMoreTo={`/artist/${id}/all/videos`}
+        />
       )}
       <MediaRow
         title="Fans also like"
@@ -110,7 +118,11 @@ export function ArtistDetail({ onDownload }: { onDownload: OnDownload }) {
       {artist.credits.length > 0 && (
         <>
           <SectionHeader title="Credits" />
-          <TrackList tracks={artist.credits} onDownload={onDownload} showAlbum />
+          <TrackList
+            tracks={artist.credits}
+            onDownload={onDownload}
+            showAlbum
+          />
         </>
       )}
 
@@ -196,17 +208,12 @@ function VideoRow({
       </div>
       <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
         {visible.map((v) => (
-          <VideoCard
-            key={v.id}
-            video={v}
-            onPlay={() => open(v, videos)}
-          />
+          <VideoCard key={v.id} video={v} onPlay={() => open(v, videos)} />
         ))}
       </div>
     </div>
   );
 }
-
 
 function ArtistBio({ bio }: { bio: string }) {
   const [expanded, setExpanded] = useState(false);
@@ -217,10 +224,15 @@ function ArtistBio({ bio }: { bio: string }) {
     () => bio.replace(/\[wimpLink[^\]]*\]/g, "").replace(/\[\/wimpLink\]/g, ""),
     [bio],
   );
-  const truncated = cleaned.length > 800 && !expanded ? cleaned.slice(0, 800).trimEnd() + "…" : cleaned;
+  const truncated =
+    cleaned.length > 800 && !expanded
+      ? cleaned.slice(0, 800).trimEnd() + "…"
+      : cleaned;
   return (
     <div className="max-w-3xl rounded-lg border border-border/50 bg-card/40 p-6">
-      <p className="whitespace-pre-line text-sm leading-relaxed text-muted-foreground">{truncated}</p>
+      <p className="whitespace-pre-line text-sm leading-relaxed text-muted-foreground">
+        {truncated}
+      </p>
       {cleaned.length > 800 && (
         <button
           onClick={() => setExpanded((v) => !v)}

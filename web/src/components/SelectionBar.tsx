@@ -22,7 +22,9 @@ import {
 export function SelectionBar() {
   const { selected, clear, removeMany } = useTrackSelection();
   const count = selected.size;
-  const [busy, setBusy] = useState<null | "download" | "like" | "playlist">(null);
+  const [busy, setBusy] = useState<null | "download" | "like" | "playlist">(
+    null,
+  );
   const toast = useToast();
   const favs = useFavorites();
   const { playlists } = useMyPlaylists();
@@ -162,7 +164,10 @@ export function SelectionBar() {
                 <ListPlus className="h-3.5 w-3.5" /> Add to playlist
               </Button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="max-h-80 overflow-y-auto">
+            <DropdownMenuContent
+              align="end"
+              className="max-h-80 overflow-y-auto"
+            >
               <DropdownMenuLabel>Choose playlist</DropdownMenuLabel>
               <DropdownMenuSeparator />
               {playlists.length === 0 && (

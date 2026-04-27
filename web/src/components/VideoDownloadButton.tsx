@@ -20,11 +20,16 @@ import { cn } from "@/lib/utils";
 
 type VideoQuality = "HIGH" | "MEDIUM" | "LOW";
 
-const QUALITY_OPTIONS: { value: VideoQuality; label: string; hint: string }[] = [
-  { value: "HIGH", label: "High", hint: "1080p when available — largest file" },
-  { value: "MEDIUM", label: "Medium", hint: "720p — good balance" },
-  { value: "LOW", label: "Low", hint: "480p — smallest file" },
-];
+const QUALITY_OPTIONS: { value: VideoQuality; label: string; hint: string }[] =
+  [
+    {
+      value: "HIGH",
+      label: "High",
+      hint: "1080p when available — largest file",
+    },
+    { value: "MEDIUM", label: "Medium", hint: "720p — good balance" },
+    { value: "LOW", label: "Low", hint: "480p — smallest file" },
+  ];
 
 /**
  * Starts an HLS → MP4 remux on the backend. Click opens a
@@ -144,7 +149,9 @@ export function VideoDownloadButton({
               "relative flex h-9 w-9 items-center justify-center",
               className,
             )}
-            aria-label={pct != null ? `Downloading video — ${pct}%` : "Downloading video"}
+            aria-label={
+              pct != null ? `Downloading video — ${pct}%` : "Downloading video"
+            }
           >
             <ProgressRing fraction={job?.progress ?? null} />
             <span className="relative z-10 text-[9px] font-bold tabular-nums text-foreground">
@@ -190,7 +197,9 @@ export function VideoDownloadButton({
         </TooltipTrigger>
         <TooltipContent align="center" className="max-w-xs">
           <div className="flex flex-col gap-0.5">
-            <span className="font-semibold">Downloaded — click to show in Finder</span>
+            <span className="font-semibold">
+              Downloaded — click to show in Finder
+            </span>
             {job?.output_path && (
               <span className="break-all text-muted-foreground">
                 {job.output_path}
@@ -248,7 +257,9 @@ export function VideoDownloadButton({
           >
             <div className="flex min-w-0 flex-1 flex-col">
               <span className="font-semibold">{q.label}</span>
-              <span className="text-[11px] text-muted-foreground">{q.hint}</span>
+              <span className="text-[11px] text-muted-foreground">
+                {q.hint}
+              </span>
             </div>
           </DropdownMenuItem>
         ))}

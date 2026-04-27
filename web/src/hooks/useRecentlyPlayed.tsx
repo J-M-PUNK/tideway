@@ -61,7 +61,10 @@ export function RecentsProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
-  const value = useMemo(() => ({ tracks, record, clear }), [tracks, record, clear]);
+  const value = useMemo(
+    () => ({ tracks, record, clear }),
+    [tracks, record, clear],
+  );
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
 }
 

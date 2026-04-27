@@ -34,7 +34,8 @@ export function UpdateBanner() {
 
   useEffect(() => {
     let cancelled = false;
-    api.updateCheck()
+    api
+      .updateCheck()
       .then((res) => {
         if (cancelled) return;
         setUpdate(res);

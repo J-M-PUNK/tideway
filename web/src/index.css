@@ -10,6 +10,7 @@
 :-webkit-full-screen {
   background: #000;
 }
+
 ::backdrop,
 ::-webkit-backdrop {
   background: #000;
@@ -41,6 +42,7 @@
     --input: 0 0% 13%;
     --ring: 195 90% 52%;
     --radius: 0.5rem;
+
     /* Theme-specific chrome colors (scrollbar track/thumb, hardcoded
      *  now-playing bar, hero gradient fallback). Defined here as
      *  variables so the `.light` block can override them too. */
@@ -61,6 +63,7 @@
     --card-foreground: 220 20% 14%;
     --popover: 0 0% 100%;
     --popover-foreground: 220 20% 14%;
+
     /* Cyan-blue tuned for contrast on white (≈4.6:1). Vibrant enough
      *  to carry the brand against the cool-tinted light background,
      *  dim enough that saturated chrome doesn't vibrate. */
@@ -86,33 +89,68 @@
     @apply border-border;
   }
 
-  html, body, #root {
+  html,
+  body,
+  #root {
     @apply h-full;
   }
 
   body {
     @apply bg-background text-foreground antialiased;
-    font-family: Inter, system-ui, -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+
+    font-family:
+      Inter,
+      system-ui,
+      -apple-system,
+      "Segoe UI",
+      Helvetica,
+      Arial,
+      sans-serif;
     font-feature-settings: "cv11", "ss01";
   }
 }
 
 @layer utilities {
-  .scrollbar-thin::-webkit-scrollbar { width: 10px; height: 10px; }
-  .scrollbar-thin::-webkit-scrollbar-thumb { background: hsl(var(--scrollbar-thumb)); border-radius: 999px; }
-  .scrollbar-thin::-webkit-scrollbar-thumb:hover { background: hsl(var(--scrollbar-thumb-hover)); }
-  .scrollbar-thin::-webkit-scrollbar-track { background: transparent; }
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    background: hsl(var(--scrollbar-thumb));
+    border-radius: 999px;
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-thumb:hover {
+    background: hsl(var(--scrollbar-thumb-hover));
+  }
+
+  .scrollbar-thin::-webkit-scrollbar-track {
+    background: transparent;
+  }
 
   /* Subtle fade-in applied to the routed view on every navigation.
      Keyed on location.pathname in App.tsx so the animation replays. */
   @keyframes route-fade {
-    from { opacity: 0; transform: translateY(4px); }
-    to   { opacity: 1; transform: translateY(0); }
+    from {
+      opacity: 0;
+      transform: translateY(4px);
+    }
+
+    to {
+      opacity: 1;
+      transform: translateY(0);
+    }
   }
-  .animate-route { animation: route-fade 120ms ease-out; }
+
+  .animate-route {
+    animation: route-fade 120ms ease-out;
+  }
 
   /* Users who prefer reduced motion get no animations. */
   @media (prefers-reduced-motion: reduce) {
-    .animate-route { animation: none; }
+    .animate-route {
+      animation: none;
+    }
   }
 }

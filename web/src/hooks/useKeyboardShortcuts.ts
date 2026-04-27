@@ -30,7 +30,11 @@ function isTextInput(el: EventTarget | null): boolean {
  * doesn't need to take the full player as a prop and re-register
  * handlers on every render.
  */
-export function useKeyboardShortcuts({ onOpenPalette }: { onOpenPalette: () => void }) {
+export function useKeyboardShortcuts({
+  onOpenPalette,
+}: {
+  onOpenPalette: () => void;
+}) {
   const actions = usePlayerActions();
   const { track, volume } = usePlayerMeta();
   const favs = useFavorites();
@@ -78,7 +82,10 @@ export function useKeyboardShortcuts({ onOpenPalette }: { onOpenPalette: () => v
       // (used by browsers, text editing, etc.) aren't intercepted.
       if (
         e.key === "ArrowUp" &&
-        !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey
+        !e.shiftKey &&
+        !e.metaKey &&
+        !e.ctrlKey &&
+        !e.altKey
       ) {
         e.preventDefault();
         actions.setVolume(Math.min(1, volume + 0.05));
@@ -86,7 +93,10 @@ export function useKeyboardShortcuts({ onOpenPalette }: { onOpenPalette: () => v
       }
       if (
         e.key === "ArrowDown" &&
-        !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey
+        !e.shiftKey &&
+        !e.metaKey &&
+        !e.ctrlKey &&
+        !e.altKey
       ) {
         e.preventDefault();
         actions.setVolume(Math.max(0, volume - 0.05));

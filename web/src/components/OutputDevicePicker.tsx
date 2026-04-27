@@ -52,7 +52,18 @@ export function OutputDevicePicker() {
     opts.devices.find((d) => d.id === opts.current)?.name ?? "System default";
 
   return (
-    <DropdownMenu>
+    <DropdownMenu
+      onOpenChange={(open) => {
+        // Refetch the device list each time the dropdown opens, so a
+        // user who plugs in headphones (or pairs a Bluetooth speaker)
+        // after launching Tideway sees the new device without having
+        // to restart. The backend re-enumerates CoreAudio when this
+        // call lands; cost is one HTTP round-trip per open.
+        if (open) {
+          void opts.refresh();
+        }
+      }}
+    >
       <DropdownMenuTrigger asChild>
         <Button
           variant="ghost"
@@ -70,7 +81,10 @@ export function OutputDevicePicker() {
         <DropdownMenuLabel>Output device</DropdownMenuLabel>
         <DropdownMenuSeparator />
         {opts.loaded && opts.devices.length > 0 ? (
-          <DropdownMenuRadioGroup value={opts.current} onValueChange={pickDevice}>
+          <DropdownMenuRadioGroup
+            value={opts.current}
+            onValueChange={pickDevice}
+          >
             {opts.devices.map((d) => (
               <DropdownMenuRadioItem
                 key={d.id || "default"}
@@ -99,10 +113,10 @@ export function OutputDevicePicker() {
           <div className="flex flex-col">
             <span className="font-semibold">Use Exclusive Mode</span>
             <span className="text-[11px] text-muted-foreground">
-              Tideway takes exclusive use of the audio device. Default
-              playback is already bit-perfect when the source rate
-              matches the device, so leave this off unless you also
-              want to lock other apps out of the device.
+              Tideway takes exclusive use of the audio device. Default playback
+              is already bit-perfect when the source rate matches the device, so
+              leave this off unless you also want to lock other apps out of the
+              device.
             </span>
           </div>
         </DropdownMenuCheckboxItem>
@@ -115,8 +129,8 @@ export function OutputDevicePicker() {
           <div className="flex flex-col">
             <span className="font-semibold">Force volume</span>
             <span className="text-[11px] text-muted-foreground">
-              Keep Tideway volume at max and control output on your
-              external device.
+              Keep Tideway volume at max and control output on your external
+              device.
             </span>
           </div>
         </DropdownMenuCheckboxItem>

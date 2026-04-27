@@ -19,7 +19,8 @@ export function MoodsPage({ onDownload }: { onDownload: OnDownload }) {
       </div>
     );
   }
-  if (error || !data) return <ErrorView error={error ?? "Couldn't load moods"} />;
+  if (error || !data)
+    return <ErrorView error={error ?? "Couldn't load moods"} />;
 
   return (
     <div>

@@ -87,6 +87,25 @@ jobs:
         working-directory: web
         run: npx tsc -b --noEmit
 
+      - name: ESLint
+        working-directory: web
+        run: npm run lint
+
+      - name: Stylelint
+        working-directory: web
+        run: npm run lint:css
+
+      - name: HTMLHint
+        working-directory: web
+        run: npm run lint:html
+
+      - name: Prettier
+        # `format:check` exits non-zero when any file isn't already
+        # in Prettier's canonical form. Pairs with the local
+        # `npm run format` script the user runs before committing.
+        working-directory: web
+        run: npm run format:check
+
       - name: Run vitest
         working-directory: web
         run: npm test

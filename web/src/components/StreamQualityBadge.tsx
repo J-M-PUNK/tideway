@@ -7,26 +7,23 @@ import {
 import { cn } from "@/lib/utils";
 
 /**
- * Small pill that surfaces the codec + sample rate / bit depth of the
- * audio the user is actually hearing. Renders nothing when we don't
- * have enough info (still loading, codec unknown, etc.) — better to
- * omit than show "? kHz".
+ * Quality pill in the now-playing bar. Pill text is the four-tier
+ * label the rest of the UI uses (Low / Medium / High / Max), so
+ * settings, the streaming-quality picker, the download menus, and
+ * the now-playing bar all read the same way.
  *
- * Hover reveals the full label via a Radix tooltip — the pill text is
- * intentionally terse (e.g. "FLAC 96/24") so it fits in narrow
- * containers, and the tooltip expands to the full form
- * ("FLAC · 96kHz · 24-bit · HI RES · Tidal stream") for users who
- * want the full picture. Native `title` is unstyled + slow; the Radix
- * variant is instant and visually consistent with other hovers.
+ * The tooltip on hover keeps the full technical readout — codec +
+ * sample rate + bit depth (e.g. "FLAC · 96kHz · 24-bit") — so users
+ * who want to confirm they're getting bit-perfect output can still
+ * see it without having to dig.
  *
- * Tiers are color-coded so high-res is visually distinct from CD-res
- * from lossy:
- *   hi-res (sample_rate > 48k or bit_depth >= 24) → primary tone
- *   lossless (FLAC/ALAC at 16/44.1)                → foreground
- *   lossy (AAC/MP3/Opus)                           → muted
+ * Tone is still tier-coded for at-a-glance distinction:
+ *   Max   → primary tone (hi-res streams: > 48 kHz or ≥ 24-bit)
+ *   High  → foreground   (CD-res lossless: FLAC / ALAC 16/44.1)
+ *   Low / Medium → muted (lossy AAC at 96 / 320 kbps)
  *
- * Local files keep the same visual treatment — users shouldn't care
- * whether the bits came off disk or over the wire at this level.
+ * Renders nothing when we don't have enough info (still loading,
+ * codec unknown, etc.) — better to omit than show a placeholder.
  */
 export function StreamQualityBadge({
   info,
@@ -39,23 +36,20 @@ export function StreamQualityBadge({
   const codec = info.codec.toUpperCase();
   const rate = formatRate(info.sample_rate_hz);
   const depth = info.bit_depth ? `${info.bit_depth}-bit` : null;
-  const tier = tierOf(info);
-  // Label layout: "FLAC 96/24" when we have everything, "FLAC 44.1"
-  // when we only have sample rate, "AAC" when we have neither (i.e.
-  // lossy where bit depth is meaningless).
-  let label = codec;
-  if (rate && depth) label = `${codec} ${rate}/${info.bit_depth}`;
-  else if (rate) label = `${codec} ${rate}`;
+  const tier = tierLabel(info);
+  // Tone matches tier without rendering the tier name in the pill —
+  // the pill is just the user-facing label, the color carries the
+  // hi-res / lossless / lossy distinction.
   const tone =
-    tier === "hires"
+    tier === "Max"
       ? "bg-primary/15 text-primary"
-      : tier === "lossless"
+      : tier === "High"
         ? "bg-foreground/10 text-foreground"
         : "bg-muted-foreground/15 text-muted-foreground";
 
-  // Full technical readout — codec + rate + depth, nothing else.
-  // Tier names and source ("Streaming from Tidal") add no value
-  // beyond the audible specs.
+  // Tooltip stays as a full technical readout — codec + rate + depth.
+  // The pill carries the tier label; the tooltip carries the specs
+  // for users who care about exact rate and bit depth.
   const fullLabel = [codec, rate ? `${rate}kHz` : null, depth]
     .filter(Boolean)
     .join(" · ");
@@ -67,14 +61,14 @@ export function StreamQualityBadge({
           className={cn(
             // flex-shrink-0 so a truncating parent (e.g. the
             // artist/metadata row in NowPlaying) can't clip the pill
-            // out of existence — the terse label is already small
-            // and the tooltip carries the rest.
+            // out of existence — the label is already small and the
+            // tooltip carries the rest.
             "flex-shrink-0 whitespace-nowrap rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider cursor-default",
             tone,
             className,
           )}
         >
-          {label}
+          {tier}
         </span>
       </TooltipTrigger>
       <TooltipContent align="center">{fullLabel}</TooltipContent>
@@ -90,16 +84,30 @@ function formatRate(hz: number | null): string | null {
   return khz % 1 === 0 ? String(khz) : khz.toFixed(1);
 }
 
-function tierOf(info: StreamInfo): "hires" | "lossless" | "lossy" {
+/**
+ * Map a StreamInfo to one of the four user-facing labels. Tidal
+ * streams carry the tier in `audio_quality` directly, so prefer
+ * that. Local files don't have it (Tidal isn't involved at all),
+ * so we fall back to deriving from codec + sample rate / bit
+ * depth — local files can never be "Low" since that's a Tidal-
+ * specific 96k AAC tier.
+ */
+function tierLabel(info: StreamInfo): "Low" | "Medium" | "High" | "Max" {
+  const aq = (info.audio_quality || "").toUpperCase();
+  if (aq === "LOW") return "Low";
+  if (aq === "HIGH") return "Medium";
+  if (aq === "LOSSLESS") return "High";
+  if (aq === "HI_RES" || aq === "HI_RES_LOSSLESS") return "Max";
+
   const codec = (info.codec || "").toLowerCase();
   if (codec === "flac" || codec === "alac") {
-    if (
+    const isHiRes =
       (info.bit_depth !== null && info.bit_depth >= 24) ||
-      (info.sample_rate_hz !== null && info.sample_rate_hz > 48000)
-    ) {
-      return "hires";
-    }
-    return "lossless";
+      (info.sample_rate_hz !== null && info.sample_rate_hz > 48000);
+    return isHiRes ? "Max" : "High";
   }
-  return "lossy";
+  // Lossy local file (rare). "Medium" is the closest user-facing
+  // bucket; we have no way to distinguish 96 kbps from 320 kbps
+  // sources without Tidal's tier string.
+  return "Medium";
 }

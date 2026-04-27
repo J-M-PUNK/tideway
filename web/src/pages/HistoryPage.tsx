@@ -35,7 +35,9 @@ export function HistoryPage({ onDownload }: { onDownload: OnDownload }) {
   const toast = useToast();
   const { tracks: localTracks, clear: clearLocal } = useRecentlyPlayed();
   const [lastfmConnected, setLastfmConnected] = useState<boolean | null>(null);
-  const [lastfmTracks, setLastfmTracks] = useState<LastFmRecentTrack[] | null>(null);
+  const [lastfmTracks, setLastfmTracks] = useState<LastFmRecentTrack[] | null>(
+    null,
+  );
   const [loadingLastfm, setLoadingLastfm] = useState(false);
   const [lastfmError, setLastfmError] = useState<string | null>(null);
 
@@ -95,7 +97,10 @@ export function HistoryPage({ onDownload }: { onDownload: OnDownload }) {
   const tracks = usingLastfm ? resolvedLastfm : localTracks;
   const initialLoading = usingLastfm && lastfmTracks === null && loadingLastfm;
   const waitingOnResolution =
-    usingLastfm && lastfmTracks !== null && lastfmQueries.length > 0 && resolvedLastfm.length === 0;
+    usingLastfm &&
+    lastfmTracks !== null &&
+    lastfmQueries.length > 0 &&
+    resolvedLastfm.length === 0;
 
   if (initialLoading) {
     return (
@@ -151,7 +156,10 @@ export function HistoryPage({ onDownload }: { onDownload: OnDownload }) {
                 variant="outline"
                 onClick={() => {
                   clearLocal();
-                  toast.show({ kind: "info", title: "Listening history cleared" });
+                  toast.show({
+                    kind: "info",
+                    title: "Listening history cleared",
+                  });
                 }}
               >
                 <Trash2 className="h-4 w-4" /> Clear history

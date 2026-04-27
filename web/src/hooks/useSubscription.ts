@@ -37,10 +37,10 @@ let inflight: Promise<void> | null = null;
 
 function setState(next: SubscriptionInfo): void {
   if (
-    next.tier === state.tier
-    && next.canDownload === state.canDownload
-    && next.reason === state.reason
-    && next.loaded === state.loaded
+    next.tier === state.tier &&
+    next.canDownload === state.canDownload &&
+    next.reason === state.reason &&
+    next.loaded === state.loaded
   ) {
     return;
   }

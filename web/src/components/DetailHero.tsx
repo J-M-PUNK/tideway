@@ -106,7 +106,8 @@ export function DetailHero({
             "flex-shrink-0 overflow-hidden bg-secondary shadow-2xl",
             blurredBackdrop ? "h-60 w-60" : "h-56 w-56",
             round ? "rounded-full" : "rounded-md",
-            onCoverClick && "cursor-pointer transition-transform hover:scale-[1.02]",
+            onCoverClick &&
+              "cursor-pointer transition-transform hover:scale-[1.02]",
           );
           const inner = src ? (
             <img src={src} alt={title} className="h-full w-full object-cover" />
@@ -140,8 +141,12 @@ export function DetailHero({
               "font-black tracking-tight",
               eyebrow ? "mt-2" : "",
               blurredBackdrop
-                ? title.length > 30 ? "text-3xl" : "text-4xl"
-                : title.length > 30 ? "text-4xl" : "text-5xl",
+                ? title.length > 30
+                  ? "text-3xl"
+                  : "text-4xl"
+                : title.length > 30
+                  ? "text-4xl"
+                  : "text-5xl",
             )}
           >
             {title}

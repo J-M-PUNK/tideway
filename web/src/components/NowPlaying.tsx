@@ -46,7 +46,11 @@ import { SleepTimerButton } from "@/components/SleepTimerButton";
 import { StreamQualityBadge } from "@/components/StreamQualityBadge";
 import { useIsDownloaded } from "@/hooks/useDownloadedSet";
 import { useRecordPlays } from "@/hooks/useRecentlyPlayed";
-import { usePlayerActions, usePlayerMeta, usePlayerTime } from "@/hooks/PlayerContext";
+import {
+  usePlayerActions,
+  usePlayerMeta,
+  usePlayerTime,
+} from "@/hooks/PlayerContext";
 import {
   useUiPreferences,
   type StreamingQuality,
@@ -96,87 +100,105 @@ export function NowPlaying({
       <div className="flex items-center gap-4">
         <ContextMenu>
           <ContextMenuTrigger asChild>
-        <div className="flex min-w-0 flex-1 items-center gap-3">
-          <button
-            onClick={onExpand}
-            className="group relative h-14 w-14 flex-shrink-0 overflow-hidden rounded bg-secondary"
-            title="Expand now playing"
-          >
-            {cover ? (
-              <img src={cover} alt="" className="h-full w-full object-cover" />
-            ) : (
-              <div className="flex h-full w-full items-center justify-center text-muted-foreground">
-                <Music className="h-5 w-5" />
+            <div className="flex min-w-0 flex-1 items-center gap-3">
+              <button
+                onClick={onExpand}
+                className="group relative h-14 w-14 flex-shrink-0 overflow-hidden rounded bg-secondary"
+                title="Expand now playing"
+              >
+                {cover ? (
+                  <img
+                    src={cover}
+                    alt=""
+                    className="h-full w-full object-cover"
+                  />
+                ) : (
+                  <div className="flex h-full w-full items-center justify-center text-muted-foreground">
+                    <Music className="h-5 w-5" />
+                  </div>
+                )}
+                <span className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 transition-opacity group-hover:opacity-100">
+                  <svg
+                    className="h-4 w-4 text-foreground"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                  >
+                    <path d="M15 3h6v6M14 10l7-7M9 21H3v-6M10 14l-7 7" />
+                  </svg>
+                </span>
+              </button>
+              <div className="min-w-0">
+                <div className="truncate text-sm font-semibold">
+                  {track.album ? (
+                    <Link
+                      to={`/album/${track.album.id}`}
+                      className="hover:underline"
+                    >
+                      {track.name}
+                    </Link>
+                  ) : (
+                    track.name
+                  )}
+                </div>
+                <div className="truncate text-xs text-muted-foreground">
+                  {track.artists.map((a, i) => (
+                    <span key={a.id}>
+                      {i > 0 && ", "}
+                      <Link to={`/artist/${a.id}`} className="hover:underline">
+                        {a.name}
+                      </Link>
+                    </span>
+                  ))}
+                  {isLocal && (
+                    <span className="ml-2 rounded bg-primary/15 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-primary">
+                      Downloaded
+                    </span>
+                  )}
+                  <StreamQualityBadge info={streamInfo} className="ml-2" />
+                </div>
               </div>
-            )}
-            <span className="absolute inset-0 flex items-center justify-center bg-black/40 opacity-0 transition-opacity group-hover:opacity-100">
-              <svg className="h-4 w-4 text-foreground" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M15 3h6v6M14 10l7-7M9 21H3v-6M10 14l-7 7" />
-              </svg>
-            </span>
-          </button>
-          <div className="min-w-0">
-            <div className="truncate text-sm font-semibold">
-              {track.album ? (
-                <Link to={`/album/${track.album.id}`} className="hover:underline">
-                  {track.name}
-                </Link>
-              ) : (
-                track.name
-              )}
-            </div>
-            <div className="truncate text-xs text-muted-foreground">
-              {track.artists.map((a, i) => (
-                <span key={a.id}>
-                  {i > 0 && ", "}
-                  <Link to={`/artist/${a.id}`} className="hover:underline">
-                    {a.name}
-                  </Link>
-                </span>
-              ))}
-              {isLocal && (
-                <span className="ml-2 rounded bg-primary/15 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-primary">
-                  Downloaded
-                </span>
-              )}
-              <StreamQualityBadge info={streamInfo} className="ml-2" />
-            </div>
-          </div>
-          <div className="flex items-center">
-            <HeartButton kind="track" id={track.id} size="sm" tone="foreground" />
-            <DownloadButton
-              kind="track"
-              id={track.id}
-              onPick={onDownload}
-              iconOnly
-              variant="ghost"
-              mediaTags={track.media_tags}
-            />
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  className="h-8 w-8 data-[state=open]:text-primary"
-                  title="More"
-                  aria-label="Track actions"
-                >
-                  <MoreHorizontal className="h-4 w-4" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-60">
-                <TrackMenuItems
-                  parts={DROPDOWN_MENU_PARTS}
-                  track={track}
-                  context={queue.length > 0 ? queue : [track]}
-                  onDownload={onDownload}
-                  onShowCredits={() => setCreditsOpen(true)}
-                  showSelect={false}
+              <div className="flex items-center">
+                <HeartButton
+                  kind="track"
+                  id={track.id}
+                  size="sm"
+                  tone="foreground"
                 />
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </div>
-        </div>
+                <DownloadButton
+                  kind="track"
+                  id={track.id}
+                  onPick={onDownload}
+                  iconOnly
+                  variant="ghost"
+                  mediaTags={track.media_tags}
+                />
+                <DropdownMenu>
+                  <DropdownMenuTrigger asChild>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-8 w-8 data-[state=open]:text-primary"
+                      title="More"
+                      aria-label="Track actions"
+                    >
+                      <MoreHorizontal className="h-4 w-4" />
+                    </Button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="end" className="w-60">
+                    <TrackMenuItems
+                      parts={DROPDOWN_MENU_PARTS}
+                      track={track}
+                      context={queue.length > 0 ? queue : [track]}
+                      onDownload={onDownload}
+                      onShowCredits={() => setCreditsOpen(true)}
+                      showSelect={false}
+                    />
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </div>
+            </div>
           </ContextMenuTrigger>
           <ContextMenuContent className="w-60">
             <TrackMenuItems
@@ -296,7 +318,9 @@ export function NowPlaying({
         </div>
       </div>
       {error && (
-        <div className="mt-1 text-center text-[11px] text-destructive">{error}</div>
+        <div className="mt-1 text-center text-[11px] text-destructive">
+          {error}
+        </div>
       )}
     </div>
   );
@@ -371,7 +395,7 @@ const QUALITY_BADGE_CLASS: Record<StreamingQuality, string> = {
 function StreamingQualityPicker({ isLocal }: { isLocal: boolean }) {
   const { streamingQuality, set } = useUiPreferences();
   const current = QUALITY_OPTIONS.find((q) => q.value === streamingQuality);
-  const label = isLocal ? "Downloaded" : current?.label ?? "Streaming";
+  const label = isLocal ? "Downloaded" : (current?.label ?? "Streaming");
 
   if (isLocal) {
     return (
@@ -427,8 +451,8 @@ function StreamingQualityPicker({ isLocal }: { isLocal: boolean }) {
         ))}
         <DropdownMenuSeparator />
         <div className="px-2 py-1.5 text-[11px] text-muted-foreground">
-          Max uses significantly more bandwidth — a 4-minute track is
-          ~70–140 MB depending on sample rate.
+          Max uses significantly more bandwidth — a 4-minute track is ~70–140 MB
+          depending on sample rate.
         </div>
       </DropdownMenuContent>
     </DropdownMenu>
@@ -448,7 +472,11 @@ function VolumeControl({
   return (
     <div
       className={cn("flex items-center gap-2", disabled && "opacity-50")}
-      title={disabled ? "Force Volume is on — attenuate on your output device" : undefined}
+      title={
+        disabled
+          ? "Force Volume is on — attenuate on your output device"
+          : undefined
+      }
     >
       <Button
         variant="ghost"
@@ -458,7 +486,11 @@ function VolumeControl({
         disabled={disabled}
         title={muted ? "Unmute" : "Mute"}
       >
-        {muted ? <VolumeX className="h-4 w-4" /> : <Volume2 className="h-4 w-4" />}
+        {muted ? (
+          <VolumeX className="h-4 w-4" />
+        ) : (
+          <Volume2 className="h-4 w-4" />
+        )}
       </Button>
       <input
         type="range"

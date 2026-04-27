@@ -22,7 +22,10 @@ export function BrowsePage({ onDownload }: { onDownload: OnDownload }) {
   } catch {
     decoded = path;
   }
-  const { data, loading, error } = useApi(() => api.pagePath(decoded), [decoded]);
+  const { data, loading, error } = useApi(
+    () => api.pagePath(decoded),
+    [decoded],
+  );
 
   // Prefer the title Tidal gives us in the response; fall back to a
   // title derived from the path only when the backend didn't include
@@ -32,12 +35,15 @@ export function BrowsePage({ onDownload }: { onDownload: OnDownload }) {
   if (loading) {
     return (
       <div>
-        <h1 className="mb-8 text-3xl font-bold tracking-tight">{deriveTitle(decoded)}</h1>
+        <h1 className="mb-8 text-3xl font-bold tracking-tight">
+          {deriveTitle(decoded)}
+        </h1>
         <GridSkeleton count={12} />
       </div>
     );
   }
-  if (error || !data) return <ErrorView error={error ?? "Couldn't load page"} />;
+  if (error || !data)
+    return <ErrorView error={error ?? "Couldn't load page"} />;
 
   return (
     <div>
@@ -55,7 +61,10 @@ function deriveTitle(path: string): string {
   const viewAllMatch = path.match(/^home\/pages\/([^/]+)\/view-all$/i);
   const raw = viewAllMatch
     ? viewAllMatch[1]
-    : path.replace(/^pages\//, "").replace(/^genre_/, "").replace(/^m_/, "");
+    : path
+        .replace(/^pages\//, "")
+        .replace(/^genre_/, "")
+        .replace(/^m_/, "");
   return raw
     .toLowerCase()
     .split(/[_\s]+/)

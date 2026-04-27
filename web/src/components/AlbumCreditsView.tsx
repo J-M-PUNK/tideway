@@ -81,7 +81,10 @@ function TrackCreditsCard({ track }: { track: TrackCredits }) {
           {primaryArtist && (
             <div className="truncate text-xs text-muted-foreground">
               {primaryArtist.id ? (
-                <Link to={`/artist/${primaryArtist.id}`} className="hover:underline">
+                <Link
+                  to={`/artist/${primaryArtist.id}`}
+                  className="hover:underline"
+                >
                   {primaryArtist.name}
                 </Link>
               ) : (
@@ -94,7 +97,9 @@ function TrackCreditsCard({ track }: { track: TrackCredits }) {
       {/* Credits body — one role block per entry */}
       <div className="flex flex-col gap-4 px-5 py-4">
         {track.credits.length === 0 ? (
-          <div className="text-xs text-muted-foreground">No credits listed.</div>
+          <div className="text-xs text-muted-foreground">
+            No credits listed.
+          </div>
         ) : (
           track.credits.map((entry) => (
             <div key={entry.role} className="flex flex-col gap-1">

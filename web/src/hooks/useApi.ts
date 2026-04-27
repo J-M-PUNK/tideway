@@ -14,8 +14,15 @@ interface State<T> {
  * Intentionally tiny — a full cache layer (SWR/Query) would be overkill for
  * a single-user local tool.
  */
-export function useApi<T>(fetcher: () => Promise<T>, deps: React.DependencyList = []): State<T> {
-  const [state, setState] = useState<State<T>>({ data: null, loading: true, error: null });
+export function useApi<T>(
+  fetcher: () => Promise<T>,
+  deps: React.DependencyList = [],
+): State<T> {
+  const [state, setState] = useState<State<T>>({
+    data: null,
+    loading: true,
+    error: null,
+  });
 
   useEffect(() => {
     let cancelled = false;

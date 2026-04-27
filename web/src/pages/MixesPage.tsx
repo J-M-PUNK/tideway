@@ -23,7 +23,8 @@ export function MixesPage() {
       </div>
     );
   }
-  if (error || !mixes) return <ErrorView error={error ?? "Couldn't load mixes"} />;
+  if (error || !mixes)
+    return <ErrorView error={error ?? "Couldn't load mixes"} />;
 
   return (
     <div>
@@ -54,7 +55,9 @@ export function MixesPage() {
             <div className="min-w-0">
               <div className="truncate text-sm font-semibold">{m.name}</div>
               {m.subtitle && (
-                <div className="truncate text-xs text-muted-foreground">{m.subtitle}</div>
+                <div className="truncate text-xs text-muted-foreground">
+                  {m.subtitle}
+                </div>
               )}
             </div>
           </Link>

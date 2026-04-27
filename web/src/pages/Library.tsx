@@ -1,8 +1,28 @@
 import { useEffect, useMemo, useState } from "react";
-import { Compass, Disc3, Download, Folder, Heart, LayoutGrid, Library as LibraryIcon, List, ListMusic, Loader2, Menu, Plus, User } from "lucide-react";
+import {
+  Compass,
+  Disc3,
+  Download,
+  Folder,
+  Heart,
+  LayoutGrid,
+  Library as LibraryIcon,
+  List,
+  ListMusic,
+  Loader2,
+  Menu,
+  Plus,
+  User,
+} from "lucide-react";
 import { Link, Navigate, useParams } from "react-router-dom";
 import { api } from "@/api/client";
-import type { Album, Artist, Playlist, PlaylistFolder, Track } from "@/api/types";
+import type {
+  Album,
+  Artist,
+  Playlist,
+  PlaylistFolder,
+  Track,
+} from "@/api/types";
 import type { OnDownload } from "@/api/download";
 import { Grid } from "@/components/Grid";
 import { Input } from "@/components/ui/input";
@@ -54,7 +74,10 @@ function saveView(section: Section, view: View): void {
   }
 }
 
-const META: Record<Section, { title: string; icon: typeof Disc3; emptyHint: string }> = {
+const META: Record<
+  Section,
+  { title: string; icon: typeof Disc3; emptyHint: string }
+> = {
   albums: {
     title: "Albums",
     icon: Disc3,
@@ -88,7 +111,7 @@ export function Library({ onDownload }: { onDownload: OnDownload }) {
     return <Navigate to="/library/albums" replace />;
   }
   const type = section as Section;
-  const { title, icon: Icon, emptyHint } = META[type];
+  const { title, emptyHint } = META[type];
 
   const [data, setData] = useState<LibraryItem[] | null>(null);
   const [folders, setFolders] = useState<PlaylistFolder[]>([]);
@@ -168,7 +191,9 @@ export function Library({ onDownload }: { onDownload: OnDownload }) {
       ? data.filter((item) =>
           [
             "name" in item ? item.name : "",
-            "artists" in item && item.artists ? item.artists.map((a) => a.name).join(" ") : "",
+            "artists" in item && item.artists
+              ? item.artists.map((a) => a.name).join(" ")
+              : "",
             "creator" in item && item.creator ? item.creator : "",
           ]
             .join(" ")
@@ -185,7 +210,9 @@ export function Library({ onDownload }: { onDownload: OnDownload }) {
       );
     }
     if (sort === "alpha") {
-      return [...base].sort((a, b) => ("name" in a ? a.name : "").localeCompare("name" in b ? b.name : ""));
+      return [...base].sort((a, b) =>
+        ("name" in a ? a.name : "").localeCompare("name" in b ? b.name : ""),
+      );
     }
     return base; // "recent" — backend already returns newest-first
   }, [data, filter, sort, format, type]);
@@ -199,10 +226,7 @@ export function Library({ onDownload }: { onDownload: OnDownload }) {
 
   return (
     <div>
-      <div className="mb-6 flex flex-wrap items-center justify-between gap-4">
-        <h1 className="flex items-center gap-3 text-3xl font-bold tracking-tight">
-          <Icon className="h-7 w-7" /> {title}
-        </h1>
+      <div className="mb-6 flex flex-wrap items-center justify-end gap-4">
         <div className="flex items-center gap-2">
           {type === "tracks" && data && data.length > 0 && (
             <DownloadAllTracks tracks={data as Track[]} />
@@ -233,7 +257,9 @@ export function Library({ onDownload }: { onDownload: OnDownload }) {
             className="h-9 max-w-xs"
           />
           <SortMenu sort={sort} onSort={setSort} />
-          {type !== "tracks" && <ViewToggle view={view} onChange={changeView} />}
+          {type !== "tracks" && (
+            <ViewToggle view={view} onChange={changeView} />
+          )}
         </div>
       </div>
 
@@ -249,7 +275,9 @@ export function Library({ onDownload }: { onDownload: OnDownload }) {
         </div>
       )}
 
-      {!data && !loadError && (type === "tracks" ? <TrackListSkeleton /> : <GridSkeleton />)}
+      {!data &&
+        !loadError &&
+        (type === "tracks" ? <TrackListSkeleton /> : <GridSkeleton />)}
 
       {data && data.length === 0 && (
         <EmptyState
@@ -281,7 +309,11 @@ export function Library({ onDownload }: { onDownload: OnDownload }) {
       )}
 
       {data && data.length > 0 && filtered.length === 0 && (
-        <EmptyState icon={LibraryIcon} title="No matches" description={`Nothing matches "${filter}".`} />
+        <EmptyState
+          icon={LibraryIcon}
+          title="No matches"
+          description={`Nothing matches "${filter}".`}
+        />
       )}
 
       {data && filtered.length > 0 && type === "tracks" && (
@@ -376,7 +408,11 @@ function DownloadAllTracks({ tracks }: { tracks: Track[] }) {
   };
   return (
     <Button size="sm" variant="outline" onClick={run} disabled={busy}>
-      {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Download className="h-4 w-4" />}
+      {busy ? (
+        <Loader2 className="h-4 w-4 animate-spin" />
+      ) : (
+        <Download className="h-4 w-4" />
+      )}
       Download all
     </Button>
   );
@@ -438,10 +474,14 @@ function SortMenu({ sort, onSort }: { sort: Sort; onSort: (s: Sort) => void }) {
         <DropdownMenuLabel>Sort by</DropdownMenuLabel>
         <DropdownMenuSeparator />
         <DropdownMenuItem onSelect={() => onSort("recent")}>
-          <span className={cn(sort === "recent" ? "text-primary" : "")}>Recently added</span>
+          <span className={cn(sort === "recent" ? "text-primary" : "")}>
+            Recently added
+          </span>
         </DropdownMenuItem>
         <DropdownMenuItem onSelect={() => onSort("alpha")}>
-          <span className={cn(sort === "alpha" ? "text-primary" : "")}>Alphabetical</span>
+          <span className={cn(sort === "alpha" ? "text-primary" : "")}>
+            Alphabetical
+          </span>
         </DropdownMenuItem>
       </DropdownMenuContent>
     </DropdownMenu>

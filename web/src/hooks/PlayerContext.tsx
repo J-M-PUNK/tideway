@@ -71,7 +71,7 @@ type PlayerActions = Pick<
   | "cycleRepeat"
   | "setSleepTimer"
   | "clearSleepTimer"
-  | "playNext"
+  | "addToQueue"
   | "jumpTo"
   | "removeFromQueue"
   | "clearQueue"
@@ -147,7 +147,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       cycleRepeat: player.cycleRepeat,
       setSleepTimer: player.setSleepTimer,
       clearSleepTimer: player.clearSleepTimer,
-      playNext: player.playNext,
+      addToQueue: player.addToQueue,
       jumpTo: player.jumpTo,
       removeFromQueue: player.removeFromQueue,
       clearQueue: player.clearQueue,
@@ -164,7 +164,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       player.cycleRepeat,
       player.setSleepTimer,
       player.clearSleepTimer,
-      player.playNext,
+      player.addToQueue,
       player.jumpTo,
       player.removeFromQueue,
       player.clearQueue,

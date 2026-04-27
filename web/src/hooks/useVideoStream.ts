@@ -112,7 +112,12 @@ export function useVideoStream(
       .then((url) => {
         if (cancelled) return;
         if (url) setState({ url, error: null, loading: false });
-        else setState({ url: null, error: "No stream URL returned", loading: false });
+        else
+          setState({
+            url: null,
+            error: "No stream URL returned",
+            loading: false,
+          });
       })
       .catch((err) => {
         if (cancelled) return;

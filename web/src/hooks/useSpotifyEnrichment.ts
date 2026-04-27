@@ -82,7 +82,7 @@ export function useSpotifyTrackPlaycount(
     }
     return off;
   }, [key]);
-  return key ? playcountCache.get(key) ?? null : null;
+  return key ? (playcountCache.get(key) ?? null) : null;
 }
 
 export function useSpotifyArtistStats(
@@ -136,7 +136,7 @@ export function useSpotifyArtistStats(
     }
     return off;
   }, [key, tidalArtistId, tidalArtistName, sortedIsrcs.join(",")]);
-  return key ? statsCache.get(key) ?? null : null;
+  return key ? (statsCache.get(key) ?? null) : null;
 }
 
 const albumPlaysCache = new Map<string, AlbumPlays>();
@@ -185,7 +185,7 @@ export function useSpotifyAlbumTotalPlays(
     }
     return off;
   }, [key]);
-  return key ? albumPlaysCache.get(key) ?? null : null;
+  return key ? (albumPlaysCache.get(key) ?? null) : null;
 }
 
 // Gate — flipped by a settings callback or an availability probe

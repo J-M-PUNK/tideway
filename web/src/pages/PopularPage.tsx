@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import {
-  Flame,
   Music,
   Radio,
   Settings as SettingsIcon,
@@ -72,7 +71,6 @@ export function PopularPage({ onDownload }: { onDownload: OnDownload }) {
     return (
       <div>
         <ChartsNav />
-        <Header />
         <EmptyState
           icon={Radio}
           title="Connect Last.fm to browse global charts"
@@ -92,25 +90,11 @@ export function PopularPage({ onDownload }: { onDownload: OnDownload }) {
   return (
     <div>
       <ChartsNav />
-      <Header />
       <TabBar tab={tab} onChange={setTab} />
       <div className="mt-6">
         {tab === "artists" && <ChartArtists />}
         {tab === "tracks" && <ChartTracks onDownload={onDownload} />}
       </div>
-    </div>
-  );
-}
-
-function Header() {
-  return (
-    <div className="mb-6">
-      <h1 className="flex items-center gap-3 text-3xl font-bold tracking-tight">
-        <Flame className="h-7 w-7" /> Popular
-      </h1>
-      <p className="mt-1 text-sm text-muted-foreground">
-        What Last.fm's entire community is listening to right now.
-      </p>
     </div>
   );
 }
@@ -170,7 +154,13 @@ function ChartArtists() {
   }, []);
   if (!data) return <ArtistGridSkeleton />;
   if (data.length === 0) {
-    return <EmptyState icon={UserIcon} title="No data" description="Last.fm didn't return any results." />;
+    return (
+      <EmptyState
+        icon={UserIcon}
+        title="No data"
+        description="Last.fm didn't return any results."
+      />
+    );
   }
   return (
     <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6">
@@ -181,7 +171,13 @@ function ChartArtists() {
   );
 }
 
-function ArtistChartCard({ rank, artist }: { rank: number; artist: LastFmChartArtist }) {
+function ArtistChartCard({
+  rank,
+  artist,
+}: {
+  rank: number;
+  artist: LastFmChartArtist;
+}) {
   const navigate = useNavigate();
   const toast = useToast();
   const tidalId = useTidalArtistId(artist.name);
@@ -285,10 +281,9 @@ function ChartTracks({ onDownload }: { onDownload: OnDownload }) {
             // chart tracks that missed their playcount on an earlier
             // visit (Spotify throttle, release-week zero) get a retry
             // instead of sitting dark.
-            const { playcounts } = await api.spotify.trackPlaycounts(
-              lookup,
-              { refresh: true },
-            );
+            const { playcounts } = await api.spotify.trackPlaycounts(lookup, {
+              refresh: true,
+            });
             if (!cancelled) preseedSpotifyPlaycounts(playcounts);
           } catch {
             /* fine — per-row hooks will fall back to their own fetch */
@@ -305,9 +300,17 @@ function ChartTracks({ onDownload }: { onDownload: OnDownload }) {
 
   if (!data) return <TrackListSkeleton />;
   if (data.length === 0) {
-    return <EmptyState icon={Music} title="No data" description="Last.fm didn't return any results." />;
+    return (
+      <EmptyState
+        icon={Music}
+        title="No data"
+        description="Last.fm didn't return any results."
+      />
+    );
   }
-  return <TrackList tracks={data} onDownload={onDownload} numbered showPlaycount />;
+  return (
+    <TrackList tracks={data} onDownload={onDownload} numbered showPlaycount />
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -317,7 +320,8 @@ function ChartTracks({ onDownload }: { onDownload: OnDownload }) {
 function formatCompact(n: number): string {
   if (n < 1000) return n.toLocaleString();
   if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}K`;
-  if (n < 1_000_000_000) return `${(n / 1_000_000).toFixed(n < 10_000_000 ? 1 : 0)}M`;
+  if (n < 1_000_000_000)
+    return `${(n / 1_000_000).toFixed(n < 10_000_000 ? 1 : 0)}M`;
   return `${(n / 1_000_000_000).toFixed(1)}B`;
 }
 

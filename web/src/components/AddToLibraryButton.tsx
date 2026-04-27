@@ -32,9 +32,7 @@ export function AddToLibraryButton({
       title={liked ? "Remove from library" : "Add to library"}
       aria-pressed={liked}
     >
-      <Heart
-        className={cn("h-5 w-5", liked && "fill-primary text-primary")}
-      />
+      <Heart className={cn("h-5 w-5", liked && "fill-primary text-primary")} />
       <div className="text-xs font-semibold">{label}</div>
     </button>
   );
