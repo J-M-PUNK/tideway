@@ -151,10 +151,10 @@ export function FavoritesProvider({ children }: { children: ReactNode }) {
         if (already) await api.favorites.remove(kind, id);
         else await api.favorites.add(kind, id);
         // Notify other surfaces that depend on the full library/tracks
-        // payload (e.g. `useLikedTracksByArtist` on the artist page's
-        // "Liked songs" section) so they can refetch. The event is
-        // a low-cost broadcast; only listeners on a current artist
-        // page actually do anything with it.
+        // payload (e.g. `useLikedByArtist` on the artist page's
+        // "You Liked" section) so they can refetch. The event is a
+        // low-cost broadcast; only listeners on a current artist page
+        // actually do anything with it.
         window.dispatchEvent(new CustomEvent("tideway:favorite-toggled"));
       } catch (err) {
         // Only roll back if the current state still reflects *our* optimistic
