@@ -6,6 +6,7 @@ import type { Album, Artist, Video } from "@/api/types";
 import type { OnDownload } from "@/api/download";
 import { useApi } from "@/hooks/useApi";
 import { useColumnCount } from "@/hooks/useColumnCount";
+import { useLikedTracksByArtist } from "@/hooks/useLikedTracksByArtist";
 import { useVideoPlayer } from "@/hooks/useVideoPlayer";
 import { ArtistHero } from "@/components/ArtistHero";
 import { ArtistTopCities } from "@/components/ArtistTopCities";
@@ -28,6 +29,11 @@ export function ArtistDetail({ onDownload }: { onDownload: OnDownload }) {
   // mount like it used to.
   const { data: artist, loading, error } = useApi(() => api.artist(id), [id]);
   const [popularExpanded, setPopularExpanded] = useState(false);
+  // The user's liked tracks credited to this artist. Spotify renders
+  // this above Albums on the artist page; we mirror the same slot.
+  // Hook returns null while the first library/tracks fetch is in
+  // flight; we just don't render the section in that window.
+  const likedByArtist = useLikedTracksByArtist(artist?.id);
 
   if (loading) {
     return (
@@ -81,6 +87,25 @@ export function ArtistDetail({ onDownload }: { onDownload: OnDownload }) {
             >
               {popularExpanded ? "Show less" : "View more"}
             </button>
+          )}
+        </>
+      )}
+
+      {likedByArtist && likedByArtist.length > 0 && (
+        <>
+          <SectionHeader
+            title={`Songs you've liked${
+              likedByArtist.length > 5 ? ` · ${likedByArtist.length}` : ""
+            }`}
+          />
+          <TrackList
+            tracks={likedByArtist.slice(0, 5)}
+            onDownload={onDownload}
+          />
+          {likedByArtist.length > 5 && (
+            <div className="mb-8 mt-2">
+              <ViewMoreLink to={`/artist/${id}/all/liked`} />
+            </div>
           )}
         </>
       )}

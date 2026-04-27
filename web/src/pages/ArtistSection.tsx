@@ -4,6 +4,7 @@ import { api } from "@/api/client";
 import type { Album, Artist, Track, Video } from "@/api/types";
 import type { OnDownload } from "@/api/download";
 import { useApi } from "@/hooks/useApi";
+import { useLikedTracksByArtist } from "@/hooks/useLikedTracksByArtist";
 import { useVideoPlayer } from "@/hooks/useVideoPlayer";
 import { Grid } from "@/components/Grid";
 import { MediaCard } from "@/components/MediaCard";
@@ -18,11 +19,14 @@ export type ArtistSectionKey =
   | "eps"
   | "appears-on"
   | "similar"
-  | "videos";
+  | "videos"
+  | "liked";
 
 interface SectionMeta {
   title: string;
-  field: keyof ArtistData;
+  /** Field on the artist payload to read from. Set to `null` for
+   *  sections sourced from elsewhere (e.g. the user's library). */
+  field: keyof ArtistData | null;
   /** Render shape: tracks → TrackList; videos → video grid; media →
    *  MediaCard grid (albums and artists). Used by both the loading
    *  skeleton picker and the body dispatcher so the two stay in sync. */
@@ -36,6 +40,10 @@ const SECTIONS: Record<ArtistSectionKey, SectionMeta> = {
   "appears-on": { title: "Appears on", field: "appears_on", kind: "media" },
   similar: { title: "Fans also like", field: "similar", kind: "media" },
   videos: { title: "Videos", field: "videos", kind: "videos" },
+  // Liked songs aren't in the artist payload — they come from the
+  // user's library filtered by artist. Field is null and the body
+  // dispatcher pulls from `useLikedTracksByArtist` below.
+  liked: { title: "Songs you've liked", field: null, kind: "tracks" },
 };
 
 interface ArtistData {
@@ -60,6 +68,11 @@ export function ArtistSection({ onDownload }: { onDownload: OnDownload }) {
   }>();
   const { data: artist, loading, error } = useApi(() => api.artist(id), [id]);
   const meta = SECTIONS[section as ArtistSectionKey];
+  // Liked-songs source: pull from the user's library filtered to this
+  // artist. Returns null while the library fetch is loading. The
+  // dispatcher below takes precedence over the artist-payload field
+  // when meta.field is null (i.e. the "liked" section).
+  const likedByArtist = useLikedTracksByArtist(artist?.id);
 
   if (!meta) {
     return <ErrorView error={`Unknown artist section "${section}"`} />;
@@ -80,11 +93,18 @@ export function ArtistSection({ onDownload }: { onDownload: OnDownload }) {
     return <ErrorView error={error ?? "Artist not found"} />;
   }
 
-  const items = (artist as unknown as ArtistData)[meta.field] as
-    | Track[]
-    | Album[]
-    | Artist[]
-    | Video[];
+  const items: Track[] | Album[] | Artist[] | Video[] =
+    meta.field === null
+      ? // liked-songs section sources from the library filter, not the
+        // artist payload. While the filter is in flight we render
+        // empty — the loading skeleton above handles the initial
+        // window for the artist payload itself.
+        (likedByArtist ?? [])
+      : ((artist as unknown as ArtistData)[meta.field] as
+          | Track[]
+          | Album[]
+          | Artist[]
+          | Video[]);
 
   return (
     <div>
