@@ -169,6 +169,16 @@ class PCMPlayer:
         # a no-op while this is on. User attenuates via DAC/OS instead
         # so bit-depth isn't scaled away before the stream leaves us.
         self._force_volume: bool = False
+        # Set True around any code path that intentionally stops the
+        # current OutputStream because it's about to open a fresh
+        # one in its place (set_output_device, exclusive-mode flip,
+        # cross-rate gapless bridge). The finished_callback that
+        # sounddevice fires from `stream.stop()` checks this flag and
+        # skips its end-of-track / device-loss logic so a transient
+        # stream replacement doesn't show up to the frontend as
+        # `state="ended"` or trigger device-loss recovery against
+        # a perfectly healthy device.
+        self._replacing_stream: bool = False
 
         # Remembered source for restart-based seek. For DASH streams
         # we store the full URL list (index 0 = init segment, 1+ =
@@ -836,26 +846,38 @@ class PCMPlayer:
             # device. The decoder thread keeps filling the PCM
             # queue in the background, so the new stream picks up
             # where the old one left off after its first callback.
-            try:
-                current_stream.stop()
-            except Exception:
-                pass
-            try:
-                current_stream.close()
-            except Exception:
-                pass
+            #
+            # `_replacing_stream` muzzles the finished_callback that
+            # `stream.stop()` triggers — without it, the callback
+            # would interpret the stop as a natural end-of-track and
+            # transition state to "ended" mid-swap, briefly telling
+            # the frontend playback finished.
             with self._lock:
-                self._stream = None
-                # Reset the callback's mid-frame carry so the
-                # first post-reopen callback starts on a fresh
-                # chunk boundary — otherwise we could re-emit a
-                # partial chunk of already-played samples.
-                self._callback_carry = None
-                self._open_output_stream(sample_rate, channels, sd_dtype)
+                self._replacing_stream = True
             try:
-                self._stream.start()
-            except Exception:
-                log.exception("set_output_device: stream start failed")
+                try:
+                    current_stream.stop()
+                except Exception:
+                    pass
+                try:
+                    current_stream.close()
+                except Exception:
+                    pass
+                with self._lock:
+                    self._stream = None
+                    # Reset the callback's mid-frame carry so the
+                    # first post-reopen callback starts on a fresh
+                    # chunk boundary — otherwise we could re-emit a
+                    # partial chunk of already-played samples.
+                    self._callback_carry = None
+                    self._open_output_stream(sample_rate, channels, sd_dtype)
+                try:
+                    self._stream.start()
+                except Exception:
+                    log.exception("set_output_device: stream start failed")
+            finally:
+                with self._lock:
+                    self._replacing_stream = False
 
     def set_exclusive_mode(self, enabled: bool) -> None:
         """Flip exclusive-mode on the audio output stream. If a stream
@@ -883,22 +905,30 @@ class PCMPlayer:
             ):
                 return
 
-            try:
-                current_stream.stop()
-            except Exception:
-                pass
-            try:
-                current_stream.close()
-            except Exception:
-                pass
+            # Same intentional-stop muzzle as set_output_device — see
+            # the comment there.
             with self._lock:
-                self._stream = None
-                self._callback_carry = None
-                self._open_output_stream(sample_rate, channels, sd_dtype)
+                self._replacing_stream = True
             try:
-                self._stream.start()
-            except Exception:
-                log.exception("set_exclusive_mode: stream start failed")
+                try:
+                    current_stream.stop()
+                except Exception:
+                    pass
+                try:
+                    current_stream.close()
+                except Exception:
+                    pass
+                with self._lock:
+                    self._stream = None
+                    self._callback_carry = None
+                    self._open_output_stream(sample_rate, channels, sd_dtype)
+                try:
+                    self._stream.start()
+                except Exception:
+                    log.exception("set_exclusive_mode: stream start failed")
+            finally:
+                with self._lock:
+                    self._replacing_stream = False
 
     def snapshot(self) -> PlayerSnapshot:
         with self._lock:
@@ -1819,11 +1849,21 @@ class PCMPlayer:
         return True
 
     def _on_stream_finished(self) -> None:
-        # Called by sounddevice when the stream ends — either from
-        # CallbackStop (natural EOF) or from stream.stop() during
-        # teardown. _teardown() sets state to idle FIRST, so we can
-        # distinguish: idle here means user-initiated stop; anything
-        # else means the track ended naturally.
+        # Called by sounddevice when the stream ends. Three reasons it
+        # might fire:
+        #   1. Natural EOF — callback raised CallbackStop because the
+        #      decoder finished and the queue drained.
+        #   2. Intentional stream replacement (set_output_device,
+        #      set_exclusive_mode, cross-rate bridge) — `_replacing_
+        #      stream` is set; ignore this firing entirely, the
+        #      replacement code is opening a new stream right now.
+        #   3. Device loss — headphones unplugged, USB DAC pulled,
+        #      Bluetooth out of range. PortAudio aborts the stream
+        #      because the underlying CoreAudio device is gone, but
+        #      our decoder still has frames buffered. Recover by
+        #      reopening on the system default so playback continues
+        #      on speakers without pausing — that's how every other
+        #      streaming app behaves and what users expect.
         #
         # Capture AND clear the preload pointer under the same lock
         # acquisition so a concurrent _drop_preload on the HTTP
@@ -1836,7 +1876,29 @@ class PCMPlayer:
         with self._lock:
             if self._state in ("idle", "error"):
                 return
+            if self._replacing_stream:
+                # Intentional stream swap — see set_output_device /
+                # set_exclusive_mode. Don't transition state; don't
+                # trigger device-loss recovery.
+                return
+            # Device-loss heuristic: the stream ended but the decoder
+            # still has frames ready to play. Natural EOF requires
+            # `_decoder_done.is_set()`; if it isn't set, something
+            # cut us off mid-track. The most common cause is the
+            # output device disappearing.
+            decoder_done = self._decoder_done.is_set()
+            was_playing = self._state == "playing"
             pre = self._preload
+            if pre is None and was_playing and not decoder_done:
+                # Recovery runs off-thread because the finished_callback
+                # runs on sounddevice's own thread which we shouldn't
+                # re-enter stream machinery from.
+                threading.Thread(
+                    target=self._recover_from_device_loss,
+                    name="pcm-device-recovery",
+                    daemon=True,
+                ).start()
+                return
             self._preload = None
 
         # Cross-rate bridge: preload exists but has a different
@@ -1857,6 +1919,87 @@ class PCMPlayer:
         with self._lock:
             self._transition("ended")
         self._emit()
+
+    def _recover_from_device_loss(self) -> None:
+        """Reopen the output stream on the system default when the
+        currently-selected device disappears mid-playback. Standard
+        streaming-app behavior: unplug headphones, audio keeps
+        playing on speakers, no manual user action required.
+
+        The decoder thread is still running and feeding the PCM
+        queue, so once we open a fresh stream and start it the
+        first callback drains the queued frames and audio resumes.
+        Brief silence (~50 ms) while CoreAudio renegotiates the
+        new device, same as a manual device switch.
+        """
+        with self._pipeline_lock:
+            with self._lock:
+                # Bail if state moved on between the finished_callback
+                # and us acquiring the lock — user pressed stop, a
+                # natural EOF arrived, error path fired, etc.
+                if self._state in ("idle", "error", "ended"):
+                    return
+                if self._stream is None:
+                    return
+                sample_rate = self._stream_sample_rate
+                channels = self._stream_channels
+                sd_dtype = self._stream_sd_dtype
+                old_stream = self._stream
+                self._stream = None
+                self._callback_carry = None
+                # Drop the explicit device pin — the user's selected
+                # device is gone, so route to whatever the system
+                # default is now (CoreAudio promotes to internal
+                # speakers when headphones unplug). The next time the
+                # user opens the device picker they'll see the live
+                # list and can re-select if they want.
+                self._selected_device_id = ""
+                self._replacing_stream = True
+
+            if (
+                sample_rate is None
+                or channels is None
+                or sd_dtype is None
+            ):
+                with self._lock:
+                    self._replacing_stream = False
+                return
+
+            try:
+                old_stream.close()
+            except Exception:
+                pass
+
+            # Force PortAudio to re-enumerate CoreAudio so the new
+            # default device is visible. Same trick the device-list
+            # endpoint uses when no stream is active.
+            try:
+                sd._terminate()
+            except Exception:
+                pass
+            try:
+                sd._initialize()
+            except Exception:
+                log.exception("device-loss recovery: PortAudio reinit failed")
+
+            try:
+                with self._lock:
+                    self._open_output_stream(sample_rate, channels, sd_dtype)
+                self._stream.start()
+                log.info(
+                    "device-loss recovery: reopened on system default "
+                    "(rate=%d, channels=%d)",
+                    sample_rate, channels,
+                )
+            except Exception:
+                log.exception("device-loss recovery: failed to reopen stream")
+                with self._lock:
+                    self._transition("error")
+                    self._stream = None
+                self._emit()
+            finally:
+                with self._lock:
+                    self._replacing_stream = False
 
     def _bridge_to_preload(self, pre: _Preload) -> None:
         """Stream re-open + swap for a cross-rate preload. Produces
