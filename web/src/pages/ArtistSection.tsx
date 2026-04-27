@@ -4,7 +4,7 @@ import { api } from "@/api/client";
 import type { Album, Artist, Track, Video } from "@/api/types";
 import type { OnDownload } from "@/api/download";
 import { useApi } from "@/hooks/useApi";
-import { useLikedTracksByArtist } from "@/hooks/useLikedTracksByArtist";
+import { useLikedByArtist } from "@/hooks/useLikedByArtist";
 import { useVideoPlayer } from "@/hooks/useVideoPlayer";
 import { Grid } from "@/components/Grid";
 import { MediaCard } from "@/components/MediaCard";
@@ -28,9 +28,10 @@ interface SectionMeta {
    *  sections sourced from elsewhere (e.g. the user's library). */
   field: keyof ArtistData | null;
   /** Render shape: tracks → TrackList; videos → video grid; media →
-   *  MediaCard grid (albums and artists). Used by both the loading
-   *  skeleton picker and the body dispatcher so the two stay in sync. */
-  kind: "tracks" | "videos" | "media";
+   *  MediaCard grid (albums and artists); liked → hearted albums
+   *  grid + hearted tracks list. Used by both the loading skeleton
+   *  picker and the body dispatcher so the two stay in sync. */
+  kind: "tracks" | "videos" | "media" | "liked";
 }
 
 const SECTIONS: Record<ArtistSectionKey, SectionMeta> = {
@@ -40,10 +41,13 @@ const SECTIONS: Record<ArtistSectionKey, SectionMeta> = {
   "appears-on": { title: "Appears on", field: "appears_on", kind: "media" },
   similar: { title: "Fans also like", field: "similar", kind: "media" },
   videos: { title: "Videos", field: "videos", kind: "videos" },
-  // Liked songs aren't in the artist payload — they come from the
-  // user's library filtered by artist. Field is null and the body
-  // dispatcher pulls from `useLikedTracksByArtist` below.
-  liked: { title: "Songs you've liked", field: null, kind: "tracks" },
+  // Liked content isn't in the artist payload — comes from the
+  // user's library filtered by artist. The custom render path
+  // (kind: "liked") shows hearted albums on top of hearted tracks
+  // so both surfaces are reachable from one place. The page-level
+  // h1 reads "Liked from [Artist]" (computed below); this `title`
+  // is the bare fallback used by the loading skeleton.
+  liked: { title: "Liked", field: null, kind: "liked" },
 };
 
 interface ArtistData {
@@ -68,11 +72,9 @@ export function ArtistSection({ onDownload }: { onDownload: OnDownload }) {
   }>();
   const { data: artist, loading, error } = useApi(() => api.artist(id), [id]);
   const meta = SECTIONS[section as ArtistSectionKey];
-  // Liked-songs source: pull from the user's library filtered to this
-  // artist. Returns null while the library fetch is loading. The
-  // dispatcher below takes precedence over the artist-payload field
-  // when meta.field is null (i.e. the "liked" section).
-  const likedByArtist = useLikedTracksByArtist(artist?.id);
+  // Liked source: pull from the user's library filtered to this
+  // artist. Returns null while the library fetch is loading.
+  const liked = useLikedByArtist(artist?.id);
 
   if (!meta) {
     return <ErrorView error={`Unknown artist section "${section}"`} />;
@@ -81,7 +83,7 @@ export function ArtistSection({ onDownload }: { onDownload: OnDownload }) {
     return (
       <div>
         <h1 className="mb-6 text-3xl font-bold tracking-tight">{meta.title}</h1>
-        {meta.kind === "tracks" ? (
+        {meta.kind === "tracks" || meta.kind === "liked" ? (
           <TrackListSkeleton count={10} />
         ) : (
           <GridSkeleton count={12} />
@@ -93,29 +95,102 @@ export function ArtistSection({ onDownload }: { onDownload: OnDownload }) {
     return <ErrorView error={error ?? "Artist not found"} />;
   }
 
-  const items: Track[] | Album[] | Artist[] | Video[] =
-    meta.field === null
-      ? // liked-songs section sources from the library filter, not the
-        // artist payload. While the filter is in flight we render
-        // empty — the loading skeleton above handles the initial
-        // window for the artist payload itself.
-        (likedByArtist ?? [])
-      : ((artist as unknown as ArtistData)[meta.field] as
-          | Track[]
-          | Album[]
-          | Artist[]
-          | Video[]);
+  // Header for the liked-section concatenates the artist name into
+  // the h1 instead of using the artist eyebrow above it. Reads as
+  // "things you liked from this artist" — works whether the page
+  // shows tracks, albums, or both, unlike the literal "Liked
+  // Songs by [Artist]" which mismatches when albums are also
+  // shown.
+  const isLiked = meta.kind === "liked";
+  const headerTitle = isLiked ? `Liked from ${artist.name}` : meta.title;
 
   return (
     <div>
       <div className="mb-6">
-        <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
-          {artist.name}
-        </div>
-        <h1 className="mt-1 text-3xl font-bold tracking-tight">{meta.title}</h1>
+        {!isLiked && (
+          <div className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+            {artist.name}
+          </div>
+        )}
+        <h1
+          className={
+            isLiked
+              ? "text-3xl font-bold tracking-tight"
+              : "mt-1 text-3xl font-bold tracking-tight"
+          }
+        >
+          {headerTitle}
+        </h1>
       </div>
-      <SectionBody kind={meta.kind} items={items} onDownload={onDownload} />
+      {meta.kind === "liked" ? (
+        <LikedBody
+          tracks={liked?.tracks ?? []}
+          albums={liked?.albums ?? []}
+          onDownload={onDownload}
+        />
+      ) : (
+        <SectionBody
+          kind={meta.kind}
+          items={
+            ((artist as unknown as ArtistData)[
+              meta.field as keyof ArtistData
+            ] ?? []) as Track[] | Album[] | Artist[] | Video[]
+          }
+          onDownload={onDownload}
+        />
+      )}
     </div>
+  );
+}
+
+/**
+ * Liked-section body: hearted albums on top (when present), then a
+ * track list. Empty state when the user has neither — though the
+ * artist page only links here when at least one is non-empty, so
+ * this is mostly defensive.
+ */
+function LikedBody({
+  tracks,
+  albums,
+  onDownload,
+}: {
+  tracks: Track[];
+  albums: Album[];
+  onDownload: OnDownload;
+}) {
+  if (tracks.length === 0 && albums.length === 0) {
+    return (
+      <p className="text-sm text-muted-foreground">
+        Nothing liked from this artist yet.
+      </p>
+    );
+  }
+  return (
+    <>
+      {albums.length > 0 && (
+        <div className="mb-10">
+          <h2 className="mb-4 text-lg font-bold tracking-tight">Albums</h2>
+          <Grid>
+            {albums.map((a) => (
+              <MediaCard key={a.id} item={a} onDownload={onDownload} />
+            ))}
+          </Grid>
+        </div>
+      )}
+      {tracks.length > 0 && (
+        <div>
+          {albums.length > 0 && (
+            <h2 className="mb-4 text-lg font-bold tracking-tight">Songs</h2>
+          )}
+          <TrackList
+            tracks={tracks}
+            onDownload={onDownload}
+            numbered
+            showAlbum
+          />
+        </div>
+      )}
+    </>
   );
 }
 
