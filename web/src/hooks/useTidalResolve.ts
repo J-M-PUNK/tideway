@@ -30,7 +30,9 @@ function notifyArtist(key: string) {
 async function resolveArtistId(name: string): Promise<string | null> {
   try {
     const res = await api.search(name, 10);
-    const exact = res.artists.find((a) => a.name.toLowerCase() === name.toLowerCase());
+    const exact = res.artists.find(
+      (a) => a.name.toLowerCase() === name.toLowerCase(),
+    );
     return (exact ?? res.artists[0])?.id ?? null;
   } catch {
     return null;
@@ -85,7 +87,10 @@ function notifyTrack(key: string) {
   trackSubs.get(key)?.forEach((fn) => fn());
 }
 
-async function resolveTrack(title: string, artist: string): Promise<Track | null> {
+async function resolveTrack(
+  title: string,
+  artist: string,
+): Promise<Track | null> {
   try {
     const res = await api.search(`${artist} ${title}`, 5);
     return findBestMatch(res.tracks, { track: title, artist });

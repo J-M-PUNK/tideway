@@ -41,7 +41,7 @@ function fetchOnce(trackId: string): Promise<Lyrics> {
   if (existing) return existing;
   const promise = api
     .trackLyrics(trackId)
-    .catch(() => ({ synced: null, text: null } as Lyrics))
+    .catch(() => ({ synced: null, text: null }) as Lyrics)
     .then((lyrics) => {
       cache.set(trackId, lyrics);
       notify(trackId);
@@ -72,12 +72,14 @@ export function useLyrics(trackId: string | null | undefined): {
     const cached = cache.has(trackId);
     // Subscribe first so we don't miss a notification if the fetch resolves
     // between our cache check and our subscription.
-    const unsubscribe = subscribeTrack(trackId, () => forceRender((n) => n + 1));
+    const unsubscribe = subscribeTrack(trackId, () =>
+      forceRender((n) => n + 1),
+    );
     if (!cached) fetchOnce(trackId);
     return unsubscribe;
   }, [trackId]);
 
-  const lyrics = trackId ? cache.get(trackId) ?? null : null;
+  const lyrics = trackId ? (cache.get(trackId) ?? null) : null;
   // Treat as loading whenever we have a trackId and no cache entry yet,
   // regardless of whether the in-flight request has been registered by
   // our effect. Otherwise the very first render (before the effect

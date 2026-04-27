@@ -85,14 +85,25 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   );
 }
 
-function ToastView({ toast, onDismiss }: { toast: Toast; onDismiss: () => void }) {
+function ToastView({
+  toast,
+  onDismiss,
+}: {
+  toast: Toast;
+  onDismiss: () => void;
+}) {
   const [entering, setEntering] = useState(true);
   useEffect(() => {
     const t = window.setTimeout(() => setEntering(false), 10);
     return () => window.clearTimeout(t);
   }, []);
 
-  const Icon = toast.kind === "success" ? CheckCircle2 : toast.kind === "error" ? XCircle : Info;
+  const Icon =
+    toast.kind === "success"
+      ? CheckCircle2
+      : toast.kind === "error"
+        ? XCircle
+        : Info;
   const tint =
     toast.kind === "success"
       ? "text-primary"

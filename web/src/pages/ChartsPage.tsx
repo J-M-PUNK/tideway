@@ -18,7 +18,6 @@ type ChartKey = "new" | "rising" | "top";
 
 interface ChartSpec {
   title: string;
-  subtitle: string;
   icon: LucideIcon;
   path: string;
 }
@@ -26,19 +25,16 @@ interface ChartSpec {
 const CHARTS: Record<ChartKey, ChartSpec> = {
   new: {
     title: "New Releases",
-    subtitle: "Fresh albums and tracks Tidal's editors are highlighting.",
     icon: Newspaper,
     path: "pages/explore_new_music",
   },
   rising: {
     title: "Tidal Rising",
-    subtitle: "Up-and-coming artists gaining traction.",
     icon: Flame,
     path: "pages/rising",
   },
   top: {
     title: "Top Charts",
-    subtitle: "What's popular right now.",
     icon: TrendingUp,
     path: "pages/explore_top_music",
   },
@@ -47,9 +43,11 @@ const CHARTS: Record<ChartKey, ChartSpec> = {
 export function ChartsPage({ onDownload }: { onDownload: OnDownload }) {
   const { chart = "new" } = useParams<{ chart: ChartKey }>();
   const spec = CHARTS[chart as ChartKey] ?? CHARTS.new;
-  const { data, loading, error } = useApi(() => api.pagePath(spec.path), [spec.path]);
+  const { data, loading, error } = useApi(
+    () => api.pagePath(spec.path),
+    [spec.path],
+  );
 
-  const Icon = spec.icon;
   // New Releases stays standalone; only Top and Rising share the
   // Charts tab strip (Popular lives on its own route).
   const showChartsNav = chart === "top" || chart === "rising";
@@ -58,37 +56,17 @@ export function ChartsPage({ onDownload }: { onDownload: OnDownload }) {
     return (
       <div>
         {showChartsNav && <ChartsNav />}
-        <Header icon={Icon} title={spec.title} subtitle={spec.subtitle} />
         <GridSkeleton count={12} />
       </div>
     );
   }
-  if (error || !data) return <ErrorView error={error ?? `Couldn't load ${spec.title}`} />;
+  if (error || !data)
+    return <ErrorView error={error ?? `Couldn't load ${spec.title}`} />;
 
   return (
     <div>
       {showChartsNav && <ChartsNav />}
-      <Header icon={Icon} title={spec.title} subtitle={spec.subtitle} />
       <PageView page={data} onDownload={onDownload} />
-    </div>
-  );
-}
-
-function Header({
-  icon: Icon,
-  title,
-  subtitle,
-}: {
-  icon: LucideIcon;
-  title: string;
-  subtitle: string;
-}) {
-  return (
-    <div className="mb-8">
-      <h1 className="flex items-center gap-3 text-3xl font-bold tracking-tight">
-        <Icon className="h-7 w-7" /> {title}
-      </h1>
-      <p className="mt-1 text-sm text-muted-foreground">{subtitle}</p>
     </div>
   );
 }

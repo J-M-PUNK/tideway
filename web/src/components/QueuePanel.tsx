@@ -6,7 +6,13 @@ import { useIsDownloaded } from "@/hooks/useDownloadedSet";
 import { usePlayerActions, usePlayerMeta } from "@/hooks/PlayerContext";
 import { cn } from "@/lib/utils";
 
-export function QueuePanel({ open, onClose }: { open: boolean; onClose: () => void }) {
+export function QueuePanel({
+  open,
+  onClose,
+}: {
+  open: boolean;
+  onClose: () => void;
+}) {
   const { track, queue, queueIndex } = usePlayerMeta();
   const actions = usePlayerActions();
   const current = queueIndex;
@@ -47,7 +53,12 @@ export function QueuePanel({ open, onClose }: { open: boolean; onClose: () => vo
                 <Trash2 className="h-3 w-3" /> Clear
               </Button>
             )}
-            <Button variant="ghost" size="icon" className="h-7 w-7" onClick={onClose}>
+            <Button
+              variant="ghost"
+              size="icon"
+              className="h-7 w-7"
+              onClick={onClose}
+            >
               <X className="h-4 w-4" />
             </Button>
           </div>

@@ -37,6 +37,25 @@ export function AlbumDetail({ onDownload }: { onDownload: OnDownload }) {
       prefetchMany(album.tracks.map((t) => t.id));
     }
   }, [album, prefetchMany]);
+  // Prefetch the primary artist's detail payload as soon as the
+  // album loads. The backend's artist endpoint fans out 10 Tidal
+  // calls and takes ~1s on a cold load; clicking the artist name
+  // from the album page is one of the most common navigations, so
+  // warming the backend's 5-minute artist-detail cache here makes
+  // that click feel instant. Fire-and-forget — we don't surface the
+  // result here, the next /api/artist/<id> call just hits the warm
+  // cache. Run on a microtask so it doesn't compete with the other
+  // first-paint network calls (cover image, etc).
+  const primaryArtistId = album?.artists?.[0]?.id ?? null;
+  useEffect(() => {
+    if (!primaryArtistId) return;
+    const handle = window.setTimeout(() => {
+      api.artist(primaryArtistId).catch(() => {
+        /* prefetch is best-effort */
+      });
+    }, 0);
+    return () => window.clearTimeout(handle);
+  }, [primaryArtistId]);
   // Tidal-style Credits "tab": toggling the Credits button swaps the
   // normal TrackList body for a 2-column grid of per-track credits.
   const [showingCredits, setShowingCredits] = useState(false);
@@ -263,13 +282,7 @@ function SingleRowSection({
           // orphan item on row 2. Column counts: base=2, sm=3, md=4,
           // lg=5, 2xl=6, matched by the responsive hide/show classes
           // on each item.
-          <div
-            key={it.id}
-            className={cn(
-              ROW_ITEM_VISIBILITY[i],
-              "min-w-0",
-            )}
-          >
+          <div key={it.id} className={cn(ROW_ITEM_VISIBILITY[i], "min-w-0")}>
             <MediaCard item={it} onDownload={onDownload} />
           </div>
         ))}
@@ -393,15 +406,16 @@ function AlbumPlaycountBadge({
   return (
     <>
       {totalPlays > 0 && (
-        <span title={`Summed Spotify play count across ${spotify?.resolved ?? 0} of ${spotify?.total ?? 0} tracks`}>
+        <span
+          title={`Summed Spotify play count across ${spotify?.resolved ?? 0} of ${spotify?.total ?? 0} tracks`}
+        >
           {formatCompact(totalPlays)}
           {partial ? "+" : ""} total plays
         </span>
       )}
       {user > 0 && (
         <span className="text-primary">
-          you've played {user.toLocaleString()}{" "}
-          {user === 1 ? "time" : "times"}
+          you've played {user.toLocaleString()} {user === 1 ? "time" : "times"}
         </span>
       )}
     </>
@@ -411,7 +425,8 @@ function AlbumPlaycountBadge({
 function formatCompact(n: number): string {
   if (n < 1000) return n.toLocaleString();
   if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}K`;
-  if (n < 1_000_000_000) return `${(n / 1_000_000).toFixed(n < 10_000_000 ? 1 : 0)}M`;
+  if (n < 1_000_000_000)
+    return `${(n / 1_000_000).toFixed(n < 10_000_000 ? 1 : 0)}M`;
   return `${(n / 1_000_000_000).toFixed(1)}B`;
 }
 
@@ -466,7 +481,8 @@ function AlbumReview({ review }: { review: string }) {
   // Strip Tidal's inline `[wimpLink]` anchors. Memoized so rerenders of the
   // parent don't re-regex the same string.
   const cleaned = useMemo(
-    () => review.replace(/\[wimpLink[^\]]*\]/g, "").replace(/\[\/wimpLink\]/g, ""),
+    () =>
+      review.replace(/\[wimpLink[^\]]*\]/g, "").replace(/\[\/wimpLink\]/g, ""),
     [review],
   );
   return (

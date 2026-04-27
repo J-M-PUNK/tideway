@@ -51,7 +51,11 @@ export function AddUrlDialog({ trigger }: { trigger?: React.ReactNode }) {
       await api.downloads.enqueueUrl(url.trim(), quality || undefined);
       setUrl("");
       setOpen(false);
-      toast.show({ kind: "success", title: "Queued", description: "Added to downloads." });
+      toast.show({
+        kind: "success",
+        title: "Queued",
+        description: "Added to downloads.",
+      });
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -72,7 +76,8 @@ export function AddUrlDialog({ trigger }: { trigger?: React.ReactNode }) {
         <DialogHeader>
           <DialogTitle>Download from Tidal URL</DialogTitle>
           <DialogDescription>
-            Paste any tidal.com link — track, album, or playlist — to enqueue it.
+            Paste any tidal.com link — track, album, or playlist — to enqueue
+            it.
           </DialogDescription>
         </DialogHeader>
         <form
@@ -117,7 +122,11 @@ export function AddUrlDialog({ trigger }: { trigger?: React.ReactNode }) {
           {error && <p className="text-xs text-destructive">{error}</p>}
 
           <div className="flex justify-end gap-2">
-            <Button type="button" variant="ghost" onClick={() => setOpen(false)}>
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={() => setOpen(false)}
+            >
               Cancel
             </Button>
             <Button type="submit" disabled={submitting || !url.trim()}>

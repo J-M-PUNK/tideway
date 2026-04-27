@@ -94,16 +94,24 @@ async function req<T>(path: string, init?: RequestInit): Promise<T> {
 export const api = {
   auth: {
     status: () => req<AuthStatus>("/api/auth/status"),
-    loginStart: () => req<{ url: string; user_code: string }>("/api/auth/login/start", { method: "POST" }),
+    loginStart: () =>
+      req<{ url: string; user_code: string }>("/api/auth/login/start", {
+        method: "POST",
+      }),
     loginPoll: () =>
-      req<{ status: "idle" | "pending" | "ok" | "failed"; username?: string }>("/api/auth/login/poll"),
+      req<{ status: "idle" | "pending" | "ok" | "failed"; username?: string }>(
+        "/api/auth/login/poll",
+      ),
     logout: () => req<{ ok: true }>("/api/auth/logout", { method: "POST" }),
     pkceUrl: () => req<{ url: string }>("/api/auth/pkce/url"),
     pkceComplete: (redirect_url: string) =>
-      req<{ status: "ok"; username: string | null }>("/api/auth/pkce/complete", {
-        method: "POST",
-        body: JSON.stringify({ redirect_url }),
-      }),
+      req<{ status: "ok"; username: string | null }>(
+        "/api/auth/pkce/complete",
+        {
+          method: "POST",
+          body: JSON.stringify({ redirect_url }),
+        },
+      ),
     /** Ask the desktop shell to open a pywebview child window at
      *  Tidal's PKCE login URL and auto-capture the post-signin
      *  redirect. Returns `supported: false` when running in plain
@@ -119,9 +127,11 @@ export const api = {
      *  bail out of the waiting spinner and show the paste fallback
      *  without waiting for the 10-minute timeout. */
     inappLoginState: () =>
-      req<{ phase: "idle" | "active" | "aborted_sso" | "closed" | "unauthorized" }>(
-        "/api/auth/login/inapp/state",
-      ).catch(() => ({ phase: "idle" as const })),
+      req<{
+        phase: "idle" | "active" | "aborted_sso" | "closed" | "unauthorized";
+      }>("/api/auth/login/inapp/state").catch(() => ({
+        phase: "idle" as const,
+      })),
   },
   /** Open a Tidal URL in the user's default system browser. Exists
    *  because `window.open` for external URLs is silently dropped in
@@ -221,19 +231,13 @@ export const api = {
         `/api/lastfm/weekly-scrobbles?weeks=${weeks}`,
       ),
     chartTopArtists: (limit = 50) =>
-      req<LastFmChartArtist[]>(
-        `/api/lastfm/chart/top-artists?limit=${limit}`,
-      ),
+      req<LastFmChartArtist[]>(`/api/lastfm/chart/top-artists?limit=${limit}`),
     chartTopTracks: (limit = 50) =>
-      req<LastFmChartTrack[]>(
-        `/api/lastfm/chart/top-tracks?limit=${limit}`,
-      ),
+      req<LastFmChartTrack[]>(`/api/lastfm/chart/top-tracks?limit=${limit}`),
     /** Last.fm top tracks pre-resolved to Tidal Track objects. One
      *  round-trip instead of the N+1 resolve-on-client pattern. */
     chartTopTracksResolved: (limit = 50) =>
-      req<Track[]>(
-        `/api/lastfm/chart/top-tracks-resolved?limit=${limit}`,
-      ),
+      req<Track[]>(`/api/lastfm/chart/top-tracks-resolved?limit=${limit}`),
     chartTopTags: (limit = 50) =>
       req<LastFmChartTag[]>(`/api/lastfm/chart/top-tags?limit=${limit}`),
     nowPlaying: (track: {
@@ -563,10 +567,7 @@ export const api = {
           matched: number;
         }>(`/api/import/spotify/${kind}/match`, { method: "POST" }),
     },
-    favorite: (
-      kind: "track" | "album" | "artist",
-      ids: string[],
-    ) =>
+    favorite: (kind: "track" | "album" | "artist", ids: string[]) =>
       req<{ kind: string; added: number; failed: number }>(
         "/api/import/favorite",
         {
@@ -576,7 +577,8 @@ export const api = {
       ),
   },
   user: {
-    profile: (id: string) => req<TidalUser>(`/api/user/${encodeURIComponent(id)}`),
+    profile: (id: string) =>
+      req<TidalUser>(`/api/user/${encodeURIComponent(id)}`),
     playlists: (id: string) =>
       req<Playlist[]>(`/api/user/${encodeURIComponent(id)}/playlists`),
     followers: (id: string) =>
@@ -628,11 +630,19 @@ export const api = {
       }),
   },
   mixes: () =>
-    req<{ kind: "mix"; id: string; name: string; subtitle: string; cover: string | null }[]>(
-      "/api/mixes",
-    ),
+    req<
+      {
+        kind: "mix";
+        id: string;
+        name: string;
+        subtitle: string;
+        cover: string | null;
+      }[]
+    >("/api/mixes"),
   search: (q: string, limit = 20) =>
-    req<SearchResponse>(`/api/search?q=${encodeURIComponent(q)}&limit=${limit}`),
+    req<SearchResponse>(
+      `/api/search?q=${encodeURIComponent(q)}&limit=${limit}`,
+    ),
   library: {
     tracks: () => req<Track[]>("/api/library/tracks"),
     albums: () => req<Album[]>("/api/library/albums"),
@@ -672,7 +682,10 @@ export const api = {
       movePlaylists: (folderId: string, playlistIds: string[]) =>
         req<{ ok: boolean }>(
           `/api/library/folders/${encodeURIComponent(folderId)}/playlists`,
-          { method: "POST", body: JSON.stringify({ playlist_ids: playlistIds }) },
+          {
+            method: "POST",
+            body: JSON.stringify({ playlist_ids: playlistIds }),
+          },
         ),
     },
   },
@@ -708,8 +721,7 @@ export const api = {
     }),
   videoDownloadStatus: (id: string) =>
     req<VideoDownloadJob>(`/api/video/${id}/download`),
-  videoDownloadsList: () =>
-    req<VideoDownloadJob[]>(`/api/video/downloads`),
+  videoDownloadsList: () => req<VideoDownloadJob[]>(`/api/video/downloads`),
   /** Open the OS file manager with the given path highlighted.
    *  No-ops silently in plain browser mode. */
   revealInFinder: (path: string) =>
@@ -720,9 +732,7 @@ export const api = {
   playlist: (id: string) => req<PlaylistDetail>(`/api/playlist/${id}`),
   mix: (id: string) => req<MixDetail>(`/api/mix/${encodeURIComponent(id)}`),
   track: (id: string) => req<Track>(`/api/track/${id}`),
-  lastfmTrackPlaycountsBatch: (
-    items: { artist: string; track: string }[],
-  ) =>
+  lastfmTrackPlaycountsBatch: (items: { artist: string; track: string }[]) =>
     req<{
       results: Record<string, LastFmPlaycount>;
     }>("/api/lastfm/track-playcounts", {
@@ -751,10 +761,8 @@ export const api = {
       editorial: TidalPage | null;
     }>("/api/feed"),
   player: {
-    available: () =>
-      req<{ available: boolean }>("/api/player/available"),
-    state: () =>
-      req<PlayerSnapshot>("/api/player/state"),
+    available: () => req<{ available: boolean }>("/api/player/available"),
+    state: () => req<PlayerSnapshot>("/api/player/state"),
     load: (trackId: string, quality?: string) =>
       req<PlayerSnapshot>("/api/player/load", {
         method: "POST",
@@ -794,14 +802,10 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ track_ids: trackIds, quality }),
       }).catch(() => ({ prefetched: 0, total: trackIds.length })),
-    play: () =>
-      req<PlayerSnapshot>("/api/player/play", { method: "POST" }),
-    pause: () =>
-      req<PlayerSnapshot>("/api/player/pause", { method: "POST" }),
-    resume: () =>
-      req<PlayerSnapshot>("/api/player/resume", { method: "POST" }),
-    stop: () =>
-      req<PlayerSnapshot>("/api/player/stop", { method: "POST" }),
+    play: () => req<PlayerSnapshot>("/api/player/play", { method: "POST" }),
+    pause: () => req<PlayerSnapshot>("/api/player/pause", { method: "POST" }),
+    resume: () => req<PlayerSnapshot>("/api/player/resume", { method: "POST" }),
+    stop: () => req<PlayerSnapshot>("/api/player/stop", { method: "POST" }),
     seek: (fraction: number) =>
       req<PlayerSnapshot>("/api/player/seek", {
         method: "POST",
@@ -916,32 +920,45 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ quality }),
       }),
-    clearCompleted: () => req<{ ok: true }>("/api/downloads/completed", { method: "DELETE" }),
+    clearCompleted: () =>
+      req<{ ok: true }>("/api/downloads/completed", { method: "DELETE" }),
     cancel: (id: string) =>
       req<{ ok: true }>(`/api/downloads/${id}`, { method: "DELETE" }),
     cancelAll: () =>
       req<{ cancelled: number }>("/api/downloads/active", { method: "DELETE" }),
     reveal: (path: string) =>
-      req<{ ok: true }>("/api/reveal", { method: "POST", body: JSON.stringify({ path }) }),
+      req<{ ok: true }>("/api/reveal", {
+        method: "POST",
+        body: JSON.stringify({ path }),
+      }),
     stats: () =>
       req<{ output_dir: string; total_bytes: number; file_count: number }>(
         "/api/downloads/stats",
       ),
     state: () => req<{ paused: boolean }>("/api/downloads/state"),
-    pause: () => req<{ paused: true }>("/api/downloads/pause", { method: "POST" }),
-    resume: () => req<{ paused: false }>("/api/downloads/resume", { method: "POST" }),
+    pause: () =>
+      req<{ paused: true }>("/api/downloads/pause", { method: "POST" }),
+    resume: () =>
+      req<{ paused: false }>("/api/downloads/resume", { method: "POST" }),
   },
   settings: {
     get: () => req<Settings>("/api/settings"),
     put: (patch: Partial<Settings>) =>
-      req<Settings>("/api/settings", { method: "PUT", body: JSON.stringify(patch) }),
+      req<Settings>("/api/settings", {
+        method: "PUT",
+        body: JSON.stringify(patch),
+      }),
   },
   favorites: {
     snapshot: () => req<FavoritesSnapshot>("/api/favorites"),
     add: (kind: FavoriteKind, id: string) =>
-      req<{ ok: true }>(`/api/favorites/${kind}/${encodeURIComponent(id)}`, { method: "POST" }),
+      req<{ ok: true }>(`/api/favorites/${kind}/${encodeURIComponent(id)}`, {
+        method: "POST",
+      }),
     remove: (kind: FavoriteKind, id: string) =>
-      req<{ ok: true }>(`/api/favorites/${kind}/${encodeURIComponent(id)}`, { method: "DELETE" }),
+      req<{ ok: true }>(`/api/favorites/${kind}/${encodeURIComponent(id)}`, {
+        method: "DELETE",
+      }),
     bulk: (kind: FavoriteKind, ids: string[], add = true) =>
       req<{ submitted: number }>("/api/favorites/bulk", {
         method: "POST",
@@ -956,7 +973,9 @@ export const api = {
         body: JSON.stringify({ title, description }),
       }),
     delete: (id: string) =>
-      req<{ ok: true }>(`/api/playlists/${encodeURIComponent(id)}`, { method: "DELETE" }),
+      req<{ ok: true }>(`/api/playlists/${encodeURIComponent(id)}`, {
+        method: "DELETE",
+      }),
     edit: (id: string, patch: { title?: string; description?: string }) =>
       req<Playlist>(`/api/playlists/${encodeURIComponent(id)}`, {
         method: "PUT",
@@ -968,14 +987,20 @@ export const api = {
         body: JSON.stringify({ track_ids: trackIds }),
       }),
     removeTrack: (id: string, index: number) =>
-      req<{ ok: true }>(`/api/playlists/${encodeURIComponent(id)}/tracks/${index}`, {
-        method: "DELETE",
-      }),
+      req<{ ok: true }>(
+        `/api/playlists/${encodeURIComponent(id)}/tracks/${index}`,
+        {
+          method: "DELETE",
+        },
+      ),
     moveTrack: (id: string, mediaId: string, position: number) =>
-      req<{ ok: true }>(`/api/playlists/${encodeURIComponent(id)}/tracks/move`, {
-        method: "POST",
-        body: JSON.stringify({ media_id: mediaId, position }),
-      }),
+      req<{ ok: true }>(
+        `/api/playlists/${encodeURIComponent(id)}/tracks/move`,
+        {
+          method: "POST",
+          body: JSON.stringify({ media_id: mediaId, position }),
+        },
+      ),
   },
   /** Current Tidal request-gate cooldown. Populated after an HTTP
    *  429 or an abuse-detected 403; the UI uses it to render a

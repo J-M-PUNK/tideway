@@ -34,7 +34,11 @@ export function CreateFolderDialog({
     setSubmitting(true);
     try {
       const folder = await api.library.folders.create(name.trim(), parentId);
-      toast.show({ kind: "success", title: "Folder created", description: folder.name });
+      toast.show({
+        kind: "success",
+        title: "Folder created",
+        description: folder.name,
+      });
       setOpen(false);
       setName("");
       onCreated?.(folder);
@@ -85,7 +89,11 @@ export function CreateFolderDialog({
             />
           </div>
           <div className="flex justify-end gap-2">
-            <Button type="button" variant="ghost" onClick={() => setOpen(false)}>
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={() => setOpen(false)}
+            >
               Cancel
             </Button>
             <Button type="submit" disabled={!name.trim() || submitting}>

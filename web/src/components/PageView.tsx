@@ -51,7 +51,9 @@ export function PageView({ page, onDownload, forceSingleRow = false }: Props) {
         description="This page doesn't have any content right now. Try the home page or explore to find something to listen to."
         action={
           <Button asChild variant="secondary" size="sm">
-            <Link to="/"><Home className="h-4 w-4" /> Go home</Link>
+            <Link to="/">
+              <Home className="h-4 w-4" /> Go home
+            </Link>
           </Button>
         }
       />
@@ -62,7 +64,9 @@ export function PageView({ page, onDownload, forceSingleRow = false }: Props) {
   // in" on Home — which uses our local history and is more accurate for
   // this client — so we drop the row everywhere rather than show two
   // near-identical grids stacked.
-  const categories = page.categories.filter((cat) => cat.type !== "ShortcutList");
+  const categories = page.categories.filter(
+    (cat) => cat.type !== "ShortcutList",
+  );
   return (
     <div className="flex flex-col gap-8">
       {categories.map((cat, i) => (
@@ -103,7 +107,6 @@ function Section({
         <TrackList
           tracks={items.filter((i): i is Track => i.kind === "track")}
           onDownload={onDownload}
-
         />
       </div>
     );
@@ -136,7 +139,9 @@ function Section({
   // second cap a narrower viewport renders 4 cards then an orphaned
   // 5th on a partial second row.
   const ROW_CAP = 5;
-  const visible = singleRow ? items.slice(0, Math.min(ROW_CAP, columnCount)) : items;
+  const visible = singleRow
+    ? items.slice(0, Math.min(ROW_CAP, columnCount))
+    : items;
   // Track rows need a shared playback context: clicking one track's
   // cover should play it with the row's other tracks queued up.
   const rowTracks = items.filter((i): i is Track => i.kind === "track");
@@ -207,15 +212,19 @@ function SectionHeader({
   return (
     <div className="mb-4 flex items-end justify-between gap-4">
       <div className="flex min-w-0 items-center gap-3">
-        {context && (
-          ctxPath ? (
+        {context &&
+          (ctxPath ? (
             <Link
               to={ctxPath}
               className="h-12 w-12 flex-shrink-0 overflow-hidden rounded bg-secondary transition-transform hover:scale-105"
               title={context.title}
             >
               {ctxCover ? (
-                <img src={ctxCover} alt="" className="h-full w-full object-cover" />
+                <img
+                  src={ctxCover}
+                  alt=""
+                  className="h-full w-full object-cover"
+                />
               ) : (
                 <div className="flex h-full w-full items-center justify-center text-muted-foreground">
                   <Music className="h-5 w-5" />
@@ -225,15 +234,18 @@ function SectionHeader({
           ) : (
             <div className="h-12 w-12 flex-shrink-0 overflow-hidden rounded bg-secondary">
               {ctxCover ? (
-                <img src={ctxCover} alt="" className="h-full w-full object-cover" />
+                <img
+                  src={ctxCover}
+                  alt=""
+                  className="h-full w-full object-cover"
+                />
               ) : (
                 <div className="flex h-full w-full items-center justify-center text-muted-foreground">
                   <Music className="h-5 w-5" />
                 </div>
               )}
             </div>
-          )
-        )}
+          ))}
         <div className="min-w-0">
           {context ? (
             <>
@@ -248,14 +260,20 @@ function SectionHeader({
                   {context.title}
                 </Link>
               ) : (
-                <div className="truncate text-xl font-bold tracking-tight">{context.title}</div>
+                <div className="truncate text-xl font-bold tracking-tight">
+                  {context.title}
+                </div>
               )}
             </>
           ) : (
             <>
-              <h2 className="truncate text-xl font-bold tracking-tight">{title}</h2>
+              <h2 className="truncate text-xl font-bold tracking-tight">
+                {title}
+              </h2>
               {subtitle && (
-                <div className="mt-0.5 truncate text-sm text-muted-foreground">{subtitle}</div>
+                <div className="mt-0.5 truncate text-sm text-muted-foreground">
+                  {subtitle}
+                </div>
               )}
             </>
           )}
@@ -277,8 +295,17 @@ function PageItemCard({
   onDownload: OnDownload;
   rowTracks?: Track[];
 }) {
-  if (item.kind === "album" || item.kind === "artist" || item.kind === "playlist") {
-    return <MediaCard item={item as Album | Artist | Playlist} onDownload={onDownload} />;
+  if (
+    item.kind === "album" ||
+    item.kind === "artist" ||
+    item.kind === "playlist"
+  ) {
+    return (
+      <MediaCard
+        item={item as Album | Artist | Playlist}
+        onDownload={onDownload}
+      />
+    );
   }
   if (item.kind === "mix") {
     return <MixCard mix={item} />;
@@ -417,13 +444,7 @@ function TrackHeart({
   );
 }
 
-function MixHeart({
-  mixId,
-  className,
-}: {
-  mixId: string;
-  className?: string;
-}) {
+function MixHeart({ mixId, className }: { mixId: string; className?: string }) {
   const favs = useFavorites();
   const liked = favs.has("mix", mixId);
   return (
@@ -472,7 +493,9 @@ function MixCard({ mix }: { mix: MixItem }) {
         ) : (
           <Music className="m-auto h-10 w-10 text-muted-foreground" />
         )}
-        <div className={`absolute bottom-2 left-2 transition-all ${hoverGroup}`}>
+        <div
+          className={`absolute bottom-2 left-2 transition-all ${hoverGroup}`}
+        >
           <PlayMediaButton
             kind="mix"
             id={mix.id}
@@ -488,7 +511,9 @@ function MixCard({ mix }: { mix: MixItem }) {
       <div className="min-w-0">
         <div className="truncate font-semibold">{mix.name}</div>
         {mix.subtitle && (
-          <div className="truncate text-xs text-muted-foreground">{mix.subtitle}</div>
+          <div className="truncate text-xs text-muted-foreground">
+            {mix.subtitle}
+          </div>
         )}
       </div>
     </Link>
@@ -505,7 +530,9 @@ function PageLinkTile({ link }: { link: PageLinkItem }) {
       className={cn(
         "relative flex aspect-[5/3] items-start overflow-hidden rounded-lg p-4 text-lg font-bold tracking-tight text-foreground transition-transform hover:scale-[1.02]",
       )}
-      style={{ background: `linear-gradient(135deg, hsl(${hue}, 60%, 35%), hsl(${(hue + 40) % 360}, 70%, 20%))` }}
+      style={{
+        background: `linear-gradient(135deg, hsl(${hue}, 60%, 35%), hsl(${(hue + 40) % 360}, 70%, 20%))`,
+      }}
     >
       <span className="line-clamp-2">{link.title}</span>
     </Link>

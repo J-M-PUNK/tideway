@@ -52,7 +52,8 @@ export function Search({ onDownload }: { onDownload: OnDownload }) {
     }, 300);
     return () => {
       cancelled = true;
-      if (debounceRef.current !== null) window.clearTimeout(debounceRef.current);
+      if (debounceRef.current !== null)
+        window.clearTimeout(debounceRef.current);
     };
   }, [q]);
 
@@ -66,19 +67,27 @@ export function Search({ onDownload }: { onDownload: OnDownload }) {
   const filteredTracks =
     results && format !== "all"
       ? results.tracks.filter((t) => matchesFormat(t, format))
-      : results?.tracks ?? [];
+      : (results?.tracks ?? []);
   const filteredAlbums =
     results && format !== "all"
       ? results.albums.filter((a) => matchesFormat(a, format))
-      : results?.albums ?? [];
+      : (results?.albums ?? []);
   const showTracks =
-    results && (filter === "all" || filter === "tracks") && filteredTracks.length > 0;
+    results &&
+    (filter === "all" || filter === "tracks") &&
+    filteredTracks.length > 0;
   const showAlbums =
-    results && (filter === "all" || filter === "albums") && filteredAlbums.length > 0;
+    results &&
+    (filter === "all" || filter === "albums") &&
+    filteredAlbums.length > 0;
   const showArtists =
-    results && (filter === "all" || filter === "artists") && results.artists.length > 0;
+    results &&
+    (filter === "all" || filter === "artists") &&
+    results.artists.length > 0;
   const showPlaylists =
-    results && (filter === "all" || filter === "playlists") && results.playlists.length > 0;
+    results &&
+    (filter === "all" || filter === "playlists") &&
+    results.playlists.length > 0;
   const showFormatFilter =
     !!results &&
     (filter === "all" || filter === "tracks" || filter === "albums") &&
@@ -118,7 +127,11 @@ export function Search({ onDownload }: { onDownload: OnDownload }) {
       )}
 
       {results && !hasAny && (
-        <EmptyState icon={Music} title="No results" description={`Nothing matched "${q}".`} />
+        <EmptyState
+          icon={Music}
+          title="No results"
+          description={`Nothing matched "${q}".`}
+        />
       )}
 
       {showTracks && (

@@ -18,13 +18,12 @@ import { useMyPlaylists } from "@/hooks/useMyPlaylists";
 
 /**
  * Three-dots overflow menu for a detail page (mix / album / playlist).
- * Keeps the core actions (Play next, Add to playlist, Download)
+ * Keeps the core actions (Add to queue, Add to playlist, Download)
  * consistent across all collection types so users don't relearn the
  * menu per page.
  *
- * - **Play next**: inserts all tracks directly after the current in
- *   the queue, preserving their order. No-op when the collection is
- *   empty.
+ * - **Add to queue**: appends every track to the end of the queue in
+ *   their natural order. No-op when the collection is empty.
  * - **Add to playlist**: submenu listing the user's playlists; picking
  *   one bulk-adds all tracks via a single `addTracks` call.
  * - **Download**: enqueues the whole collection as a bulk job. When
@@ -40,22 +39,26 @@ interface Props {
   downloadId?: string;
 }
 
-export function CollectionOverflowMenu({ tracks, downloadKind, downloadId }: Props) {
+export function CollectionOverflowMenu({
+  tracks,
+  downloadKind,
+  downloadId,
+}: Props) {
   const toast = useToast();
   const actions = usePlayerActions();
   const { playlists } = useMyPlaylists();
 
-  const playNext = () => {
+  const addToQueue = () => {
     if (tracks.length === 0) return;
-    // playNext inserts at `queueIndex + 1`. Walking the list in reverse
-    // so each insert lands ahead of the previous, leaving the final
-    // order as: [current, tracks[0], tracks[1], …, tracks[N-1], …prev].
-    for (let i = tracks.length - 1; i >= 0; i--) {
-      actions.playNext(tracks[i]);
+    // Forward iteration is correct for append-to-end: the first track
+    // ends up immediately after the current queue tail, the rest
+    // follow in their natural order.
+    for (const t of tracks) {
+      actions.addToQueue(t);
     }
     toast.show({
       kind: "success",
-      title: `Queued ${tracks.length} ${tracks.length === 1 ? "track" : "tracks"} next`,
+      title: `Added ${tracks.length} ${tracks.length === 1 ? "track" : "tracks"} to queue`,
     });
   };
 
@@ -84,7 +87,9 @@ export function CollectionOverflowMenu({ tracks, downloadKind, downloadId }: Pro
     if (tracks.length === 0) return;
     try {
       if (downloadKind && downloadId) {
-        await api.downloads.enqueueBulk([{ kind: downloadKind, id: downloadId }]);
+        await api.downloads.enqueueBulk([
+          { kind: downloadKind, id: downloadId },
+        ]);
       } else {
         await api.downloads.enqueueBulk(
           tracks.map((t) => ({ kind: "track" as const, id: t.id })),
@@ -117,8 +122,8 @@ export function CollectionOverflowMenu({ tracks, downloadKind, downloadId }: Pro
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-56">
-        <DropdownMenuItem onSelect={playNext}>
-          <ListPlus className="h-3.5 w-3.5" /> Play next
+        <DropdownMenuItem onSelect={addToQueue}>
+          <ListPlus className="h-3.5 w-3.5" /> Add to queue
         </DropdownMenuItem>
         <DropdownMenuSub>
           <DropdownMenuSubTrigger>
@@ -134,7 +139,10 @@ export function CollectionOverflowMenu({ tracks, downloadKind, downloadId }: Pro
             />
             {playlists.length > 0 && <DropdownMenuSeparator />}
             {playlists.map((p) => (
-              <DropdownMenuItem key={p.id} onSelect={() => addToPlaylist(p.id, p.name)}>
+              <DropdownMenuItem
+                key={p.id}
+                onSelect={() => addToPlaylist(p.id, p.name)}
+              >
                 <span className="truncate">{p.name}</span>
               </DropdownMenuItem>
             ))}

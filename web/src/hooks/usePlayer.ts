@@ -46,12 +46,7 @@ export type RepeatMode = "off" | "all" | "one";
  *    aggregates like "My Most Listened" but do not appear in
  *    Recently Played.
  */
-export type PlaySourceType =
-  | "ALBUM"
-  | "PLAYLIST"
-  | "MIX"
-  | "ARTIST"
-  | "TRACK";
+export type PlaySourceType = "ALBUM" | "PLAYLIST" | "MIX" | "ARTIST" | "TRACK";
 
 export interface PlaySource {
   type: PlaySourceType;
@@ -91,6 +86,13 @@ interface PersistedState {
   volume: number;
   shuffle: boolean;
   repeat: RepeatMode;
+  /** Id of the track that was loaded when the user closed the app.
+   *  Used as a sanity-check against the persisted queue so that on
+   *  boot we only restore "now playing" when queue[queueIndex] still
+   *  matches what was loaded (queue shape may have drifted between
+   *  versions). The track object itself comes from the queue, not
+   *  from this field. */
+  trackId: string | null;
 }
 
 function loadPersisted(): Partial<PersistedState> {
@@ -129,7 +131,10 @@ const INITIAL: PlayerState = {
  * case `repeat: "one"` loops the same index. When the user hits Next
  * manually we always advance regardless of repeat mode.
  */
-export function pickNextIndex(state: PlayerState, onEnded = false): number | null {
+export function pickNextIndex(
+  state: PlayerState,
+  onEnded = false,
+): number | null {
   if (state.queue.length === 0) return null;
   if (onEnded && state.repeat === "one") return state.queueIndex;
   // Single-track queue: a natural end shouldn't loop unless the user
@@ -186,10 +191,46 @@ export function usePlayer() {
       persisted.repeat === "all" || persisted.repeat === "one"
         ? persisted.repeat
         : "off";
+    const queue: Track[] = Array.isArray(persisted.queue)
+      ? persisted.queue
+      : [];
+
+    // Restore "now playing" only when the persisted queueIndex points
+    // at a track whose id still matches what we wrote out at quit.
+    // Bails to a clean (track: null, queueIndex: -1) state if anything
+    // looks off — better to show an empty player than the wrong track.
+    let restoreIndex = -1;
+    let restoreTrack: Track | null = null;
+    let restoreCurrentTime = 0;
+    if (
+      typeof persisted.queueIndex === "number" &&
+      persisted.queueIndex >= 0 &&
+      persisted.queueIndex < queue.length &&
+      typeof persisted.trackId === "string" &&
+      queue[persisted.queueIndex] &&
+      queue[persisted.queueIndex].id === persisted.trackId
+    ) {
+      restoreIndex = persisted.queueIndex;
+      restoreTrack = queue[persisted.queueIndex];
+      if (
+        typeof persisted.currentTime === "number" &&
+        persisted.currentTime > 0
+      ) {
+        restoreCurrentTime = persisted.currentTime;
+      }
+    }
+
     return {
       ...INITIAL,
-      queue: Array.isArray(persisted.queue) ? persisted.queue : [],
-      queueIndex: -1,
+      queue,
+      queueIndex: restoreIndex,
+      track: restoreTrack,
+      currentTime: restoreCurrentTime,
+      // duration becomes accurate once the backend's first snapshot
+      // arrives after the restore load(). Seed from the track's known
+      // duration so the progress bar renders something useful in the
+      // brief window before that snapshot.
+      duration: restoreTrack?.duration ?? 0,
       volume: typeof persisted.volume === "number" ? persisted.volume : 1,
       shuffle: !!persisted.shuffle,
       repeat,
@@ -207,7 +248,11 @@ export function usePlayer() {
   useEffect(() => {
     const flush = () => {
       const s = stateRef.current;
-      if (s.queue.length === 0 && s.queueIndex === -1 && s.currentTime === 0) {
+      // Skip writes when nothing's loaded — don't clobber a real prior
+      // session. We allow currentTime === 0 here because a paused-at-
+      // start track is still worth persisting (the user explicitly
+      // queued it).
+      if (s.queue.length === 0 && s.queueIndex === -1 && !s.track) {
         return;
       }
       try {
@@ -218,6 +263,7 @@ export function usePlayer() {
           volume: s.volume,
           shuffle: s.shuffle,
           repeat: s.repeat,
+          trackId: s.track?.id ?? null,
         };
         localStorage.setItem(PERSIST_KEY, JSON.stringify(snapshot));
       } catch {
@@ -286,7 +332,8 @@ export function usePlayer() {
         const id = snap.track_id;
         rehydratingTrackIdRef.current = id;
         expectedTrackIdRef.current = id;
-        api.track(id)
+        api
+          .track(id)
           .then((t) => {
             setState((s) => {
               // Race guard: if the backend has since moved on to a
@@ -334,7 +381,8 @@ export function usePlayer() {
           ...s,
           playing: snap.state === "playing",
           loading: snap.state === "loading",
-          error: snap.error ?? (snap.state === "error" ? "Playback failed" : null),
+          error:
+            snap.error ?? (snap.state === "error" ? "Playback failed" : null),
           currentTime,
           duration,
           streamInfo: snap.stream_info,
@@ -377,12 +425,10 @@ export function usePlayer() {
             const nextTrack = s.queue[nextIdx];
             if (nextTrack && nextTrack.id !== snap.track_id) {
               preloadedForTrackIdRef.current = snap.track_id;
-              api.player
-                .preload(nextTrack.id, qualityRef.current)
-                .catch(() => {
-                  /* fire-and-forget; failure falls back to the
+              api.player.preload(nextTrack.id, qualityRef.current).catch(() => {
+                /* fire-and-forget; failure falls back to the
                      normal slow-path load on track-end. */
-                });
+              });
             }
           }
         }
@@ -443,8 +489,117 @@ export function usePlayer() {
     api.player.volume(Math.round(state.volume * 100)).catch(() => {});
   }, [state.volume]);
 
+  // Album-end "continue with artist radio" preference, mirrored from
+  // the backend Settings dataclass. Read on mount and refreshed
+  // whenever the SettingsPage dispatches the `tidal-settings-updated`
+  // event (it does this after a successful PUT). Held in a ref so
+  // the album-end branch in advanceRef can read the latest value
+  // without taking it as a dep — the advance code path is set up
+  // once and would otherwise need to redefine on every settings
+  // change.
+  const continueRadioRef = useRef(false);
+  useEffect(() => {
+    let cancelled = false;
+    api.settings
+      .get()
+      .then((s) => {
+        if (!cancelled) {
+          continueRadioRef.current = !!s.continue_with_artist_radio_after_album;
+        }
+      })
+      .catch(() => {
+        /* default: false */
+      });
+    const handler = (event: Event) => {
+      const detail = (event as CustomEvent).detail as {
+        continue_with_artist_radio_after_album?: boolean;
+      } | null;
+      if (
+        detail &&
+        typeof detail.continue_with_artist_radio_after_album === "boolean"
+      ) {
+        continueRadioRef.current =
+          detail.continue_with_artist_radio_after_album;
+      }
+    };
+    window.addEventListener("tidal-settings-updated", handler);
+    return () => {
+      cancelled = true;
+      window.removeEventListener("tidal-settings-updated", handler);
+    };
+  }, []);
+
+  // Restore the persisted "now playing" track on app launch. We seed
+  // the track + queueIndex + currentTime synchronously in the state
+  // initializer so the UI shows it immediately; this effect catches
+  // up the backend by loading the manifest and seeking to the saved
+  // position — paused, never auto-resumed.
+  //
+  // Skipped when the backend is already playing something else (a
+  // refresh during active playback): the existing rehydrate path
+  // inside applySnapshot wins, and we don't want to overwrite that
+  // session with our stale persisted track.
+  const restoredRef = useRef(false);
+  useEffect(() => {
+    if (restoredRef.current) return;
+    const cur = stateRef.current;
+    if (!cur.track || cur.queueIndex < 0) return;
+    restoredRef.current = true;
+
+    void (async () => {
+      let backendIdle = true;
+      try {
+        const snap = await api.player.state();
+        backendIdle = snap.state === "idle";
+      } catch {
+        // Backend unreachable. Treat as idle so we still seed the UI;
+        // the load() below will surface the actual error if the
+        // backend really is down.
+      }
+      if (!backendIdle) {
+        // Backend is playing or paused on its own session — defer to
+        // the rehydrate path in applySnapshot. Don't stomp on it.
+        return;
+      }
+
+      const track = cur.track;
+      if (!track) return;
+      expectedTrackIdRef.current = track.id;
+      try {
+        const loaded = await api.player.load(track.id, qualityRef.current);
+        const durationSec = loaded.duration_ms / 1000;
+        if (durationSec > 0 && cur.currentTime > 0) {
+          // Clamp into a valid fraction. Past-end positions can show
+          // up after a track was edited / replaced server-side; clamp
+          // them to 0 rather than landing at end-of-track and
+          // immediately firing `ended`.
+          const fraction = cur.currentTime / durationSec;
+          if (fraction > 0 && fraction < 0.999) {
+            await api.player.seek(fraction);
+          }
+        }
+      } catch {
+        // Track is no longer streamable (region / license change /
+        // stale id). Clear the persisted now-playing so the UI
+        // doesn't show a track that won't play.
+        setState((s) => ({
+          ...s,
+          track: null,
+          queueIndex: -1,
+          currentTime: 0,
+          duration: 0,
+        }));
+        expectedTrackIdRef.current = null;
+      }
+    })();
+  }, []);
+
   const playAtIndex = useCallback(
-    (index: number, queueOverride?: Track[], sourceOverride?: PlaySource | null) => {
+    (
+      index: number,
+      queueOverride?: Track[],
+      sourceOverride?: PlaySource | null,
+    ) => {
       // Bounds-check against the queue before the optimistic state
       // update so we can set refs up front without worrying about
       // rolling them back on a no-op. setState reducers should be
@@ -502,6 +657,59 @@ export function usePlayer() {
     [],
   );
 
+  // Load a queue position into the backend without auto-playing —
+  // mirrors playAtIndex but stops at the paused-with-decoder-primed
+  // state. Used at album-end so we can show track 0 ready-to-play
+  // without immediately starting it (Spotify / Apple Music default).
+  const loadAtIndexPaused = useCallback(
+    (
+      index: number,
+      queueOverride?: Track[],
+      sourceOverride?: PlaySource | null,
+    ) => {
+      const resolvedQueue = queueOverride ?? stateRef.current.queue;
+      if (index < 0 || index >= resolvedQueue.length) return;
+      const track = resolvedQueue[index];
+      expectedTrackIdRef.current = track.id;
+      endOfTrackPendingRef.current = false;
+      setState((s) => {
+        const queue = queueOverride ?? s.queue;
+        if (index < 0 || index >= queue.length) return s;
+        const next: PlayerState = {
+          ...s,
+          track,
+          queue,
+          queueIndex: index,
+          playing: false,
+          loading: true,
+          error: null,
+          currentTime: 0,
+          duration: track.duration ?? 0,
+          source:
+            sourceOverride !== undefined
+              ? sourceOverride
+              : queueOverride
+                ? null
+                : s.source,
+        };
+        void (async () => {
+          try {
+            await api.player.load(track.id, qualityRef.current);
+          } catch (err) {
+            setState((cur) => ({
+              ...cur,
+              playing: false,
+              loading: false,
+              error: err instanceof Error ? err.message : String(err),
+            }));
+          }
+        })();
+        return next;
+      });
+    },
+    [],
+  );
+
   useEffect(() => {
     advanceRef.current = () => {
       if (endOfTrackPendingRef.current) {
@@ -511,19 +719,69 @@ export function usePlayer() {
       const n = pickNextIndex(stateRef.current, true);
       if (n !== null) {
         playAtIndex(n);
-      } else {
-        api.player.stop().catch(() => {});
-        setState((s) => ({
-          ...s,
-          playing: false,
-          loading: false,
-          currentTime: 0,
-          queueIndex: -1,
-          track: null,
-        }));
+        return;
       }
+      // Queue ended with no next index. Three behaviors:
+      //   1. Album source AND user has the "continue with artist
+      //      radio" setting on: append an artist radio mix and
+      //      auto-play the first new track. Asynchronous (radio
+      //      fetch); falls back to behavior 2 on any error.
+      //   2. Album source (default): re-prime track 0 of the same
+      //      queue, paused. Standard Spotify / Apple Music behavior.
+      //      One tap of Play repeats the album.
+      //   3. Anything else (playlist, mix, artist, single track,
+      //      unknown source): stop and clear, same as before.
+      const cur = stateRef.current;
+      if (cur.source?.type === "ALBUM" && cur.queue.length > 0) {
+        if (continueRadioRef.current) {
+          // Behavior 1: artist radio takeover.
+          const lastTrack = cur.queue[cur.queueIndex];
+          const artistId = lastTrack?.artists?.[0]?.id;
+          if (artistId) {
+            void (async () => {
+              try {
+                const radio = await api.artistRadio(String(artistId));
+                if (!radio || radio.length === 0) {
+                  // No radio results — fall back to pause-on-track-0.
+                  loadAtIndexPaused(0);
+                  return;
+                }
+                // Filter out tracks already in the album queue so we
+                // don't immediately replay what just finished.
+                const albumIds = new Set(cur.queue.map((t) => t.id));
+                const fresh = radio.filter((t) => !albumIds.has(t.id));
+                const radioTail = fresh.length > 0 ? fresh : radio;
+                const newQueue = [...cur.queue, ...radioTail];
+                playAtIndex(cur.queueIndex + 1, newQueue, {
+                  type: "ARTIST",
+                  id: String(artistId),
+                });
+              } catch {
+                // Network / API failure — graceful fallback.
+                loadAtIndexPaused(0);
+              }
+            })();
+            return;
+          }
+          // Missing artist on the last track — fall through to the
+          // default album-end behavior.
+        }
+        // Behavior 2: pause on track 0.
+        loadAtIndexPaused(0);
+        return;
+      }
+      // Behavior 3: stop.
+      api.player.stop().catch(() => {});
+      setState((s) => ({
+        ...s,
+        playing: false,
+        loading: false,
+        currentTime: 0,
+        queueIndex: -1,
+        track: null,
+      }));
     };
-  }, [playAtIndex]);
+  }, [playAtIndex, loadAtIndexPaused]);
 
   const play = useCallback(
     (track: Track, contextTracks?: Track[], source?: PlaySource | null) => {
@@ -701,17 +959,13 @@ export function usePlayer() {
     [clearSleepTimer],
   );
 
-  const playNext = useCallback((track: Track) => {
-    setState((s) => {
-      if (s.queueIndex < 0) {
-        const already = s.queue.some((t) => t.id === track.id);
-        if (already) return s;
-        return { ...s, queue: [...s.queue, track] };
-      }
-      const nextQueue = [...s.queue];
-      nextQueue.splice(s.queueIndex + 1, 0, track);
-      return { ...s, queue: nextQueue };
-    });
+  // Append to the end of the queue. Always appends — duplicates pass
+  // through so a user who queues the same track twice gets two
+  // entries (matches the no-dedupe ask). When the queue is empty,
+  // this seeds a single-track queue without auto-playing; the user
+  // hits Play to start.
+  const addToQueue = useCallback((track: Track) => {
+    setState((s) => ({ ...s, queue: [...s.queue, track] }));
   }, []);
 
   const jumpTo = useCallback(
@@ -741,8 +995,7 @@ export function usePlayer() {
 
   return {
     ...state,
-    hasNext:
-      state.queueIndex >= 0 && state.queueIndex < state.queue.length - 1,
+    hasNext: state.queueIndex >= 0 && state.queueIndex < state.queue.length - 1,
     hasPrev: state.queueIndex > 0,
     sleepRemaining,
     play,
@@ -756,7 +1009,7 @@ export function usePlayer() {
     cycleRepeat,
     setSleepTimer,
     clearSleepTimer,
-    playNext,
+    addToQueue,
     jumpTo,
     removeFromQueue,
     clearQueue,

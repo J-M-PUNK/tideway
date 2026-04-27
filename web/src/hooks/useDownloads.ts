@@ -33,7 +33,9 @@ export function useDownloads() {
         const item = (payload.item as DownloadItem) ?? null;
         if (!item?.id) return;
         setItems((prev) => ({ ...prev, [item.id]: item }));
-        setOrder((prev) => (prev.includes(item.id) ? prev : [...prev, item.id]));
+        setOrder((prev) =>
+          prev.includes(item.id) ? prev : [...prev, item.id],
+        );
       }
     });
   }, [stream]);
@@ -46,8 +48,14 @@ export function useDownloads() {
     () => list.filter((i) => i.status !== "Complete" && i.status !== "Failed"),
     [list],
   );
-  const completed = useMemo(() => list.filter((i) => i.status === "Complete"), [list]);
-  const failed = useMemo(() => list.filter((i) => i.status === "Failed"), [list]);
+  const completed = useMemo(
+    () => list.filter((i) => i.status === "Complete"),
+    [list],
+  );
+  const failed = useMemo(
+    () => list.filter((i) => i.status === "Failed"),
+    [list],
+  );
 
   return { items: list, active, completed, failed };
 }

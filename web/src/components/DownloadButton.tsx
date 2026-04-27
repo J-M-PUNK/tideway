@@ -10,7 +10,10 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useQualities } from "@/hooks/useQualities";
-import { DOWNLOAD_GATE_TOOLTIP, useSubscription } from "@/hooks/useSubscription";
+import {
+  DOWNLOAD_GATE_TOOLTIP,
+  useSubscription,
+} from "@/hooks/useSubscription";
 import { effectiveFormatLabel } from "@/lib/quality";
 import { cn } from "@/lib/utils";
 
@@ -114,7 +117,9 @@ export function DownloadButton({
                   )}
                 </div>
                 <div className="text-xs text-muted-foreground">{q.bitrate}</div>
-                <div className="text-[11px] text-muted-foreground/70">{q.description}</div>
+                <div className="text-[11px] text-muted-foreground/70">
+                  {q.description}
+                </div>
               </div>
             </DropdownMenuItem>
           );

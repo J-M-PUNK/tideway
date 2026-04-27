@@ -1,4 +1,11 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+} from "react";
 import { api } from "@/api/client";
 
 /**
@@ -82,9 +89,22 @@ export function OfflineProvider({ children }: { children: React.ReactNode }) {
   const value = useMemo<OfflineCtx>(() => {
     const userBool = userOffline === true;
     const effective =
-      userOffline === null ? (autoOffline ? true : null) : userBool || autoOffline;
-    const source: OfflineSource = userBool ? "user" : autoOffline ? "auto" : null;
-    return { offline: effective, offlineSource: source, set: setUserOffline, reload };
+      userOffline === null
+        ? autoOffline
+          ? true
+          : null
+        : userBool || autoOffline;
+    const source: OfflineSource = userBool
+      ? "user"
+      : autoOffline
+        ? "auto"
+        : null;
+    return {
+      offline: effective,
+      offlineSource: source,
+      set: setUserOffline,
+      reload,
+    };
   }, [userOffline, autoOffline, reload]);
 
   return <Ctx.Provider value={value}>{children}</Ctx.Provider>;
@@ -92,6 +112,7 @@ export function OfflineProvider({ children }: { children: React.ReactNode }) {
 
 export function useOfflineMode(): OfflineCtx {
   const ctx = useContext(Ctx);
-  if (!ctx) throw new Error("useOfflineMode must be used within OfflineProvider");
+  if (!ctx)
+    throw new Error("useOfflineMode must be used within OfflineProvider");
   return ctx;
 }

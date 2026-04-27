@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { Link } from "react-router-dom";
-import { Compass, Music, Rss } from "lucide-react";
+import { Compass, Music } from "lucide-react";
 import { api } from "@/api/client";
 import type { Album } from "@/api/types";
 import type { OnDownload } from "@/api/download";
@@ -35,30 +35,33 @@ export function FeedPage({ onDownload }: { onDownload: OnDownload }) {
   if (loading) {
     return (
       <div>
-        <Header />
         <GridSkeleton count={12} />
       </div>
     );
   }
-  if (error || !data) return <ErrorView error={error ?? "Couldn't load feed"} />;
+  if (error || !data)
+    return <ErrorView error={error ?? "Couldn't load feed"} />;
 
   const items = data.items;
   const editorial = data.editorial;
   const hasCurated = items.length > 0;
   const hasEditorial =
-    !!editorial && Array.isArray(editorial.categories) && editorial.categories.length > 0;
+    !!editorial &&
+    Array.isArray(editorial.categories) &&
+    editorial.categories.length > 0;
 
   if (!hasCurated && !hasEditorial) {
     return (
       <div>
-        <Header />
         <EmptyState
           icon={Music}
           title="No new releases yet"
           description="Favorite or watch some artists in Tidal — their new albums will show up here as they drop."
           action={
             <Button asChild variant="secondary" size="sm">
-              <Link to="/library/artists"><Compass className="h-4 w-4" /> Find artists to follow</Link>
+              <Link to="/library/artists">
+                <Compass className="h-4 w-4" /> Find artists to follow
+              </Link>
             </Button>
           }
         />
@@ -70,7 +73,6 @@ export function FeedPage({ onDownload }: { onDownload: OnDownload }) {
 
   return (
     <div>
-      <Header />
       {hasCurated && (
         <div className="mb-12 flex flex-col gap-10">
           <div>
@@ -88,7 +90,11 @@ export function FeedPage({ onDownload }: { onDownload: OnDownload }) {
                   </h3>
                   <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6">
                     {group.items.map((item) => (
-                      <FeedCard key={item.id} item={item} onDownload={onDownload} />
+                      <FeedCard
+                        key={item.id}
+                        item={item}
+                        onDownload={onDownload}
+                      />
                     ))}
                   </div>
                 </section>
@@ -110,20 +116,13 @@ export function FeedPage({ onDownload }: { onDownload: OnDownload }) {
   );
 }
 
-function Header() {
-  return (
-    <div className="mb-8">
-      <h1 className="flex items-center gap-3 text-3xl font-bold tracking-tight">
-        <Rss className="h-7 w-7" /> Feed
-      </h1>
-      <p className="mt-1 text-sm text-muted-foreground">
-        New releases from your favorite and watched artists.
-      </p>
-    </div>
-  );
-}
-
-function FeedCard({ item, onDownload }: { item: FeedItem; onDownload: OnDownload }) {
+function FeedCard({
+  item,
+  onDownload,
+}: {
+  item: FeedItem;
+  onDownload: OnDownload;
+}) {
   const cover = imageProxy(item.cover);
   const artist = item.artists?.map((a) => a.name).join(", ") ?? "";
   return (
@@ -166,7 +165,10 @@ function FeedCard({ item, onDownload }: { item: FeedItem; onDownload: OnDownload
 }
 
 function groupByDay(items: FeedItem[]): { label: string; items: FeedItem[] }[] {
-  const buckets = new Map<string, { label: string; sort: number; items: FeedItem[] }>();
+  const buckets = new Map<
+    string,
+    { label: string; sort: number; items: FeedItem[] }
+  >();
   for (const item of items) {
     const key = item.released_at.slice(0, 10); // YYYY-MM-DD
     const existing = buckets.get(key);
@@ -190,7 +192,9 @@ function formatGroupLabel(iso: string): string {
   today.setHours(0, 0, 0, 0);
   const dayOf = new Date(date);
   dayOf.setHours(0, 0, 0, 0);
-  const diffDays = Math.round((today.getTime() - dayOf.getTime()) / (1000 * 60 * 60 * 24));
+  const diffDays = Math.round(
+    (today.getTime() - dayOf.getTime()) / (1000 * 60 * 60 * 24),
+  );
   if (diffDays === 0) return "Today";
   if (diffDays === 1) return "Yesterday";
   if (diffDays < 7) return `${diffDays} days ago`;

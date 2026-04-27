@@ -19,7 +19,11 @@ import type { Lyrics } from "@/api/types";
 import { useCoverColor } from "@/hooks/useCoverColor";
 import { useIsDownloaded } from "@/hooks/useDownloadedSet";
 import { useLyrics } from "@/hooks/useLyrics";
-import { usePlayerActions, usePlayerMeta, usePlayerTime } from "@/hooks/PlayerContext";
+import {
+  usePlayerActions,
+  usePlayerMeta,
+  usePlayerTime,
+} from "@/hooks/PlayerContext";
 import { Button } from "@/components/ui/button";
 import { HeartButton } from "@/components/HeartButton";
 import { DownloadButton } from "@/components/DownloadButton";
@@ -39,7 +43,8 @@ export function FullScreenPlayer({
   onClose: () => void;
   onDownload: OnDownload;
 }) {
-  const { track, playing, loading, shuffle, repeat, hasNext, hasPrev } = usePlayerMeta();
+  const { track, playing, loading, shuffle, repeat, hasNext, hasPrev } =
+    usePlayerMeta();
   const { currentTime, duration } = usePlayerTime();
   const actions = usePlayerActions();
 
@@ -65,7 +70,9 @@ export function FullScreenPlayer({
 
   // Shared with LyricsPanel — same hook, same cache, so opening one view
   // doesn't refetch what the other already has.
-  const { lyrics, loading: loadingLyrics } = useLyrics(open ? track?.id ?? null : null);
+  const { lyrics, loading: loadingLyrics } = useLyrics(
+    open ? (track?.id ?? null) : null,
+  );
   const activeIdx = useActiveLyric(lyrics, currentTime);
 
   if (!open || !track) return null;
@@ -146,7 +153,9 @@ export function FullScreenPlayer({
         <div className="flex items-center gap-4">
           <div className="flex min-w-0 flex-1 items-center gap-3">
             <div className="min-w-0">
-              <div className="truncate text-base font-semibold">{track.name}</div>
+              <div className="truncate text-base font-semibold">
+                {track.name}
+              </div>
               <div className="truncate text-sm text-foreground/70">
                 {track.artists.map((a, i) => (
                   <span key={a.id}>
@@ -179,7 +188,10 @@ export function FullScreenPlayer({
                 variant="ghost"
                 size="icon"
                 onClick={actions.toggleShuffle}
-                className={cn("h-9 w-9 hover:bg-white/10", shuffle && "text-primary")}
+                className={cn(
+                  "h-9 w-9 hover:bg-white/10",
+                  shuffle && "text-primary",
+                )}
                 title="Shuffle"
               >
                 <Shuffle className="h-4 w-4" />
@@ -249,7 +261,9 @@ export function FullScreenPlayer({
               </Button>
             </div>
             <div className="flex w-full max-w-xl items-center gap-2 text-[11px] text-foreground/70">
-              <span className="w-10 text-right tabular-nums">{formatDuration(currentTime)}</span>
+              <span className="w-10 text-right tabular-nums">
+                {formatDuration(currentTime)}
+              </span>
               <input
                 type="range"
                 min={0}
@@ -263,7 +277,9 @@ export function FullScreenPlayer({
                 }}
                 aria-label="Seek"
               />
-              <span className="w-10 tabular-nums">{formatDuration(duration)}</span>
+              <span className="w-10 tabular-nums">
+                {formatDuration(duration)}
+              </span>
             </div>
           </div>
 
@@ -311,7 +327,9 @@ function SyncedLyricsPane({
               onClick={() => onSeek(line.time)}
               className={cn(
                 "rounded px-3 py-1 text-left text-2xl font-bold leading-snug transition-all",
-                isActive ? "text-foreground" : "text-foreground hover:text-foreground",
+                isActive
+                  ? "text-foreground"
+                  : "text-foreground hover:text-foreground",
               )}
               style={{ opacity }}
             >

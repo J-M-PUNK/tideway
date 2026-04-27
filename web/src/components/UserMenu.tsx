@@ -73,7 +73,7 @@ export function UserMenu({
               ? signedIn
                 ? `${username} (offline)`
                 : "Offline"
-              : username ?? "Account"
+              : (username ?? "Account")
           }
         >
           {offline ? (

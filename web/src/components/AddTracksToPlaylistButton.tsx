@@ -58,7 +58,10 @@ export function AddTracksToPlaylistButton({ tracks }: { tracks: Track[] }) {
           <div className="text-xs font-semibold">Add</div>
         </button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="max-h-96 w-64 overflow-y-auto">
+      <DropdownMenuContent
+        align="end"
+        className="max-h-96 w-64 overflow-y-auto"
+      >
         <DropdownMenuLabel>Add to playlist</DropdownMenuLabel>
         <DropdownMenuSeparator />
         <CreatePlaylistDialog

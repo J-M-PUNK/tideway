@@ -32,7 +32,9 @@ function cacheSet(key: string, value: string): void {
  * image URL. Null while loading or on failure. Results are cached per URL.
  */
 export function useCoverColor(url: string | null | undefined): string | null {
-  const [color, setColor] = useState<string | null>(url ? cacheGet(url) ?? null : null);
+  const [color, setColor] = useState<string | null>(
+    url ? (cacheGet(url) ?? null) : null,
+  );
 
   useEffect(() => {
     if (!url) {
@@ -46,7 +48,10 @@ export function useCoverColor(url: string | null | undefined): string | null {
     }
     let cancelled = false;
     fac
-      .getColorAsync(url, { algorithm: "dominant", ignoredColor: [[0, 0, 0, 255, 20]] })
+      .getColorAsync(url, {
+        algorithm: "dominant",
+        ignoredColor: [[0, 0, 0, 255, 20]],
+      })
       .then((result) => {
         if (cancelled) return;
         cacheSet(url, result.rgb);

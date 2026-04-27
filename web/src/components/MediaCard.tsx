@@ -46,7 +46,9 @@ export function MediaCard({
       to={href}
       className="group relative flex flex-col gap-3 rounded-lg bg-card p-4 transition-colors hover:bg-accent"
     >
-      <div className={`relative aspect-square w-full overflow-hidden bg-secondary ${rounded}`}>
+      <div
+        className={`relative aspect-square w-full overflow-hidden bg-secondary ${rounded}`}
+      >
         {cover ? (
           <img
             src={cover}
