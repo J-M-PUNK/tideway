@@ -52,7 +52,7 @@ binaries: list[tuple[str, str]] = []
 # compiled .pyd; collect_all grabs data + binaries + submodules in one
 # call. Same pattern for any other package with a native extension that
 # the default hook doesn't cover.
-for pkg in ("pydantic", "pydantic_core", "curl_cffi"):
+for pkg in ("pydantic", "pydantic_core", "curl_cffi", "tls_client"):
     try:
         _d, _b, _h = collect_all(pkg)
         datas += _d
