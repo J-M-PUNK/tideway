@@ -170,7 +170,13 @@ function ChartArtists() {
   }, []);
   if (!data) return <ArtistGridSkeleton />;
   if (data.length === 0) {
-    return <EmptyState icon={UserIcon} title="No data" description="Last.fm didn't return any results." />;
+    return (
+      <EmptyState
+        icon={UserIcon}
+        title="No data"
+        description="Last.fm didn't return any results."
+      />
+    );
   }
   return (
     <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6">
@@ -181,7 +187,13 @@ function ChartArtists() {
   );
 }
 
-function ArtistChartCard({ rank, artist }: { rank: number; artist: LastFmChartArtist }) {
+function ArtistChartCard({
+  rank,
+  artist,
+}: {
+  rank: number;
+  artist: LastFmChartArtist;
+}) {
   const navigate = useNavigate();
   const toast = useToast();
   const tidalId = useTidalArtistId(artist.name);
@@ -285,10 +297,9 @@ function ChartTracks({ onDownload }: { onDownload: OnDownload }) {
             // chart tracks that missed their playcount on an earlier
             // visit (Spotify throttle, release-week zero) get a retry
             // instead of sitting dark.
-            const { playcounts } = await api.spotify.trackPlaycounts(
-              lookup,
-              { refresh: true },
-            );
+            const { playcounts } = await api.spotify.trackPlaycounts(lookup, {
+              refresh: true,
+            });
             if (!cancelled) preseedSpotifyPlaycounts(playcounts);
           } catch {
             /* fine — per-row hooks will fall back to their own fetch */
@@ -305,9 +316,17 @@ function ChartTracks({ onDownload }: { onDownload: OnDownload }) {
 
   if (!data) return <TrackListSkeleton />;
   if (data.length === 0) {
-    return <EmptyState icon={Music} title="No data" description="Last.fm didn't return any results." />;
+    return (
+      <EmptyState
+        icon={Music}
+        title="No data"
+        description="Last.fm didn't return any results."
+      />
+    );
   }
-  return <TrackList tracks={data} onDownload={onDownload} numbered showPlaycount />;
+  return (
+    <TrackList tracks={data} onDownload={onDownload} numbered showPlaycount />
+  );
 }
 
 // ---------------------------------------------------------------------------
@@ -317,7 +336,8 @@ function ChartTracks({ onDownload }: { onDownload: OnDownload }) {
 function formatCompact(n: number): string {
   if (n < 1000) return n.toLocaleString();
   if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}K`;
-  if (n < 1_000_000_000) return `${(n / 1_000_000).toFixed(n < 10_000_000 ? 1 : 0)}M`;
+  if (n < 1_000_000_000)
+    return `${(n / 1_000_000).toFixed(n < 10_000_000 ? 1 : 0)}M`;
   return `${(n / 1_000_000_000).toFixed(1)}B`;
 }
 

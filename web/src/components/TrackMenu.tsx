@@ -25,7 +25,10 @@ import { useFavorites } from "@/hooks/useFavorites";
 import { useMyPlaylists } from "@/hooks/useMyPlaylists";
 import { useTrackSelection } from "@/hooks/useTrackSelection";
 import { useQualities } from "@/hooks/useQualities";
-import { DOWNLOAD_GATE_TOOLTIP, useSubscription } from "@/hooks/useSubscription";
+import {
+  DOWNLOAD_GATE_TOOLTIP,
+  useSubscription,
+} from "@/hooks/useSubscription";
 import { useToast } from "@/components/toast";
 import { CreatePlaylistDialog } from "@/components/CreatePlaylistDialog";
 import { effectiveFormatLabel } from "@/lib/quality";
@@ -132,7 +135,8 @@ export function TrackMenuItems({
   const { pathname } = useLocation();
   const navigate = useNavigate();
   const onAlbumPage =
-    !!track.album && pathname === `/album/${encodeURIComponent(track.album.id)}`;
+    !!track.album &&
+    pathname === `/album/${encodeURIComponent(track.album.id)}`;
   const onArtistPage =
     !!track.artists[0] &&
     pathname === `/artist/${encodeURIComponent(track.artists[0].id)}`;
@@ -155,12 +159,17 @@ export function TrackMenuItems({
     navigate(`/radio/track/${track.id}`, { state: { seed } });
   };
 
-  const shareUrl = track.share_url || `https://tidal.com/browse/track/${track.id}`;
+  const shareUrl =
+    track.share_url || `https://tidal.com/browse/track/${track.id}`;
 
   const copyLink = async () => {
     try {
       await navigator.clipboard.writeText(shareUrl);
-      toast.show({ kind: "success", title: "Link copied", description: shareUrl });
+      toast.show({
+        kind: "success",
+        title: "Link copied",
+        description: shareUrl,
+      });
     } catch {
       toast.show({
         kind: "error",
@@ -187,7 +196,11 @@ export function TrackMenuItems({
       <Item onSelect={() => actions.playNext(track)}>
         <ListPlus className="h-3.5 w-3.5" /> Play next
       </Item>
-      <AddToPlaylistSubmenu parts={parts} trackId={track.id} trackName={track.name} />
+      <AddToPlaylistSubmenu
+        parts={parts}
+        trackId={track.id}
+        trackName={track.name}
+      />
       <Item onSelect={() => favs.toggle("track", track.id)}>
         <Heart
           className={cn("h-3.5 w-3.5", liked && "fill-primary text-primary")}
@@ -222,7 +235,9 @@ export function TrackMenuItems({
       <ShareSubmenu parts={parts} onCopy={copyLink} onOpen={openOnTidal} />
       {showSelect && (
         <Item onSelect={() => selection.toggle(track)}>
-          <CheckSquare className={cn("h-3.5 w-3.5", isSelected && "text-primary")} />
+          <CheckSquare
+            className={cn("h-3.5 w-3.5", isSelected && "text-primary")}
+          />
           {isSelected ? "Deselect" : "Select"}
         </Item>
       )}
@@ -295,7 +310,6 @@ function ShareSubmenu({
     </Sub>
   );
 }
-
 
 function AddToPlaylistSubmenu({
   parts,
@@ -371,10 +385,7 @@ function DownloadSubmenu({
 
   if (!sub.canDownload) {
     return (
-      <Item
-        disabled
-        title={sub.reason ?? DOWNLOAD_GATE_TOOLTIP}
-      >
+      <Item disabled title={sub.reason ?? DOWNLOAD_GATE_TOOLTIP}>
         <Download className="h-3.5 w-3.5" /> Download…
       </Item>
     );
@@ -401,7 +412,9 @@ function DownloadSubmenu({
                     </span>
                   )}
                 </div>
-                <span className="text-[11px] text-muted-foreground">{q.bitrate}</span>
+                <span className="text-[11px] text-muted-foreground">
+                  {q.bitrate}
+                </span>
               </div>
             </Item>
           );
@@ -410,4 +423,3 @@ function DownloadSubmenu({
     </Sub>
   );
 }
-

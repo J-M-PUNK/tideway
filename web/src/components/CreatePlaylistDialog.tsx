@@ -46,7 +46,11 @@ export function CreatePlaylistDialog({
       const p = await api.playlists.create(title.trim(), description.trim());
       optimisticAdd(p);
       refresh().catch(() => {});
-      toast.show({ kind: "success", title: "Playlist created", description: p.name });
+      toast.show({
+        kind: "success",
+        title: "Playlist created",
+        description: p.name,
+      });
       setOpen(false);
       setTitle("");
       setDescription("");
@@ -81,7 +85,9 @@ export function CreatePlaylistDialog({
       <DialogContent>
         <DialogHeader>
           <DialogTitle>Create playlist</DialogTitle>
-          <DialogDescription>Give it a name. You can add tracks afterwards.</DialogDescription>
+          <DialogDescription>
+            Give it a name. You can add tracks afterwards.
+          </DialogDescription>
         </DialogHeader>
         <form
           onSubmit={(e) => {
@@ -112,7 +118,11 @@ export function CreatePlaylistDialog({
             />
           </div>
           <div className="flex justify-end gap-2">
-            <Button type="button" variant="ghost" onClick={() => setOpen(false)}>
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={() => setOpen(false)}
+            >
               Cancel
             </Button>
             <Button type="submit" disabled={!title.trim() || submitting}>

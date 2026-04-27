@@ -263,13 +263,7 @@ function SingleRowSection({
           // orphan item on row 2. Column counts: base=2, sm=3, md=4,
           // lg=5, 2xl=6, matched by the responsive hide/show classes
           // on each item.
-          <div
-            key={it.id}
-            className={cn(
-              ROW_ITEM_VISIBILITY[i],
-              "min-w-0",
-            )}
-          >
+          <div key={it.id} className={cn(ROW_ITEM_VISIBILITY[i], "min-w-0")}>
             <MediaCard item={it} onDownload={onDownload} />
           </div>
         ))}
@@ -393,15 +387,16 @@ function AlbumPlaycountBadge({
   return (
     <>
       {totalPlays > 0 && (
-        <span title={`Summed Spotify play count across ${spotify?.resolved ?? 0} of ${spotify?.total ?? 0} tracks`}>
+        <span
+          title={`Summed Spotify play count across ${spotify?.resolved ?? 0} of ${spotify?.total ?? 0} tracks`}
+        >
           {formatCompact(totalPlays)}
           {partial ? "+" : ""} total plays
         </span>
       )}
       {user > 0 && (
         <span className="text-primary">
-          you've played {user.toLocaleString()}{" "}
-          {user === 1 ? "time" : "times"}
+          you've played {user.toLocaleString()} {user === 1 ? "time" : "times"}
         </span>
       )}
     </>
@@ -411,7 +406,8 @@ function AlbumPlaycountBadge({
 function formatCompact(n: number): string {
   if (n < 1000) return n.toLocaleString();
   if (n < 1_000_000) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}K`;
-  if (n < 1_000_000_000) return `${(n / 1_000_000).toFixed(n < 10_000_000 ? 1 : 0)}M`;
+  if (n < 1_000_000_000)
+    return `${(n / 1_000_000).toFixed(n < 10_000_000 ? 1 : 0)}M`;
   return `${(n / 1_000_000_000).toFixed(1)}B`;
 }
 
@@ -466,7 +462,8 @@ function AlbumReview({ review }: { review: string }) {
   // Strip Tidal's inline `[wimpLink]` anchors. Memoized so rerenders of the
   // parent don't re-regex the same string.
   const cleaned = useMemo(
-    () => review.replace(/\[wimpLink[^\]]*\]/g, "").replace(/\[\/wimpLink\]/g, ""),
+    () =>
+      review.replace(/\[wimpLink[^\]]*\]/g, "").replace(/\[\/wimpLink\]/g, ""),
     [review],
   );
   return (

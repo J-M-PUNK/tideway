@@ -191,7 +191,9 @@ function CompactRow({ category }: { category: PageCategory }) {
       <div className="mb-4 flex items-baseline justify-between gap-4">
         <h2 className="text-xl font-bold tracking-tight">{category.title}</h2>
         {hasMore && category.viewAllPath && (
-          <ViewMoreLink to={`/browse/${encodeURIComponent(category.viewAllPath)}`} />
+          <ViewMoreLink
+            to={`/browse/${encodeURIComponent(category.viewAllPath)}`}
+          />
         )}
       </div>
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
@@ -324,8 +326,8 @@ function PlayablePill({
         ) : (
           <div className="truncate text-sm font-semibold">{title}</div>
         )}
-        {subtitle && (
-          subtitleTo ? (
+        {subtitle &&
+          (subtitleTo ? (
             <Link
               to={subtitleTo}
               className="block truncate text-xs text-muted-foreground hover:underline"
@@ -336,8 +338,7 @@ function PlayablePill({
             <div className="truncate text-xs text-muted-foreground">
               {subtitle}
             </div>
-          )
-        )}
+          ))}
       </div>
       <MoreHorizontal className="h-4 w-4 flex-shrink-0 text-muted-foreground" />
     </div>
@@ -521,7 +522,8 @@ export function Home({ onDownload }: { onDownload: OnDownload }) {
   const { data, loading, error } = useApi(() => api.page("home"), []);
 
   const hour = new Date().getHours();
-  const greeting = hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
+  const greeting =
+    hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
 
   if (loading) {
     return (
@@ -531,7 +533,8 @@ export function Home({ onDownload }: { onDownload: OnDownload }) {
       </div>
     );
   }
-  if (error || !data) return <ErrorView error={error ?? "Couldn't load home"} />;
+  if (error || !data)
+    return <ErrorView error={error ?? "Couldn't load home"} />;
 
   const { compactRows, page: filteredPage } = filterHomeRows(data);
 

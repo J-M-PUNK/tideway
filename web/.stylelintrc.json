@@ -1,0 +1,40 @@
+{
+  "extends": ["stylelint-config-standard"],
+  "rules": {
+    "at-rule-no-unknown": [
+      true,
+      {
+        "ignoreAtRules": [
+          "tailwind",
+          "apply",
+          "layer",
+          "variants",
+          "responsive",
+          "screen"
+        ]
+      }
+    ],
+    "selector-pseudo-class-no-unknown": [
+      true,
+      {
+        "ignorePseudoClasses": ["fullscreen", "-webkit-full-screen"]
+      }
+    ],
+    "selector-pseudo-element-no-unknown": [
+      true,
+      {
+        "ignorePseudoElements": ["backdrop", "-webkit-backdrop"]
+      }
+    ],
+    "no-descending-specificity": null,
+    "selector-class-pattern": null,
+    "custom-property-pattern": null,
+    "selector-no-vendor-prefix": [
+      true,
+      {
+        "ignoreSelectors": [":-webkit-full-screen", "::-webkit-backdrop"]
+      }
+    ]
+  },
+  "ignoreFiles": ["dist/**", "node_modules/**"]
+}

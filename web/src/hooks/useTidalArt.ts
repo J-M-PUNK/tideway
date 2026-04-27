@@ -32,19 +32,28 @@ function notify(key: string) {
   for (const fn of set) fn();
 }
 
-async function resolve(kind: Kind, name: string, artist?: string): Promise<string | null> {
+async function resolve(
+  kind: Kind,
+  name: string,
+  artist?: string,
+): Promise<string | null> {
   const query = artist ? `${artist} ${name}` : name;
   try {
     const res = await api.search(query, 5);
     if (kind === "artist") {
-      const exact = res.artists.find((a) => a.name.toLowerCase() === name.toLowerCase());
+      const exact = res.artists.find(
+        (a) => a.name.toLowerCase() === name.toLowerCase(),
+      );
       return (exact ?? res.artists[0])?.picture ?? null;
     }
     if (kind === "album") {
       const exact = res.albums.find(
         (a) =>
           a.name.toLowerCase() === name.toLowerCase() &&
-          (!artist || a.artists.some((ar) => ar.name.toLowerCase() === artist.toLowerCase())),
+          (!artist ||
+            a.artists.some(
+              (ar) => ar.name.toLowerCase() === artist.toLowerCase(),
+            )),
       );
       return (exact ?? res.albums[0])?.cover ?? null;
     }
@@ -52,7 +61,10 @@ async function resolve(kind: Kind, name: string, artist?: string): Promise<strin
     const exact = res.tracks.find(
       (t) =>
         t.name.toLowerCase() === name.toLowerCase() &&
-        (!artist || t.artists.some((ar) => ar.name.toLowerCase() === artist.toLowerCase())),
+        (!artist ||
+          t.artists.some(
+            (ar) => ar.name.toLowerCase() === artist.toLowerCase(),
+          )),
     );
     return (exact ?? res.tracks[0])?.album?.cover ?? null;
   } catch {
@@ -67,7 +79,11 @@ async function resolve(kind: Kind, name: string, artist?: string): Promise<strin
  * while loading or when no match exists — the caller keeps its
  * existing fallback icon.
  */
-export function useTidalArt(kind: Kind, name: string, artist?: string): string | null {
+export function useTidalArt(
+  kind: Kind,
+  name: string,
+  artist?: string,
+): string | null {
   const key = keyOf(kind, name, artist);
   const [, tick] = useState(0);
 

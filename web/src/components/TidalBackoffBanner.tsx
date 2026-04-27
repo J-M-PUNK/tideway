@@ -27,10 +27,10 @@ export function TidalBackoffBanner() {
         // banner stays inactive.
         setState((prev) => {
           if (
-            prev
-            && prev.active === r.active
-            && prev.reason === r.reason
-            && Math.abs(prev.seconds_remaining - r.seconds_remaining) < 2
+            prev &&
+            prev.active === r.active &&
+            prev.reason === r.reason &&
+            Math.abs(prev.seconds_remaining - r.seconds_remaining) < 2
           ) {
             return prev;
           }
@@ -54,8 +54,8 @@ export function TidalBackoffBanner() {
     <div className="flex items-center justify-center gap-2 bg-rose-500/20 px-4 py-1.5 text-xs font-semibold text-rose-200">
       <ShieldAlert className="h-3.5 w-3.5" />
       Tidal paused us for ~{minutes}m after detecting heavy API use. Playback,
-      search, and navigation will resume automatically — retrying now makes
-      the window longer.
+      search, and navigation will resume automatically — retrying now makes the
+      window longer.
     </div>
   );
 }

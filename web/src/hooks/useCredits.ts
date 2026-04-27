@@ -54,7 +54,10 @@ function fetchOnce(trackId: string): Promise<CreditEntry[]> {
  * Fetch track credits with caching. Returns null while loading so the UI
  * can render a spinner; cached results are synchronous on subsequent calls.
  */
-export function useCredits(trackId: string | null | undefined, enabled = true): {
+export function useCredits(
+  trackId: string | null | undefined,
+  enabled = true,
+): {
   credits: CreditEntry[] | null;
   loading: boolean;
 } {
@@ -62,12 +65,15 @@ export function useCredits(trackId: string | null | undefined, enabled = true): 
 
   useEffect(() => {
     if (!enabled || !trackId) return;
-    const unsubscribe = subscribeTrack(trackId, () => forceRender((n) => n + 1));
+    const unsubscribe = subscribeTrack(trackId, () =>
+      forceRender((n) => n + 1),
+    );
     if (!cache.has(trackId)) fetchOnce(trackId);
     return unsubscribe;
   }, [trackId, enabled]);
 
-  const credits = trackId ? cache.get(trackId) ?? null : null;
-  const loading = !!enabled && !!trackId && !cache.has(trackId) && inflight.has(trackId);
+  const credits = trackId ? (cache.get(trackId) ?? null) : null;
+  const loading =
+    !!enabled && !!trackId && !cache.has(trackId) && inflight.has(trackId);
   return { credits, loading };
 }

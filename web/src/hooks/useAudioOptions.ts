@@ -40,11 +40,11 @@ function setState(next: AudioOptions): void {
   // or toggling an already-on option doesn't wake every subscriber
   // and re-render consumers.
   if (
-    next.current === state.current
-    && next.exclusiveMode === state.exclusiveMode
-    && next.forceVolume === state.forceVolume
-    && next.loaded === state.loaded
-    && next.devices === state.devices
+    next.current === state.current &&
+    next.exclusiveMode === state.exclusiveMode &&
+    next.forceVolume === state.forceVolume &&
+    next.loaded === state.loaded &&
+    next.devices === state.devices
   ) {
     return;
   }

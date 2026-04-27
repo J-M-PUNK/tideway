@@ -62,7 +62,10 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
     let cancelled = false;
     (async () => {
       try {
-        const [s, qs] = await Promise.all([api.settings.get(), api.qualities()]);
+        const [s, qs] = await Promise.all([
+          api.settings.get(),
+          api.qualities(),
+        ]);
         if (cancelled) return;
         setSettings(s);
         lastSavedRef.current = s;
@@ -84,7 +87,8 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
   useEffect(() => {
     if (!settings || !lastSavedRef.current) return;
     if (settings === lastSavedRef.current) return;
-    if (saveTimerRef.current !== null) window.clearTimeout(saveTimerRef.current);
+    if (saveTimerRef.current !== null)
+      window.clearTimeout(saveTimerRef.current);
     saveTimerRef.current = window.setTimeout(async () => {
       saveTimerRef.current = null;
       setStatus("saving");
@@ -133,14 +137,18 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
 
   useEffect(() => {
     return () => {
-      if (saveTimerRef.current !== null) window.clearTimeout(saveTimerRef.current);
-      if (savedIndicatorRef.current !== null) window.clearTimeout(savedIndicatorRef.current);
+      if (saveTimerRef.current !== null)
+        window.clearTimeout(saveTimerRef.current);
+      if (savedIndicatorRef.current !== null)
+        window.clearTimeout(savedIndicatorRef.current);
     };
   }, []);
 
   if (loadError)
     return (
-      <div className="text-sm text-destructive">Couldn't load settings: {loadError.message}</div>
+      <div className="text-sm text-destructive">
+        Couldn't load settings: {loadError.message}
+      </div>
     );
   if (!settings) {
     return (
@@ -177,7 +185,7 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
               // value after a subscription downgrade.
               qualities.some((q) => q.value === ui.streamingQuality)
                 ? ui.streamingQuality
-                : qualities[0]?.value ?? "low_320k"
+                : (qualities[0]?.value ?? "low_320k")
             }
             onChange={(e) =>
               ui.set({ streamingQuality: e.target.value as StreamingQuality })
@@ -272,7 +280,9 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
             max={10}
             step={1}
             value={settings.concurrent_downloads}
-            onChange={(e) => patch({ concurrent_downloads: Number(e.target.value) })}
+            onChange={(e) =>
+              patch({ concurrent_downloads: Number(e.target.value) })
+            }
             className="h-2 w-full cursor-pointer appearance-none rounded-full bg-secondary accent-primary"
             aria-label="Concurrent downloads"
           />
@@ -330,7 +340,8 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
           <div className="flex-1">
             <div className="font-semibold">Open import hub</div>
             <div className="text-xs text-muted-foreground">
-              Pick what you want to import and which specific items to bring over.
+              Pick what you want to import and which specific items to bring
+              over.
             </div>
           </div>
           <ChevronRight className="h-4 w-4 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
@@ -344,7 +355,10 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
 
       <Section title="Appearance" icon={Palette}>
         <Field label="Theme">
-          <ThemePicker value={ui.theme} onChange={(t) => ui.set({ theme: t })} />
+          <ThemePicker
+            value={ui.theme}
+            onChange={(t) => ui.set({ theme: t })}
+          />
         </Field>
       </Section>
 
@@ -432,7 +446,9 @@ function Section({
           {Icon && <Icon className="h-4 w-4 text-muted-foreground" />}
           {title}
         </h2>
-        {description && <p className="mt-0.5 text-sm text-muted-foreground">{description}</p>}
+        {description && (
+          <p className="mt-0.5 text-sm text-muted-foreground">{description}</p>
+        )}
       </div>
       {children}
     </section>
@@ -583,7 +599,10 @@ function AudioEngineFields() {
   // the backend on release (via mouse-up / change commit).
   const [localBands, setLocalBands] = useState<number[] | null>(null);
   useEffect(() => {
-    if (eq) setLocalBands(eq.bands.length ? eq.bands : new Array(eq.band_count).fill(0));
+    if (eq)
+      setLocalBands(
+        eq.bands.length ? eq.bands : new Array(eq.band_count).fill(0),
+      );
   }, [eq]);
 
   if (!eq || !devices) return null;
@@ -763,7 +782,6 @@ function EqSlider({
   );
 }
 
-
 /**
  * AirPlay output control. Lists discovered receivers on the local
  * network, walks the user through a one-time pair, and lets them
@@ -930,8 +948,8 @@ function AirPlaySection() {
           </div>
           {devices.length === 0 ? (
             <p className="text-xs text-muted-foreground">
-              No AirPlay receivers found on this network. Make sure the
-              speaker or HomePod is powered on and awake.
+              No AirPlay receivers found on this network. Make sure the speaker
+              or HomePod is powered on and awake.
             </p>
           ) : (
             <ul className="flex flex-col gap-2">
@@ -984,12 +1002,11 @@ function AirPlaySection() {
             </ul>
           )}
           <p className="text-xs text-muted-foreground">
-            Audio tees to the connected AirPlay receiver while local
-            output keeps playing. Mute your local speakers with the
-            volume slider if you don't want both at once. macOS's
-            built-in AirPlay Receiver is not supported (Apple's
-            proprietary pairing); HomePods, AirPort Express, Apple TVs,
-            and most third-party AirPlay speakers work.
+            Audio tees to the connected AirPlay receiver while local output
+            keeps playing. Mute your local speakers with the volume slider if
+            you don't want both at once. macOS's built-in AirPlay Receiver is
+            not supported (Apple's proprietary pairing); HomePods, AirPort
+            Express, Apple TVs, and most third-party AirPlay speakers work.
           </p>
         </>
       )}
@@ -999,9 +1016,9 @@ function AirPlaySection() {
             Pairing with {pairing.name}
           </div>
           <p className="mb-3 text-xs text-muted-foreground">
-            A 4-digit PIN should appear on the receiver now. If the
-            receiver is a HomePod, check the paired iPhone or iPad;
-            some models display the PIN there.
+            A 4-digit PIN should appear on the receiver now. If the receiver is
+            a HomePod, check the paired iPhone or iPad; some models display the
+            PIN there.
           </p>
           <div className="flex items-center gap-2">
             <Input
@@ -1014,7 +1031,9 @@ function AirPlaySection() {
               autoFocus
             />
             <Button onClick={submitPin} disabled={pinBusy || !pin}>
-              {pinBusy ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : null}
+              {pinBusy ? (
+                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+              ) : null}
               Submit
             </Button>
             <Button variant="ghost" onClick={cancelPair}>
@@ -1026,7 +1045,6 @@ function AirPlaySection() {
     </Section>
   );
 }
-
 
 /**
  * Last.fm scrobbling setup. Three states:
@@ -1050,7 +1068,9 @@ function LastFmSection() {
   const [apiKey, setApiKey] = useState("");
   const [apiSecret, setApiSecret] = useState("");
   const [pendingToken, setPendingToken] = useState<string | null>(null);
-  const [busy, setBusy] = useState<null | "save" | "connect" | "complete" | "disconnect">(null);
+  const [busy, setBusy] = useState<
+    null | "save" | "connect" | "complete" | "disconnect"
+  >(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -1077,7 +1097,10 @@ function LastFmSection() {
     if (!apiKey.trim() || !apiSecret.trim()) return;
     setBusy("save");
     try {
-      const s = await api.lastfm.setCredentials(apiKey.trim(), apiSecret.trim());
+      const s = await api.lastfm.setCredentials(
+        apiKey.trim(),
+        apiSecret.trim(),
+      );
       setStatus(s);
       setApiKey("");
       setApiSecret("");
@@ -1185,7 +1208,8 @@ function LastFmSection() {
           <div>
             <div className="text-sm font-semibold">Connected</div>
             <div className="text-xs text-muted-foreground">
-              Scrobbling as <span className="text-foreground">{status.username}</span>
+              Scrobbling as{" "}
+              <span className="text-foreground">{status.username}</span>
             </div>
           </div>
           <Button
@@ -1194,7 +1218,9 @@ function LastFmSection() {
             onClick={disconnect}
             disabled={busy !== null}
           >
-            {busy === "disconnect" && <Loader2 className="h-4 w-4 animate-spin" />}
+            {busy === "disconnect" && (
+              <Loader2 className="h-4 w-4 animate-spin" />
+            )}
             Disconnect
           </Button>
         </div>
@@ -1212,7 +1238,9 @@ function LastFmSection() {
               variant={pendingToken ? "outline" : "default"}
               size="sm"
             >
-              {busy === "connect" && <Loader2 className="h-4 w-4 animate-spin" />}
+              {busy === "connect" && (
+                <Loader2 className="h-4 w-4 animate-spin" />
+              )}
               {pendingToken ? "Open Last.fm again" : "Connect"}
             </Button>
             {pendingToken && (
@@ -1221,7 +1249,9 @@ function LastFmSection() {
                 disabled={busy !== null}
                 size="sm"
               >
-                {busy === "complete" && <Loader2 className="h-4 w-4 animate-spin" />}
+                {busy === "complete" && (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                )}
                 I've approved — finish connecting
               </Button>
             )}
@@ -1241,8 +1271,8 @@ function LastFmSection() {
           </div>
           {pendingToken && (
             <p className="text-xs text-muted-foreground">
-              Browser should have opened to Last.fm. Approve the app, then
-              click "I've approved".
+              Browser should have opened to Last.fm. Approve the app, then click
+              "I've approved".
             </p>
           )}
         </div>
@@ -1256,8 +1286,8 @@ function LastFmSection() {
             >
               Create a free API account
             </button>{" "}
-            if you don't have one — any application name works, callback
-            URL can be blank.
+            if you don't have one — any application name works, callback URL can
+            be blank.
           </p>
           <Field label="API key">
             <Input
@@ -1372,7 +1402,10 @@ function AutostartSection({
       </label>
       {status.available && status.path && (
         <div className="text-xs text-muted-foreground">
-          Will launch: <code className="rounded bg-secondary px-1.5 py-0.5">{status.path}</code>
+          Will launch:{" "}
+          <code className="rounded bg-secondary px-1.5 py-0.5">
+            {status.path}
+          </code>
         </div>
       )}
       <Toggle

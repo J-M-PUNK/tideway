@@ -19,7 +19,11 @@ export function ShareButton({ shareUrl }: Props) {
     if (!shareUrl) return;
     try {
       await navigator.clipboard.writeText(shareUrl);
-      toast.show({ kind: "success", title: "Link copied", description: shareUrl });
+      toast.show({
+        kind: "success",
+        title: "Link copied",
+        description: shareUrl,
+      });
     } catch {
       toast.show({
         kind: "error",

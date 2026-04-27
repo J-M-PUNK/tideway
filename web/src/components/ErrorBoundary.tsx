@@ -47,8 +47,8 @@ export class ErrorBoundary extends Component<Props, State> {
         <div className="flex max-w-md flex-col gap-4 rounded-xl border border-border bg-card p-8 text-center shadow-xl">
           <h1 className="text-xl font-bold">Something went wrong.</h1>
           <p className="text-sm text-muted-foreground">
-            The UI hit an unexpected error. You can reload the page, or try to dismiss the
-            error and keep going.
+            The UI hit an unexpected error. You can reload the page, or try to
+            dismiss the error and keep going.
           </p>
           <pre className="max-h-40 overflow-auto rounded bg-secondary p-3 text-left text-xs text-muted-foreground">
             {this.state.error.message}

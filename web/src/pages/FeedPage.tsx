@@ -40,13 +40,16 @@ export function FeedPage({ onDownload }: { onDownload: OnDownload }) {
       </div>
     );
   }
-  if (error || !data) return <ErrorView error={error ?? "Couldn't load feed"} />;
+  if (error || !data)
+    return <ErrorView error={error ?? "Couldn't load feed"} />;
 
   const items = data.items;
   const editorial = data.editorial;
   const hasCurated = items.length > 0;
   const hasEditorial =
-    !!editorial && Array.isArray(editorial.categories) && editorial.categories.length > 0;
+    !!editorial &&
+    Array.isArray(editorial.categories) &&
+    editorial.categories.length > 0;
 
   if (!hasCurated && !hasEditorial) {
     return (
@@ -58,7 +61,9 @@ export function FeedPage({ onDownload }: { onDownload: OnDownload }) {
           description="Favorite or watch some artists in Tidal — their new albums will show up here as they drop."
           action={
             <Button asChild variant="secondary" size="sm">
-              <Link to="/library/artists"><Compass className="h-4 w-4" /> Find artists to follow</Link>
+              <Link to="/library/artists">
+                <Compass className="h-4 w-4" /> Find artists to follow
+              </Link>
             </Button>
           }
         />
@@ -88,7 +93,11 @@ export function FeedPage({ onDownload }: { onDownload: OnDownload }) {
                   </h3>
                   <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6">
                     {group.items.map((item) => (
-                      <FeedCard key={item.id} item={item} onDownload={onDownload} />
+                      <FeedCard
+                        key={item.id}
+                        item={item}
+                        onDownload={onDownload}
+                      />
                     ))}
                   </div>
                 </section>
@@ -123,7 +132,13 @@ function Header() {
   );
 }
 
-function FeedCard({ item, onDownload }: { item: FeedItem; onDownload: OnDownload }) {
+function FeedCard({
+  item,
+  onDownload,
+}: {
+  item: FeedItem;
+  onDownload: OnDownload;
+}) {
   const cover = imageProxy(item.cover);
   const artist = item.artists?.map((a) => a.name).join(", ") ?? "";
   return (
@@ -166,7 +181,10 @@ function FeedCard({ item, onDownload }: { item: FeedItem; onDownload: OnDownload
 }
 
 function groupByDay(items: FeedItem[]): { label: string; items: FeedItem[] }[] {
-  const buckets = new Map<string, { label: string; sort: number; items: FeedItem[] }>();
+  const buckets = new Map<
+    string,
+    { label: string; sort: number; items: FeedItem[] }
+  >();
   for (const item of items) {
     const key = item.released_at.slice(0, 10); // YYYY-MM-DD
     const existing = buckets.get(key);
@@ -190,7 +208,9 @@ function formatGroupLabel(iso: string): string {
   today.setHours(0, 0, 0, 0);
   const dayOf = new Date(date);
   dayOf.setHours(0, 0, 0, 0);
-  const diffDays = Math.round((today.getTime() - dayOf.getTime()) / (1000 * 60 * 60 * 24));
+  const diffDays = Math.round(
+    (today.getTime() - dayOf.getTime()) / (1000 * 60 * 60 * 24),
+  );
   if (diffDays === 0) return "Today";
   if (diffDays === 1) return "Yesterday";
   if (diffDays < 7) return `${diffDays} days ago`;

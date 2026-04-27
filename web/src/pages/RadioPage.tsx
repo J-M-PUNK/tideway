@@ -44,8 +44,8 @@ export function RadioPage({ kind, onDownload }: Props) {
   // Router state carries the seed for track radio since we have no
   // cheap metadata endpoint for tracks. Artist radio also respects
   // state as a short-circuit to skip the extra fetch.
-  const stateSeed = (location.state as { seed?: RadioSeed } | null)?.seed
-    ?? null;
+  const stateSeed =
+    (location.state as { seed?: RadioSeed } | null)?.seed ?? null;
 
   const radio = useApi(() => fetchRadio(kind, id), [kind, id]);
 
@@ -61,8 +61,9 @@ export function RadioPage({ kind, onDownload }: Props) {
   );
 
   const tracks = radio.data ?? [];
-  const seed: RadioSeed = stateSeed
-    ?? (kind === "artist" && artistMeta.data
+  const seed: RadioSeed =
+    stateSeed ??
+    (kind === "artist" && artistMeta.data
       ? { name: artistMeta.data.name, cover: artistMeta.data.picture }
       : tracks[0]
         ? {
@@ -72,8 +73,8 @@ export function RadioPage({ kind, onDownload }: Props) {
         : null);
 
   const eyebrow = kind === "artist" ? "Artist Radio" : "Track Radio";
-  const title = seed?.name
-    ?? (kind === "artist" ? "Artist Radio" : "Track Radio");
+  const title =
+    seed?.name ?? (kind === "artist" ? "Artist Radio" : "Track Radio");
 
   // Kick off playback once, as soon as tracks arrive. Keyed on
   // id+kind so navigating to a different radio page restarts the
@@ -134,7 +135,10 @@ export function RadioPage({ kind, onDownload }: Props) {
                 }}
                 shuffleIntent={shuffleIntent}
               />
-              <ShuffleButton value={shuffleIntent} onChange={setShuffleIntent} />
+              <ShuffleButton
+                value={shuffleIntent}
+                onChange={setShuffleIntent}
+              />
               <div className="ml-auto flex items-center gap-6">
                 <AddTracksToPlaylistButton tracks={tracks} />
                 <CollectionOverflowMenu tracks={tracks} />
@@ -155,7 +159,10 @@ export function RadioPage({ kind, onDownload }: Props) {
   );
 }
 
-async function fetchRadio(kind: "artist" | "track", id: string): Promise<Track[]> {
+async function fetchRadio(
+  kind: "artist" | "track",
+  id: string,
+): Promise<Track[]> {
   if (kind === "artist") return api.artistRadio(id);
   return api.trackRadio(id);
 }

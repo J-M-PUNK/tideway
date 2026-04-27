@@ -106,6 +106,9 @@ export function DownloadStreamProvider({ children }: { children: ReactNode }) {
 
 export function useDownloadStream(): StreamContextValue {
   const ctx = useContext(Ctx);
-  if (!ctx) throw new Error("useDownloadStream must be inside <DownloadStreamProvider>");
+  if (!ctx)
+    throw new Error(
+      "useDownloadStream must be inside <DownloadStreamProvider>",
+    );
   return ctx;
 }

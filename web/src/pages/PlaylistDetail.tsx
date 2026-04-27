@@ -1,6 +1,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
-import { AlertTriangle, Folder, FolderMinus, Loader2, Pencil, Trash2 } from "lucide-react";
+import {
+  AlertTriangle,
+  Folder,
+  FolderMinus,
+  Loader2,
+  Pencil,
+  Trash2,
+} from "lucide-react";
 import { api } from "@/api/client";
 import type { OnDownload } from "@/api/download";
 import type { PlaylistFolder, Track } from "@/api/types";
@@ -46,10 +53,11 @@ export function PlaylistDetail({ onDownload }: { onDownload: OnDownload }) {
   // refreshTick is bumped after edits to re-run the playlist fetch without
   // reloading the whole SPA (which would nuke queue, scroll, player state).
   const [refreshTick, setRefreshTick] = useState(0);
-  const { data: playlist, loading, error } = useApi(
-    () => api.playlist(id),
-    [id, refreshTick],
-  );
+  const {
+    data: playlist,
+    loading,
+    error,
+  } = useApi(() => api.playlist(id), [id, refreshTick]);
   // Local optimistic copy of tracks so removing a track feels instant.
   const [localTracks, setLocalTracks] = useState<Track[] | null>(null);
   const toast = useToast();
@@ -160,7 +168,8 @@ export function PlaylistDetail({ onDownload }: { onDownload: OnDownload }) {
       </div>
     );
   }
-  if (error || !playlist) return <ErrorView error={error ?? "Playlist not found"} />;
+  if (error || !playlist)
+    return <ErrorView error={error ?? "Playlist not found"} />;
 
   return (
     <div>
@@ -171,7 +180,9 @@ export function PlaylistDetail({ onDownload }: { onDownload: OnDownload }) {
         meta={
           <div className="flex flex-col gap-2">
             {playlist.description && (
-              <p className="line-clamp-2 text-muted-foreground">{playlist.description}</p>
+              <p className="line-clamp-2 text-muted-foreground">
+                {playlist.description}
+              </p>
             )}
             <span>
               {playlist.creator && (
@@ -206,17 +217,24 @@ export function PlaylistDetail({ onDownload }: { onDownload: OnDownload }) {
               />
             )}
             {tracks.length > 0 && (
-              <ShuffleButton value={shuffleIntent} onChange={setShuffleIntent} />
+              <ShuffleButton
+                value={shuffleIntent}
+                onChange={setShuffleIntent}
+              />
             )}
             <div className="ml-auto flex items-center gap-6">
-              {!playlist.owned && <AddToLibraryButton kind="playlist" id={playlist.id} />}
+              {!playlist.owned && (
+                <AddToLibraryButton kind="playlist" id={playlist.id} />
+              )}
               <ShareButton shareUrl={playlist.share_url} />
               <CollectionOverflowMenu
                 tracks={tracks}
                 downloadKind="playlist"
                 downloadId={playlist.id}
               />
-              {playlist.owned && <MoveToFolderButton playlistId={playlist.id} />}
+              {playlist.owned && (
+                <MoveToFolderButton playlistId={playlist.id} />
+              )}
               {playlist.owned && (
                 <>
                   <EditPlaylistButton
@@ -225,7 +243,10 @@ export function PlaylistDetail({ onDownload }: { onDownload: OnDownload }) {
                     initialDescription={playlist.description}
                     onSaved={() => setRefreshTick((n) => n + 1)}
                   />
-                  <DeletePlaylistButton playlistId={playlist.id} name={playlist.name} />
+                  <DeletePlaylistButton
+                    playlistId={playlist.id}
+                    name={playlist.name}
+                  />
                 </>
               )}
             </div>
@@ -298,7 +319,10 @@ function MoveToFolderButton({ playlistId }: { playlistId: string }) {
       await api.library.folders.movePlaylists(folderId, [playlistId]);
       toast.show({
         kind: "success",
-        title: folderId === "root" ? "Moved out of folder" : `Moved to ${folderName}`,
+        title:
+          folderId === "root"
+            ? "Moved out of folder"
+            : `Moved to ${folderName}`,
       });
     } catch (err) {
       toast.show({
@@ -368,7 +392,10 @@ function EditPlaylistButton({
   const save = async () => {
     setSubmitting(true);
     try {
-      await api.playlists.edit(playlistId, { title: title.trim(), description });
+      await api.playlists.edit(playlistId, {
+        title: title.trim(),
+        description,
+      });
       toast.show({ kind: "success", title: "Playlist updated" });
       setOpen(false);
       refresh().catch(() => {});
@@ -395,7 +422,9 @@ function EditPlaylistButton({
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Edit playlist</DialogTitle>
-            <DialogDescription>Update the name or description.</DialogDescription>
+            <DialogDescription>
+              Update the name or description.
+            </DialogDescription>
           </DialogHeader>
           <form
             onSubmit={(e) => {
@@ -424,7 +453,11 @@ function EditPlaylistButton({
               />
             </div>
             <div className="flex justify-end gap-2">
-              <Button type="button" variant="ghost" onClick={() => setOpen(false)}>
+              <Button
+                type="button"
+                variant="ghost"
+                onClick={() => setOpen(false)}
+              >
                 Cancel
               </Button>
               <Button type="submit" disabled={!title.trim() || submitting}>
@@ -439,7 +472,13 @@ function EditPlaylistButton({
   );
 }
 
-function DeletePlaylistButton({ playlistId, name }: { playlistId: string; name: string }) {
+function DeletePlaylistButton({
+  playlistId,
+  name,
+}: {
+  playlistId: string;
+  name: string;
+}) {
   const [open, setOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const toast = useToast();
@@ -451,7 +490,11 @@ function DeletePlaylistButton({ playlistId, name }: { playlistId: string; name: 
     try {
       await api.playlists.delete(playlistId);
       optimisticRemove(playlistId);
-      toast.show({ kind: "success", title: "Playlist deleted", description: name });
+      toast.show({
+        kind: "success",
+        title: "Playlist deleted",
+        description: name,
+      });
       navigate("/library/playlists");
     } catch (err) {
       toast.show({
@@ -475,14 +518,19 @@ function DeletePlaylistButton({ playlistId, name }: { playlistId: string; name: 
           <DialogHeader>
             <DialogTitle>Delete "{name}"?</DialogTitle>
             <DialogDescription>
-              This removes the playlist from your Tidal account. It can't be undone.
+              This removes the playlist from your Tidal account. It can't be
+              undone.
             </DialogDescription>
           </DialogHeader>
           <div className="flex justify-end gap-2">
             <Button variant="ghost" onClick={() => setOpen(false)}>
               Cancel
             </Button>
-            <Button variant="destructive" onClick={confirmDelete} disabled={submitting}>
+            <Button
+              variant="destructive"
+              onClick={confirmDelete}
+              disabled={submitting}
+            >
               {submitting && <Loader2 className="h-4 w-4 animate-spin" />}
               Delete
             </Button>
