@@ -80,6 +80,16 @@ for pkg in (
     # Without this the packaged app falls back to plain requests
     # silently, losing the TLS-fingerprint match.
     "curl_cffi",
+    # tls-client ships per-arch native binaries
+    # (tls-client-arm64.dylib, tls-client-amd64.so, etc.) under
+    # tls_client/dependencies/. spotapi loads one of those via
+    # ctypes at runtime, but PyInstaller's static analysis only
+    # sees the python imports — without collect_all the dylibs
+    # don't ship and every Spotify call dies with
+    # "Failed to load dynlib/dll '.../tls-client-<arch>.dylib'."
+    # That's the missing-monthly-listeners + zero-playcount bug
+    # from v0.4.8.
+    "tls_client",
 ):
     try:
         _d, _b, _h = collect_all(pkg)
