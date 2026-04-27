@@ -1,12 +1,12 @@
 import { useMemo, useState } from "react";
-import { useParams } from "react-router-dom";
-import { Video as VideoIcon } from "lucide-react";
+import { Link, useParams } from "react-router-dom";
+import { Heart, Music, Video as VideoIcon } from "lucide-react";
 import { api } from "@/api/client";
-import type { Album, Artist, Video } from "@/api/types";
+import type { Album, Artist, Track, Video } from "@/api/types";
 import type { OnDownload } from "@/api/download";
 import { useApi } from "@/hooks/useApi";
 import { useColumnCount } from "@/hooks/useColumnCount";
-import { useLikedTracksByArtist } from "@/hooks/useLikedTracksByArtist";
+import { useLikedByArtist } from "@/hooks/useLikedByArtist";
 import { useVideoPlayer } from "@/hooks/useVideoPlayer";
 import { ArtistHero } from "@/components/ArtistHero";
 import { ArtistTopCities } from "@/components/ArtistTopCities";
@@ -20,6 +20,7 @@ import {
   TrackListSkeleton,
 } from "@/components/Skeletons";
 import { VideoCard } from "@/components/VideoCard";
+import { imageProxy } from "@/lib/utils";
 
 export function ArtistDetail({ onDownload }: { onDownload: OnDownload }) {
   const { id = "" } = useParams();
@@ -29,11 +30,12 @@ export function ArtistDetail({ onDownload }: { onDownload: OnDownload }) {
   // mount like it used to.
   const { data: artist, loading, error } = useApi(() => api.artist(id), [id]);
   const [popularExpanded, setPopularExpanded] = useState(false);
-  // The user's liked tracks credited to this artist. Spotify renders
-  // this above Albums on the artist page; we mirror the same slot.
-  // Hook returns null while the first library/tracks fetch is in
-  // flight; we just don't render the section in that window.
-  const likedByArtist = useLikedTracksByArtist(artist?.id);
+  // The user's liked tracks + albums credited to this artist. Spotify
+  // renders a "You Liked" summary card above Albums; clicking it
+  // opens the full list. Hook returns null while the first
+  // library fetch is in flight; we just don't render the section in
+  // that window.
+  const liked = useLikedByArtist(artist?.id);
 
   if (loading) {
     return (
@@ -91,22 +93,15 @@ export function ArtistDetail({ onDownload }: { onDownload: OnDownload }) {
         </>
       )}
 
-      {likedByArtist && likedByArtist.length > 0 && (
+      {liked && (liked.tracks.length > 0 || liked.albums.length > 0) && (
         <>
-          <SectionHeader
-            title={`Songs you've liked${
-              likedByArtist.length > 5 ? ` · ${likedByArtist.length}` : ""
-            }`}
+          <SectionHeader title="You Liked" />
+          <LikedSummaryCard
+            artistId={id}
+            artistName={artist.name}
+            tracks={liked.tracks}
+            albums={liked.albums}
           />
-          <TrackList
-            tracks={likedByArtist.slice(0, 5)}
-            onDownload={onDownload}
-          />
-          {likedByArtist.length > 5 && (
-            <div className="mb-8 mt-2">
-              <ViewMoreLink to={`/artist/${id}/all/liked`} />
-            </div>
-          )}
         </>
       )}
 
@@ -167,6 +162,79 @@ export function ArtistDetail({ onDownload }: { onDownload: OnDownload }) {
         </>
       )}
     </div>
+  );
+}
+
+/**
+ * Summary card for the "You Liked" section on the artist page.
+ * Mirrors Spotify's surface — single cover image with a heart
+ * overlay, primary text "X songs · Y release(s)", subtitle
+ * "By [Artist]". The whole card is clickable; click opens the
+ * dedicated drill-down at /artist/:id/all/liked.
+ *
+ * Cover preference order: first liked album cover (most stable
+ * across re-fetches because albums change less often than the
+ * track list), then first liked track's album cover, then a
+ * placeholder Music glyph. The card never renders without at
+ * least one liked item — caller gates on count > 0.
+ */
+function LikedSummaryCard({
+  artistId,
+  artistName,
+  tracks,
+  albums,
+}: {
+  artistId: string;
+  artistName: string;
+  tracks: Track[];
+  albums: Album[];
+}) {
+  const songCount = tracks.length;
+  const releaseCount = albums.length;
+  // "Title" reads more naturally with the larger count first; the
+  // user is more likely to have many liked songs and few liked
+  // albums than the reverse, but either order works.
+  const summary = [
+    songCount > 0 ? `${songCount} ${songCount === 1 ? "song" : "songs"}` : null,
+    releaseCount > 0
+      ? `${releaseCount} ${releaseCount === 1 ? "release" : "releases"}`
+      : null,
+  ]
+    .filter(Boolean)
+    .join(" · ");
+
+  const cover = albums[0]?.cover ?? tracks[0]?.album?.cover ?? null;
+  const coverUrl = cover ? imageProxy(cover) : null;
+
+  return (
+    <Link
+      to={`/artist/${artistId}/all/liked`}
+      className="mb-10 inline-flex max-w-md items-center gap-4 rounded-lg p-2 transition-colors hover:bg-accent"
+    >
+      <div className="relative h-20 w-20 shrink-0 overflow-hidden rounded-md bg-secondary">
+        {coverUrl ? (
+          <img
+            src={coverUrl}
+            alt=""
+            className="h-full w-full object-cover"
+            loading="lazy"
+          />
+        ) : (
+          <div className="flex h-full w-full items-center justify-center text-muted-foreground">
+            <Music className="h-8 w-8" />
+          </div>
+        )}
+        <div className="absolute bottom-1 right-1 flex h-6 w-6 items-center justify-center rounded-full bg-primary text-primary-foreground shadow">
+          <Heart className="h-3.5 w-3.5 fill-current" />
+        </div>
+      </div>
+      <div className="min-w-0 flex-1">
+        <div className="truncate text-base font-bold">{summary}</div>
+        <div className="truncate text-sm text-muted-foreground">
+          By {artistName}
+        </div>
+      </div>
+    </Link>
   );
 }
 
