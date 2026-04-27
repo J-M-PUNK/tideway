@@ -115,13 +115,23 @@ _db_lock = threading.Lock()
 _db_path = user_data_dir() / "spotify_public_cache.db"
 
 # Bumped when a code change makes existing cached data unreliable. The
-# resolver fix (canonical-track search + name-matched artist mapping)
-# means rows written by the old code can be wrong: a Thriller playcount
-# cached at 40M from the reissue's ISRC, or a Tidal artist mapped to a
-# featured collaborator. The version sentinel at the top of `_db()`
-# wipes those tables on first open after the bump so users see the
-# corrected numbers without having to manually clear the cache.
-_CACHE_SCHEMA_VERSION = 2
+# version sentinel at the top of `_db()` wipes the affected tables on
+# first open after a bump so users see corrected numbers without
+# having to clear the cache by hand.
+#
+# History:
+#   1: pre-v0.4.6 (no sentinel; treated as version 0).
+#   2: v0.4.6 resolver fix — pre-fix rows had wrong playcounts (Thriller
+#      cached at 40M from a reissue ISRC) and wrong artist mappings
+#      (Tidal artist resolved to a featured Spotify collaborator).
+#      Wiped to let the new resolver rebuild correctly.
+#   3: v0.4.9 tls-client bundling fix — between v0.4.6 and v0.4.8 the
+#      packaged Mac/Windows builds couldn't load tls-client's native
+#      dylib, so spotapi calls died at ctypes load and every result
+#      cached as null. Wiping flushes those nulls so the now-working
+#      transport gets re-asked instead of waiting out the 1-day
+#      negative TTL on each row.
+_CACHE_SCHEMA_VERSION = 3
 
 
 def _db() -> sqlite3.Connection:
