@@ -88,7 +88,7 @@ export function Library({ onDownload }: { onDownload: OnDownload }) {
     return <Navigate to="/library/albums" replace />;
   }
   const type = section as Section;
-  const { title, icon: Icon, emptyHint } = META[type];
+  const { title, emptyHint } = META[type];
 
   const [data, setData] = useState<LibraryItem[] | null>(null);
   const [folders, setFolders] = useState<PlaylistFolder[]>([]);
@@ -199,10 +199,7 @@ export function Library({ onDownload }: { onDownload: OnDownload }) {
 
   return (
     <div>
-      <div className="mb-6 flex flex-wrap items-center justify-between gap-4">
-        <h1 className="flex items-center gap-3 text-3xl font-bold tracking-tight">
-          <Icon className="h-7 w-7" /> {title}
-        </h1>
+      <div className="mb-6 flex flex-wrap items-center justify-end gap-4">
         <div className="flex items-center gap-2">
           {type === "tracks" && data && data.length > 0 && (
             <DownloadAllTracks tracks={data as Track[]} />

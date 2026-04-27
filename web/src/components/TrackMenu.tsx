@@ -184,8 +184,8 @@ export function TrackMenuItems({
       <Item onSelect={() => actions.play(track, playQueue)}>
         <Play className="h-3.5 w-3.5" /> Play
       </Item>
-      <Item onSelect={() => actions.playNext(track)}>
-        <ListPlus className="h-3.5 w-3.5" /> Play next
+      <Item onSelect={() => actions.addToQueue(track)}>
+        <ListPlus className="h-3.5 w-3.5" /> Add to queue
       </Item>
       <AddToPlaylistSubmenu parts={parts} trackId={track.id} trackName={track.name} />
       <Item onSelect={() => favs.toggle("track", track.id)}>

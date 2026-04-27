@@ -8,7 +8,6 @@ import {
   ExternalLink,
   FileText,
   Heart,
-  ImportIcon,
   ListMusic,
   Loader2,
   Music,
@@ -74,7 +73,6 @@ export function ImportPage() {
 
   return (
     <div>
-      <Header />
       {review ? (
         <MatchReview
           rows={review.rows}
@@ -120,22 +118,6 @@ export function ImportPage() {
           )}
         </>
       )}
-    </div>
-  );
-}
-
-function Header() {
-  return (
-    <div className="mb-6">
-      <h1 className="flex items-center gap-3 text-3xl font-bold tracking-tight">
-        <ImportIcon className="h-7 w-7" /> Import
-      </h1>
-      <p className="mt-1 text-sm text-muted-foreground">
-        Pull playlists, liked songs, saved albums, or followed artists from
-        Spotify, Deezer, or an M3U / text file. Every item is matched by
-        ISRC / UPC when available or fuzzy name otherwise — you review and
-        pick which matches to keep before anything is created.
-      </p>
     </div>
   );
 }

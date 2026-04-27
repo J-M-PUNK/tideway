@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import {
   Bell,
@@ -211,6 +211,12 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
             <option value="both">Show both</option>
           </select>
         </Field>
+        <Toggle
+          checked={settings.continue_with_artist_radio_after_album}
+          onChange={(v) => patch({ continue_with_artist_radio_after_album: v })}
+          label="After an album ends, continue with artist radio"
+          hint="When off, the player pauses on the album's first track so you can press Play to repeat. When on, it queues an Artist Radio mix from the album's primary artist."
+        />
       </Section>
 
       {import.meta.env.VITE_SHOW_AIRPLAY === "1" && <AirPlaySection />}
@@ -461,21 +467,30 @@ function Toggle({
   checked,
   onChange,
   label,
+  hint,
 }: {
   checked: boolean;
   onChange: (v: boolean) => void;
   label: string;
+  /** Optional explanatory text rendered below the checkbox row. Same
+   *  visual treatment as the hint on `<Field>`. */
+  hint?: ReactNode;
 }) {
   return (
-    <label className="flex items-center gap-3 text-sm">
-      <input
-        type="checkbox"
-        checked={checked}
-        onChange={(e) => onChange(e.target.checked)}
-        className="h-4 w-4 accent-primary"
-      />
-      {label}
-    </label>
+    <div className="flex flex-col gap-1">
+      <label className="flex items-center gap-3 text-sm">
+        <input
+          type="checkbox"
+          checked={checked}
+          onChange={(e) => onChange(e.target.checked)}
+          className="h-4 w-4 accent-primary"
+        />
+        {label}
+      </label>
+      {hint && (
+        <p className="ml-7 text-xs text-muted-foreground">{hint}</p>
+      )}
+    </div>
   );
 }
 

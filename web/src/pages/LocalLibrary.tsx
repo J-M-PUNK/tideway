@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { ChevronDown, ChevronRight, Clock, Disc3, Film, FolderOpen, HardDrive, Music, Play, User } from "lucide-react";
+import { ChevronDown, ChevronRight, Clock, Disc3, Film, FolderOpen, Music, Play, User } from "lucide-react";
 import { api } from "@/api/client";
 import type { LocalFile, LocalVideo, Track } from "@/api/types";
 import type { OnDownload } from "@/api/download";
@@ -187,11 +187,8 @@ export function LocalLibrary({ onDownload: _onDownload }: { onDownload: OnDownlo
     <div>
       <div className="mb-6 flex flex-wrap items-end justify-between gap-4">
         <div>
-          <h1 className="flex items-center gap-3 text-3xl font-bold tracking-tight">
-            <HardDrive className="h-7 w-7" /> On this device
-          </h1>
           {data && (
-            <p className="mt-1 text-sm text-muted-foreground">{countText}</p>
+            <p className="text-sm text-muted-foreground">{countText}</p>
           )}
         </div>
         <div className="flex items-center gap-2">

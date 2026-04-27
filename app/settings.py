@@ -107,6 +107,15 @@ class Settings:
     # bit-depth loss. Implemented by clamping set_volume() to 100 and
     # hiding the slider in the UI.
     force_volume: bool = False
+    # When the queue ends after an album finishes, take over with an
+    # Artist Radio mix from the album's primary artist instead of
+    # pausing on track 1 of the same album. Off by default — most
+    # users prefer the album just stop on its own first track so
+    # they can repeat it; opt-in for users who want continuous
+    # playback in the style of "auto-radio" from Spotify / Apple
+    # Music. Only fires when the queue's source was an album; other
+    # sources (playlists, mixes, single-track plays) ignore this.
+    continue_with_artist_radio_after_album: bool = False
     # Don't restore the main window on launch; go straight to the
     # tray. Useful for "Launch on login" users who want Tideway
     # running without grabbing focus each reboot.

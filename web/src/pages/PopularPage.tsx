@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import {
-  Flame,
   Music,
   Radio,
   Settings as SettingsIcon,
@@ -72,7 +71,6 @@ export function PopularPage({ onDownload }: { onDownload: OnDownload }) {
     return (
       <div>
         <ChartsNav />
-        <Header />
         <EmptyState
           icon={Radio}
           title="Connect Last.fm to browse global charts"
@@ -92,25 +90,11 @@ export function PopularPage({ onDownload }: { onDownload: OnDownload }) {
   return (
     <div>
       <ChartsNav />
-      <Header />
       <TabBar tab={tab} onChange={setTab} />
       <div className="mt-6">
         {tab === "artists" && <ChartArtists />}
         {tab === "tracks" && <ChartTracks onDownload={onDownload} />}
       </div>
-    </div>
-  );
-}
-
-function Header() {
-  return (
-    <div className="mb-6">
-      <h1 className="flex items-center gap-3 text-3xl font-bold tracking-tight">
-        <Flame className="h-7 w-7" /> Popular
-      </h1>
-      <p className="mt-1 text-sm text-muted-foreground">
-        What Last.fm's entire community is listening to right now.
-      </p>
     </div>
   );
 }

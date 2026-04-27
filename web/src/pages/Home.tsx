@@ -520,13 +520,9 @@ function PillCover({ cover }: { cover: string | null }) {
 export function Home({ onDownload }: { onDownload: OnDownload }) {
   const { data, loading, error } = useApi(() => api.page("home"), []);
 
-  const hour = new Date().getHours();
-  const greeting = hour < 12 ? "Good morning" : hour < 18 ? "Good afternoon" : "Good evening";
-
   if (loading) {
     return (
       <div>
-        <h1 className="mb-6 text-4xl font-bold tracking-tight">{greeting}</h1>
         <GridSkeleton count={12} />
       </div>
     );
@@ -537,7 +533,6 @@ export function Home({ onDownload }: { onDownload: OnDownload }) {
 
   return (
     <div>
-      <h1 className="mb-8 text-4xl font-bold tracking-tight">{greeting}</h1>
       <LastfmConnectNudge />
       {compactRows.map((cat, i) => (
         <CompactRow key={`compact-${i}`} category={cat} />

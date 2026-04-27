@@ -1,6 +1,6 @@
 import { useEffect } from "react";
 import { Link } from "react-router-dom";
-import { Compass, Music, Rss } from "lucide-react";
+import { Compass, Music } from "lucide-react";
 import { api } from "@/api/client";
 import type { Album } from "@/api/types";
 import type { OnDownload } from "@/api/download";
@@ -35,7 +35,6 @@ export function FeedPage({ onDownload }: { onDownload: OnDownload }) {
   if (loading) {
     return (
       <div>
-        <Header />
         <GridSkeleton count={12} />
       </div>
     );
@@ -51,7 +50,6 @@ export function FeedPage({ onDownload }: { onDownload: OnDownload }) {
   if (!hasCurated && !hasEditorial) {
     return (
       <div>
-        <Header />
         <EmptyState
           icon={Music}
           title="No new releases yet"
@@ -70,7 +68,6 @@ export function FeedPage({ onDownload }: { onDownload: OnDownload }) {
 
   return (
     <div>
-      <Header />
       {hasCurated && (
         <div className="mb-12 flex flex-col gap-10">
           <div>
@@ -106,19 +103,6 @@ export function FeedPage({ onDownload }: { onDownload: OnDownload }) {
           <PageView page={editorial} onDownload={onDownload} />
         </div>
       )}
-    </div>
-  );
-}
-
-function Header() {
-  return (
-    <div className="mb-8">
-      <h1 className="flex items-center gap-3 text-3xl font-bold tracking-tight">
-        <Rss className="h-7 w-7" /> Feed
-      </h1>
-      <p className="mt-1 text-sm text-muted-foreground">
-        New releases from your favorite and watched artists.
-      </p>
     </div>
   );
 }
