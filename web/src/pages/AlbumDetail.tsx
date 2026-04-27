@@ -37,6 +37,25 @@ export function AlbumDetail({ onDownload }: { onDownload: OnDownload }) {
       prefetchMany(album.tracks.map((t) => t.id));
     }
   }, [album, prefetchMany]);
+  // Prefetch the primary artist's detail payload as soon as the
+  // album loads. The backend's artist endpoint fans out 10 Tidal
+  // calls and takes ~1s on a cold load; clicking the artist name
+  // from the album page is one of the most common navigations, so
+  // warming the backend's 5-minute artist-detail cache here makes
+  // that click feel instant. Fire-and-forget — we don't surface the
+  // result here, the next /api/artist/<id> call just hits the warm
+  // cache. Run on a microtask so it doesn't compete with the other
+  // first-paint network calls (cover image, etc).
+  const primaryArtistId = album?.artists?.[0]?.id ?? null;
+  useEffect(() => {
+    if (!primaryArtistId) return;
+    const handle = window.setTimeout(() => {
+      api.artist(primaryArtistId).catch(() => {
+        /* prefetch is best-effort */
+      });
+    }, 0);
+    return () => window.clearTimeout(handle);
+  }, [primaryArtistId]);
   // Tidal-style Credits "tab": toggling the Credits button swaps the
   // normal TrackList body for a 2-column grid of per-track credits.
   const [showingCredits, setShowingCredits] = useState(false);
