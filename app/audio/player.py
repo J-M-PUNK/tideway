@@ -780,33 +780,68 @@ class PCMPlayer:
         the audio callback thread to die mid-flight, which we never
         want during playback. When a stream is active the device
         list reflects whatever was visible at stream-open time.
+
+        On macOS specifically, a single terminate + initialize cycle
+        sometimes doesn't pick up devices that connected at boot
+        but after PortAudio's first init (e.g. AirPods that paired
+        before Tideway launched but appeared in CoreAudio's list
+        only after the user opened the picker). Two refresh cycles
+        consistently surfaces them; the cost is two ~5ms cycles
+        which is invisible to the user opening the picker.
+
+        Logs the full enumerated list to stdout via `[audio]` so
+        the user can see exactly what PortAudio reports when
+        diagnosing "my headphones aren't showing up" — without
+        the log, the user is blind to whether the device just
+        doesn't reach our filter or was never enumerated at all.
         """
         out: list[dict] = [{"id": "", "name": "System default"}]
-        # Refresh PortAudio's device list when no stream is open.
-        # We're holding the pipeline-level lock so set_output_device
-        # / new stream opens can't race us.
         with self._lock:
             stream_active = self._stream is not None
         if not stream_active:
-            try:
-                sd._terminate()
-            except Exception:
-                # Already-terminated / never-initialized are both
-                # fine — the next query_devices below will re-init
-                # lazily.
-                pass
-            try:
-                sd._initialize()
-            except Exception:
-                log.exception("sd._initialize after refresh failed")
+            for cycle in range(2):
+                try:
+                    sd._terminate()
+                except Exception:
+                    pass
+                try:
+                    sd._initialize()
+                except Exception:
+                    log.exception(
+                        "sd._initialize after refresh cycle %d failed", cycle
+                    )
         try:
             devices = sd.query_devices()
         except Exception:
             log.exception("sd.query_devices failed")
+            print(
+                "[audio] device enumeration failed — see traceback above",
+                flush=True,
+            )
             return out
+        # Loud diagnostic dump. Goes to the dev-console so the user
+        # can paste the snapshot in a bug report when devices look
+        # wrong.
+        print(
+            f"[audio] enumerated {len(devices)} device(s) "
+            f"(stream_active={stream_active}):",
+            flush=True,
+        )
         for i, d in enumerate(devices):
-            if int(d.get("max_output_channels", 0) or 0) > 0:
-                name = d.get("name") or f"Device {i}"
+            ch_in = int(d.get("max_input_channels", 0) or 0)
+            ch_out = int(d.get("max_output_channels", 0) or 0)
+            try:
+                ha_name = sd.query_hostapis(d["hostapi"])["name"]
+            except Exception:
+                ha_name = f"hostapi={d.get('hostapi')}"
+            name = d.get("name") or f"Device {i}"
+            kind = "OUT" if ch_out > 0 else ("IN " if ch_in > 0 else "?  ")
+            print(
+                f"[audio]   [{i:2d}] {kind} ch={ch_out}/{ch_in} "
+                f"hostapi={ha_name!r} name={name!r}",
+                flush=True,
+            )
+            if ch_out > 0:
                 out.append({"id": str(i), "name": name})
         return out
 
