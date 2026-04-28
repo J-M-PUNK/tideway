@@ -4,6 +4,44 @@ These rules are project-scoped and override anything that conflicts in
 the global Claude config. Global rules about writing style, commit
 attribution, and git hygiene still apply.
 
+## No bandaids
+
+If you recognize that what you're about to write is a workaround for
+a deeper problem rather than the actual fix, **stop and find the
+actual fix.** Things that are bandaids:
+
+- "Belt-and-suspenders" / "defense-in-depth" setState calls that
+  paper over a state-management bug whose root cause is somewhere
+  else. The right fix is in the somewhere-else.
+- Hardcoded substring / name-matching filters for things the OS
+  exposes through a proper API (CoreAudio's
+  `kAudioDevicePropertyDeviceCanBeDefaultDevice`, WASAPI's
+  `IMMDevice::GetState()`, etc). The right fix is the OS API.
+- "Sometimes one isn't enough so we do it twice" loops, retry
+  counts above 1 without an explicit reason, sleeps that exist
+  because something is racy. The right fix is to find what's racy
+  and synchronize properly.
+- Try / except blocks that catch a real error and turn it into a
+  silent fallback. Catch a specific error class with a comment
+  explaining why; don't swallow `Exception` and pretend everything
+  is fine.
+- Comments that say "for now" or "until we" or "as a workaround"
+  on permanent code paths. If it's not the right fix, don't ship
+  it; if it IS the right fix, the comment shouldn't apologize for
+  it.
+
+When the proper fix is genuinely outside the scope of the current
+change (e.g. needs a different platform's API and you're not on
+that platform), say so explicitly and either:
+
+1. Punt to a follow-up branch with a clear scope, or
+2. Leave the un-fixed behavior intact (degraded but honest) rather
+   than ship a misleading bandaid that masks the gap.
+
+Never ship code that you'd describe to the reviewer as "temporary"
+or "good enough for now" without explicit user sign-off on that
+specific tradeoff.
+
 ## Release workflow
 
 When the user has a batch of unrelated fixes or features to ship in a

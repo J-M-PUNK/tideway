@@ -740,14 +740,12 @@ export function usePlayer() {
             await api.player.seek(fraction);
           }
         }
-        // Defense-in-depth: explicitly clear loading=false. The
-        // primary fix lives on the backend — `PCMPlayer.load()` now
-        // transitions to "paused" instead of leaving state in
-        // "loading" forever, so the SSE drives the right value.
-        // This setState is redundant in the common case but
-        // protects against any future regression that leaves the
-        // state field stale.
-        setState((s) => ({ ...s, loading: false }));
+        // No setState for `loading` here. PCMPlayer.load()
+        // transitions to "paused" when it returns; the SSE pushes
+        // that snapshot, and applySnapshot updates state.loading
+        // accordingly. The backend snapshot is the source of truth
+        // for transport state — duplicating it here would just
+        // create two ways for it to disagree.
       } catch {
         // Track is no longer streamable (region / license change /
         // stale id). Clear the persisted now-playing so the UI
@@ -758,7 +756,6 @@ export function usePlayer() {
           queueIndex: -1,
           currentTime: 0,
           duration: 0,
-          loading: false,
         }));
         expectedTrackIdRef.current = null;
       }
