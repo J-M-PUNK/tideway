@@ -780,6 +780,18 @@ class PCMPlayer:
         the audio callback thread to die mid-flight, which we never
         want during playback. When a stream is active the device
         list reflects whatever was visible at stream-open time.
+
+        Windows note: PortAudio exposes the same physical device
+        through multiple host APIs (MME, DirectSound, WASAPI,
+        WDM-KS). Without filtering, every speaker / DAC shows up
+        four times in the picker, and the MME / DirectSound entries
+        also include devices the user has DISABLED in System Sound
+        settings (those backends ignore device state). We filter to
+        the WASAPI host API on Windows, which (a) deduplicates and
+        (b) skips disabled endpoints because WASAPI's enumeration
+        respects the IMMDevice DEVICE_STATE_ACTIVE filter. macOS
+        and Linux only have one usable host API each (Core Audio,
+        ALSA) so they're unaffected.
         """
         out: list[dict] = [{"id": "", "name": "System default"}]
         # Refresh PortAudio's device list when no stream is open.
@@ -804,10 +816,17 @@ class PCMPlayer:
         except Exception:
             log.exception("sd.query_devices failed")
             return out
+        wasapi_idx = _wasapi_host_api_index()
         for i, d in enumerate(devices):
-            if int(d.get("max_output_channels", 0) or 0) > 0:
-                name = d.get("name") or f"Device {i}"
-                out.append({"id": str(i), "name": name})
+            if int(d.get("max_output_channels", 0) or 0) <= 0:
+                continue
+            # Windows: keep only WASAPI entries. Falls through to
+            # "show everything" on macOS / Linux (wasapi_idx is None
+            # there since the host API doesn't exist).
+            if wasapi_idx is not None and d.get("hostapi") != wasapi_idx:
+                continue
+            name = d.get("name") or f"Device {i}"
+            out.append({"id": str(i), "name": name})
         return out
 
     def set_output_device(self, device_id: str) -> None:
@@ -2123,6 +2142,29 @@ def _safe_int(v: object) -> Optional[int]:
         return int(v)
     except (TypeError, ValueError):
         return None
+
+
+def _wasapi_host_api_index() -> Optional[int]:
+    """Return the PortAudio host-api index for WASAPI on Windows, or
+    None on every other platform / when WASAPI isn't built into this
+    PortAudio.
+
+    Used by `list_output_devices()` to filter out the duplicate
+    listings PortAudio creates when the same physical device is
+    exposed via MME, DirectSound, WASAPI, and WDM-KS — and to skip
+    devices the user has disabled in Windows Sound settings, which
+    the older host APIs still enumerate but WASAPI doesn't.
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        for idx, ha in enumerate(sd.query_hostapis()):
+            name = (ha.get("name") or "").lower()
+            if name == "windows wasapi" or "wasapi" in name:
+                return idx
+    except Exception:
+        log.exception("query_hostapis failed; falling back to all-host-API listing")
+    return None
 
 
 def _normalize_codec(raw: object) -> Optional[str]:
