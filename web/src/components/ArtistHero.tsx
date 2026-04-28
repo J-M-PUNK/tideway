@@ -79,15 +79,26 @@ export function ArtistHero({
           <div className="absolute inset-0 bg-gradient-to-b from-[#2a2a2a] to-[#0a0a0a]" />
         )}
         {cover && (
+          // `object-contain` so the artist's full photo shows at its
+          // natural aspect, not a center-crop horizontal slice. The
+          // blurred backdrop above fills any gap on the sides for
+          // square / portrait photos. A narrow gradient mask fades the
+          // very edges into the backdrop so the photo doesn't look
+          // pasted on top.
+          //
+          // Earlier this was `object-cover` with an aggressive 30/70
+          // side mask, which cropped the image to a narrow middle band
+          // — for typical press shots the face landed off-frame and
+          // users saw a chest-area zoom of the artist.
           <img
             src={cover}
             alt={artistName}
-            className="absolute inset-0 h-full w-full object-cover"
+            className="absolute inset-0 h-full w-full object-contain"
             style={{
               maskImage:
-                "linear-gradient(90deg, transparent 0%, black 30%, black 70%, transparent 100%)",
+                "linear-gradient(90deg, transparent 0%, black 8%, black 92%, transparent 100%)",
               WebkitMaskImage:
-                "linear-gradient(90deg, transparent 0%, black 30%, black 70%, transparent 100%)",
+                "linear-gradient(90deg, transparent 0%, black 8%, black 92%, transparent 100%)",
             }}
           />
         )}
