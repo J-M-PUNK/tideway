@@ -379,8 +379,19 @@ class PCMPlayer:
             self._decoder_done = threading.Event()
             self._pcm_queue = queue.Queue(maxsize=_PCM_QUEUE_MAX)
             self._last_error = None
+            # Transition out of "loading" now that the decoder is up
+            # and the output stream is open. We land in "paused"
+            # because nothing has called .play() yet — this is the
+            # "loaded but not playing" state. play_track() will move
+            # us to "playing" via its play() call right after this
+            # returns; load()-without-play callers (the restore-on-
+            # quit path, the album-end pause-on-track-1 flow) want
+            # the snapshot to report "paused" here, not a perpetual
+            # "loading" the frontend can't recover from.
+            self._transition("paused")
 
         self._start_decoder_thread()
+        self._emit()
         return self.snapshot()
 
     def play_track(

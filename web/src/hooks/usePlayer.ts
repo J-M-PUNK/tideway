@@ -704,15 +704,13 @@ export function usePlayer() {
             await api.player.seek(fraction);
           }
         }
-        // Belt-and-suspenders: explicitly clear loading=false at the
-        // end of restore. Reproducible bug seen in v0.4.10 where the
-        // backend transitioned loading→paused but the SSE snapshot
-        // either didn't reach the frontend or got dropped by the
-        // expectedTrackIdRef / seq guards, leaving the UI showing
-        // "loading" indefinitely on a track that was actually loaded
-        // and ready. Forcing loading=false here is safe — by this
-        // point load() and seek() both completed successfully, so
-        // we know the track is ready to play.
+        // Defense-in-depth: explicitly clear loading=false. The
+        // primary fix lives on the backend — `PCMPlayer.load()` now
+        // transitions to "paused" instead of leaving state in
+        // "loading" forever, so the SSE drives the right value.
+        // This setState is redundant in the common case but
+        // protects against any future regression that leaves the
+        // state field stale.
         setState((s) => ({ ...s, loading: false }));
       } catch {
         // Track is no longer streamable (region / license change /
