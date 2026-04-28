@@ -63,6 +63,13 @@ _K_AUDIO_OBJECT_PROPERTY_ELEMENT_MAIN = 0
 _K_AUDIO_DEVICE_PROPERTY_DEVICE_CAN_BE_DEFAULT_DEVICE = 0x64666C74  # 'dflt'
 _K_AUDIO_DEVICE_PROPERTY_DEVICE_NAME_CF_STRING = 0x6C6E616D        # 'lnam'
 _K_AUDIO_HARDWARE_PROPERTY_DEFAULT_OUTPUT_DEVICE = 0x64657574      # 'dOut'
+# Same selector as `kAudioHardwarePropertyDevices`, listed here for
+# clarity at the listener-registration site. Defined again rather
+# than reused so a future reader can search for either name and
+# find the listener wiring.
+_K_AUDIO_HARDWARE_PROPERTY_DEVICES_LISTENER = (
+    _K_AUDIO_HARDWARE_PROPERTY_DEVICES
+)
 _K_CF_STRING_ENCODING_UTF8 = 0x08000100
 
 
@@ -318,31 +325,40 @@ def visible_output_device_names() -> Optional[set[str]]:
     return visible
 
 
-def register_default_output_listener(
+def register_audio_route_listener(
     callback: Callable[[], None],
 ) -> Optional[Callable[[], None]]:
-    """Subscribe to macOS's "default output device changed" event.
+    """Subscribe to the CoreAudio events that affect audio routing.
 
-    Fires whenever the system default output flips — headphones
-    unplug (→ built-in speakers), AirPods connect, the user picks
-    a different device in Sound preferences, etc. This is the
-    signal we need to recover from device loss on macOS, because
-    PortAudio's `finished_callback` doesn't reliably fire when a
-    CoreAudio device disappears mid-stream — the stream just goes
-    silent. CoreAudio DOES fire this property-change notification
-    in every case we care about.
+    Two properties under the AudioObjectSystemObject get the same
+    callback:
 
-    `callback` runs on a CoreAudio internal thread, so it must
-    be fast and reentrant. The standard pattern is to spawn a
-    Python worker from the callback and do real work there;
-    callers who follow that pattern can ignore the threading
-    concerns here.
+      - `kAudioHardwarePropertyDefaultOutputDevice`: fires when the
+        system default output flips. Auto-route-on-unplug cases
+        (headphones disappear → speakers become default), Sound-
+        pref changes, AirPods auto-connect.
+      - `kAudioHardwarePropertyDevices`: fires when ANY device
+        appears or disappears. Catches the "headphones plugged in
+        but macOS doesn't auto-route to them" case (depends on the
+        Sound-pref "Automatically switch input/output" setting,
+        which is OFF by default on some Mac configurations). Without
+        this listener, PortAudio's enumeration stays stale until
+        the next stream-less picker open and headphones never
+        appear in the picker after plug-in.
 
-    Returns an unregister function on success, or None when
-    registration fails / on non-darwin. The unregister function
-    is safe to call once. Caller is expected to keep the
-    unregister around for app lifetime — the listener stays
-    active until either it's called or the process exits.
+    Both registrations route to the same Python callback so the
+    handler can do one thing — refresh the audio engine's view of
+    devices. When both fire for the same OS event (common; macOS
+    often updates default + device-list together) the callback
+    naturally dedupes via the player's own state checks.
+
+    `callback` runs on a CoreAudio internal thread; it must be
+    fast and reentrant. Real work belongs on a Python worker
+    thread. PortAudio reinit specifically MUST NOT happen on the
+    CoreAudio thread or we deadlock.
+
+    Returns an unregister function on success, None on failure /
+    non-darwin. The unregister tears down both subscriptions.
     """
     fw = _frameworks()
     if fw is None:
@@ -355,43 +371,76 @@ def register_default_output_listener(
         try:
             callback()
         except Exception:
-            log.exception("default-output-device listener callback raised")
+            log.exception("audio-route listener callback raised")
         return 0  # noErr
 
     listener = _LISTENER_PROC(_impl)
-    addr = _AudioObjectPropertyAddress(
+    addr_default = _AudioObjectPropertyAddress(
         _K_AUDIO_HARDWARE_PROPERTY_DEFAULT_OUTPUT_DEVICE,
         _K_AUDIO_OBJECT_PROPERTY_SCOPE_GLOBAL,
         _K_AUDIO_OBJECT_PROPERTY_ELEMENT_MAIN,
     )
+    addr_devices = _AudioObjectPropertyAddress(
+        _K_AUDIO_HARDWARE_PROPERTY_DEVICES_LISTENER,
+        _K_AUDIO_OBJECT_PROPERTY_SCOPE_GLOBAL,
+        _K_AUDIO_OBJECT_PROPERTY_ELEMENT_MAIN,
+    )
 
-    err = ca.AudioObjectAddPropertyListener(
+    err1 = ca.AudioObjectAddPropertyListener(
         _K_AUDIO_OBJECT_SYSTEM_OBJECT,
-        byref(addr),
+        byref(addr_default),
         listener,
         None,
     )
-    if err != 0:
+    err2 = ca.AudioObjectAddPropertyListener(
+        _K_AUDIO_OBJECT_SYSTEM_OBJECT,
+        byref(addr_devices),
+        listener,
+        None,
+    )
+    if err1 != 0 and err2 != 0:
         log.warning(
-            "AudioObjectAddPropertyListener failed: status=%d", err
+            "AudioObjectAddPropertyListener failed for both: "
+            "default-out=%d devices=%d",
+            err1, err2,
         )
         return None
+    if err1 != 0:
+        log.warning(
+            "default-output listener failed (status=%d); "
+            "devices listener still active",
+            err1,
+        )
+    if err2 != 0:
+        log.warning(
+            "devices listener failed (status=%d); "
+            "default-output listener still active",
+            err2,
+        )
 
-    # Pin the listener so Python's GC doesn't drop the C pointer
-    # mid-flight. Also pin the address struct because CoreAudio
-    # holds a reference to it.
+    # Strong refs so Python GC can't drop the C pointers CoreAudio
+    # is now holding.
     with _keepalive_lock:
-        _listener_keepalive.append((listener, addr))
+        _listener_keepalive.append((listener, addr_default, addr_devices))
 
     def unregister() -> None:
-        try:
-            ca.AudioObjectRemovePropertyListener(
-                _K_AUDIO_OBJECT_SYSTEM_OBJECT,
-                byref(addr),
-                listener,
-                None,
-            )
-        except Exception:
-            log.exception("AudioObjectRemovePropertyListener raised")
+        for addr in (addr_default, addr_devices):
+            try:
+                ca.AudioObjectRemovePropertyListener(
+                    _K_AUDIO_OBJECT_SYSTEM_OBJECT,
+                    byref(addr),
+                    listener,
+                    None,
+                )
+            except Exception:
+                log.exception(
+                    "AudioObjectRemovePropertyListener raised"
+                )
 
     return unregister
+
+
+# Back-compat alias. The old name was specific to the default-
+# output listener; the new function covers both events but the
+# callsite in PCMPlayer originally referenced the old name.
+register_default_output_listener = register_audio_route_listener
