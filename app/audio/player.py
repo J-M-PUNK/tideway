@@ -763,37 +763,40 @@ class PCMPlayer:
     # --- Device selection -------------------------------------------
 
     def list_output_devices(self) -> list[dict]:
-        """Enumerate output-capable audio devices via sounddevice.
+        """Enumerate output-capable audio devices via sounddevice and
+        filter to the same set macOS System Settings → Sound → Output
+        shows.
+
         Returns `[{"id": "<int-as-str>", "name": "<human>"}]`, with
         an empty-id "System default" entry first.
 
-        PortAudio caches its CoreAudio device list at the time of
-        initialization. Devices plugged in after Tideway launched
-        (USB DACs, Bluetooth headphones, etc.) wouldn't appear
-        without a refresh — and there's no public PortAudio API
-        for "rescan." The standard workaround across PortAudio-
-        based apps is to terminate and re-initialize the library;
-        the next query then re-enumerates from CoreAudio.
+        Refresh: PortAudio caches its CoreAudio device list at the
+        time of initialization. Devices plugged in after Tideway
+        launched (USB DACs, Bluetooth headphones, etc.) wouldn't
+        appear without a refresh, and there's no public PortAudio
+        API for "rescan." We terminate + re-initialize when no
+        stream is open. Two cycles instead of one because a single
+        cycle sometimes misses devices that connected at boot but
+        only became visible to CoreAudio after our first init.
 
-        We only do the terminate + reinit when no stream is open.
-        Tearing PortAudio out from under an active stream causes
-        the audio callback thread to die mid-flight, which we never
-        want during playback. When a stream is active the device
-        list reflects whatever was visible at stream-open time.
+        Filter: `app.audio.macos_audio_devices.visible_output_device_names`
+        asks CoreAudio for the same OUTPUT-scope visibility property
+        macOS itself uses to build System Settings — the proper API,
+        not a substring guess. Microsoft Teams Audio, ZoomAudioDevice,
+        BlackHole, microphones with no output streams, and aggregate
+        devices the user hasn't explicitly enabled all return False
+        on `kAudioDevicePropertyDeviceCanBeDefaultDevice` and get
+        filtered. Real hardware (built-in speakers, AirPods, USB
+        DACs, HDMI, AirPlay endpoints) returns True and passes.
 
-        On macOS specifically, a single terminate + initialize cycle
-        sometimes doesn't pick up devices that connected at boot
-        but after PortAudio's first init (e.g. AirPods that paired
-        before Tideway launched but appeared in CoreAudio's list
-        only after the user opened the picker). Two refresh cycles
-        consistently surfaces them; the cost is two ~5ms cycles
-        which is invisible to the user opening the picker.
+        Falls back to the unfiltered PortAudio list when the
+        CoreAudio query is unavailable (non-darwin, or the framework
+        didn't load) so the picker is degraded but never empty.
 
-        Logs the full enumerated list to stdout via `[audio]` so
-        the user can see exactly what PortAudio reports when
-        diagnosing "my headphones aren't showing up" — without
-        the log, the user is blind to whether the device just
-        doesn't reach our filter or was never enumerated at all.
+        Logs the full enumeration via `[audio]` print lines so
+        users debugging "my headphones aren't showing up" can see
+        what PortAudio reports AND which entries the visibility
+        filter accepted vs. rejected.
         """
         out: list[dict] = [{"id": "", "name": "System default"}]
         with self._lock:
@@ -819,11 +822,20 @@ class PCMPlayer:
                 flush=True,
             )
             return out
-        # Loud diagnostic dump. Goes to the dev-console so the user
-        # can paste the snapshot in a bug report when devices look
-        # wrong.
+
+        # Ask macOS itself which output devices count as "visible."
+        # None on non-darwin / on framework load failure → fall
+        # through to the legacy PortAudio-only filter.
+        visible = _macos_visible_output_names()
+        if visible is not None:
+            print(
+                f"[audio] CoreAudio reports {len(visible)} visible output "
+                f"device(s): {sorted(visible)!r}",
+                flush=True,
+            )
+
         print(
-            f"[audio] enumerated {len(devices)} device(s) "
+            f"[audio] PortAudio enumerated {len(devices)} device(s) "
             f"(stream_active={stream_active}):",
             flush=True,
         )
@@ -836,14 +848,30 @@ class PCMPlayer:
                 ha_name = f"hostapi={d.get('hostapi')}"
             name = d.get("name") or f"Device {i}"
             kind = "OUT" if ch_out > 0 else ("IN " if ch_in > 0 else "?  ")
-            virtual = _is_virtual_audio_device(name)
-            tag = "VIRT" if virtual else kind
+
+            if ch_out > 0:
+                # CoreAudio path (preferred). Match by display name —
+                # PortAudio's `name` field on macOS is the same
+                # CFString CoreAudio returns.
+                if visible is not None:
+                    accepted = name in visible
+                    tag = "OUT " if accepted else "HIDE"
+                else:
+                    # Non-darwin or CoreAudio query failed: keep the
+                    # substring fallback for known virtual devices so
+                    # we still hide the most common offenders.
+                    accepted = not _is_virtual_audio_device(name)
+                    tag = "OUT " if accepted else "VIRT"
+            else:
+                accepted = False
+                tag = kind
+
             print(
                 f"[audio]   [{i:2d}] {tag} ch={ch_out}/{ch_in} "
                 f"hostapi={ha_name!r} name={name!r}",
                 flush=True,
             )
-            if ch_out > 0 and not virtual:
+            if accepted:
                 out.append({"id": str(i), "name": name})
         return out
 
@@ -2217,14 +2245,39 @@ _VIRTUAL_DEVICE_PATTERNS: tuple[str, ...] = (
 
 def _is_virtual_audio_device(name: str) -> bool:
     """Return True when `name` matches a known virtual / loopback /
-    aggregate device. Used by `list_output_devices()` to keep these
-    out of the user-facing picker even though PortAudio enumerates
-    them. The dev-console diagnostic dump still shows them tagged
-    `VIRT` so the user can confirm what was filtered."""
+    aggregate device. Used by `list_output_devices()` ONLY as a
+    non-darwin fallback — on macOS we consult CoreAudio's
+    `kAudioDevicePropertyDeviceCanBeDefaultDevice` (output scope)
+    via `_macos_visible_output_names`, which is the same API
+    macOS itself uses to build System Settings → Sound → Output
+    and is more accurate than any substring heuristic. The
+    substring list survives for Linux / Windows where we don't
+    have an equivalent OS query yet."""
     lower = (name or "").strip().lower()
     if not lower:
         return False
     return any(p in lower for p in _VIRTUAL_DEVICE_PATTERNS)
+
+
+def _macos_visible_output_names() -> Optional[set[str]]:
+    """Thin wrapper around the CoreAudio query so this module
+    doesn't pay an import cost on non-darwin and so a missing
+    framework dlopen is logged once rather than on every picker
+    open. Returns None on failure / non-darwin."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        from app.audio.macos_audio_devices import (
+            visible_output_device_names,
+        )
+    except Exception:
+        log.exception("macos_audio_devices import failed; falling back")
+        return None
+    try:
+        return visible_output_device_names()
+    except Exception:
+        log.exception("visible_output_device_names raised; falling back")
+        return None
 
 
 def _normalize_codec(raw: object) -> Optional[str]:
