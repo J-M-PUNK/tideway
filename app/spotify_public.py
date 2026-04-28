@@ -131,7 +131,17 @@ _db_path = user_data_dir() / "spotify_public_cache.db"
 #      cached as null. Wiping flushes those nulls so the now-working
 #      transport gets re-asked instead of waiting out the 1-day
 #      negative TTL on each row.
-_CACHE_SCHEMA_VERSION = 3
+#   4: search-limit bump (5 -> 50) and artist-name-search fallback.
+#      Pre-bump rows could carry undercount playcounts (canonical
+#      version wasn't in the top-5 search results so the resolver
+#      capped at a non-canonical version's count, e.g. Quadeca's
+#      SCRAPYARD tracks coming back at ~30% of Spotify's actual
+#      number) and null artist mappings (no primary-artist match
+#      found within the top-5 sample ISRCs, e.g. Justin Bieber's
+#      monthly listeners going blank because his top-N tracks on
+#      Tidal are all feature credits). Wipe to force re-resolution
+#      under the new code paths.
+_CACHE_SCHEMA_VERSION = 4
 
 
 def _db() -> sqlite3.Connection:
@@ -338,20 +348,37 @@ def _resolve_artist_via_name_match(
 ) -> Optional[str]:
     """Walk a list of sample ISRCs and return the Spotify artist id
     of the first track whose primary artist's name matches the Tidal
-    artist's name. Returns None if no candidate matches.
+    artist's name. Falls back to a direct artist-name search on
+    Spotify when the ISRC walk doesn't find a primary-artist match.
 
-    The single-ISRC path missed any artist whose top track on Tidal
-    was a feature credit — Spotify lists the host as primary, we
-    cached that host's id, and the page silently rendered the wrong
-    person's monthly listeners (or nothing, when the names later
-    failed a sanity check). Walking multiple ISRCs and requiring an
-    exact name match recovers in the common case where at least one
-    of the artist's top tracks is theirs as primary.
+    Two-stage resolution:
+
+    1. **ISRC walk (preferred).** For each of up to 15 sample ISRCs
+       (was 5), find the Spotify track and check whether its primary
+       artist's name matches `tidal_artist_name`. Returns the first
+       match. This is the most accurate path — the ISRC ties us to
+       a specific track Tidal has, so the artist we resolve through
+       it is provably someone Tidal also lists. Bumped from 5 to 15
+       because artists like Justin Bieber, who are heavy feature
+       collaborators, can have their entire top-15-on-Tidal be
+       feature credits where the host (Kid LAROI, Skrillex, etc.) is
+       Spotify's primary artist.
+
+    2. **Artist-name search fallback.** When the ISRC walk fails —
+       common for artists whose entire top-N is feature credits —
+       fall back to Spotify's `query_artists` endpoint with
+       `tidal_artist_name`. We accept the first result whose
+       displayed name equals our target (case-insensitive). Less
+       precise than the ISRC walk because two artists can share a
+       name (e.g. multiple "John Smith" entries on Spotify), but
+       precise enough for major artists with unique names — and
+       returning *something* is better than the wrong-person /
+       no-stats UX the ISRC-only path produces.
     """
     wanted = (tidal_artist_name or "").strip().lower()
     if not wanted:
         return None
-    for isrc in sample_isrcs[:5]:
+    for isrc in sample_isrcs[:15]:
         ic = (isrc or "").strip().upper()
         if not ic:
             continue
@@ -378,6 +405,46 @@ def _resolve_artist_via_name_match(
                 )
                 if name.strip().lower() == wanted:
                     return uri.split(":")[-1]
+    return _search_artist_by_name(tidal_artist_name)
+
+
+def _search_artist_by_name(name: str) -> Optional[str]:
+    """Spotify artist search keyed on display name. Returns the
+    Spotify artist id of the first hit whose name matches `name`
+    (case-insensitive, trimmed). Used as a fallback after the ISRC
+    walk in `_resolve_artist_via_name_match` fails.
+
+    Errors are logged and swallowed; callers treat None as "couldn't
+    resolve".
+    """
+    wanted = (name or "").strip().lower()
+    if not wanted:
+        return None
+    try:
+        _, artist_mod = _ensure_client()
+        res = artist_mod.query_artists(name, limit=10)
+    except Exception as exc:
+        log.warning("spotify artist search failed for %r: %s", name, exc)
+        return None
+    items = (
+        (res.get("data") or {})
+        .get("searchV2", {})
+        .get("artists", {})
+        .get("items")
+        or []
+    )
+    for entry in items:
+        item = (entry.get("item") or {}).get("data") or {}
+        uri = item.get("uri") or ""
+        if not uri.startswith("spotify:artist:"):
+            continue
+        item_name = str(
+            (item.get("profile") or {}).get("name")
+            or item.get("name")
+            or ""
+        )
+        if item_name.strip().lower() == wanted:
+            return uri.split(":")[-1]
     return None
 
 
@@ -854,10 +921,23 @@ def _search_track_candidates(query: str) -> list[tuple[str, str]]:
     `[(track_id, display_name), ...]` for hits whose URI is a
     spotify:track:. Errors are logged and swallowed — callers
     treat an empty list as "search produced nothing useful".
+
+    Limit is 50 (was 5). For tracks that exist in multiple Spotify
+    entries (album version, single release, lyric video, alt master,
+    pre-release) the canonical highest-playcount version is often
+    not in the top 5 results — Spotify's search ranks by relevance
+    against the query, not by playcount. The downstream
+    `_resolve_canonical_track` filter scans the candidate list for
+    title/artist matches and picks the highest playcount among those,
+    so widening the candidate list directly raises ceiling on what
+    we can find without making the lookup any less accurate. The
+    pre-filter on `name.lower() == wanted_title` gates the expensive
+    per-candidate `_song_info` calls so wider lookups don't blow up
+    cost.
     """
     try:
         song, _ = _ensure_client()
-        res = song.query_songs(query, limit=5)
+        res = song.query_songs(query, limit=50)
     except Exception as exc:
         log.warning("spotify track search failed for %r: %s", query, exc)
         return []
