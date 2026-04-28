@@ -1881,15 +1881,39 @@ class PCMPlayer:
                 # set_exclusive_mode. Don't transition state; don't
                 # trigger device-loss recovery.
                 return
-            # Device-loss heuristic: the stream ended but the decoder
-            # still has frames ready to play. Natural EOF requires
-            # `_decoder_done.is_set()`; if it isn't set, something
-            # cut us off mid-track. The most common cause is the
-            # output device disappearing.
+            # Device-loss heuristic: stream ended unexpectedly, with
+            # work still pending. Two ways to know the work isn't done:
+            #
+            #   1. Decoder hasn't finished decoding the rest of the
+            #      track (`not decoder_done`).
+            #   2. Decoder IS done but the PCM queue still has chunks
+            #      the callback never got to render (`qsize > 0`). This
+            #      is the case when the device disappears late in a
+            #      short track — the decoder finished filling the queue
+            #      before the unplug, so `decoder_done` is True even
+            #      though several seconds of audio are still waiting to
+            #      play.
+            #
+            # Natural EOF, by contrast, has both the decoder done AND
+            # the queue drained — the callback got everything out
+            # before raising CallbackStop.
             decoder_done = self._decoder_done.is_set()
+            queue_pending = (
+                self._pcm_queue.qsize() > 0
+                if self._pcm_queue is not None
+                else False
+            )
             was_playing = self._state == "playing"
             pre = self._preload
-            if pre is None and was_playing and not decoder_done:
+            should_recover = was_playing and pre is None and (
+                not decoder_done or queue_pending
+            )
+            if should_recover:
+                log.info(
+                    "device-loss detected: triggering recovery "
+                    "(decoder_done=%s, queue_pending=%s)",
+                    decoder_done, queue_pending,
+                )
                 # Recovery runs off-thread because the finished_callback
                 # runs on sounddevice's own thread which we shouldn't
                 # re-enter stream machinery from.
