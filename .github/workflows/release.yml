@@ -53,18 +53,22 @@ jobs:
 
       - name: Verify native libraries bundled
         # Backstop against the curl-cffi-missing-from-bundle (v0.4.7)
-        # and tls-client-missing-from-bundle (v0.4.8) regressions.
-        # Both shipped because PyInstaller's static analysis missed
-        # native libs that get loaded via ctypes / CFFI at runtime.
-        # If anyone removes the matching collect_all() in the spec,
-        # the grep below trips and the release fails before users
-        # install a broken bundle.
+        # regression. PyInstaller's static analysis routinely misses
+        # native libs that get loaded via ctypes / CFFI at runtime,
+        # and curl-cffi falling back to plain requests would silently
+        # drop our TLS-fingerprint match.
+        #
+        # tls_client used to be checked here too — we deliberately
+        # stopped bundling it in v0.4.11 because its Go-CGO DLL was
+        # crashing the Windows app, and spotapi now talks to Spotify
+        # through curl-cffi via app/spotify_curl_session.py instead.
+        # If you're tempted to add it back: don't, the broken
+        # transport stays out of the bundle on purpose.
         run: |
           set -e
           APP_DIR="dist/Tideway.app/Contents"
           required_globs=(
             "*/curl_cffi/_wrapper*.so"
-            "*/tls_client/dependencies/tls-client-arm64.dylib"
           )
           for pat in "${required_globs[@]}"; do
             count=$(find "$APP_DIR" -path "$pat" 2>/dev/null | wc -l | tr -d ' ')
@@ -134,16 +138,23 @@ jobs:
 
       - name: Verify native libraries bundled
         # Backstop against the curl-cffi-missing-from-bundle (v0.4.7)
-        # and tls-client-missing-from-bundle (v0.4.8) regressions.
-        # Both shipped because PyInstaller's static analysis missed
-        # native libs that get loaded via ctypes / CFFI at runtime.
-        # If the spec stops collecting them the build fails here
-        # rather than at the user's machine on first Spotify call.
+        # regression. PyInstaller's static analysis routinely misses
+        # native libs that get loaded via ctypes / CFFI at runtime,
+        # and curl-cffi falling back to plain requests would silently
+        # drop our TLS-fingerprint match.
+        #
+        # tls-client-*.dll used to be checked here too — we
+        # deliberately stopped bundling it in v0.4.11 because its
+        # Go-CGO DLL was crashing the Windows app at offset 0x66621
+        # on first Spotify enrichment call, and spotapi now talks to
+        # Spotify through curl-cffi via app/spotify_curl_session.py
+        # instead. If you're tempted to add it back: don't, the
+        # broken transport stays out of the bundle on purpose.
         shell: pwsh
         run: |
           $appRoot = "dist\Tideway"
           $missing = $false
-          foreach ($pat in @("_wrapper*", "tls-client-*.dll")) {
+          foreach ($pat in @("_wrapper*")) {
             $files = Get-ChildItem -Path $appRoot -Recurse -Filter $pat -ErrorAction SilentlyContinue
             if (-not $files) {
               Write-Host "::error ::Missing native library matching $pat in Windows bundle"
@@ -221,16 +232,23 @@ jobs:
 
       - name: Verify native libraries bundled
         # Backstop against the curl-cffi-missing-from-bundle (v0.4.7)
-        # and tls-client-missing-from-bundle (v0.4.8) regressions.
-        # Both shipped because PyInstaller's static analysis missed
-        # native libs that get loaded via ctypes / CFFI at runtime.
-        # If the spec stops collecting them the build fails here
-        # rather than at the user's machine on first Spotify call.
+        # regression. PyInstaller's static analysis routinely misses
+        # native libs that get loaded via ctypes / CFFI at runtime,
+        # and curl-cffi falling back to plain requests would silently
+        # drop our TLS-fingerprint match.
+        #
+        # tls-client-*.dll used to be checked here too — we
+        # deliberately stopped bundling it in v0.4.11 because its
+        # Go-CGO DLL was crashing the Windows app at offset 0x66621
+        # on first Spotify enrichment call, and spotapi now talks to
+        # Spotify through curl-cffi via app/spotify_curl_session.py
+        # instead. If you're tempted to add it back: don't, the
+        # broken transport stays out of the bundle on purpose.
         shell: pwsh
         run: |
           $appRoot = "dist\Tideway"
           $missing = $false
-          foreach ($pat in @("_wrapper*", "tls-client-*.dll")) {
+          foreach ($pat in @("_wrapper*")) {
             $files = Get-ChildItem -Path $appRoot -Recurse -Filter $pat -ErrorAction SilentlyContinue
             if (-not $files) {
               Write-Host "::error ::Missing native library matching $pat in Windows bundle"
