@@ -307,9 +307,49 @@ jobs:
           name: Tideway-Windows-arm64
           path: artifacts
 
+      # Pull the release notes out of the tagged commit's message body.
+      # The release-commit convention (CONTRIBUTING.md, "Tag the release")
+      # is "Release X.Y.Z: <subject>" on the subject line and the
+      # user-visible notes in the body, so this just becomes the GitHub
+      # release body verbatim. Removes the "I tagged but the draft is
+      # empty so I have to write notes twice" failure mode that bit
+      # v0.4.11.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 1
+
+      - name: Extract release notes from tag commit body
+        id: notes
+        # `git log -1 --format=%b` prints just the body (everything
+        # after the subject line + blank line), preserving paragraph
+        # breaks and markdown. Empty body = empty file = empty release
+        # body, which is no worse than the old behavior.
+        run: |
+          set -e
+          git log -1 --format=%b "${{ github.ref }}" > release_body.md
+          echo "Release body (${{ github.ref_name }}):"
+          echo "----"
+          cat release_body.md
+          echo "----"
+
       - name: Create / update release
         uses: softprops/action-gh-release@v2
         with:
+          # Pin the tag explicitly. The action defaults to github.ref_name
+          # but if a draft was created out-of-band (e.g. by a previous
+          # failed run that succeeded as far as the publish job) the
+          # action can end up creating an "untagged-<sha>" release
+          # instead of binding to v<X.Y.Z>. That bit v0.4.11 — the
+          # release published with tag_name="untagged-..." and the
+          # auto-updater (which compares the tag string against the
+          # installed version) couldn't see it.
+          tag_name: ${{ github.ref_name }}
+          name: ${{ github.ref_name }}
+          # Body comes from the tag commit's message body. Stays as a
+          # draft for human review before publishing — see CONTRIBUTING.md
+          # "Tag the release" for the full flow.
+          body_path: release_body.md
           # Glob rather than explicit filename so the version-stamped
           # asset names (Tideway-0.1.0.dmg, Tideway-setup-0.1.0.exe,
           # Tideway-setup-0.1.0-arm64.exe) land without hardcoding the
@@ -317,17 +357,15 @@ jobs:
           files: |
             artifacts/Tideway-*.dmg
             artifacts/Tideway-setup-*.exe
-          # draft: true preserves an existing draft's state. If the
-          # release doesn't exist yet (a push with no manually-created
-          # draft), one is created as a draft for the maintainer to
-          # review before publishing. Keeps curated release notes
-          # written before the tag was pushed from getting wiped.
+          # draft: true so the maintainer can review the auto-populated
+          # notes (and edit / restructure if needed) before publishing.
+          # Publishing a draft is what actually triggers the auto-update
+          # check on user installs — /releases/latest excludes drafts.
           draft: true
-          # generate_release_notes: false so curated notes written
-          # into a pre-existing draft aren't overwritten. When
-          # creating a fresh release from scratch the body will be
-          # empty; run `gh release edit vX.Y.Z --notes-file ...` or
-          # fill it in the GitHub UI before publishing.
+          # generate_release_notes: false because we already have notes
+          # from the commit body. Setting true would make the action
+          # append GitHub's auto-generated changelog (linked PRs since
+          # last tag) on TOP of our curated body, which doubles up.
           generate_release_notes: false
           # Mark tags containing a hyphen (v0.2.0-rc1 etc.) as
           # prereleases automatically.
