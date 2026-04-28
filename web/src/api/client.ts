@@ -861,6 +861,22 @@ export const api = {
         body: JSON.stringify({ device_id: deviceId }),
       }),
   },
+  /** Backend backstop for "what was playing when the user quit."
+   *  Pairs with the frontend's localStorage persistence — see
+   *  usePlayer.ts. The server keeps the most-recently-pushed
+   *  snapshot in user_data_dir/now_playing.json so a quit that
+   *  loses localStorage (WKWebView quirks on macOS) still restores. */
+  nowPlayingState: {
+    get: () =>
+      req<{ state: Record<string, unknown> | null }>(
+        "/api/now-playing/state",
+      ).catch(() => ({ state: null })),
+    put: (state: Record<string, unknown> | null) =>
+      req<{ ok: boolean }>("/api/now-playing/state", {
+        method: "PUT",
+        body: JSON.stringify(state ?? {}),
+      }).catch(() => ({ ok: false })),
+  },
   airplay: {
     devices: () =>
       req<{
