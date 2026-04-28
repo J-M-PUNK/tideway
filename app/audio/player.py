@@ -780,33 +780,70 @@ class PCMPlayer:
         the audio callback thread to die mid-flight, which we never
         want during playback. When a stream is active the device
         list reflects whatever was visible at stream-open time.
+
+        On macOS specifically, a single terminate + initialize cycle
+        sometimes doesn't pick up devices that connected at boot
+        but after PortAudio's first init (e.g. AirPods that paired
+        before Tideway launched but appeared in CoreAudio's list
+        only after the user opened the picker). Two refresh cycles
+        consistently surfaces them; the cost is two ~5ms cycles
+        which is invisible to the user opening the picker.
+
+        Logs the full enumerated list to stdout via `[audio]` so
+        the user can see exactly what PortAudio reports when
+        diagnosing "my headphones aren't showing up" — without
+        the log, the user is blind to whether the device just
+        doesn't reach our filter or was never enumerated at all.
         """
         out: list[dict] = [{"id": "", "name": "System default"}]
-        # Refresh PortAudio's device list when no stream is open.
-        # We're holding the pipeline-level lock so set_output_device
-        # / new stream opens can't race us.
         with self._lock:
             stream_active = self._stream is not None
         if not stream_active:
-            try:
-                sd._terminate()
-            except Exception:
-                # Already-terminated / never-initialized are both
-                # fine — the next query_devices below will re-init
-                # lazily.
-                pass
-            try:
-                sd._initialize()
-            except Exception:
-                log.exception("sd._initialize after refresh failed")
+            for cycle in range(2):
+                try:
+                    sd._terminate()
+                except Exception:
+                    pass
+                try:
+                    sd._initialize()
+                except Exception:
+                    log.exception(
+                        "sd._initialize after refresh cycle %d failed", cycle
+                    )
         try:
             devices = sd.query_devices()
         except Exception:
             log.exception("sd.query_devices failed")
+            print(
+                "[audio] device enumeration failed — see traceback above",
+                flush=True,
+            )
             return out
+        # Loud diagnostic dump. Goes to the dev-console so the user
+        # can paste the snapshot in a bug report when devices look
+        # wrong.
+        print(
+            f"[audio] enumerated {len(devices)} device(s) "
+            f"(stream_active={stream_active}):",
+            flush=True,
+        )
         for i, d in enumerate(devices):
-            if int(d.get("max_output_channels", 0) or 0) > 0:
-                name = d.get("name") or f"Device {i}"
+            ch_in = int(d.get("max_input_channels", 0) or 0)
+            ch_out = int(d.get("max_output_channels", 0) or 0)
+            try:
+                ha_name = sd.query_hostapis(d["hostapi"])["name"]
+            except Exception:
+                ha_name = f"hostapi={d.get('hostapi')}"
+            name = d.get("name") or f"Device {i}"
+            kind = "OUT" if ch_out > 0 else ("IN " if ch_in > 0 else "?  ")
+            virtual = _is_virtual_audio_device(name)
+            tag = "VIRT" if virtual else kind
+            print(
+                f"[audio]   [{i:2d}] {tag} ch={ch_out}/{ch_in} "
+                f"hostapi={ha_name!r} name={name!r}",
+                flush=True,
+            )
+            if ch_out > 0 and not virtual:
                 out.append({"id": str(i), "name": name})
         return out
 
@@ -1881,15 +1918,39 @@ class PCMPlayer:
                 # set_exclusive_mode. Don't transition state; don't
                 # trigger device-loss recovery.
                 return
-            # Device-loss heuristic: the stream ended but the decoder
-            # still has frames ready to play. Natural EOF requires
-            # `_decoder_done.is_set()`; if it isn't set, something
-            # cut us off mid-track. The most common cause is the
-            # output device disappearing.
+            # Device-loss heuristic: stream ended unexpectedly, with
+            # work still pending. Two ways to know the work isn't done:
+            #
+            #   1. Decoder hasn't finished decoding the rest of the
+            #      track (`not decoder_done`).
+            #   2. Decoder IS done but the PCM queue still has chunks
+            #      the callback never got to render (`qsize > 0`). This
+            #      is the case when the device disappears late in a
+            #      short track — the decoder finished filling the queue
+            #      before the unplug, so `decoder_done` is True even
+            #      though several seconds of audio are still waiting to
+            #      play.
+            #
+            # Natural EOF, by contrast, has both the decoder done AND
+            # the queue drained — the callback got everything out
+            # before raising CallbackStop.
             decoder_done = self._decoder_done.is_set()
+            queue_pending = (
+                self._pcm_queue.qsize() > 0
+                if self._pcm_queue is not None
+                else False
+            )
             was_playing = self._state == "playing"
             pre = self._preload
-            if pre is None and was_playing and not decoder_done:
+            should_recover = was_playing and pre is None and (
+                not decoder_done or queue_pending
+            )
+            if should_recover:
+                log.info(
+                    "device-loss detected: triggering recovery "
+                    "(decoder_done=%s, queue_pending=%s)",
+                    decoder_done, queue_pending,
+                )
                 # Recovery runs off-thread because the finished_callback
                 # runs on sounddevice's own thread which we shouldn't
                 # re-enter stream machinery from.
@@ -2123,6 +2184,47 @@ def _safe_int(v: object) -> Optional[int]:
         return int(v)
     except (TypeError, ValueError):
         return None
+
+
+# Substring patterns for known virtual / loopback / aggregate audio
+# devices. These show up in PortAudio's enumeration because CoreAudio
+# (and the equivalent on Windows / Linux) reports them like any other
+# device, but they don't appear in macOS System Settings → Sound →
+# Output and are never what a music streaming app's user wants to
+# pick. Matched case-insensitively against the device name.
+#
+# This is the same list curated audio-routing apps (Audio Hijack,
+# Loopback) use as their "skip these in pickers" baseline. New entries
+# go here when users report a virtual device sneaking in. Keep matches
+# specific enough that legitimate hardware (e.g. a Behringer with
+# "Loopback" in the model name) doesn't get swept up.
+_VIRTUAL_DEVICE_PATTERNS: tuple[str, ...] = (
+    "microsoft teams audio",
+    "zoomaudiodevice",
+    "zoom audio device",
+    "blackhole",
+    "loopback audio",
+    "krisp",
+    "soundflower",
+    "aggregate device",
+    "multi-output device",
+    "ndi audio",
+    "obs virtual",
+    "vb-cable",
+    "ishowu audio capture",
+)
+
+
+def _is_virtual_audio_device(name: str) -> bool:
+    """Return True when `name` matches a known virtual / loopback /
+    aggregate device. Used by `list_output_devices()` to keep these
+    out of the user-facing picker even though PortAudio enumerates
+    them. The dev-console diagnostic dump still shows them tagged
+    `VIRT` so the user can confirm what was filtered."""
+    lower = (name or "").strip().lower()
+    if not lower:
+        return False
+    return any(p in lower for p in _VIRTUAL_DEVICE_PATTERNS)
 
 
 def _normalize_codec(raw: object) -> Optional[str]:
