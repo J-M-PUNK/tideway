@@ -4,6 +4,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
+import { tierFromStreamInfo } from "@/lib/quality";
 import { cn } from "@/lib/utils";
 
 /**
@@ -36,7 +37,7 @@ export function StreamQualityBadge({
   const codec = info.codec.toUpperCase();
   const rate = formatRate(info.sample_rate_hz);
   const depth = info.bit_depth ? `${info.bit_depth}-bit` : null;
-  const tier = tierLabel(info);
+  const tier = tierFromStreamInfo(info);
   // Tone matches tier without rendering the tier name in the pill —
   // the pill is just the user-facing label, the color carries the
   // hi-res / lossless / lossy distinction.
@@ -82,32 +83,4 @@ function formatRate(hz: number | null): string | null {
   // off whole-number kHz values.
   const khz = hz / 1000;
   return khz % 1 === 0 ? String(khz) : khz.toFixed(1);
-}
-
-/**
- * Map a StreamInfo to one of the four user-facing labels. Tidal
- * streams carry the tier in `audio_quality` directly, so prefer
- * that. Local files don't have it (Tidal isn't involved at all),
- * so we fall back to deriving from codec + sample rate / bit
- * depth — local files can never be "Low" since that's a Tidal-
- * specific 96k AAC tier.
- */
-function tierLabel(info: StreamInfo): "Low" | "Medium" | "High" | "Max" {
-  const aq = (info.audio_quality || "").toUpperCase();
-  if (aq === "LOW") return "Low";
-  if (aq === "HIGH") return "Medium";
-  if (aq === "LOSSLESS") return "High";
-  if (aq === "HI_RES" || aq === "HI_RES_LOSSLESS") return "Max";
-
-  const codec = (info.codec || "").toLowerCase();
-  if (codec === "flac" || codec === "alac") {
-    const isHiRes =
-      (info.bit_depth !== null && info.bit_depth >= 24) ||
-      (info.sample_rate_hz !== null && info.sample_rate_hz > 48000);
-    return isHiRes ? "Max" : "High";
-  }
-  // Lossy local file (rare). "Medium" is the closest user-facing
-  // bucket; we have no way to distinguish 96 kbps from 320 kbps
-  // sources without Tidal's tier string.
-  return "Medium";
 }

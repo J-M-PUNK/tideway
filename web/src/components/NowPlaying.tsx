@@ -18,6 +18,12 @@ import {
   VolumeX,
 } from "lucide-react";
 import type { OnDownload } from "@/api/download";
+import type { StreamInfo } from "@/api/types";
+import {
+  type QualityTier,
+  tierFromPreference,
+  tierFromStreamInfo,
+} from "@/lib/quality";
 import { formatDuration, imageProxy } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import {
@@ -307,7 +313,7 @@ export function NowPlaying({
           >
             <ListMusic className="h-4 w-4" />
           </Button>
-          <StreamingQualityPicker isLocal={isLocal} />
+          <StreamingQualityPicker isLocal={isLocal} streamInfo={streamInfo} />
           <SleepTimerButton />
           <OutputDevicePicker />
           <VolumeControl
@@ -380,22 +386,39 @@ const QUALITY_OPTIONS: {
 // palette entries read on both dark and light backgrounds without
 // needing a mode-specific override. `primary` is the brand accent,
 // reserved for Max so the top tier is visually distinct.
-const QUALITY_BADGE_CLASS: Record<StreamingQuality, string> = {
-  low_96k: "bg-neutral-500/15 text-neutral-400 hover:bg-neutral-500/25",
-  low_320k: "bg-amber-500/15 text-amber-500 hover:bg-amber-500/25",
-  high_lossless: "bg-sky-500/15 text-sky-500 hover:bg-sky-500/25",
-  hi_res_lossless: "bg-primary/15 text-primary hover:bg-primary/25",
+const TIER_BADGE_CLASS: Record<QualityTier, string> = {
+  Low: "bg-neutral-500/15 text-neutral-400 hover:bg-neutral-500/25",
+  Medium: "bg-amber-500/15 text-amber-500 hover:bg-amber-500/25",
+  High: "bg-sky-500/15 text-sky-500 hover:bg-sky-500/25",
+  Max: "bg-primary/15 text-primary hover:bg-primary/25",
 };
 
 /**
- * Quality picker pill on the Now Playing bar. When the current track is
- * a downloaded local file, this is a no-op badge (playback is already at
- * the file's native quality) — only the streaming path actually switches.
+ * Quality picker pill on the Now Playing bar. The label and color
+ * reflect the *actual* playback tier (derived from `streamInfo`),
+ * not the user's preference — so a Max-preference user playing a
+ * Lossless-only track sees "High" here and on the small badge to
+ * the left of the title. When nothing is playing yet (`streamInfo`
+ * is null on a fresh launch), the label falls back to the
+ * preference so the picker shows something useful.
+ *
+ * The dropdown still exposes all four preference options. Picking
+ * one updates `streamingQuality`; the next track that loads at
+ * the new ceiling is reflected in this badge automatically when
+ * the SSE pushes its first snapshot.
+ *
+ * Local files keep the existing "Downloaded" treatment since the
+ * file's quality is fixed by the disk content, not by Tidal's
+ * tier system.
  */
-function StreamingQualityPicker({ isLocal }: { isLocal: boolean }) {
+function StreamingQualityPicker({
+  isLocal,
+  streamInfo,
+}: {
+  isLocal: boolean;
+  streamInfo: StreamInfo | null;
+}) {
   const { streamingQuality, set } = useUiPreferences();
-  const current = QUALITY_OPTIONS.find((q) => q.value === streamingQuality);
-  const label = isLocal ? "Downloaded" : (current?.label ?? "Streaming");
 
   if (isLocal) {
     return (
@@ -403,11 +426,16 @@ function StreamingQualityPicker({ isLocal }: { isLocal: boolean }) {
         className="flex items-center gap-1.5 rounded-full bg-primary/15 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-primary"
         title="Playing the local file at its downloaded quality"
       >
-        <AudioLines className="h-3 w-3" /> {label}
+        <AudioLines className="h-3 w-3" /> Downloaded
       </div>
     );
   }
-  const badgeClass = QUALITY_BADGE_CLASS[streamingQuality];
+
+  const effectiveTier: QualityTier = streamInfo
+    ? tierFromStreamInfo(streamInfo)
+    : tierFromPreference(streamingQuality);
+  const label = effectiveTier;
+  const badgeClass = TIER_BADGE_CLASS[effectiveTier];
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
