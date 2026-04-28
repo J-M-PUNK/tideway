@@ -554,3 +554,150 @@ def test_schema_bump_is_idempotent(tmp_path, monkeypatch):
     finally:
         conn.close()
     assert rows == [(1234567,)]
+
+
+# ---------------------------------------------------------------------------
+# Search-limit bump: candidate list widened from 5 to 50 so that albums
+# whose canonical version sits beyond the top-5 results (e.g. when a
+# track has many alternate releases / pre-release singles / lyric
+# videos) still surface the right playcount.
+# ---------------------------------------------------------------------------
+
+
+def test_search_limit_is_widened(isolated_cache, fake_clients):
+    """`_search_track_candidates` must request `limit=50` from
+    spotapi. With the old `limit=5`, tracks like Quadeca's SCRAPYARD
+    album returned undercounts because the canonical album version
+    wasn't in the top 5 ISRC-search results."""
+    song, _ = fake_clients
+    captured: list[int] = []
+
+    def _query(q, limit=5):
+        captured.append(limit)
+        return _search_payload({"id": "X", "name": "x"})
+
+    song.query_songs.side_effect = _query
+    song.get_track_info.return_value = _get_track_payload(
+        playcount=0, primary_artist_name="x"
+    )
+
+    spotify_public._search_track_candidates("isrc:USXX0001")
+    spotify_public._search_track_candidates("Quadeca DUSTCUTTER")
+
+    assert captured == [50, 50], (
+        f"expected limit=50 on every search call, got {captured}"
+    )
+
+
+# ---------------------------------------------------------------------------
+# Artist-name search fallback: when the ISRC walk fails to find a
+# primary-artist match (typical for collab-heavy artists like Justin
+# Bieber whose top tracks on Tidal are all feature credits), fall
+# back to Spotify's `query_artists` endpoint and accept the first
+# name match.
+# ---------------------------------------------------------------------------
+
+
+def _artist_search_payload(*candidates: dict) -> dict:
+    """Build a queryV2 artist-search response. Each candidate is
+    `{"id": "<spotify_artist_id>", "name": "<display name>"}`."""
+    return {
+        "data": {
+            "searchV2": {
+                "artists": {
+                    "items": [
+                        {
+                            "item": {
+                                "data": {
+                                    "uri": f"spotify:artist:{c['id']}",
+                                    "profile": {"name": c["name"]},
+                                }
+                            }
+                        }
+                        for c in candidates
+                    ]
+                }
+            }
+        }
+    }
+
+
+def test_artist_resolution_falls_back_to_name_search(
+    isolated_cache, fake_clients
+):
+    """Tidal artist 'Justin Bieber' has every sample ISRC on a
+    collab where Bieber is a feature, not the primary. ISRC walk
+    can't find a primary-artist match. Resolver must fall through
+    to `query_artists("Justin Bieber")` and pick up the canonical
+    Bieber artist id."""
+    song, artist = fake_clients
+
+    # Every ISRC search returns a track where someone else is primary.
+    song.query_songs.side_effect = lambda q, limit=50: _search_payload(
+        {"id": "FEAT_TRK_ID", "name": "Stay"},
+    )
+    song.get_track_info.return_value = _get_track_payload(
+        playcount=2_000_000_000,
+        primary_artist_id="KIDLAROI_ID",
+        primary_artist_name="The Kid LAROI",
+    )
+
+    # Artist search returns Bieber as the first hit.
+    artist.query_artists.return_value = _artist_search_payload(
+        {"id": "BIEBER_ARTIST_ID", "name": "Justin Bieber"},
+    )
+    artist.get_artist.return_value = _artist_overview_payload(
+        monthly_listeners=80_000_000, name="Justin Bieber"
+    )
+
+    stats = spotify_public.artist_stats_v2(
+        tidal_artist_id="bieber_tidal_id",
+        tidal_artist_name="Justin Bieber",
+        sample_isrcs=["USFEAT00001", "USFEAT00002", "USFEAT00003"],
+    )
+
+    assert stats is not None
+    assert stats.spotify_artist_id == "BIEBER_ARTIST_ID", (
+        "fallback didn't pick up the artist-name search hit; resolver "
+        "is still returning None when ISRC walk fails"
+    )
+    assert stats.monthly_listeners == 80_000_000
+    assert artist.query_artists.called, (
+        "artist-name search wasn't attempted after ISRC walk failed"
+    )
+
+
+def test_artist_name_search_rejects_non_matching_results(
+    isolated_cache, fake_clients
+):
+    """Artist search is fuzzy — query "Jim" can return "Jim and the
+    Hellcats", "Jimmy", "Jim Carrey", etc. The fallback must only
+    accept hits whose name matches case-insensitively, and skip
+    everything else."""
+    song, artist = fake_clients
+
+    song.query_songs.side_effect = lambda q, limit=50: _search_payload(
+        {"id": "T", "name": "x"}
+    )
+    song.get_track_info.return_value = _get_track_payload(
+        playcount=1, primary_artist_name="Someone Else"
+    )
+
+    # Search returns soundalikes only — none match "Jim" exactly.
+    artist.query_artists.return_value = _artist_search_payload(
+        {"id": "JIMMY_ID", "name": "Jimmy"},
+        {"id": "JIMC_ID", "name": "Jim Carrey"},
+        {"id": "JIMHELLCATS_ID", "name": "Jim and the Hellcats"},
+    )
+
+    stats = spotify_public.artist_stats_v2(
+        tidal_artist_id="99",
+        tidal_artist_name="Jim",
+        sample_isrcs=["USXXX0001"],
+    )
+
+    assert stats is None, (
+        "fallback accepted a soundalike artist whose name doesn't "
+        "match exactly — should have returned None"
+    )
+    artist.get_artist.assert_not_called()
