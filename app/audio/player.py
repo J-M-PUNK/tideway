@@ -240,64 +240,82 @@ class PCMPlayer:
         self._eq_bands: list[float] = []
         self._eq_preamp: Optional[float] = None
 
-        # macOS device-change listener. PortAudio's `finished_callback`
-        # doesn't reliably fire when a CoreAudio output device
-        # disappears mid-stream — the stream just goes silent. We
-        # subscribe to CoreAudio's default-output-device change
-        # property directly so we hear about headphone unplugs,
-        # AirPods connects, and Sound-pref device switches the moment
-        # they happen, and we kick off recovery from there. No-op
-        # on non-darwin.
-        self._default_output_listener_unregister: Optional[
+        # macOS audio-route listener. Subscribes to TWO CoreAudio
+        # events:
+        #   1. Default output device changed (headphones unplug
+        #      auto-reroutes to speakers; user picks a different
+        #      device in Sound prefs).
+        #   2. Device list changed (a device plugged in or out,
+        #      independent of whether it became the default).
+        # Both feed the same handler — recovery is idempotent and
+        # the player's state checks naturally dedupe.
+        #
+        # The dual subscription is important for "headphones
+        # plugged in but macOS didn't auto-route to them" (a
+        # supported Sound-pref configuration). Without the
+        # device-list listener, PortAudio's enumeration stays
+        # stale after that plug-in event and the picker never
+        # shows the new headphones until the user restarts.
+        self._audio_route_listener_unregister: Optional[
             Callable[[], None]
         ] = None
         if sys.platform == "darwin":
             try:
                 from app.audio.macos_audio_devices import (
-                    register_default_output_listener,
+                    register_audio_route_listener,
                 )
-                self._default_output_listener_unregister = (
-                    register_default_output_listener(
-                        self._on_default_output_changed
+                self._audio_route_listener_unregister = (
+                    register_audio_route_listener(
+                        self._on_audio_route_changed
                     )
                 )
-                if self._default_output_listener_unregister is not None:
+                if self._audio_route_listener_unregister is not None:
                     print(
-                        "[audio] subscribed to CoreAudio default-output"
-                        "-device changes",
+                        "[audio] subscribed to CoreAudio default-output "
+                        "+ device-list changes",
                         flush=True,
                     )
             except Exception:
                 log.exception(
-                    "default-output listener registration crashed"
+                    "audio-route listener registration crashed"
                 )
 
-    def _on_default_output_changed(self) -> None:
-        """Fired (on a CoreAudio thread) whenever macOS's default
-        output device changes. Headphones unplug → built-in
-        speakers, AirPods connect → AirPods, Sound-pref change →
-        whatever was picked.
+    def _on_audio_route_changed(self) -> None:
+        """Fired (on a CoreAudio thread) whenever the audio routing
+        topology changes — default output device flipped OR a
+        device plugged in / unplugged.
 
-        We respond by triggering the same `_recover_from_device_loss`
-        path the finished_callback uses. It's idempotent: if the
-        stream is already torn down (idle / error / ended) the
-        recovery short-circuits; otherwise it closes the now-stale
-        stream and opens a new one on the system default. Spawned
-        on a fresh thread because we're on a CoreAudio internal
-        thread here and shouldn't re-enter stream machinery.
+        We respond with `_recover_from_device_loss` regardless of
+        which event fired. The recovery is dual-purpose: when the
+        selected device disappeared it falls back to default, when
+        the selected device is still around it reopens on the
+        original (preserving the user's manual selection AND
+        refreshing PortAudio's enumeration so a newly-plugged-in
+        device shows up in the picker).
+
+        Idempotent: if the player is idle / error / ended, recovery
+        short-circuits and we just need PortAudio to re-enumerate
+        on the next picker open.
+
+        Spawned on a fresh thread because we're on a CoreAudio
+        internal thread here and shouldn't re-enter stream
+        machinery (PortAudio reinit specifically would deadlock).
         """
         with self._lock:
             state = self._state
         if state not in ("playing", "paused", "loading"):
+            # No active stream. The picker will refresh PortAudio
+            # itself the next time the user opens it, so there's
+            # nothing to do here.
             return
         print(
-            f"[audio] default output changed (was state={state!r}); "
+            f"[audio] audio route changed (state={state!r}); "
             "kicking recovery",
             flush=True,
         )
         threading.Thread(
             target=self._recover_from_device_loss,
-            name="pcm-default-output-changed",
+            name="pcm-audio-route-changed",
             daemon=True,
         ).start()
 
@@ -2071,21 +2089,34 @@ class PCMPlayer:
         self._emit()
 
     def _recover_from_device_loss(self) -> None:
-        """Reopen the output stream on the system default when the
-        currently-selected device disappears mid-playback. Standard
-        streaming-app behavior: unplug headphones, audio keeps
-        playing on speakers, no manual user action required.
+        """Re-bind the output stream to a working device after a
+        CoreAudio routing change. Two scenarios this covers:
 
-        The decoder thread is still running and feeding the PCM
-        queue, so once we open a fresh stream and start it the
-        first callback drains the queued frames and audio resumes.
-        Brief silence (~50 ms) while CoreAudio renegotiates the
-        new device, same as a manual device switch.
+          A. The currently-selected device disappeared (headphones
+             unplugged, USB DAC removed, AirPods drifted out of
+             range). The reopen on the original device fails; we
+             fall back to the system default.
+
+          B. The device list changed but the selected device is
+             still around (a NEW device just plugged in — e.g.
+             headphones reconnected while audio is on speakers).
+             The reopen on the original device succeeds; the user's
+             selection is preserved AND PortAudio's enumeration
+             gets refreshed in the same step so the picker shows
+             the new device next time it opens.
+
+        Standard streaming-app behavior: unplug headphones, audio
+        keeps playing on speakers; plug them back in, the picker
+        sees them again. ~50 ms of silence while CoreAudio
+        renegotiates, same as a manual device switch.
+
+        The decoder thread keeps feeding the PCM queue throughout,
+        so once we open a fresh stream the first callback drains
+        the queued frames and audio resumes seamlessly.
         """
         with self._pipeline_lock:
             with self._lock:
-                # Bail if state moved on between the finished_callback
-                # and us acquiring the lock — user pressed stop, a
+                # Bail if state moved on — user pressed stop, a
                 # natural EOF arrived, error path fired, etc.
                 if self._state in ("idle", "error", "ended"):
                     return
@@ -2097,13 +2128,11 @@ class PCMPlayer:
                 old_stream = self._stream
                 self._stream = None
                 self._callback_carry = None
-                # Drop the explicit device pin — the user's selected
-                # device is gone, so route to whatever the system
-                # default is now (CoreAudio promotes to internal
-                # speakers when headphones unplug). The next time the
-                # user opens the device picker they'll see the live
-                # list and can re-select if they want.
-                self._selected_device_id = ""
+                # KEEP the user's selection. We try it first below;
+                # only fall back to default if the reopen fails
+                # (which is what means "the device actually
+                # disappeared" vs "device list just changed").
+                original_device_id = self._selected_device_id
                 self._replacing_stream = True
 
             if (
@@ -2120,9 +2149,10 @@ class PCMPlayer:
             except Exception:
                 pass
 
-            # Force PortAudio to re-enumerate CoreAudio so the new
-            # default device is visible. Same trick the device-list
-            # endpoint uses when no stream is active.
+            # Force PortAudio to re-enumerate CoreAudio. Without
+            # this, devices that plugged in since the last init
+            # are invisible to PortAudio even though CoreAudio
+            # sees them.
             try:
                 sd._terminate()
             except Exception:
@@ -2130,19 +2160,54 @@ class PCMPlayer:
             try:
                 sd._initialize()
             except Exception:
-                log.exception("device-loss recovery: PortAudio reinit failed")
+                log.exception("device-recovery: PortAudio reinit failed")
 
+            # First attempt: original device. Succeeds in the
+            # "device list changed but my pick is still around"
+            # case (scenario B above).
             try:
                 with self._lock:
-                    self._open_output_stream(sample_rate, channels, sd_dtype)
+                    self._open_output_stream(
+                        sample_rate, channels, sd_dtype
+                    )
                 self._stream.start()
                 log.info(
-                    "device-loss recovery: reopened on system default "
+                    "device-recovery: reopened on original device "
+                    "id=%r (rate=%d, channels=%d)",
+                    original_device_id, sample_rate, channels,
+                )
+                with self._lock:
+                    self._replacing_stream = False
+                return
+            except Exception as exc:
+                log.info(
+                    "device-recovery: original device id=%r "
+                    "unavailable (%r); falling back to system default",
+                    original_device_id, exc,
+                )
+                # Reset state for the second attempt.
+                with self._lock:
+                    self._selected_device_id = ""
+                    self._stream = None
+                    self._callback_carry = None
+
+            # Second attempt: system default (scenario A: device
+            # actually disappeared).
+            try:
+                with self._lock:
+                    self._open_output_stream(
+                        sample_rate, channels, sd_dtype
+                    )
+                self._stream.start()
+                log.info(
+                    "device-recovery: reopened on system default "
                     "(rate=%d, channels=%d)",
                     sample_rate, channels,
                 )
             except Exception:
-                log.exception("device-loss recovery: failed to reopen stream")
+                log.exception(
+                    "device-recovery: system-default fallback also failed"
+                )
                 with self._lock:
                     self._transition("error")
                     self._stream = None
