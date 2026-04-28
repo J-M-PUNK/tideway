@@ -30,7 +30,12 @@ import { useUiPreferences, type StreamingQuality } from "./useUiPreferences";
  */
 
 const PERSIST_KEY = "tideway:player";
-const PERSIST_INTERVAL_MS = 5000;
+// Tightened from 5s to 2s so the worst-case "you quit between two
+// ticks" loss window is smaller. Persist work is a single
+// JSON.stringify + setItem on a state we already have in memory; the
+// extra cost is negligible compared to the UX cost of forgetting what
+// the user was just listening to.
+const PERSIST_INTERVAL_MS = 2000;
 
 export type RepeatMode = "off" | "all" | "one";
 
@@ -90,9 +95,15 @@ interface PersistedState {
    *  Used as a sanity-check against the persisted queue so that on
    *  boot we only restore "now playing" when queue[queueIndex] still
    *  matches what was loaded (queue shape may have drifted between
-   *  versions). The track object itself comes from the queue, not
-   *  from this field. */
+   *  versions). */
   trackId: string | null;
+  /** The full Track object the user was listening to. Persisted
+   *  alongside `trackId` so single-track plays (where the queue
+   *  is empty and `queueIndex` is -1) can still restore on relaunch.
+   *  Without this field, tapping a search result and quitting would
+   *  lose the now-playing on reopen, since the queue-based restore
+   *  path requires queueIndex >= 0. */
+  track: Track | null;
 }
 
 function loadPersisted(): Partial<PersistedState> {
@@ -195,10 +206,18 @@ export function usePlayer() {
       ? persisted.queue
       : [];
 
-    // Restore "now playing" only when the persisted queueIndex points
-    // at a track whose id still matches what we wrote out at quit.
-    // Bails to a clean (track: null, queueIndex: -1) state if anything
-    // looks off — better to show an empty player than the wrong track.
+    // Restore "now playing" with two paths:
+    //   1. Queue-based: the persisted queueIndex points at a track
+    //      whose id still matches what was loaded at quit. Used by
+    //      album / playlist / mix sessions.
+    //   2. Standalone-track: queueIndex is -1 (single-track play
+    //      from a search result, etc.) but the persisted Track
+    //      object's id matches the persisted trackId. The track was
+    //      never in a queue context but we still want to restore it.
+    //
+    // Bails to a clean (track: null, queueIndex: -1) state if neither
+    // path is satisfied — better to show an empty player than the
+    // wrong track.
     let restoreIndex = -1;
     let restoreTrack: Track | null = null;
     let restoreCurrentTime = 0;
@@ -212,12 +231,24 @@ export function usePlayer() {
     ) {
       restoreIndex = persisted.queueIndex;
       restoreTrack = queue[persisted.queueIndex];
-      if (
-        typeof persisted.currentTime === "number" &&
-        persisted.currentTime > 0
-      ) {
-        restoreCurrentTime = persisted.currentTime;
-      }
+    } else if (
+      persisted.track &&
+      typeof persisted.track === "object" &&
+      typeof persisted.trackId === "string" &&
+      persisted.track.id === persisted.trackId
+    ) {
+      // Single-track play: no queue context, but the standalone
+      // Track survived the round-trip.
+      restoreTrack = persisted.track;
+      // Leave restoreIndex at -1 so the queue-position UI stays empty
+      // — the user wasn't in a queue.
+    }
+    if (
+      restoreTrack &&
+      typeof persisted.currentTime === "number" &&
+      persisted.currentTime > 0
+    ) {
+      restoreCurrentTime = persisted.currentTime;
     }
 
     return {
@@ -242,9 +273,22 @@ export function usePlayer() {
     stateRef.current = state;
   }, [state]);
 
-  // Persist queue + prefs on an interval so a reload picks up where
-  // the user left off. Skip writes when the state is still the empty
-  // initial one so we don't clobber a real prior session.
+  // Persist queue + prefs so a relaunch picks up where the user left
+  // off. Skip writes when nothing's loaded so we don't clobber a real
+  // prior session.
+  //
+  // Three lifecycle hooks listen for "the user is leaving":
+  //   - `beforeunload`: classic page-close. Fires reliably on most
+  //     browser exits and on pywebview window-close.
+  //   - `pagehide`: fires in cases where `beforeunload` doesn't —
+  //     Safari mobile, BFCache navigations, and some embedded-webview
+  //     paths. Most reliable last-chance hook in the spec.
+  //   - `visibilitychange` to "hidden": fires when the app loses focus
+  //     or is sent to background. macOS Cmd-Q sometimes hides the
+  //     window before tearing it down without firing beforeunload, so
+  //     a flush here catches it.
+  // All three call the same `flush()` so a triple-hit on quit just
+  // writes the same JSON three times — cheap and idempotent.
   useEffect(() => {
     const flush = () => {
       const s = stateRef.current;
@@ -264,17 +308,25 @@ export function usePlayer() {
           shuffle: s.shuffle,
           repeat: s.repeat,
           trackId: s.track?.id ?? null,
+          track: s.track,
         };
         localStorage.setItem(PERSIST_KEY, JSON.stringify(snapshot));
       } catch {
         /* storage full or disabled */
       }
     };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "hidden") flush();
+    };
     const id = window.setInterval(flush, PERSIST_INTERVAL_MS);
     window.addEventListener("beforeunload", flush);
+    window.addEventListener("pagehide", flush);
+    document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
       window.clearInterval(id);
       window.removeEventListener("beforeunload", flush);
+      window.removeEventListener("pagehide", flush);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
     };
   }, []);
 
@@ -543,7 +595,10 @@ export function usePlayer() {
   useEffect(() => {
     if (restoredRef.current) return;
     const cur = stateRef.current;
-    if (!cur.track || cur.queueIndex < 0) return;
+    // Standalone-track plays restore with `queueIndex = -1`, so the
+    // restore is keyed solely on whether a track was hydrated by the
+    // initializer — not on whether a queue position was hydrated.
+    if (!cur.track) return;
     restoredRef.current = true;
 
     void (async () => {
