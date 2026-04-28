@@ -802,6 +802,21 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ track_ids: trackIds, quality }),
       }).catch(() => ({ prefetched: 0, total: trackIds.length })),
+    /** Push display metadata for the currently-playing track into
+     *  macOS Now Playing. Fired on track change so Control Center,
+     *  the menu-bar widget, and the lock screen show title / artist
+     *  / album / duration. No-ops on non-macOS server-side. */
+    nowPlaying: (info: {
+      title: string;
+      artist: string;
+      album?: string;
+      duration_ms?: number;
+      artwork_url?: string;
+    }) =>
+      req<{ ok: boolean }>("/api/now-playing", {
+        method: "POST",
+        body: JSON.stringify(info),
+      }).catch(() => ({ ok: false })),
     play: () => req<PlayerSnapshot>("/api/player/play", { method: "POST" }),
     pause: () => req<PlayerSnapshot>("/api/player/pause", { method: "POST" }),
     resume: () => req<PlayerSnapshot>("/api/player/resume", { method: "POST" }),
