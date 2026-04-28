@@ -52,7 +52,12 @@ binaries: list[tuple[str, str]] = []
 # compiled .pyd; collect_all grabs data + binaries + submodules in one
 # call. Same pattern for any other package with a native extension that
 # the default hook doesn't cover.
-for pkg in ("pydantic", "pydantic_core", "curl_cffi", "tls_client"):
+#
+# `tls_client` is deliberately excluded: spotapi imports it but we
+# replace the transport with `app.spotify_curl_session` (curl-cffi)
+# at runtime, and the bundled `tls-client-64.dll` panics on Windows.
+# Skipping the collect_all keeps the broken DLL out of the install.
+for pkg in ("pydantic", "pydantic_core", "curl_cffi"):
     try:
         _d, _b, _h = collect_all(pkg)
         datas += _d
@@ -89,6 +94,11 @@ hiddenimports = [
     "pystray",
     "pystray._win32",
     "PIL.Image",
+    # curl-cffi-backed transport for spotapi. Imported lazily inside
+    # app.spotify_public._ensure_client; declare explicitly so
+    # PyInstaller's static analysis picks it up regardless of whether
+    # the function-body import is traced.
+    "app.spotify_curl_session",
 ]
 
 a = Analysis(

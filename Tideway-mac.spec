@@ -78,18 +78,17 @@ for pkg in (
     # curl-cffi ships its own libcurl-impersonate dylib + a CFFI
     # binding that PyInstaller's static analysis routinely misses.
     # Without this the packaged app falls back to plain requests
-    # silently, losing the TLS-fingerprint match.
+    # silently, losing the TLS-fingerprint match. Also serves as the
+    # transport for spotapi via app/spotify_curl_session.py — see
+    # below for why we no longer bundle tls_client.
     "curl_cffi",
-    # tls-client ships per-arch native binaries
-    # (tls-client-arm64.dylib, tls-client-amd64.so, etc.) under
-    # tls_client/dependencies/. spotapi loads one of those via
-    # ctypes at runtime, but PyInstaller's static analysis only
-    # sees the python imports — without collect_all the dylibs
-    # don't ship and every Spotify call dies with
-    # "Failed to load dynlib/dll '.../tls-client-<arch>.dylib'."
-    # That's the missing-monthly-listeners + zero-playcount bug
-    # from v0.4.8.
-    "tls_client",
+    # NOTE: tls_client is intentionally NOT bundled. spotapi imports
+    # it transitively, but its `tls-client-{arch}.dylib` Go-CGO
+    # library panics with STATUS_BREAKPOINT on first request and
+    # crashes the app. app/spotify_curl_session.py installs no-op
+    # stubs for the `tls_client` module tree at startup and routes
+    # spotapi's requests through curl-cffi instead. Skipping the
+    # collect_all here keeps the broken dylib out of the bundle.
 ):
     try:
         _d, _b, _h = collect_all(pkg)
@@ -147,6 +146,11 @@ hiddenimports = [
     "pystray",
     "pystray._darwin",
     "PIL.Image",
+    # curl-cffi-backed transport for spotapi. Imported lazily inside
+    # app.spotify_public._ensure_client; declare explicitly so
+    # PyInstaller's static analysis picks it up regardless of whether
+    # the function-body import is traced.
+    "app.spotify_curl_session",
 ]
 
 a = Analysis(
