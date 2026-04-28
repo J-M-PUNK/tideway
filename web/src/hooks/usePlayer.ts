@@ -30,7 +30,12 @@ import { useUiPreferences, type StreamingQuality } from "./useUiPreferences";
  */
 
 const PERSIST_KEY = "tideway:player";
-const PERSIST_INTERVAL_MS = 5000;
+// Tightened from 5s to 2s so the worst-case "you quit between two
+// ticks" loss window is smaller. Persist work is a single
+// JSON.stringify + setItem on a state we already have in memory; the
+// extra cost is negligible compared to the UX cost of forgetting what
+// the user was just listening to.
+const PERSIST_INTERVAL_MS = 2000;
 
 export type RepeatMode = "off" | "all" | "one";
 
@@ -90,9 +95,15 @@ interface PersistedState {
    *  Used as a sanity-check against the persisted queue so that on
    *  boot we only restore "now playing" when queue[queueIndex] still
    *  matches what was loaded (queue shape may have drifted between
-   *  versions). The track object itself comes from the queue, not
-   *  from this field. */
+   *  versions). */
   trackId: string | null;
+  /** The full Track object the user was listening to. Persisted
+   *  alongside `trackId` so single-track plays (where the queue
+   *  is empty and `queueIndex` is -1) can still restore on relaunch.
+   *  Without this field, tapping a search result and quitting would
+   *  lose the now-playing on reopen, since the queue-based restore
+   *  path requires queueIndex >= 0. */
+  track: Track | null;
 }
 
 function loadPersisted(): Partial<PersistedState> {
@@ -105,6 +116,49 @@ function loadPersisted(): Partial<PersistedState> {
   } catch {
     return {};
   }
+}
+
+/** Decide what to seed `state.track`, `state.queueIndex`, and
+ *  `state.currentTime` with based on a persisted snapshot — extracted
+ *  so the backend backstop hydrate path (`api.nowPlayingState.get()`)
+ *  can apply the same shape-validation as the localStorage path. */
+function pickRestoreFromPersisted(
+  persisted: Partial<PersistedState>,
+  queue: Track[],
+): {
+  restoreIndex: number;
+  restoreTrack: Track | null;
+  restoreCurrentTime: number;
+} {
+  let restoreIndex = -1;
+  let restoreTrack: Track | null = null;
+  let restoreCurrentTime = 0;
+  if (
+    typeof persisted.queueIndex === "number" &&
+    persisted.queueIndex >= 0 &&
+    persisted.queueIndex < queue.length &&
+    typeof persisted.trackId === "string" &&
+    queue[persisted.queueIndex] &&
+    queue[persisted.queueIndex].id === persisted.trackId
+  ) {
+    restoreIndex = persisted.queueIndex;
+    restoreTrack = queue[persisted.queueIndex];
+  } else if (
+    persisted.track &&
+    typeof persisted.track === "object" &&
+    typeof persisted.trackId === "string" &&
+    persisted.track.id === persisted.trackId
+  ) {
+    restoreTrack = persisted.track;
+  }
+  if (
+    restoreTrack &&
+    typeof persisted.currentTime === "number" &&
+    persisted.currentTime > 0
+  ) {
+    restoreCurrentTime = persisted.currentTime;
+  }
+  return { restoreIndex, restoreTrack, restoreCurrentTime };
 }
 
 const INITIAL: PlayerState = {
@@ -195,30 +249,22 @@ export function usePlayer() {
       ? persisted.queue
       : [];
 
-    // Restore "now playing" only when the persisted queueIndex points
-    // at a track whose id still matches what we wrote out at quit.
-    // Bails to a clean (track: null, queueIndex: -1) state if anything
-    // looks off — better to show an empty player than the wrong track.
-    let restoreIndex = -1;
-    let restoreTrack: Track | null = null;
-    let restoreCurrentTime = 0;
-    if (
-      typeof persisted.queueIndex === "number" &&
-      persisted.queueIndex >= 0 &&
-      persisted.queueIndex < queue.length &&
-      typeof persisted.trackId === "string" &&
-      queue[persisted.queueIndex] &&
-      queue[persisted.queueIndex].id === persisted.trackId
-    ) {
-      restoreIndex = persisted.queueIndex;
-      restoreTrack = queue[persisted.queueIndex];
-      if (
-        typeof persisted.currentTime === "number" &&
-        persisted.currentTime > 0
-      ) {
-        restoreCurrentTime = persisted.currentTime;
-      }
-    }
+    // Restore "now playing" with two paths:
+    //   1. Queue-based: the persisted queueIndex points at a track
+    //      whose id still matches what was loaded at quit. Used by
+    //      album / playlist / mix sessions.
+    //   2. Standalone-track: queueIndex is -1 (single-track play
+    //      from a search result, etc.) but the persisted Track
+    //      object's id matches the persisted trackId. The track was
+    //      never in a queue context but we still want to restore it.
+    //
+    // Bails to a clean (track: null, queueIndex: -1) state if neither
+    // path is satisfied — better to show an empty player than the
+    // wrong track. The same parser handles the backend backstop
+    // hydration in the effect below (when WKWebView dropped
+    // localStorage between launches).
+    const { restoreIndex, restoreTrack, restoreCurrentTime } =
+      pickRestoreFromPersisted(persisted, queue);
 
     return {
       ...INITIAL,
@@ -242,9 +288,70 @@ export function usePlayer() {
     stateRef.current = state;
   }, [state]);
 
-  // Persist queue + prefs on an interval so a reload picks up where
-  // the user left off. Skip writes when the state is still the empty
-  // initial one so we don't clobber a real prior session.
+  // Backend backstop hydration. The useState initializer above seeds
+  // from localStorage, which is the fast path. But pywebview's
+  // WKWebView on macOS sometimes loses localStorage between launches
+  // (the OS may discard the data store on app quit depending on the
+  // mode pywebview opens it in), so the localStorage path can come
+  // up empty even though the user expected their track back. Server
+  // keeps a parallel copy of the persisted snapshot in
+  // `user_data_dir/now_playing.json`; if localStorage was empty,
+  // pull from there and apply the same shape-validated restore as
+  // the synchronous initializer. Idempotent via a ref so re-runs
+  // don't re-trigger.
+  const backendHydratedRef = useRef(false);
+  useEffect(() => {
+    if (backendHydratedRef.current) return;
+    backendHydratedRef.current = true;
+    if (stateRef.current.track) return; // already hydrated from localStorage
+    void (async () => {
+      const { state: backendState } = await api.nowPlayingState.get();
+      if (!backendState || typeof backendState !== "object") return;
+      // The backend just round-trips the JSON we wrote, so the
+      // shape matches PersistedState. Cast through unknown to
+      // satisfy TS since the API method types it as a generic dict.
+      const persisted = backendState as unknown as Partial<PersistedState>;
+      const queue: Track[] = Array.isArray(persisted.queue)
+        ? persisted.queue
+        : [];
+      const repeat: RepeatMode =
+        persisted.repeat === "all" || persisted.repeat === "one"
+          ? persisted.repeat
+          : "off";
+      const { restoreIndex, restoreTrack, restoreCurrentTime } =
+        pickRestoreFromPersisted(persisted, queue);
+      if (!restoreTrack) return;
+      setState((s) => ({
+        ...s,
+        queue,
+        queueIndex: restoreIndex,
+        track: restoreTrack,
+        currentTime: restoreCurrentTime,
+        duration: restoreTrack.duration ?? s.duration,
+        volume:
+          typeof persisted.volume === "number" ? persisted.volume : s.volume,
+        shuffle: !!persisted.shuffle,
+        repeat,
+      }));
+    })();
+  }, []);
+
+  // Persist queue + prefs so a relaunch picks up where the user left
+  // off. Skip writes when nothing's loaded so we don't clobber a real
+  // prior session.
+  //
+  // Three lifecycle hooks listen for "the user is leaving":
+  //   - `beforeunload`: classic page-close. Fires reliably on most
+  //     browser exits and on pywebview window-close.
+  //   - `pagehide`: fires in cases where `beforeunload` doesn't —
+  //     Safari mobile, BFCache navigations, and some embedded-webview
+  //     paths. Most reliable last-chance hook in the spec.
+  //   - `visibilitychange` to "hidden": fires when the app loses focus
+  //     or is sent to background. macOS Cmd-Q sometimes hides the
+  //     window before tearing it down without firing beforeunload, so
+  //     a flush here catches it.
+  // All three call the same `flush()` so a triple-hit on quit just
+  // writes the same JSON three times — cheap and idempotent.
   useEffect(() => {
     const flush = () => {
       const s = stateRef.current;
@@ -255,26 +362,42 @@ export function usePlayer() {
       if (s.queue.length === 0 && s.queueIndex === -1 && !s.track) {
         return;
       }
+      const snapshot: PersistedState = {
+        queue: s.queue,
+        queueIndex: s.queueIndex,
+        currentTime: s.currentTime,
+        volume: s.volume,
+        shuffle: s.shuffle,
+        repeat: s.repeat,
+        trackId: s.track?.id ?? null,
+        track: s.track,
+      };
       try {
-        const snapshot: PersistedState = {
-          queue: s.queue,
-          queueIndex: s.queueIndex,
-          currentTime: s.currentTime,
-          volume: s.volume,
-          shuffle: s.shuffle,
-          repeat: s.repeat,
-          trackId: s.track?.id ?? null,
-        };
         localStorage.setItem(PERSIST_KEY, JSON.stringify(snapshot));
       } catch {
         /* storage full or disabled */
       }
+      // Backend backstop. Pywebview's WKWebView on macOS doesn't
+      // always preserve localStorage between launches — depending
+      // on the data-store mode the OS may discard the database on
+      // app quit. The server keeps the most-recently-pushed
+      // snapshot in user_data_dir/now_playing.json, so a quit that
+      // wipes localStorage still restores cleanly. Fire-and-forget;
+      // the .catch lives on the api method itself.
+      api.nowPlayingState.put(snapshot as unknown as Record<string, unknown>);
+    };
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "hidden") flush();
     };
     const id = window.setInterval(flush, PERSIST_INTERVAL_MS);
     window.addEventListener("beforeunload", flush);
+    window.addEventListener("pagehide", flush);
+    document.addEventListener("visibilitychange", onVisibilityChange);
     return () => {
       window.clearInterval(id);
       window.removeEventListener("beforeunload", flush);
+      window.removeEventListener("pagehide", flush);
+      document.removeEventListener("visibilitychange", onVisibilityChange);
     };
   }, []);
 
@@ -543,7 +666,10 @@ export function usePlayer() {
   useEffect(() => {
     if (restoredRef.current) return;
     const cur = stateRef.current;
-    if (!cur.track || cur.queueIndex < 0) return;
+    // Standalone-track plays restore with `queueIndex = -1`, so the
+    // restore is keyed solely on whether a track was hydrated by the
+    // initializer — not on whether a queue position was hydrated.
+    if (!cur.track) return;
     restoredRef.current = true;
 
     void (async () => {
@@ -592,7 +718,12 @@ export function usePlayer() {
         expectedTrackIdRef.current = null;
       }
     })();
-  }, []);
+    // Depend on state.track: when the backend backstop hydration
+    // populates it asynchronously (localStorage was empty), this
+    // effect re-runs and the ref-gated body fires for the first
+    // time. With an empty deps array the effect only runs once on
+    // mount, missing the backend-hydrated case.
+  }, [state.track]);
 
   const playAtIndex = useCallback(
     (

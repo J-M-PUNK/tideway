@@ -50,6 +50,7 @@ from app.downloader import DownloadItem, DownloadStatus, Downloader
 from app.http import SESSION
 from app.lastfm import LastFmClient
 from app.local_index import LocalIndex
+from app import now_playing_state
 from app.paths import bundled_resource_dir
 from app.play_reporter import PlayReporter, PlaySession, recent_log as play_report_recent_log
 from app.settings import Settings, load_settings, save_settings
@@ -3623,6 +3624,49 @@ def player_state() -> dict:
     # Tidal when a track isn't on disk.
     _require_local_access()
     return _snapshot_dict(_native_player().snapshot())
+
+
+@app.get("/api/now-playing/state")
+def now_playing_state_get() -> dict:
+    """Backend backstop for the persisted now-playing snapshot.
+
+    Pywebview's WKWebView on macOS doesn't always preserve
+    localStorage between launches the way a regular browser tab
+    does, so the frontend's "restore on quit" path can come up
+    empty even when the user expects their track back. The
+    frontend POSTs the same JSON it writes to localStorage to
+    `/api/now-playing/state` (see below) on every persist tick;
+    the server keeps the latest copy in `user_data_dir`. On
+    startup the frontend reads it back via this GET and prefers
+    it when localStorage is missing.
+
+    Returns `{"state": null}` when nothing has been persisted yet.
+    """
+    _require_local_access()
+    return {"state": now_playing_state.read_state()}
+
+
+@app.put("/api/now-playing/state")
+async def now_playing_state_put(request: Request) -> dict:
+    """Push the frontend's persisted snapshot to disk. Server doesn't
+    interpret the contents — it just round-trips the JSON. The
+    frontend is the only consumer; durability across launches is
+    the only contract we care about here.
+
+    Accepts an empty body / null payload to mean "clear" — used
+    when the user explicitly stops playback so a relaunch doesn't
+    restore something they just dismissed.
+    """
+    _require_local_access()
+    try:
+        body = await request.json()
+    except Exception:
+        body = None
+    if body is None or body == {} or not isinstance(body, dict):
+        now_playing_state.clear_state()
+        return {"ok": True, "cleared": True}
+    now_playing_state.write_state(body)
+    return {"ok": True}
 
 
 @app.post("/api/player/load")
