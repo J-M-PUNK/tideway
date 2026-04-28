@@ -54,6 +54,16 @@ pystray>=0.19.5
 # import, so the actual libs stay off the dependency list — ~15 MB
 # smaller install.
 spotapi>=1.2.7
+# macOS Now Playing integration. Without claiming the system's
+# "active media player" role via MPNowPlayingInfoCenter and
+# MPRemoteCommandCenter, media keys (Cmd-F8, hardware play/pause
+# keys, Touch Bar, Control Center) route to Apple Music when
+# Tideway isn't focused — even though Tideway is the app actually
+# playing audio. The bridge in app/audio/macos_now_playing.py
+# uses these PyObjC bindings. Skipped on non-darwin via the
+# environment marker so a Linux / Windows install doesn't pull
+# them.
+pyobjc-framework-MediaPlayer>=10.0; sys_platform == "darwin"
 # UPnP / DLNA MediaRenderer output. Same library Home Assistant's
 # DLNA integration uses. Covers SSDP discovery, AVTransport control
 # (play/pause/seek), RenderingControl (volume), and OpenHome for
