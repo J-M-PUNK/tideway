@@ -16,8 +16,11 @@ same stats page.
 We reach Spotify through `spotapi` (https://github.com/Aran404/SpotAPI),
 which wraps the private GraphQL API Spotify's own Web Player uses.
 No OAuth, no user account — just anonymous requests through a
-TLS-fingerprint-spoofed client (Chrome 120) to get past Spotify's
-anti-bot filters.
+TLS-fingerprinted client (Chrome 131) to get past Spotify's
+anti-bot filters. The TLS impersonation is provided by curl-cffi
+(see `app.spotify_curl_session`), the same transport tidalapi uses;
+spotapi's bundled `tls_client` Go-CGO DLL is replaced because its
+runtime panics crashed the Windows app on first call.
 
 **Matching Tidal → Spotify.** Tidal and Spotify don't share IDs, so
 every lookup starts from an ISRC (International Standard Recording
@@ -69,24 +72,22 @@ _tls_client: Any = None
 
 
 def _stub_unused_spotapi_deps() -> None:
-    """Install empty-module stubs for pymongo + redis before the
-    first spotapi import.
+    """Install no-op stubs for the spotapi modules we don't use.
 
-    spotapi/utils/saver.py has unconditional `import pymongo` /
-    `import redis` at module level. Both are only referenced inside
-    `MongoSaver` and `RedisSaver` classes we never instantiate — the
-    imports just need to resolve for spotapi itself to load. Empty
-    `types.ModuleType` objects satisfy that, letting us drop the
-    real libraries (~15 MB combined) from requirements.txt.
+    Delegates to `app.spotify_curl_session` which owns the full stub
+    set (`tls_client`, `pymongo`, `redis`) — keeping stub definitions
+    in one place alongside the curl-cffi adapter that replaces the
+    broken `tls_client` transport. See that module's docstring for
+    the rationale on each stub.
 
-    Idempotent — once stubbed, subsequent calls are no-ops.
+    Kept as a thin wrapper here so existing call-sites (tests
+    in particular) continue to work, and so the import order is
+    explicit at the only point in `spotify_public` that touches
+    spotapi.
     """
-    import sys
-    import types as _types
+    from app.spotify_curl_session import install_spotapi_dep_stubs
 
-    for name in ("pymongo", "redis"):
-        if name not in sys.modules:
-            sys.modules[name] = _types.ModuleType(name)
+    install_spotapi_dep_stubs()
 
 
 def _ensure_client() -> tuple[Any, Any]:
@@ -96,11 +97,11 @@ def _ensure_client() -> tuple[Any, Any]:
         if _artist_mod is not None:
             return _song_mod, _artist_mod
         _stub_unused_spotapi_deps()
+        from app.spotify_curl_session import CurlSpotifyClient
         from spotapi.artist import Artist  # type: ignore
-        from spotapi.client import TLSClient  # type: ignore
         from spotapi.song import Song  # type: ignore
 
-        _tls_client = TLSClient("chrome_120", "", auto_retries=2)
+        _tls_client = CurlSpotifyClient(auto_retries=2)
         _song_mod = Song(client=_tls_client)
         _artist_mod = Artist(client=_tls_client)
         return _song_mod, _artist_mod

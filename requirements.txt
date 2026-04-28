@@ -53,6 +53,15 @@ pystray>=0.19.5
 # installs empty-module stubs for both before the first spotapi
 # import, so the actual libs stay off the dependency list — ~15 MB
 # smaller install.
+#
+# spotapi's bundled transport (`tls_client`, a Go-CGO DLL) is also
+# stubbed out: its native library panics with STATUS_BREAKPOINT on
+# Windows mid-request and takes the whole process down. We keep
+# spotapi for its protocol code (TOTP, hash scraping, GraphQL
+# framing) but route requests through `app.spotify_curl_session`,
+# which uses curl-cffi (already in this requirements file for
+# tidalapi). pip will still pull tls_client in transitively because
+# it's a hard dep of spotapi, but the runtime never loads its DLL.
 spotapi>=1.2.7
 # macOS Now Playing integration. Without claiming the system's
 # "active media player" role via MPNowPlayingInfoCenter and
