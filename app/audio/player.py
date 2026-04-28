@@ -240,6 +240,67 @@ class PCMPlayer:
         self._eq_bands: list[float] = []
         self._eq_preamp: Optional[float] = None
 
+        # macOS device-change listener. PortAudio's `finished_callback`
+        # doesn't reliably fire when a CoreAudio output device
+        # disappears mid-stream — the stream just goes silent. We
+        # subscribe to CoreAudio's default-output-device change
+        # property directly so we hear about headphone unplugs,
+        # AirPods connects, and Sound-pref device switches the moment
+        # they happen, and we kick off recovery from there. No-op
+        # on non-darwin.
+        self._default_output_listener_unregister: Optional[
+            Callable[[], None]
+        ] = None
+        if sys.platform == "darwin":
+            try:
+                from app.audio.macos_audio_devices import (
+                    register_default_output_listener,
+                )
+                self._default_output_listener_unregister = (
+                    register_default_output_listener(
+                        self._on_default_output_changed
+                    )
+                )
+                if self._default_output_listener_unregister is not None:
+                    print(
+                        "[audio] subscribed to CoreAudio default-output"
+                        "-device changes",
+                        flush=True,
+                    )
+            except Exception:
+                log.exception(
+                    "default-output listener registration crashed"
+                )
+
+    def _on_default_output_changed(self) -> None:
+        """Fired (on a CoreAudio thread) whenever macOS's default
+        output device changes. Headphones unplug → built-in
+        speakers, AirPods connect → AirPods, Sound-pref change →
+        whatever was picked.
+
+        We respond by triggering the same `_recover_from_device_loss`
+        path the finished_callback uses. It's idempotent: if the
+        stream is already torn down (idle / error / ended) the
+        recovery short-circuits; otherwise it closes the now-stale
+        stream and opens a new one on the system default. Spawned
+        on a fresh thread because we're on a CoreAudio internal
+        thread here and shouldn't re-enter stream machinery.
+        """
+        with self._lock:
+            state = self._state
+        if state not in ("playing", "paused", "loading"):
+            return
+        print(
+            f"[audio] default output changed (was state={state!r}); "
+            "kicking recovery",
+            flush=True,
+        )
+        threading.Thread(
+            target=self._recover_from_device_loss,
+            name="pcm-default-output-changed",
+            daemon=True,
+        ).start()
+
     # --- public API -------------------------------------------------
 
     def subscribe(
