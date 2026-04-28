@@ -836,12 +836,14 @@ class PCMPlayer:
                 ha_name = f"hostapi={d.get('hostapi')}"
             name = d.get("name") or f"Device {i}"
             kind = "OUT" if ch_out > 0 else ("IN " if ch_in > 0 else "?  ")
+            virtual = _is_virtual_audio_device(name)
+            tag = "VIRT" if virtual else kind
             print(
-                f"[audio]   [{i:2d}] {kind} ch={ch_out}/{ch_in} "
+                f"[audio]   [{i:2d}] {tag} ch={ch_out}/{ch_in} "
                 f"hostapi={ha_name!r} name={name!r}",
                 flush=True,
             )
-            if ch_out > 0:
+            if ch_out > 0 and not virtual:
                 out.append({"id": str(i), "name": name})
         return out
 
@@ -2182,6 +2184,47 @@ def _safe_int(v: object) -> Optional[int]:
         return int(v)
     except (TypeError, ValueError):
         return None
+
+
+# Substring patterns for known virtual / loopback / aggregate audio
+# devices. These show up in PortAudio's enumeration because CoreAudio
+# (and the equivalent on Windows / Linux) reports them like any other
+# device, but they don't appear in macOS System Settings → Sound →
+# Output and are never what a music streaming app's user wants to
+# pick. Matched case-insensitively against the device name.
+#
+# This is the same list curated audio-routing apps (Audio Hijack,
+# Loopback) use as their "skip these in pickers" baseline. New entries
+# go here when users report a virtual device sneaking in. Keep matches
+# specific enough that legitimate hardware (e.g. a Behringer with
+# "Loopback" in the model name) doesn't get swept up.
+_VIRTUAL_DEVICE_PATTERNS: tuple[str, ...] = (
+    "microsoft teams audio",
+    "zoomaudiodevice",
+    "zoom audio device",
+    "blackhole",
+    "loopback audio",
+    "krisp",
+    "soundflower",
+    "aggregate device",
+    "multi-output device",
+    "ndi audio",
+    "obs virtual",
+    "vb-cable",
+    "ishowu audio capture",
+)
+
+
+def _is_virtual_audio_device(name: str) -> bool:
+    """Return True when `name` matches a known virtual / loopback /
+    aggregate device. Used by `list_output_devices()` to keep these
+    out of the user-facing picker even though PortAudio enumerates
+    them. The dev-console diagnostic dump still shows them tagged
+    `VIRT` so the user can confirm what was filtered."""
+    lower = (name or "").strip().lower()
+    if not lower:
+        return False
+    return any(p in lower for p in _VIRTUAL_DEVICE_PATTERNS)
 
 
 def _normalize_codec(raw: object) -> Optional[str]:
