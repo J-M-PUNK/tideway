@@ -66,23 +66,8 @@ export function ArtistHero({
 
   return (
     <div className="relative -mx-8 -mt-6 mb-8 overflow-hidden">
-      {/* Layered banner. From back to front:
-          1. Heavily-blurred + darkened backdrop. Catches any gap the
-             other layers leave; gives the banner a tinted ambience
-             matching the photo's palette.
-          2. Two mirrored copies of the photo on the left and right
-             flanks, faded into the backdrop at the outer edges.
-             Mirrors Tidal's own client — when the photo's natural
-             aspect is narrower than the banner, the mirror panels
-             "extend" it visually instead of leaving empty
-             blurred-backdrop strips on either side.
-          3. The sharp original, object-contain, centered. The
-             mirrors' inner edges meet the original's left and right
-             edges at the same content (mirror = horizontal flip),
-             so the seam looks like a butterfly reflection.
-          4. Bottom-up gradient that darkens the lower half so the
-             title and action row stay legible.
-        */}
+      {/* Banner image — blurred, scaled up, and darkened so the
+          foreground text is legible regardless of what the cover is. */}
       <div className="relative h-[340px] w-full">
         {cover ? (
           <img
@@ -94,45 +79,28 @@ export function ArtistHero({
           <div className="absolute inset-0 bg-gradient-to-b from-[#2a2a2a] to-[#0a0a0a]" />
         )}
         {cover && (
-          <>
-            {/* Left mirror flank. After scaleX(-1) the image's right
-                side renders on the LEFT of the panel; the mask fades
-                from opaque on the inner (right) edge to transparent
-                on the outer (left) edge so the panel blends into
-                the blurred backdrop. */}
-            <img
-              src={cover}
-              alt=""
-              aria-hidden
-              className="absolute inset-y-0 left-0 h-full w-1/2 object-cover"
-              style={{
-                transform: "scaleX(-1)",
-                maskImage: "linear-gradient(90deg, black 0%, transparent 100%)",
-                WebkitMaskImage:
-                  "linear-gradient(90deg, black 0%, transparent 100%)",
-              }}
-            />
-            {/* Right mirror flank — symmetric to the left. */}
-            <img
-              src={cover}
-              alt=""
-              aria-hidden
-              className="absolute inset-y-0 right-0 h-full w-1/2 object-cover"
-              style={{
-                transform: "scaleX(-1)",
-                maskImage:
-                  "linear-gradient(270deg, black 0%, transparent 100%)",
-                WebkitMaskImage:
-                  "linear-gradient(270deg, black 0%, transparent 100%)",
-              }}
-            />
-            {/* Sharp centered photo on top of the mirrors. */}
-            <img
-              src={cover}
-              alt={artistName}
-              className="absolute inset-0 h-full w-full object-contain"
-            />
-          </>
+          // `object-contain` so the artist's full photo shows at its
+          // natural aspect, not a center-crop horizontal slice. The
+          // blurred backdrop above fills any gap on the sides for
+          // square / portrait photos. A narrow gradient mask fades the
+          // very edges into the backdrop so the photo doesn't look
+          // pasted on top.
+          //
+          // Earlier this was `object-cover` with an aggressive 30/70
+          // side mask, which cropped the image to a narrow middle band
+          // — for typical press shots the face landed off-frame and
+          // users saw a chest-area zoom of the artist.
+          <img
+            src={cover}
+            alt={artistName}
+            className="absolute inset-0 h-full w-full object-contain"
+            style={{
+              maskImage:
+                "linear-gradient(90deg, transparent 0%, black 8%, black 92%, transparent 100%)",
+              WebkitMaskImage:
+                "linear-gradient(90deg, transparent 0%, black 8%, black 92%, transparent 100%)",
+            }}
+          />
         )}
         <div className="absolute inset-0 bg-gradient-to-t from-background via-background/40 to-transparent" />
       </div>
