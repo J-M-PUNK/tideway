@@ -2129,30 +2129,66 @@ _lastfm_cache_lock = threading.Lock()
 _LASTFM_CACHE_TTL_SEC = 300.0
 
 
-def _lastfm_cached(key: str, fetch, ttl_sec: float = _LASTFM_CACHE_TTL_SEC):
+def _lastfm_cached(
+    key: str, fetch, ttl_sec: float = _LASTFM_CACHE_TTL_SEC,
+    persistent: bool = False,
+):
     """Scope the cache to (username, endpoint, args). Username is part
     of the key so reconnecting to a different account doesn't serve
     the previous user's data, and disconnect clears the whole map.
 
-    `ttl_sec` defaults to the shared 5-minute TTL but callers can override
-    when the underlying data changes slowly enough that a longer cache is
-    worthwhile (e.g. the resolved chart, whose cold load takes ~18 s)."""
+    `ttl_sec` defaults to the shared 5-minute TTL but callers can
+    override when the underlying data changes slowly enough that a
+    longer cache is worthwhile (e.g. the resolved chart, whose cold
+    load takes ~18 s).
+
+    `persistent=True` adds a SQLite-backed second layer at
+    `user_data_dir()/lastfm_disk_cache.db`. The in-memory hit stays
+    the hot path (microseconds); on a miss we check disk before
+    paying the upstream cost; on a successful upstream fetch we
+    populate both. The motivating case is the resolved chart — its
+    1-hour TTL was already long, but the in-memory dict died on
+    every app restart so anyone who quit Tideway between visits paid
+    the full 18 seconds again. With persistence, the cold load
+    happens once per real cache miss instead of once per process
+    lifetime.
+    """
+    from app import lastfm_disk_cache
+
     username = lastfm.status().get("username") or ""
     full_key = f"{username}|{key}"
     now = time.monotonic()
+    # 1. Memory hit — hot path.
     with _lastfm_cache_lock:
         cached = _lastfm_cache.get(full_key)
         if cached and (now - cached[0]) < ttl_sec:
             return cached[1]
+    # 2. Disk hit (only if the caller opted in). Promote to memory
+    #    so subsequent lookups in this process skip the disk read.
+    if persistent:
+        disk_value = lastfm_disk_cache.get(full_key, ttl_sec)
+        if disk_value is not None:
+            with _lastfm_cache_lock:
+                _lastfm_cache[full_key] = (now, disk_value)
+            return disk_value
+    # 3. Real fetch.
     data = fetch()
     with _lastfm_cache_lock:
         _lastfm_cache[full_key] = (now, data)
+    if persistent:
+        lastfm_disk_cache.set(full_key, data)
     return data
 
 
 def _invalidate_lastfm_cache() -> None:
+    """Drop both cache layers. Called when the user disconnects from
+    Last.fm (or reconnects under a different account); keeping the
+    previous account's results around would be a privacy bug."""
+    from app import lastfm_disk_cache
+
     with _lastfm_cache_lock:
         _lastfm_cache.clear()
+    lastfm_disk_cache.clear()
 
 
 @app.get("/api/lastfm/user-info")
@@ -2848,12 +2884,18 @@ def lastfm_chart_top_tracks_resolved(limit: int = 50) -> list[dict]:
 
         return [r for r in results if r is not None]
 
-    # 1-hour TTL (vs the default 5 min). The Last.fm global chart
-    # turns over slowly, and the cold load is expensive enough that
-    # any user who lands on the page twice within an hour really
-    # shouldn't pay for it twice.
+    # 1-hour TTL with disk persistence. The Last.fm global chart
+    # turns over slowly, and the cold-load cost (~18 s for 50 rows
+    # against Tidal at 3 workers) is expensive enough that we don't
+    # want to pay it again on every app restart. The in-memory
+    # layer alone died with the process; the SQLite-backed layer
+    # rides through restarts so the user only pays the resolve
+    # once per hour even across launches.
     return _lastfm_cached(
-        f"chart-top-tracks-resolved:{limit}", _resolve_all, ttl_sec=3600.0
+        f"chart-top-tracks-resolved:{limit}",
+        _resolve_all,
+        ttl_sec=3600.0,
+        persistent=True,
     )
 
 

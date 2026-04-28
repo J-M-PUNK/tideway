@@ -123,3 +123,97 @@ def test_invalidate_clears_all_entries():
         server._lastfm_cached("a", fetch)
         server._lastfm_cached("b", fetch)
         assert fetch_count[0] == 4
+
+
+# ---------------------------------------------------------------------------
+# persistent=True: the SQLite-backed second layer that survives app
+# restarts. Pin both the round-trip and the integration with the
+# in-memory layer.
+# ---------------------------------------------------------------------------
+
+
+def test_persistent_layer_promotes_disk_hit_to_memory(tmp_path, monkeypatch):
+    """First call populates both memory and disk. Clearing only the
+    memory layer simulates an app restart — the next call must serve
+    from disk and re-populate memory, all without paying for the
+    upstream fetch again."""
+    from app import lastfm_disk_cache
+
+    monkeypatch.setattr(
+        lastfm_disk_cache, "_db_path", tmp_path / "lastfm_disk_cache.db"
+    )
+
+    fetch_count = [0]
+
+    def fetch():
+        fetch_count[0] += 1
+        return ["resolved chart row"]
+
+    with patch.object(server.lastfm, "status", return_value={"username": "u"}):
+        server._lastfm_cached("k", fetch, ttl_sec=3600.0, persistent=True)
+        assert fetch_count[0] == 1
+
+        # Simulate app restart by wiping ONLY the memory layer.
+        server._lastfm_cache.clear()
+
+        result = server._lastfm_cached(
+            "k", fetch, ttl_sec=3600.0, persistent=True
+        )
+        assert result == ["resolved chart row"]
+        assert fetch_count[0] == 1, (
+            "persistent layer should have served the value without "
+            "re-invoking fetch"
+        )
+
+        # And the memory layer should now be re-populated for the
+        # rest of the process lifetime.
+        assert "u|k" in server._lastfm_cache
+
+
+def test_persistent_layer_off_by_default(tmp_path, monkeypatch):
+    """Callers that don't opt in must NOT touch disk. Otherwise every
+    Stats-page mount would write 8+ rows of short-lived data we'd
+    never use."""
+    from app import lastfm_disk_cache
+
+    monkeypatch.setattr(
+        lastfm_disk_cache, "_db_path", tmp_path / "lastfm_disk_cache.db"
+    )
+
+    def fetch():
+        return "v"
+
+    with patch.object(server.lastfm, "status", return_value={"username": "u"}):
+        server._lastfm_cached("k", fetch)  # default: persistent=False
+
+    # No disk hit on a follow-up persistent=True read with the in-
+    # memory layer cleared — proves the first call didn't write.
+    server._lastfm_cache.clear()
+    assert (
+        lastfm_disk_cache.get("u|k", ttl_sec=3600.0) is None
+    )
+
+
+def test_invalidate_clears_disk_layer_too(tmp_path, monkeypatch):
+    """Disconnect / re-auth uses _invalidate_lastfm_cache. Disk
+    rows must clear too — otherwise the next user's session could
+    serve the previous user's resolved chart."""
+    from app import lastfm_disk_cache
+
+    monkeypatch.setattr(
+        lastfm_disk_cache, "_db_path", tmp_path / "lastfm_disk_cache.db"
+    )
+
+    fetch_count = [0]
+
+    def fetch():
+        fetch_count[0] += 1
+        return ["secret chart"]
+
+    with patch.object(server.lastfm, "status", return_value={"username": "u"}):
+        server._lastfm_cached("k", fetch, ttl_sec=3600.0, persistent=True)
+        server._invalidate_lastfm_cache()
+
+        # Both layers gone: refetch happens.
+        server._lastfm_cached("k", fetch, ttl_sec=3600.0, persistent=True)
+        assert fetch_count[0] == 2
