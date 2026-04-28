@@ -79,12 +79,21 @@ single deploy, the workflow is:
    and manually verified — main never had the problem and the
    deploy branch is the only place we can catch it.
 6. **Tag the release.** `git tag v<X.Y.Z>` on the deploy branch's
-   tip and push the tag.
-7. **Run the release pipeline.** GitHub Actions builds artifacts off
-   the tag.
-8. **Catch main back up.** Fast-forward `main` to the deploy branch:
+   tip and push the tag. The release commit's body becomes the
+   GitHub release notes — the workflow extracts it via
+   `git log -1 --format=%b`, so write user-facing notes there
+   (not the engineer-facing "what files changed" kind).
+7. **Run the release pipeline.** GitHub Actions builds the three
+   platform installers and creates a **draft** release on GitHub
+   with the notes auto-populated from the tag commit body.
+8. **Publish the draft.** Open the Releases page, skim the
+   auto-populated notes, click Publish. Drafts are invisible to
+   the auto-updater (`/releases/latest` excludes them), so a
+   tagged-but-unpublished release ships nothing to users. If you
+   tag and walk away, no one gets the update.
+9. **Catch main back up.** Fast-forward `main` to the deploy branch:
    `git checkout main && git merge --ff-only deploy/v<X.Y.Z> && git push`.
-9. **Clean up.** Delete merged PR branches locally and on GitHub.
+10. **Clean up.** Delete merged PR branches locally and on GitHub.
 
 The integration-branch step is what differentiates this from the
 "merge each PR straight to main" pattern. Reasons:
@@ -120,7 +129,9 @@ When NOT to use this workflow:
   happens on GitHub; the user merges when ready, or directs Claude
   to do it.
 - **Never tag, push tags, or run release workflows without explicit
-  instruction.** Tagging is a release action.
+  instruction.** Tagging is a release action. Publishing the draft
+  release that the workflow produces is the same flavor of release
+  action — also requires explicit instruction.
 - **Never fast-forward main without explicit instruction.** Even if
   the deploy branch is ready, main moves only when the user says so.
 

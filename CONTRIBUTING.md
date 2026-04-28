@@ -49,9 +49,22 @@ git merge --no-ff feature/branch-three
 # Resolve any conflicts here, in the integration branch.
 # The individual PR branches stay clean.
 
-# Bump version (e.g. desktop.py, package.json) and write release
-# notes, then commit.
-git commit -m "Release 0.X.Y"
+# Bump the VERSION file and write the release notes commit. The
+# notes go into the commit message body — the release workflow
+# pulls them out of `git log -1 --format=%b` and uses them as the
+# GitHub release body, so anything you'd want a user to read on
+# the Releases page goes here. Subject line stays a one-liner.
+git commit -m "Release 0.X.Y: <one-line summary>
+
+## <Section heading>
+
+### <What changed, user-facing>
+
+Paragraph explaining the change in plain language — same shape
+as the v0.4.10 / v0.4.11 release notes.
+
+## <Another section>
+..."
 
 # Test the integrated branch BEFORE tagging.
 ./scripts/preflight.sh
@@ -71,7 +84,32 @@ git push -u origin deploy/v0.X.Y
 git push origin v0.X.Y
 ```
 
-GitHub Actions picks up the tag and builds the release artifacts.
+### Publish the draft release
+
+GitHub Actions picks up the tag and runs the Release workflow,
+which builds the three platform installers (mac DMG + Windows
+x64 EXE + Windows ARM64 EXE) and creates a **draft** release on
+the Releases page with:
+
+- Title and tag binding set to `v0.X.Y`
+- Body populated from your release commit's message body
+- All three installers attached as assets
+
+The draft sits there for a final human review:
+
+1. Open https://github.com/J-M-PUNK/tideway/releases — there will
+   be a "Draft" badge on `v0.X.Y` at the top of the list.
+2. Skim the auto-populated body. Edit on the GitHub UI if you
+   want to tweak wording, reorder sections, etc. (Permanent
+   improvements should also land back in the release commit so
+   `git log` and the Releases page stay in sync.)
+3. Click **Publish release**.
+
+Publishing is what actually ships. The auto-updater on user
+installs hits `GET /repos/.../releases/latest`, which excludes
+drafts — so a release in draft state is invisible to users and
+the auto-update notification never fires. If you tag, walk away,
+and forget to publish, no one gets the update.
 
 ### Catch main back up
 
