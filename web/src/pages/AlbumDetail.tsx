@@ -21,7 +21,10 @@ import { MediaCard } from "@/components/MediaCard";
 import { HeroSkeleton, TrackListSkeleton } from "@/components/Skeletons";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { useLastfmAlbumPlaycount } from "@/hooks/useLastfmPlaycount";
-import { useSpotifyAlbumTotalPlays } from "@/hooks/useSpotifyEnrichment";
+import {
+  useSpotifyAlbumTotalPlays,
+  useSpotifyTrackPlaycountBatch,
+} from "@/hooks/useSpotifyEnrichment";
 import { cn, formatDuration, imageProxy } from "@/lib/utils";
 
 export function AlbumDetail({ onDownload }: { onDownload: OnDownload }) {
@@ -37,6 +40,13 @@ export function AlbumDetail({ onDownload }: { onDownload: OnDownload }) {
       prefetchMany(album.tracks.map((t) => t.id));
     }
   }, [album, prefetchMany]);
+  // Batch-fetch Spotify playcounts for every track on the album in
+  // one request, instead of letting each TrackList row fire its own.
+  // The per-row hook reads from the preseed cache the batch
+  // populates, so first paint of the playcount column on a 12-track
+  // cold-cache album drops from ~6s (two browser-throttled waves of
+  // serial requests) to ~1-3s (one server-side parallel pool).
+  useSpotifyTrackPlaycountBatch(album?.tracks);
   // Prefetch the primary artist's detail payload as soon as the
   // album loads. The backend's artist endpoint fans out 10 Tidal
   // calls and takes ~1s on a cold load; clicking the artist name
