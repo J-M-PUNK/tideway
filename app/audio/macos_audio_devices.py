@@ -32,7 +32,9 @@ import ctypes
 import ctypes.util
 import logging
 import sys
+import threading
 from ctypes import (
+    CFUNCTYPE,
     POINTER,
     Structure,
     byref,
@@ -42,7 +44,7 @@ from ctypes import (
     c_void_p,
     create_string_buffer,
 )
-from typing import Optional
+from typing import Callable, Optional
 
 log = logging.getLogger(__name__)
 
@@ -60,6 +62,7 @@ _K_AUDIO_OBJECT_PROPERTY_SCOPE_OUTPUT = 0x6F757470         # 'outp'
 _K_AUDIO_OBJECT_PROPERTY_ELEMENT_MAIN = 0
 _K_AUDIO_DEVICE_PROPERTY_DEVICE_CAN_BE_DEFAULT_DEVICE = 0x64666C74  # 'dflt'
 _K_AUDIO_DEVICE_PROPERTY_DEVICE_NAME_CF_STRING = 0x6C6E616D        # 'lnam'
+_K_AUDIO_HARDWARE_PROPERTY_DEFAULT_OUTPUT_DEVICE = 0x64657574      # 'dOut'
 _K_CF_STRING_ENCODING_UTF8 = 0x08000100
 
 
@@ -76,6 +79,14 @@ class _AudioObjectPropertyAddress(Structure):
 # install). Cached so repeat calls don't re-dlopen.
 _ca: Optional[ctypes.CDLL] = None
 _cf: Optional[ctypes.CDLL] = None
+
+# Strong refs to live ctypes callback objects. Without these the
+# CoreAudio framework holds dangling pointers because Python GC's
+# the callback wrapper after register(). Append-only; entries
+# survive until process exit, which is fine — these are one per
+# listener registration and we register exactly once per session.
+_listener_keepalive: list = []
+_keepalive_lock = threading.Lock()
 
 
 def _frameworks() -> Optional[tuple[ctypes.CDLL, ctypes.CDLL]]:
@@ -125,9 +136,45 @@ def _frameworks() -> Optional[tuple[ctypes.CDLL, ctypes.CDLL]]:
     cf.CFRelease.argtypes = [c_void_p]
     cf.CFRelease.restype = None
 
+    # Property-change listener API — for catching headphone unplug /
+    # plug, AirPods connect, and other events that change the system
+    # default output device.
+    ca.AudioObjectAddPropertyListener.argtypes = [
+        c_uint32,
+        POINTER(_AudioObjectPropertyAddress),
+        c_void_p,  # CFUNCTYPE callback (cast in caller)
+        c_void_p,  # client data
+    ]
+    ca.AudioObjectAddPropertyListener.restype = c_int32
+    ca.AudioObjectRemovePropertyListener.argtypes = [
+        c_uint32,
+        POINTER(_AudioObjectPropertyAddress),
+        c_void_p,
+        c_void_p,
+    ]
+    ca.AudioObjectRemovePropertyListener.restype = c_int32
+
     _ca = ca
     _cf = cf
     return _ca, _cf
+
+
+# C-callable signature for AudioObjectAddPropertyListener's
+# AudioObjectPropertyListenerProc:
+#
+#   typedef OSStatus (*AudioObjectPropertyListenerProc)(
+#       AudioObjectID inObjectID,
+#       UInt32 inNumberAddresses,
+#       const AudioObjectPropertyAddress* inAddresses,
+#       void* inClientData
+#   );
+_LISTENER_PROC = CFUNCTYPE(
+    c_int32,
+    c_uint32,
+    c_uint32,
+    POINTER(_AudioObjectPropertyAddress),
+    c_void_p,
+)
 
 
 def _property_size(
@@ -269,3 +316,82 @@ def visible_output_device_names() -> Optional[set[str]]:
         if name:
             visible.add(name)
     return visible
+
+
+def register_default_output_listener(
+    callback: Callable[[], None],
+) -> Optional[Callable[[], None]]:
+    """Subscribe to macOS's "default output device changed" event.
+
+    Fires whenever the system default output flips — headphones
+    unplug (→ built-in speakers), AirPods connect, the user picks
+    a different device in Sound preferences, etc. This is the
+    signal we need to recover from device loss on macOS, because
+    PortAudio's `finished_callback` doesn't reliably fire when a
+    CoreAudio device disappears mid-stream — the stream just goes
+    silent. CoreAudio DOES fire this property-change notification
+    in every case we care about.
+
+    `callback` runs on a CoreAudio internal thread, so it must
+    be fast and reentrant. The standard pattern is to spawn a
+    Python worker from the callback and do real work there;
+    callers who follow that pattern can ignore the threading
+    concerns here.
+
+    Returns an unregister function on success, or None when
+    registration fails / on non-darwin. The unregister function
+    is safe to call once. Caller is expected to keep the
+    unregister around for app lifetime — the listener stays
+    active until either it's called or the process exits.
+    """
+    fw = _frameworks()
+    if fw is None:
+        return None
+    ca, _ = fw
+
+    def _impl(obj_id, n_addr, addrs, client_data) -> int:
+        # CoreAudio thread context. Catch and log everything so a
+        # buggy callback can't take down the audio engine.
+        try:
+            callback()
+        except Exception:
+            log.exception("default-output-device listener callback raised")
+        return 0  # noErr
+
+    listener = _LISTENER_PROC(_impl)
+    addr = _AudioObjectPropertyAddress(
+        _K_AUDIO_HARDWARE_PROPERTY_DEFAULT_OUTPUT_DEVICE,
+        _K_AUDIO_OBJECT_PROPERTY_SCOPE_GLOBAL,
+        _K_AUDIO_OBJECT_PROPERTY_ELEMENT_MAIN,
+    )
+
+    err = ca.AudioObjectAddPropertyListener(
+        _K_AUDIO_OBJECT_SYSTEM_OBJECT,
+        byref(addr),
+        listener,
+        None,
+    )
+    if err != 0:
+        log.warning(
+            "AudioObjectAddPropertyListener failed: status=%d", err
+        )
+        return None
+
+    # Pin the listener so Python's GC doesn't drop the C pointer
+    # mid-flight. Also pin the address struct because CoreAudio
+    # holds a reference to it.
+    with _keepalive_lock:
+        _listener_keepalive.append((listener, addr))
+
+    def unregister() -> None:
+        try:
+            ca.AudioObjectRemovePropertyListener(
+                _K_AUDIO_OBJECT_SYSTEM_OBJECT,
+                byref(addr),
+                listener,
+                None,
+            )
+        except Exception:
+            log.exception("AudioObjectRemovePropertyListener raised")
+
+    return unregister

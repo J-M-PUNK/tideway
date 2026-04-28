@@ -740,6 +740,16 @@ export function usePlayer() {
             await api.player.seek(fraction);
           }
         }
+        // Belt-and-suspenders: explicitly clear loading=false at the
+        // end of restore. Reproducible bug seen in v0.4.10 where the
+        // backend transitioned loading→paused but the SSE snapshot
+        // either didn't reach the frontend or got dropped by the
+        // expectedTrackIdRef / seq guards, leaving the UI showing
+        // "loading" indefinitely on a track that was actually loaded
+        // and ready. Forcing loading=false here is safe — by this
+        // point load() and seek() both completed successfully, so
+        // we know the track is ready to play.
+        setState((s) => ({ ...s, loading: false }));
       } catch {
         // Track is no longer streamable (region / license change /
         // stale id). Clear the persisted now-playing so the UI
@@ -750,6 +760,7 @@ export function usePlayer() {
           queueIndex: -1,
           currentTime: 0,
           duration: 0,
+          loading: false,
         }));
         expectedTrackIdRef.current = null;
       }
