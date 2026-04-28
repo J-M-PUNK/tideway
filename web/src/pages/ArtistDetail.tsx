@@ -7,6 +7,7 @@ import type { OnDownload } from "@/api/download";
 import { useApi } from "@/hooks/useApi";
 import { useColumnCount } from "@/hooks/useColumnCount";
 import { useLikedByArtist } from "@/hooks/useLikedByArtist";
+import { useSpotifyTrackPlaycountBatch } from "@/hooks/useSpotifyEnrichment";
 import { useVideoPlayer } from "@/hooks/useVideoPlayer";
 import { ArtistHero } from "@/components/ArtistHero";
 import { ArtistTopCities } from "@/components/ArtistTopCities";
@@ -36,6 +37,10 @@ export function ArtistDetail({ onDownload }: { onDownload: OnDownload }) {
   // library fetch is in flight; we just don't render the section in
   // that window.
   const liked = useLikedByArtist(artist?.id);
+  // Batch-fetch Spotify playcounts for the top tracks in one
+  // request, instead of letting each TrackList row fire its own.
+  // Same fix as AlbumDetail; see hook for cost / benefit detail.
+  useSpotifyTrackPlaycountBatch(artist?.top_tracks);
 
   if (loading) {
     return (
