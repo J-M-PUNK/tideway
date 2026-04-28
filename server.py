@@ -43,6 +43,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from app import deezer_import
 from app import global_keys as global_keys_mod
+from app.audio.macos_now_playing import MacOSNowPlayingBridge
 from app.audio.player import PCMPlayer
 from app import playlist_import
 from app import spotify_import
@@ -158,6 +159,12 @@ _tidal_page.SimpleList.get_item = _patched_get_item
 tidal = TidalClient()
 lastfm = LastFmClient()
 play_reporter = PlayReporter(tidal)
+# macOS Now Playing bridge — claims the system "active media player"
+# role so media keys route to Tideway instead of Apple Music when our
+# window isn't focused. Constructed empty; the lifespan startup hook
+# fills in base_url and calls .start(). No-ops on non-macOS so this
+# is safe to instantiate unconditionally.
+macos_now_playing_bridge = MacOSNowPlayingBridge()
 settings: Settings = load_settings()
 # Guards the `settings` rebind + downloader.settings swap so workers never
 # see a torn state (new global, old downloader field or vice versa).
@@ -526,6 +533,18 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         stop_hotkeys = global_keys_mod.start_global_hotkeys(port)
     except Exception as exc:
         print(f"[global-keys] startup failed: {exc}", flush=True)
+
+    # Register Tideway with macOS Now Playing so media keys
+    # (Cmd-F8, hardware keys on a connected keyboard, the Touch
+    # Bar's play/pause button, the Control Center widget) route
+    # to us instead of Apple Music when Tideway isn't focused.
+    # No-ops on non-macOS. See app/audio/macos_now_playing.py.
+    try:
+        port = int(os.environ.get("TIDAL_DL_PORT", "47823"))
+        macos_now_playing_bridge.set_base_url(f"http://127.0.0.1:{port}")
+        macos_now_playing_bridge.start()
+    except Exception as exc:
+        print(f"[macos-np] startup failed: {exc}", flush=True)
 
     try:
         yield
@@ -3552,6 +3571,11 @@ def _native_player() -> PCMPlayer:
             else None,
             quality_clamp=tidal.clamp_quality_to_subscription,
         )
+        # Mirror state changes into macOS Now Playing so media keys
+        # can find us. update_state() no-ops on non-macOS / when the
+        # MediaPlayer framework isn't available, so unconditional
+        # subscription is safe.
+        _pcm_player_singleton.subscribe(macos_now_playing_bridge.update_state)
 
     # One-shot: re-apply persisted EQ + output device so users who
     # set a USB-DAC preference or an EQ preset keep it across restart.
@@ -3666,6 +3690,37 @@ async def now_playing_state_put(request: Request) -> dict:
         now_playing_state.clear_state()
         return {"ok": True, "cleared": True}
     now_playing_state.write_state(body)
+    return {"ok": True}
+
+
+class _NowPlayingMetadata(BaseModel):
+    title: str = ""
+    artist: str = ""
+    album: str = ""
+    duration_ms: int = 0
+    artwork_url: str = ""
+
+
+@app.post("/api/now-playing")
+def now_playing_update(payload: _NowPlayingMetadata) -> dict:
+    """Push the current track's display metadata into macOS Now
+    Playing. Frontend hits this on track change so Control Center,
+    the menu-bar widget, and the lock screen show the song title /
+    artist / album / duration alongside the play state.
+
+    No-ops on non-macOS or when the MediaPlayer framework isn't
+    available; the bridge handles the platform check internally.
+    Returns `{"ok": true}` either way so the frontend doesn't have
+    to branch on platform.
+    """
+    _require_local_access()
+    macos_now_playing_bridge.update_metadata(
+        title=payload.title,
+        artist=payload.artist,
+        album=payload.album,
+        duration_ms=payload.duration_ms,
+        artwork_url=payload.artwork_url,
+    )
     return {"ok": True}
 
 

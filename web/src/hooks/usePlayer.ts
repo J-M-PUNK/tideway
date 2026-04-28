@@ -612,6 +612,42 @@ export function usePlayer() {
     api.player.volume(Math.round(state.volume * 100)).catch(() => {});
   }, [state.volume]);
 
+  // macOS Now Playing metadata push. The backend's PlayerSnapshot has
+  // track_id but no title / artist / album / cover, and on macOS we
+  // need that data on Tideway's MPNowPlayingInfo dict for the menu-
+  // bar widget and Control Center to render anything useful (and to
+  // keep media keys routed to us — without a populated entry, macOS
+  // can fall back to Apple Music). Fire on every track change with
+  // the data the frontend already has. Fire-and-forget; the bridge
+  // no-ops on non-macOS so this is safe to ship unconditionally.
+  const lastNowPlayingIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    const track = state.track;
+    if (!track) {
+      lastNowPlayingIdRef.current = null;
+      return;
+    }
+    if (lastNowPlayingIdRef.current === track.id) return;
+    lastNowPlayingIdRef.current = track.id;
+    const artistName =
+      Array.isArray(track.artists) && track.artists.length > 0
+        ? track.artists
+            .map((a) => a.name)
+            .filter(Boolean)
+            .join(", ")
+        : "";
+    api.player
+      .nowPlaying({
+        title: track.name || "",
+        artist: artistName,
+        album: track.album?.name ?? "",
+        duration_ms: Math.round((track.duration ?? 0) * 1000),
+      })
+      .catch(() => {
+        /* fire-and-forget */
+      });
+  }, [state.track]);
+
   // Album-end "continue with artist radio" preference, mirrored from
   // the backend Settings dataclass. Read on mount and refreshed
   // whenever the SettingsPage dispatches the `tidal-settings-updated`
