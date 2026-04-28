@@ -149,6 +149,20 @@ function NavBarSearch({ className }: { className?: string }) {
         onChange={onChange}
         placeholder="Search"
         aria-label="Search"
+        // Search queries are artist / track / album names; the OS's
+        // autocorrect, autocomplete, autocapitalize, and spellcheck
+        // helpers don't know any of them and consistently rewrite
+        // legitimate names into nonsense ("Diplo" -> "Diploma",
+        // "Phoebe Bridgers" -> "Phoebe Burgers", etc.). Disabling all
+        // four matches what Spotify, Apple Music, and YouTube Music do
+        // in their own search bars. `enterKeyHint="search"` is a small
+        // mobile nicety: the on-screen keyboard's enter key labels as
+        // a magnifying glass.
+        autoComplete="off"
+        autoCorrect="off"
+        autoCapitalize="off"
+        spellCheck={false}
+        enterKeyHint="search"
         className="h-9 pl-9"
       />
     </div>
