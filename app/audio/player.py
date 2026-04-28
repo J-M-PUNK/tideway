@@ -871,27 +871,38 @@ class PCMPlayer:
         So by the time the user opens the picker, PortAudio's
         cache is already fresh — no in-place re-init needed here.
 
-        Filter: `app.audio.macos_audio_devices.visible_output_device_names`
-        asks CoreAudio for the same OUTPUT-scope visibility property
-        macOS itself uses to build System Settings — the proper API.
-        Microsoft Teams Audio, ZoomAudioDevice, BlackHole, micro-
-        phones with no output streams, and aggregate devices the
-        user hasn't enabled all return False on
+        Each platform has its own filter, both grounded in the OS's
+        own visibility API rather than substring-name guesswork:
+
+        macOS — `app.audio.macos_audio_devices.visible_output_device_names`
+        asks CoreAudio for the OUTPUT-scope visibility property
+        macOS itself uses to build System Settings. Microsoft Teams
+        Audio, ZoomAudioDevice, BlackHole, microphones with no
+        output streams, and aggregate devices the user hasn't
+        enabled all return False on
         `kAudioDevicePropertyDeviceCanBeDefaultDevice` and get
         filtered. Real hardware (speakers, AirPods, USB DACs, HDMI,
         AirPlay endpoints) returns True and passes.
 
-        On non-darwin we currently apply NO filter — Linux and
-        Windows need their own native queries (ALSA / WASAPI's
-        `IMMDevice::GetState()`). Until those land, the picker on
-        those platforms shows whatever PortAudio enumerates,
-        warts and all. PR #23 (deferred) wires a proper WASAPI
-        host-API filter for Windows.
+        Windows — PortAudio exposes the same physical device through
+        multiple host APIs (MME, DirectSound, WASAPI, WDM-KS) so
+        without filtering every speaker / DAC shows up four times,
+        and the MME / DirectSound entries also include devices the
+        user has DISABLED in Windows Sound settings (those backends
+        ignore device state). `_wasapi_host_api_index()` finds the
+        WASAPI host-api index and we skip every other host-api on
+        the way out, which both deduplicates and respects WASAPI's
+        IMMDevice DEVICE_STATE_ACTIVE filter.
+
+        Linux — only ALSA host API exists in the typical PortAudio
+        build, so the duplicate-host problem doesn't apply. No
+        filter is run; the picker shows whatever PortAudio
+        enumerates.
 
         Logs the full enumeration via `[audio]` print lines so
         users debugging "my headphones aren't showing up" can see
-        what PortAudio reports AND which entries the visibility
-        filter accepted vs. rejected.
+        what PortAudio reports AND which entries each filter
+        accepted vs. rejected.
         """
         out: list[dict] = [{"id": "", "name": "System default"}]
         with self._lock:
@@ -915,15 +926,26 @@ class PCMPlayer:
             )
             return out
 
-        # Ask macOS itself which output devices count as "visible."
-        # None on non-darwin or on CoreAudio query failure; in that
-        # case we don't filter — see the docstring for the platform
-        # gap and the deferred Windows / Linux work.
+        # macOS visibility set (None on non-darwin / on query failure
+        # — in which case we skip the macOS filter and let the
+        # platform-agnostic + Windows-WASAPI checks below decide).
         visible = _macos_visible_output_names()
         if visible is not None:
             print(
                 f"[audio] CoreAudio reports {len(visible)} visible output "
                 f"device(s): {sorted(visible)!r}",
+                flush=True,
+            )
+
+        # Windows WASAPI host-api index (None on non-Windows / on
+        # query failure — we then fall through to "show every
+        # output-capable device", which is the right behavior on
+        # macOS/Linux anyway).
+        wasapi_idx = _wasapi_host_api_index()
+        if wasapi_idx is not None:
+            print(
+                f"[audio] WASAPI host-api index = {wasapi_idx}; "
+                "Windows picker will hide non-WASAPI entries",
                 flush=True,
             )
 
@@ -943,17 +965,20 @@ class PCMPlayer:
             kind = "OUT" if ch_out > 0 else ("IN " if ch_in > 0 else "?  ")
 
             if ch_out > 0:
-                # macOS: CoreAudio's visibility property tells us
-                # which devices appear in System Settings. On other
-                # platforms (or if CoreAudio query failed), accept
-                # everything output-capable — don't pretend a
-                # substring guess is doing the OS's job.
-                if visible is not None:
-                    accepted = name in visible
-                    tag = "OUT " if accepted else "HIDE"
-                else:
-                    accepted = True
-                    tag = "OUT "
+                # Two filters, OR'd into a single accept decision.
+                # On macOS the visibility set is the only signal;
+                # on Windows the WASAPI host-api index is. On Linux
+                # both are None and every output-capable device
+                # passes.
+                accepted = True
+                if visible is not None and name not in visible:
+                    accepted = False
+                if (
+                    wasapi_idx is not None
+                    and d.get("hostapi") != wasapi_idx
+                ):
+                    accepted = False
+                tag = "OUT " if accepted else "HIDE"
             else:
                 accepted = False
                 tag = kind
@@ -2372,6 +2397,29 @@ def _macos_visible_output_names() -> Optional[set[str]]:
     except Exception:
         log.exception("visible_output_device_names raised; falling back")
         return None
+
+
+def _wasapi_host_api_index() -> Optional[int]:
+    """Return the PortAudio host-api index for WASAPI on Windows, or
+    None on every other platform / when WASAPI isn't built into this
+    PortAudio.
+
+    Used by `list_output_devices()` to filter out the duplicate
+    listings PortAudio creates when the same physical device is
+    exposed via MME, DirectSound, WASAPI, and WDM-KS — and to skip
+    devices the user has disabled in Windows Sound settings, which
+    the older host APIs still enumerate but WASAPI doesn't.
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        for idx, ha in enumerate(sd.query_hostapis()):
+            name = (ha.get("name") or "").lower()
+            if name == "windows wasapi" or "wasapi" in name:
+                return idx
+    except Exception:
+        log.exception("query_hostapis failed; falling back to all-host-API listing")
+    return None
 
 
 def _normalize_codec(raw: object) -> Optional[str]:
