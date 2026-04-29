@@ -189,6 +189,13 @@ class CastManager:
         # "stopped casting" without polling.
         self._listeners: list[Callable[[Optional[CastDevice]], None]] = []
 
+        # Local-output silencer hook. Called with True when a
+        # session opens, False when it closes. server.py wires this
+        # to the global PCMPlayer's set_external_output_active at
+        # startup. Held as a callback rather than a hard import to
+        # avoid the circular import of cast.py <-> player.py.
+        self._local_silencer: Optional[Callable[[bool], None]] = None
+
     # ---- discovery lifecycle ---------------------------------------
 
     def start_discovery(self) -> None:
@@ -411,6 +418,18 @@ class CastManager:
         with self._session_lock:
             self._session = session
 
+        # Mute local audio output. PCMPlayer's audio callback writes
+        # silence while active; the PCM tap above STILL feeds the
+        # Cast encoder (the tap happens before the silencer in the
+        # callback ordering), so the device gets full audio while
+        # local stays quiet. Best-effort — if no silencer was wired
+        # we just skip rather than block the cast lifecycle.
+        if self._local_silencer is not None:
+            try:
+                self._local_silencer(True)
+            except Exception as exc:
+                log.debug("cast: local silencer raised: %r", exc)
+
         print(f"[cast] connected: {device.friendly_name} "
               f"@ {device.host} streaming from {session.stream_url}",
               flush=True)
@@ -460,6 +479,15 @@ class CastManager:
             session.cast.disconnect()
         except Exception as exc:
             log.debug("cast disconnect failed: %r", exc)
+
+        # Restore local audio output. The user's volume / mute
+        # settings were preserved across the cast cycle so they
+        # don't have to re-set them now. Best-effort.
+        if self._local_silencer is not None:
+            try:
+                self._local_silencer(False)
+            except Exception as exc:
+                log.debug("cast: local silencer raised on close: %r", exc)
 
         print(f"[cast] disconnected: {session.device.friendly_name}",
               flush=True)
@@ -557,6 +585,16 @@ class CastManager:
             session.bytes_encoded += len(encoded)
 
     # ---- listener bus ----------------------------------------------
+
+    def set_local_silencer(
+        self, callback: Optional[Callable[[bool], None]]
+    ) -> None:
+        """Wire the audio engine's local-output silencer. The
+        callback gets `True` whenever a Cast session opens and
+        `False` when it closes, so the audio engine can mute the
+        local sounddevice output while the Cast device is the
+        active sink. Pass None to unwire (used in tests)."""
+        self._local_silencer = callback
 
     def add_listener(
         self,
