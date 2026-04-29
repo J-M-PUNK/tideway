@@ -55,9 +55,19 @@ log = logging.getLogger(__name__)
 
 # Back-pressure between the decoder and the audio callback. Each
 # item is one AudioFrame's worth of PCM (~1024 samples typical).
-# 30 chunks ~= 0.7s at 44.1k — enough to ride out a slow segment
-# fetch without starving the output.
-_PCM_QUEUE_MAX = 30
+# Sized to hold ~2s of audio at 44.1k, ~1s at 96k, ~0.5s at 192k —
+# enough headroom that a single slow segment fetch (TLS handshake,
+# CDN edge swap, brief network blip) drains the queue without
+# starving the audio callback. Earlier sizing of 30 was tight for
+# CD-rate (0.7s) and dangerously tight for hi-res (0.16s at 192k),
+# which produced audible stutter on the slower segment fetches
+# hi-res implies (3-7 MB per segment vs. 0.5-1 MB for lossless).
+# On older driver stacks (Windows 10 LTSB) sustained underruns
+# can escalate to a fatal native abort; the bigger queue is the
+# real fix and the diagnostic logging in _audio_callback is the
+# safety net.
+# Memory cost is negligible (~800 KB at int32 stereo).
+_PCM_QUEUE_MAX = 100
 
 
 @dataclass
@@ -1884,6 +1894,28 @@ class PCMPlayer:
                     # keeps moving through the underrun window —
                     # otherwise position would freeze on every
                     # hiccup.
+                    #
+                    # Rate-limited diagnostic: distinct from the
+                    # PortAudio status-flag log because it tells us
+                    # WHY the underrun happened — our decoder thread
+                    # didn't push a chunk in time. Useful for
+                    # isolating "slow disk", "slow network", and
+                    # "slow CPU" cases when a user reports stutter.
+                    now = time.monotonic()
+                    self._cb_starve_count = (
+                        getattr(self, "_cb_starve_count", 0) + 1
+                    )
+                    last = getattr(self, "_cb_starve_last_print", 0.0)
+                    if now - last >= 1.0:
+                        count = self._cb_starve_count
+                        self._cb_starve_count = 0
+                        self._cb_starve_last_print = now
+                        print(
+                            f"[audio] queue starvation: decoder behind "
+                            f"the callback (count_since_last={count})",
+                            file=sys.stderr,
+                            flush=True,
+                        )
                     outdata[written:] = 0
                     self._samples_emitted += frames
                     return
