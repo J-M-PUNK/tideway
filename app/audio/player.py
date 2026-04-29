@@ -600,13 +600,26 @@ class PCMPlayer:
         """
         seek_t0 = time.monotonic()
         self._stop_flag.set()
+        # Cancel the decoder's source BEFORE joining the thread.
+        # `stop_flag` only gets checked between PCM frames; if the
+        # decoder is mid-segment-fetch in SegmentReader (the common
+        # case during user seeks because the queue is small) we'd
+        # otherwise wait out the rest of the HTTP read — 150-300 ms
+        # of "nothing happens" between click and audio. cancel_source
+        # closes the in-flight Response so iter_content raises and
+        # the thread exits in single-digit ms.
+        old_decoder = self._decoder
+        if old_decoder is not None:
+            try:
+                old_decoder.cancel_source()
+            except Exception:
+                pass
         thread = self._decoder_thread
         self._decoder_thread = None
         if thread is not None and thread.is_alive():
             thread.join(timeout=2.0)
         t_thread_joined = time.monotonic()
 
-        old_decoder = self._decoder
         self._decoder = None
         if old_decoder is not None:
             try:
@@ -809,6 +822,15 @@ class PCMPlayer:
             if pre is None:
                 return
             pre.stop_flag.set()
+            # Abort any in-flight HTTP fetch on the preload's decoder
+            # so its thread exits promptly instead of waiting out the
+            # rest of a 150-300 ms segment download. Drop-preload
+            # fires on every track change while a preload is buffering;
+            # without this, a fast skip stalls behind the dead preload.
+            try:
+                pre.decoder.cancel_source()
+            except Exception:
+                pass
             if pre.thread.is_alive():
                 pre.thread.join(timeout=2.0)
             try:
@@ -1968,6 +1990,17 @@ class PCMPlayer:
         # Outside the lock (well — RLock held; cleanup stays
         # short): signal + close the old pipeline's resources.
         old_stop_flag.set()
+        # Cancel the old decoder's source BEFORE joining. Same
+        # reasoning as _teardown / _restart_decoder_at: stop_flag
+        # only gets checked between PCM frames, and the old thread
+        # is very often mid-HTTP-fetch on a track change. Closing
+        # the source aborts the in-flight read so the join returns
+        # in milliseconds instead of waiting the segment out.
+        if old_decoder is not None:
+            try:
+                old_decoder.cancel_source()
+            except Exception:
+                pass
         if old_thread is not None and old_thread.is_alive():
             # Short bounded join: gives the thread a chance to
             # notice the stop flag and release its PyAV container
