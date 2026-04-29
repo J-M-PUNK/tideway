@@ -263,10 +263,13 @@ export interface Settings {
    *  DAC, speakers, or OS volume instead. Avoids software scaling
    *  that would otherwise throw away bit-depth under Exclusive Mode. */
   force_volume: boolean;
-  /** When the queue ends after an album finishes, take over with an
-   *  Artist Radio mix from the album's primary artist instead of
-   *  pausing on track 1 of the same album. Off by default. */
-  continue_with_artist_radio_after_album: boolean;
+  /** When the user's queue runs out — last track on an album,
+   *  playlist, mix, single-track play, anything — take over with an
+   *  Artist Radio mix seeded from the last track's primary artist.
+   *  On by default to match Spotify / Apple Music "autoplay". Off
+   *  falls back to per-source defaults (stop, or for albums prime
+   *  track 0 paused so one tap repeats the album). */
+  continue_playing_after_queue_ends: boolean;
   /** Launch directly to tray without opening a window. Pairs with
    *  the Launch-on-login toggle so the app can run headlessly from
    *  boot until the user clicks the tray icon. */
