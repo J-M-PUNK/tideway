@@ -18,6 +18,7 @@ import {
   VolumeX,
 } from "lucide-react";
 import type { OnDownload } from "@/api/download";
+import type { StreamInfo } from "@/api/types";
 import { formatDuration, imageProxy } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import {
@@ -307,7 +308,7 @@ export function NowPlaying({
           >
             <ListMusic className="h-4 w-4" />
           </Button>
-          <StreamingQualityPicker isLocal={isLocal} />
+          <StreamingQualityPicker isLocal={isLocal} streamInfo={streamInfo} />
           <SleepTimerButton />
           <OutputDevicePicker />
           <VolumeControl
@@ -388,13 +389,53 @@ const QUALITY_BADGE_CLASS: Record<StreamingQuality, string> = {
 };
 
 /**
+ * Map a Tidal `audio_quality` string back to one of our four
+ * StreamingQuality buckets. Lets the picker pill reflect what
+ * Tidal is actually delivering — so when the user has Max picked
+ * but the current track only ships at Lossless, the pill reads
+ * "High" instead of misleadingly claiming "Max" alongside the
+ * StreamQualityBadge that already shows "High".
+ */
+function streamingQualityFromAudioQuality(
+  aq: string | null | undefined,
+): StreamingQuality | null {
+  const v = (aq || "").toUpperCase();
+  if (v === "LOW") return "low_96k";
+  if (v === "HIGH") return "low_320k";
+  if (v === "LOSSLESS") return "high_lossless";
+  if (v === "HI_RES" || v === "HI_RES_LOSSLESS") return "hi_res_lossless";
+  return null;
+}
+
+/**
  * Quality picker pill on the Now Playing bar. When the current track is
  * a downloaded local file, this is a no-op badge (playback is already at
  * the file's native quality) — only the streaming path actually switches.
+ *
+ * The pill LABEL reflects what Tidal is actually streaming right now,
+ * not the user's preferred ceiling. A track that only ships at
+ * LOSSLESS shows "High" even when the user has Max selected as their
+ * preference, so the picker stays consistent with the
+ * StreamQualityBadge ("High") and the album hero badge ("Lossless")
+ * for the same release. The dropdown still shows the user's
+ * preference highlighted with a "Current" tag so the choice itself
+ * is never ambiguous; switching is a one-click change away.
  */
-function StreamingQualityPicker({ isLocal }: { isLocal: boolean }) {
+function StreamingQualityPicker({
+  isLocal,
+  streamInfo,
+}: {
+  isLocal: boolean;
+  streamInfo: StreamInfo | null;
+}) {
   const { streamingQuality, set } = useUiPreferences();
-  const current = QUALITY_OPTIONS.find((q) => q.value === streamingQuality);
+  // What's audible right now. Falls back to the user's preference
+  // when we have no stream info (idle, mid-load) — better than
+  // showing "Streaming" placeholder text while the bar is mounted.
+  const effectiveQuality =
+    streamingQualityFromAudioQuality(streamInfo?.audio_quality) ??
+    streamingQuality;
+  const current = QUALITY_OPTIONS.find((q) => q.value === effectiveQuality);
   const label = isLocal ? "Downloaded" : (current?.label ?? "Streaming");
 
   if (isLocal) {
@@ -407,7 +448,7 @@ function StreamingQualityPicker({ isLocal }: { isLocal: boolean }) {
       </div>
     );
   }
-  const badgeClass = QUALITY_BADGE_CLASS[streamingQuality];
+  const badgeClass = QUALITY_BADGE_CLASS[effectiveQuality];
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -421,38 +462,48 @@ function StreamingQualityPicker({ isLocal }: { isLocal: boolean }) {
           <AudioLines className="h-3 w-3" /> {label}
         </button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="w-56">
+      <DropdownMenuContent align="end" className="w-64">
         <DropdownMenuLabel>Streaming quality</DropdownMenuLabel>
         <DropdownMenuSeparator />
-        {QUALITY_OPTIONS.map((q) => (
-          <DropdownMenuItem
-            key={q.value}
-            onSelect={() => set({ streamingQuality: q.value })}
-          >
-            <div className="flex min-w-0 flex-1 flex-col">
-              <div className="flex items-center gap-2">
-                <span
-                  className={cn(
-                    "font-semibold",
-                    q.value === streamingQuality && "text-primary",
-                  )}
-                >
-                  {q.label}
-                </span>
-                {q.value === streamingQuality && (
-                  <span className="text-[10px] font-medium uppercase tracking-wider text-primary">
-                    Current
+        {QUALITY_OPTIONS.map((q) => {
+          const isPreference = q.value === streamingQuality;
+          const isPlaying = q.value === effectiveQuality;
+          return (
+            <DropdownMenuItem
+              key={q.value}
+              onSelect={() => set({ streamingQuality: q.value })}
+            >
+              <div className="flex min-w-0 flex-1 flex-col">
+                <div className="flex items-center gap-2">
+                  <span
+                    className={cn(
+                      "font-semibold",
+                      isPreference && "text-primary",
+                    )}
+                  >
+                    {q.label}
                   </span>
-                )}
+                  {isPreference && (
+                    <span className="text-[10px] font-medium uppercase tracking-wider text-primary">
+                      Selected
+                    </span>
+                  )}
+                  {isPlaying && !isPreference && (
+                    <span className="text-[10px] font-medium uppercase tracking-wider text-muted-foreground">
+                      Playing
+                    </span>
+                  )}
+                </div>
+                <div className="text-xs text-muted-foreground">{q.sublabel}</div>
               </div>
-              <div className="text-xs text-muted-foreground">{q.sublabel}</div>
-            </div>
-          </DropdownMenuItem>
-        ))}
+            </DropdownMenuItem>
+          );
+        })}
         <DropdownMenuSeparator />
         <div className="px-2 py-1.5 text-[11px] text-muted-foreground">
-          Max uses significantly more bandwidth — a 4-minute track is ~70–140 MB
-          depending on sample rate.
+          The pill shows what Tidal is delivering for this track. If the
+          release doesn't go up to your selected tier, you'll get the
+          highest tier it does have.
         </div>
       </DropdownMenuContent>
     </DropdownMenu>
