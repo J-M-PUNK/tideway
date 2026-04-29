@@ -1,4 +1,4 @@
-"""OpenHome service descriptor parser.
+"""OpenHome service descriptors + SOAP control client.
 
 OpenHome (linn-co-uk / av-openhome-org) is the UPnP-derived control
 protocol that Tidal Connect targets implement. Every Bluesound,
@@ -11,17 +11,23 @@ Linn, NAD, Cambridge, etc. unit on a LAN exposes:
     Description) XML that lists the SOAP-callable actions, their
     arguments, and the related state variables.
 
-This module turns those XMLs into typed Python objects the rest of
-Tideway can issue control calls against. Pure parsing + HTTP fetch;
-no SOAP, no eventing, no Tidal-specific logic. Slice 2 builds the
-SOAP client on top.
+This module turns those XMLs into typed Python objects (slice 1)
+AND issues SOAP control calls against them (slice 2). The SOAP
+layer is intentionally generic — it knows how to send any OpenHome
+action and parse the response, but doesn't know what Playlist or
+Volume mean. Slice 3 builds service-specific wrappers on top.
+
+Why one module for both: descriptor parsing is mostly there to feed
+the SOAP layer (controlURL + action argument lists), and the SOAP
+layer's natural input type is the OpenHomeService dataclass the
+descriptor parser produces. Splitting the file would just move
+imports around.
 
 Why separate from `tidal_connect.py`: OpenHome is a generic protocol
-useful for any UPnP-AV controller we might build (we already have
-`upnp.py` for plain MediaRenderer; OpenHome is a more capable layer
-above that). Keeping the parser independent lets it be reused if
-Tidal Connect turns out to need adjustments and we want a fallback
-for plain OpenHome control.
+useful for any UPnP-AV controller. Keeping it independent lets it
+be reused if the Tidal-specific track-handoff in slice 4 turns out
+to need adjustments and we want plain-OpenHome control as a
+fallback.
 """
 from __future__ import annotations
 
@@ -288,6 +294,227 @@ def fetch_device(
         model_number=device.model_number,
         services=tuple(enriched_services),
     )
+
+
+# ---------------------------------------------------------------------
+# SOAP action client (slice 2)
+# ---------------------------------------------------------------------
+
+
+class OpenHomeSOAPError(RuntimeError):
+    """Raised when a SOAP call returns a UPnP fault.
+
+    `code` is the UPnP errorCode (a small integer with documented
+    semantics — 401 Invalid Action, 402 Invalid Args, 501 Action
+    Failed, etc.). `description` is the human-readable string the
+    device sent. `action` and `service_type` are echoed for log
+    clarity when many calls are in flight.
+    """
+
+    def __init__(
+        self,
+        code: int,
+        description: str,
+        *,
+        action: str = "",
+        service_type: str = "",
+    ) -> None:
+        self.code = code
+        self.description = description
+        self.action = action
+        self.service_type = service_type
+        super().__init__(
+            f"UPnP {code} {description!r}"
+            f"{f' on {service_type}#{action}' if service_type else ''}"
+        )
+
+
+def invoke(
+    service: OpenHomeService,
+    action_name: str,
+    args: Optional[dict[str, str]] = None,
+    *,
+    timeout: float = 10.0,
+) -> dict[str, str]:
+    """Issue a SOAP action against a service. Returns the out-args
+    as a name -> string dict.
+
+    `args` is a name -> stringified-value dict. Caller is responsible
+    for converting non-string types (numbers, durations) to the right
+    string form per the OpenHome spec — slice 3's wrappers handle the
+    type-aware conversion for specific services.
+
+    Raises OpenHomeSOAPError if the device returns a UPnP fault.
+    Raises RuntimeError for transport failures (connection refused,
+    timeout, malformed XML response). Both are catchable separately
+    so callers can distinguish "device rejected the action" from
+    "couldn't reach the device."
+    """
+    import requests  # local import keeps module-load cheap
+
+    envelope = _build_soap_envelope(
+        service.service_type, action_name, args or {}
+    )
+    soap_action = f'"{service.service_type}#{action_name}"'
+    headers = {
+        "Content-Type": 'text/xml; charset="utf-8"',
+        "SOAPAction": soap_action,
+        # Some OpenHome firmwares are picky about Connection: close.
+        # The default keep-alive sometimes leaves the device's
+        # response buffer half-full; closing per request avoids the
+        # variant of that bug we'd otherwise have to chase later.
+        "Connection": "close",
+    }
+
+    try:
+        resp = requests.post(
+            service.control_url,
+            data=envelope.encode("utf-8"),
+            headers=headers,
+            timeout=timeout,
+        )
+    except Exception as exc:
+        raise RuntimeError(
+            f"SOAP transport to {service.control_url} failed: {exc}"
+        ) from exc
+
+    body = resp.text or ""
+    # 500 with a SOAP body is the canonical UPnP fault response.
+    # Parse the body to get the structured error rather than
+    # surfacing a bare 'HTTP 500' to the caller. Some devices return
+    # 200 even on errors though, so check body shape regardless of
+    # status code.
+    fault = _parse_soap_fault(body)
+    if fault is not None:
+        code, description = fault
+        raise OpenHomeSOAPError(
+            code,
+            description,
+            action=action_name,
+            service_type=service.service_type,
+        )
+    if resp.status_code >= 400:
+        raise RuntimeError(
+            f"SOAP HTTP {resp.status_code} from {service.control_url}: "
+            f"{body[:200]}"
+        )
+    return _parse_soap_response(body, action_name)
+
+
+# ---------------------------------------------------------------------
+# SOAP helpers (encoding + parsing)
+# ---------------------------------------------------------------------
+
+
+def _xml_escape(value: str) -> str:
+    """Minimal XML text escape for SOAP body argument values. We
+    don't use `xml.sax.saxutils.escape` because that's missing some
+    edge cases (the apostrophe doesn't need escaping in element
+    text, but quotes don't either, and we want to keep the function
+    explicit so tests can pin behaviour). Five-char rule covers
+    everything that matters in element-text context."""
+    return (
+        value.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+        .replace("'", "&apos;")
+    )
+
+
+def _build_soap_envelope(
+    service_type: str,
+    action_name: str,
+    args: dict[str, str],
+) -> str:
+    """Construct the SOAP envelope sent in the POST body.
+
+    Hand-rolled rather than using a SOAP library because UPnP's SOAP
+    profile is small and predictable, and external libraries
+    (suds-jurko, zeep) all carry surprises around namespace
+    resolution and WSDL generation that don't apply here. Slice 4
+    will pass DIDL-Lite XML as a Metadata argument value, which
+    means we have to XML-escape it — handled by `_xml_escape` below.
+    """
+    arg_xml = "".join(
+        f"<{name}>{_xml_escape(value)}</{name}>"
+        for name, value in args.items()
+    )
+    return (
+        '<?xml version="1.0" encoding="utf-8"?>'
+        '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/" '
+        's:encodingStyle="http://schemas.xmlsoap.org/soap/encoding/">'
+        "<s:Body>"
+        f'<u:{action_name} xmlns:u="{service_type}">'
+        f"{arg_xml}"
+        f"</u:{action_name}>"
+        "</s:Body>"
+        "</s:Envelope>"
+    )
+
+
+def _parse_soap_response(body: str, action_name: str) -> dict[str, str]:
+    """Pull out-args out of a successful SOAP response. The wrapper
+    element is named `<ActionName>Response` per UPnP convention; its
+    children are the out-arguments as text-content elements.
+
+    Returns an empty dict for actions that have no out-args (e.g.
+    `Playlist.Play`). Raises RuntimeError if the body isn't a
+    parseable SOAP response — that's a malformed device, not a
+    UPnP-spec fault."""
+    if not body:
+        return {}
+    try:
+        root = ET.fromstring(body)
+    except ET.ParseError as exc:
+        raise RuntimeError(f"SOAP response not parseable: {exc}") from exc
+    body_el = _find(root, "Body")
+    if body_el is None:
+        raise RuntimeError("SOAP response missing Body element")
+    response_el = _find(body_el, f"{action_name}Response")
+    if response_el is None:
+        # Some devices skip the *Response wrapper. Walk the body's
+        # immediate children to find a single child element and
+        # treat its children as the out-args. Conservative — most
+        # spec-compliant devices use the wrapper.
+        children = list(body_el)
+        if not children:
+            return {}
+        response_el = children[0]
+    return {child.tag.split("}")[-1]: (child.text or "") for child in response_el}
+
+
+def _parse_soap_fault(body: str) -> Optional[tuple[int, str]]:
+    """Return (errorCode, errorDescription) if the body is a UPnP
+    fault, else None. UPnP wraps the device-specific error inside
+    `<s:Fault>/<detail>/<UPnPError>` — both the s: and the inner
+    namespace can vary by encoder, so we use the wildcard tag match
+    consistently with the rest of the parser."""
+    if not body:
+        return None
+    try:
+        root = ET.fromstring(body)
+    except ET.ParseError:
+        return None
+    body_el = _find(root, "Body")
+    if body_el is None:
+        return None
+    fault = _find(body_el, "Fault")
+    if fault is None:
+        return None
+    detail = _find(fault, "detail")
+    if detail is None:
+        return None
+    upnp_err = _find(detail, "UPnPError")
+    if upnp_err is None:
+        return None
+    code_text = _text(_find(upnp_err, "errorCode"))
+    desc_text = _text(_find(upnp_err, "errorDescription")) or "(no description)"
+    try:
+        code = int(code_text) if code_text else 0
+    except ValueError:
+        code = 0
+    return (code, desc_text)
 
 
 # ---------------------------------------------------------------------
