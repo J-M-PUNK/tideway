@@ -641,6 +641,23 @@ class PCMPlayer:
         new_source, start_offset_s = self._build_source_at(target_s)
         t_source_built = time.monotonic()
         new_decoder = Decoder(new_source)
+        # Match the existing OutputStream's configuration. The stream
+        # stays open across a seek; the OLD decoder was configured to
+        # emit at `_stream_sample_rate` / matching dtype via the
+        # set_target_rate call in _open_output_stream. The NEW
+        # Decoder() defaults to source-rate / source-format output —
+        # which may not match the stream when shared-mode resampling
+        # is in play (e.g. 96 kHz FLAC stream open at the device's
+        # 48 kHz mixer rate as float32, but the new decoder produces
+        # int32 at 96 kHz). The audio_callback then writes int32
+        # bytes into a buffer PortAudio reads as float32, which gets
+        # reinterpreted at the wrong scale and sounds like blown-out
+        # bit-crushed audio. set_target_rate flips the new decoder
+        # into the same flt-at-target_rate config the old one had,
+        # or no-ops in the passthrough case (exclusive mode, where
+        # stream rate == source rate).
+        if self._stream_sample_rate:
+            new_decoder.set_target_rate(self._stream_sample_rate)
         t_decoder_init = time.monotonic()
         # For local files the new container starts at t=0; tell it
         # to seek forward to the precise target. For DASH we already
