@@ -617,6 +617,11 @@ def item_to_dict(item: DownloadItem) -> dict:
         "progress": item.progress,
         "error": item.error,
         "file_path": item.file_path,
+        # Realtime throughput in bytes/sec while the row is in
+        # IN_PROGRESS, otherwise 0. Frontend formats as MB/s for
+        # display in the Downloads panel; older clients that don't
+        # know this key just ignore it.
+        "speed_bps": getattr(item, "speed_bps", 0.0),
     }
 
 
