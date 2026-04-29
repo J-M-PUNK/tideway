@@ -80,6 +80,14 @@ pyobjc-framework-MediaPlayer>=10.0; sys_platform == "darwin"
 # wheel fails to install, app/audio/upnp.py silently disables the
 # UPnP output path and the rest of the app keeps working.
 async-upnp-client>=0.38.0
+# Chromecast sender. Used by app/audio/cast.py for device discovery
+# (mDNS via zeroconf) and the Cast Application Framework control
+# channel. We hand the Cast device an HTTP URL serving Tideway's
+# encoded audio stream and pychromecast issues the play_media
+# command to the Default Media Receiver. Same library Home
+# Assistant, Mopidy, and Music Assistant use, MIT-licensed and
+# actively maintained.
+pychromecast>=14.0.0
 # Build-only: PyInstaller packages desktop.py + web/dist into a native
 # .exe / .app. Not needed at runtime but bundling keeps the build command
 # documented in a single place.
