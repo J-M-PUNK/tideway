@@ -202,10 +202,27 @@ def _enable_webview_media_prefs() -> None:
         import AppKit
     except Exception:
         return
+    try:
+        from app import window_chrome as _window_chrome
+    except Exception:
+        _window_chrome = None  # type: ignore[assignment]
     original_init = BrowserView.__init__
 
     def patched_init(self, window):  # type: ignore[no-untyped-def]
         original_init(self, window)
+        # Register the new BrowserView's NSWindow with the chrome
+        # tinter so the titlebar inherits the app's theme color.
+        # `self.window` is the NSWindow on the cocoa BrowserView;
+        # falling through silently if pywebview ever renames it
+        # leaves the original system gradient titlebar — visible
+        # but not broken.
+        if _window_chrome is not None:
+            try:
+                ns = getattr(self, "window", None)
+                if ns is not None:
+                    _window_chrome.register_macos_nswindow(ns)
+            except Exception:
+                pass
         try:
             config = self.webview.configuration()
             prefs = config.preferences()
@@ -1188,6 +1205,31 @@ def main(argv: Optional[list[str]] = None) -> int:
         # macOS: wire the Dock-click → window.show() path. No-op on
         # Windows (minimize handles it natively via the taskbar).
         _wire_macos_dock_reopen(window)
+
+        # Windows: tint the title bar to match the app's background
+        # color. The hwnd doesn't exist until after the window is
+        # actually shown, so we hook the `shown` event rather than
+        # registering at create time. macOS handles tinting in the
+        # BrowserView constructor patch (see _enable_webview_media_prefs)
+        # because Cocoa's NSWindow is available immediately.
+        if sys.platform == "win32":
+            try:
+                from app import window_chrome as _window_chrome
+
+                def _on_shown_tint() -> None:
+                    try:
+                        hwnd = _window_chrome.find_pywebview_hwnd(window)
+                        if hwnd:
+                            _window_chrome.register_windows_hwnd(hwnd)
+                    except Exception:
+                        # Anything in the lookup or DWM call going wrong
+                        # leaves the OS-default titlebar — visible but
+                        # off-color. Worth not crashing for.
+                        pass
+
+                window.events.shown += _on_shown_tint
+            except Exception:
+                pass
         # Cmd+Q / Dock right-click Quit / menu-bar "Quit Tideway" all go
         # through NSApp.terminate → applicationShouldTerminate:, which
         # pywebview's delegate translates into our window's closing
