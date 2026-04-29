@@ -449,7 +449,16 @@ function Row({
       <div className="truncate text-sm text-muted-foreground">{item.album}</div>
       <div className="flex flex-col gap-1">
         <div className="flex items-center justify-between text-xs text-muted-foreground">
-          <span>{item.status}</span>
+          <span>
+            {item.status}
+            {item.status === "Downloading" &&
+            item.speed_bps &&
+            item.speed_bps > 0 ? (
+              <span className="ml-1.5 text-foreground tabular-nums">
+                {formatSpeed(item.speed_bps)}
+              </span>
+            ) : null}
+          </span>
           {!done && !failed && <span>{pct}%</span>}
         </div>
         {!done && !failed && <Progress value={pct} />}
@@ -535,6 +544,29 @@ function formatBytes(n: number): string {
     unit += 1;
   }
   return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${units[unit]}`;
+}
+
+/**
+ * Format a bytes-per-second value for the in-progress download row.
+ * Picks the unit so the number stays in the 1-999 range — KB/s for
+ * trickle, MB/s for normal, GB/s for the unrealistic case. Single
+ * decimal place under 10, integer otherwise, so the value doesn't
+ * jitter visibly between consecutive updates.
+ */
+function formatSpeed(bps: number): string {
+  if (!isFinite(bps) || bps <= 0) return "0 KB/s";
+  const units: { divisor: number; label: string }[] = [
+    { divisor: 1024 ** 3, label: "GB/s" },
+    { divisor: 1024 ** 2, label: "MB/s" },
+    { divisor: 1024, label: "KB/s" },
+  ];
+  for (const u of units) {
+    if (bps >= u.divisor) {
+      const v = bps / u.divisor;
+      return `${v < 10 ? v.toFixed(1) : Math.round(v)} ${u.label}`;
+    }
+  }
+  return `${Math.round(bps)} B/s`;
 }
 
 /**

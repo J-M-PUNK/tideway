@@ -217,6 +217,12 @@ export interface DownloadItem {
   progress: number;
   error: string | null;
   file_path: string | null;
+  /** Realtime throughput in bytes per second while the row is in
+   *  Downloading state. 0 outside of that — Pending / Fetching /
+   *  Tagging / Complete / Failed don't transfer bytes. Optional so
+   *  older server builds that don't emit it just render the row
+   *  without the speed annotation. */
+  speed_bps?: number;
 }
 
 export interface VideoDownloadJob {
