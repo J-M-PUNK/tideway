@@ -294,6 +294,20 @@ jobs:
     permissions:
       contents: write
     steps:
+      # Checkout MUST come before the artifact downloads. checkout@v4
+      # defaults to clean: true and runs `git clean -ffdx` against the
+      # workspace, which deletes untracked files — including any
+      # `artifacts/` directory we'd downloaded into beforehand. That's
+      # what made v0.4.12 and v0.4.13's first attempts ship empty
+      # releases: the artifacts arrived, then checkout wiped them, then
+      # the upload step matched zero files. Doing checkout first means
+      # the workspace is the repo, and the subsequent downloads add
+      # `artifacts/` to it without anything subsequently nuking it.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 1
+
       - uses: actions/download-artifact@v4
         with:
           name: Tideway-macOS
@@ -307,17 +321,11 @@ jobs:
           name: Tideway-Windows-arm64
           path: artifacts
 
-      # Pull the release notes out of the tagged commit's message body.
-      # The release-commit convention (CONTRIBUTING.md, "Tag the release")
-      # is "Release X.Y.Z: <subject>" on the subject line and the
-      # user-visible notes in the body, so this just becomes the GitHub
-      # release body verbatim. Removes the "I tagged but the draft is
-      # empty so I have to write notes twice" failure mode that bit
-      # v0.4.11.
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ github.ref }}
-          fetch-depth: 1
+      # Diagnostic — show exactly what landed in artifacts/ so a
+      # mismatched glob shows up here instead of silently producing
+      # an empty release. Bit v0.4.12 and v0.4.13.
+      - name: List downloaded artifacts
+        run: ls -laR artifacts
 
       - name: Extract release notes from tag commit body
         id: notes
