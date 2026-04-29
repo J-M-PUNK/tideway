@@ -147,9 +147,79 @@
     animation: route-fade 120ms ease-out;
   }
 
+  /* Heart-pop: the brief scale pulse that fires when a user toggles
+     a like ON. Same shape every social app uses (Twitter, Instagram).
+     Applied via a transient `popping` flag in HeartButton so it only
+     runs on the false→true transition, not on every render where the
+     heart happens to already be liked. */
+  @keyframes heart-pop {
+    0% {
+      transform: scale(1);
+    }
+
+    35% {
+      transform: scale(1.35);
+    }
+
+    70% {
+      transform: scale(0.92);
+    }
+
+    100% {
+      transform: scale(1);
+    }
+  }
+
+  .animate-heart-pop {
+    animation: heart-pop 320ms cubic-bezier(0.34, 1.56, 0.64, 1);
+    transform-origin: center;
+  }
+
+  /* Card lift: a tiny vertical raise on hover, paired with the
+     existing `group-hover:scale-105` cover zoom in MediaCard. The
+     translate is small (1px) so it reads as a subtle weight shift
+     rather than a moving target. */
+  @keyframes card-press {
+    from {
+      transform: scale(1);
+    }
+
+    to {
+      transform: scale(0.97);
+    }
+  }
+
+  /* Skeleton shimmer — softer than Tailwind's default animate-pulse,
+     which fades the whole block to ~50 %. Shimmer keeps the surface
+     visible while sweeping a highlight across, which reads as
+     "loading" without creating a strobing-block effect on dense
+     pages with many skeleton rows. */
+  @keyframes skeleton-shimmer {
+    0% {
+      background-position: -200% 0;
+    }
+
+    100% {
+      background-position: 200% 0;
+    }
+  }
+
+  .animate-skeleton {
+    background: linear-gradient(
+      90deg,
+      hsl(var(--secondary)) 0%,
+      hsl(var(--accent)) 50%,
+      hsl(var(--secondary)) 100%
+    );
+    background-size: 200% 100%;
+    animation: skeleton-shimmer 1.4s ease-in-out infinite;
+  }
+
   /* Users who prefer reduced motion get no animations. */
   @media (prefers-reduced-motion: reduce) {
-    .animate-route {
+    .animate-route,
+    .animate-heart-pop,
+    .animate-skeleton {
       animation: none;
     }
   }

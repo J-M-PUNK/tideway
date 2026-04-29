@@ -17,6 +17,7 @@ import type {
 } from "@/api/types";
 import type { OnDownload } from "@/api/download";
 import { useFavorites } from "@/hooks/useFavorites";
+import { useHeartPop } from "@/components/HeartButton";
 import { ViewMoreLink } from "@/components/Grid";
 import { MediaCard } from "@/components/MediaCard";
 import { PlayMediaButton } from "@/components/PlayMediaButton";
@@ -421,6 +422,11 @@ function TrackHeart({
 }) {
   const favs = useFavorites();
   const liked = favs.has("track", trackId);
+  // Shared heart-pop hook from HeartButton — keeps the like
+  // animation identical across every surface (track rows, now-
+  // playing bar, MediaCard overlay, this PageView TrackList row,
+  // detail-page Add-to-Library, etc).
+  const popping = useHeartPop(liked);
   return (
     <button
       type="button"
@@ -438,7 +444,11 @@ function TrackHeart({
       )}
     >
       <Heart
-        className={cn("h-5 w-5", liked && "fill-primary stroke-primary")}
+        className={cn(
+          "h-5 w-5",
+          liked && "fill-primary stroke-primary",
+          popping && "animate-heart-pop",
+        )}
       />
     </button>
   );
@@ -447,6 +457,7 @@ function TrackHeart({
 function MixHeart({ mixId, className }: { mixId: string; className?: string }) {
   const favs = useFavorites();
   const liked = favs.has("mix", mixId);
+  const popping = useHeartPop(liked);
   return (
     <button
       type="button"
@@ -464,7 +475,11 @@ function MixHeart({ mixId, className }: { mixId: string; className?: string }) {
       )}
     >
       <Heart
-        className={cn("h-5 w-5", liked && "fill-primary stroke-primary")}
+        className={cn(
+          "h-5 w-5",
+          liked && "fill-primary stroke-primary",
+          popping && "animate-heart-pop",
+        )}
       />
     </button>
   );

@@ -78,7 +78,12 @@ export function PlayMediaButton({
       title={busy ? "Loading…" : "Play"}
       aria-label={busy ? "Loading" : "Play"}
       className={cn(
-        "flex items-center justify-center rounded-full bg-primary text-primary-foreground shadow-lg transition-transform hover:scale-105 disabled:opacity-80",
+        // hover: lift slightly. active (mouse-down): briefly press in.
+        // The press feedback is what makes the button feel "real" —
+        // without it, click-through to playback is silent and the
+        // button reads as a flat target. duration-150 keeps the
+        // press snappy enough to land before the click resolves.
+        "flex items-center justify-center rounded-full bg-primary text-primary-foreground shadow-lg transition-transform duration-150 ease-out hover:scale-105 active:scale-95 disabled:opacity-80",
         className,
       )}
     >

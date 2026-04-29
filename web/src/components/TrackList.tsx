@@ -441,7 +441,11 @@ function TrackRow({
           style={sortableStyle}
           {...dragHandleProps}
           className={cn(
-            "group grid select-none items-center gap-4 rounded-md px-4 py-2 text-sm hover:bg-accent",
+            // transition-colors on hover smooths the bg-fade in / out
+            // so cursor-skim across a long track list reads as a
+            // continuous wave rather than discrete on/off steps. 150ms
+            // is fast enough to feel responsive on rapid mouse moves.
+            "group grid select-none items-center gap-4 rounded-md px-4 py-2 text-sm transition-colors duration-150 hover:bg-accent",
             showPlaycount
               ? "grid-cols-[24px_4fr_56px_3fr_auto]"
               : "grid-cols-[24px_4fr_3fr_auto]",
