@@ -43,7 +43,6 @@ import { CreditsDialog } from "@/components/CreditsDialog";
 import { DownloadButton } from "@/components/DownloadButton";
 import { HeartButton } from "@/components/HeartButton";
 import { OutputDevicePicker } from "@/components/OutputDevicePicker";
-import { CastPicker } from "@/components/CastPicker";
 import { SleepTimerButton } from "@/components/SleepTimerButton";
 import { useIsDownloaded } from "@/hooks/useDownloadedSet";
 import { useRecordPlays } from "@/hooks/useRecentlyPlayed";
@@ -322,7 +321,6 @@ export function NowPlaying({
           </Button>
           <StreamingQualityPicker isLocal={isLocal} streamInfo={streamInfo} />
           <SleepTimerButton />
-          <CastPicker />
           <OutputDevicePicker />
           <VolumeControl
             value={volume}
