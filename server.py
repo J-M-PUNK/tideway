@@ -5560,9 +5560,15 @@ def video_proxy(u: str):
             base_for_rewrite = getattr(r, "url", None) or u
         finally:
             r.close()
-        # Diagnostic line — kept while we shake out the proxy. Once
-        # the curl-cffi stream-mode workaround above proves stable
-        # across the supported manifest formats this can be dropped.
+        # Permanent diagnostic — same shape as `[audio] stream open`
+        # in the audio engine. One print per manifest fetch (~1 per
+        # variant per video; segments don't log) carrying the URL
+        # prefix, upstream Content-Type, body length, and first 200
+        # chars (line-escaped). Cheap to log; gives a future
+        # "videos don't play" report enough signal to identify
+        # whether Tidal has changed the manifest format, the proxy
+        # is fetching empty bodies again, or something downstream
+        # in hls.js is the cause.
         head = text[:200].replace("\n", "\\n").replace("\r", "\\r")
         print(
             f"[video-proxy] manifest u={u[:100]!r} "
