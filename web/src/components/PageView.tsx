@@ -64,9 +64,27 @@ export function PageView({ page, onDownload, forceSingleRow = false }: Props) {
   // in" on Home — which uses our local history and is more accurate for
   // this client — so we drop the row everywhere rather than show two
   // near-identical grids stacked.
-  const categories = page.categories.filter(
-    (cat) => cat.type !== "ShortcutList",
-  );
+  //
+  // Editorial-title blacklist: Tidal's home / explore feeds carry a few
+  // sections that are pure marketing fill ("Fun playlists you'll love",
+  // "Essentials to explore") rather than personalized recommendations.
+  // Match on the lower-cased title since Tidal capitalisation has
+  // shifted across regions and we want a single rule.
+  const HIDDEN_SECTION_TITLES = new Set([
+    "fun playlists you'll love",
+    "fun playlists you’ll love",
+    "essentials to explore",
+  ]);
+  const categories = page.categories.filter((cat) => {
+    if (cat.type === "ShortcutList") return false;
+    if (
+      cat.title &&
+      HIDDEN_SECTION_TITLES.has(cat.title.trim().toLowerCase())
+    ) {
+      return false;
+    }
+    return true;
+  });
   return (
     <div className="flex flex-col gap-8">
       {categories.map((cat, i) => (
