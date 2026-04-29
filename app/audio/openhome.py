@@ -518,6 +518,278 @@ def _parse_soap_fault(body: str) -> Optional[tuple[int, str]]:
 
 
 # ---------------------------------------------------------------------
+# Service-specific controllers (slice 3)
+#
+# Type-safe wrappers around `invoke()` for the services Tidal Connect
+# track-handoff (slice 4) actually needs: Playlist (load + play / pause
+# / next / seek), Volume (level + mute), Time (position + duration
+# polling), Info (current-track metadata read-back). Each controller
+# is a thin object holding one OpenHomeService; methods translate
+# Python-native types to the strings the SOAP envelope wants and
+# parse out-args back into types the rest of the audio stack expects.
+#
+# Why classes instead of free functions: the action name + service
+# argument always go together, so a class that captures both lets
+# callers write `playlist.play()` instead of repeating the service
+# every line. Also lets `from_device` factory methods cleanly return
+# None when a device doesn't expose the service.
+#
+# Not all OpenHome actions are wrapped here — only the ones we
+# actually need to plumb track handoff and basic transport control.
+# Anything else can fall back to `invoke(service, action_name, ...)`
+# directly until a wrapper is needed.
+# ---------------------------------------------------------------------
+
+
+class PlaylistController:
+    """OpenHome Playlist service. Controls the device's queue —
+    insert tracks (with stream URL + DIDL-Lite metadata), play /
+    pause / stop, skip, seek to a position in the current track,
+    clear the queue.
+
+    The Playlist service's `Id` semantics: each insert returns a
+    NewId that uniquely identifies that queue entry. SeekId /
+    SeekIndex / DeleteId all key off it. We expose `insert()`'s
+    return value so callers can hold onto the Id for future calls.
+    """
+
+    def __init__(self, service: OpenHomeService) -> None:
+        self._service = service
+
+    @classmethod
+    def from_device(
+        cls, device: OpenHomeDevice
+    ) -> Optional["PlaylistController"]:
+        svc = device.get_service("Playlist")
+        return cls(svc) if svc else None
+
+    def insert(
+        self,
+        after_id: int,
+        uri: str,
+        metadata: str = "",
+    ) -> int:
+        """Insert a track after the queue entry with the given Id.
+
+        `after_id=0` inserts at the head of the queue (the queue
+        starts empty with no Ids; 0 is the conventional 'start')
+        and is what slice 4 will use for the very-first track of a
+        new session.
+
+        `metadata` is DIDL-Lite XML. Slice 4 generates this from
+        the Tidal track metadata (title, artist, album, duration,
+        cover). The SOAP layer XML-escapes it before embedding —
+        the device sees it as text content and parses it as an
+        embedded DIDL-Lite document.
+
+        Returns the NewId of the inserted track. Slice 4 stores it
+        so subsequent SeekSecond calls can target the right entry.
+        """
+        result = invoke(
+            self._service,
+            "Insert",
+            {
+                "AfterId": str(after_id),
+                "Uri": uri,
+                "Metadata": metadata,
+            },
+        )
+        try:
+            return int(result.get("NewId", "0") or "0")
+        except ValueError:
+            return 0
+
+    def delete_all(self) -> None:
+        """Clear the queue. We call this before inserting on
+        connect to put the device into a known empty state — some
+        devices preserve the queue across controller switches and
+        we don't want our Insert to land in slot 47 of someone
+        else's leftover playlist."""
+        invoke(self._service, "DeleteAll")
+
+    def play(self) -> None:
+        invoke(self._service, "Play")
+
+    def pause(self) -> None:
+        invoke(self._service, "Pause")
+
+    def stop(self) -> None:
+        invoke(self._service, "Stop")
+
+    def next_track(self) -> None:
+        """Skip forward. Named with a `_track` suffix because plain
+        `next` would shadow Python's `next()` builtin and read
+        ambiguously inside the audio engine."""
+        invoke(self._service, "Next")
+
+    def previous_track(self) -> None:
+        invoke(self._service, "Previous")
+
+    def seek_second(self, position_s: int) -> None:
+        """Seek the currently-playing track to the given absolute
+        second offset. OpenHome SeekSecond takes an integer; the
+        decimal-seconds variant is SeekSecondAbsolute on some
+        firmwares but not universally implemented."""
+        invoke(
+            self._service,
+            "SeekSecond",
+            {"Value": str(int(position_s))},
+        )
+
+    def seek_id(self, track_id: int) -> None:
+        """Jump to a previously-inserted track by Id. Useful when
+        the queue has multiple entries and we want to switch
+        between them without rebuilding the queue."""
+        invoke(self._service, "SeekId", {"Value": str(track_id)})
+
+
+class VolumeController:
+    """OpenHome Volume service. Controls device-side volume + mute.
+
+    OpenHome volume is 0..VolumeMax (where VolumeMax is a per-
+    device value, often 100 but sometimes 80 or 60 for protected
+    speakers). This wrapper accepts a 0..100 percentage from the
+    audio engine and translates to the device's range with a
+    `volume_max()` lookup; if the lookup fails we assume 100.
+    """
+
+    def __init__(self, service: OpenHomeService) -> None:
+        self._service = service
+        self._cached_max: Optional[int] = None
+
+    @classmethod
+    def from_device(
+        cls, device: OpenHomeDevice
+    ) -> Optional["VolumeController"]:
+        svc = device.get_service("Volume")
+        return cls(svc) if svc else None
+
+    def set_volume(self, level_percent: int) -> None:
+        """Set the device volume from a 0-100 percentage. Internally
+        scales to the device's actual VolumeMax range."""
+        clamped = max(0, min(100, int(level_percent)))
+        vmax = self._max_or_default()
+        # Round-half-up to nearest device unit. Underflow (eg 1%
+        # mapping to 0 on a VolumeMax-of-50 device) is OK — that's
+        # the device's resolution limit, not our problem.
+        scaled = round(clamped * vmax / 100.0)
+        invoke(self._service, "SetVolume", {"Value": str(scaled)})
+
+    def get_volume(self) -> int:
+        """Read current device volume back as 0-100 percentage."""
+        result = invoke(self._service, "Volume")
+        try:
+            raw = int(result.get("Value", "0") or "0")
+        except ValueError:
+            return 0
+        vmax = self._max_or_default()
+        if vmax <= 0:
+            return 0
+        return round(raw * 100.0 / vmax)
+
+    def set_mute(self, muted: bool) -> None:
+        invoke(
+            self._service,
+            "SetMute",
+            {"Value": "true" if muted else "false"},
+        )
+
+    def get_mute(self) -> bool:
+        result = invoke(self._service, "Mute")
+        return (result.get("Value", "false") or "false").lower() == "true"
+
+    def volume_max(self) -> int:
+        """Read the device's VolumeMax. Cached after the first call
+        because it doesn't change at runtime — some devices only
+        expose it on a paid-firmware tier and would otherwise
+        round-trip on every set_volume."""
+        if self._cached_max is not None:
+            return self._cached_max
+        try:
+            result = invoke(self._service, "VolumeMax")
+            value = int(result.get("Value", "100") or "100")
+            self._cached_max = value
+            return value
+        except (RuntimeError, ValueError):
+            # Some firmwares don't expose VolumeMax (it isn't
+            # required by the spec). Default to 100 — the most
+            # common case — and stop trying.
+            self._cached_max = 100
+            return 100
+
+    def _max_or_default(self) -> int:
+        """Wrap volume_max() to never raise; degrades silently to
+        100 if the device rejects the call. Inline use saves a
+        try/except scattered through every set_volume / get_volume."""
+        try:
+            return self.volume_max()
+        except Exception:
+            return 100
+
+
+class TimeController:
+    """OpenHome Time service. Reports the currently-playing track's
+    duration + position, plus a TrackCount that increments on every
+    track change. Slice 5 subscribes to its events for live UI
+    updates; this wrapper is the polling fallback."""
+
+    def __init__(self, service: OpenHomeService) -> None:
+        self._service = service
+
+    @classmethod
+    def from_device(
+        cls, device: OpenHomeDevice
+    ) -> Optional["TimeController"]:
+        svc = device.get_service("Time")
+        return cls(svc) if svc else None
+
+    def time(self) -> dict[str, int]:
+        """Returns {duration, seconds, track_count} as ints. The
+        action returns four values (also TrackId) but we don't
+        currently use TrackId from the polling path."""
+        result = invoke(self._service, "Time")
+
+        def _int(name: str, default: int = 0) -> int:
+            try:
+                return int(result.get(name, str(default)) or str(default))
+            except ValueError:
+                return default
+
+        return {
+            "duration": _int("Duration"),
+            "seconds": _int("Seconds"),
+            "track_count": _int("TrackCount"),
+        }
+
+
+class InfoController:
+    """OpenHome Info service. Reports metadata about whatever the
+    device is currently rendering — title, artist, codec, bit
+    depth, sample rate, URI. Slice 4 reads it back after Insert+Play
+    to confirm the device accepted our handoff."""
+
+    def __init__(self, service: OpenHomeService) -> None:
+        self._service = service
+
+    @classmethod
+    def from_device(
+        cls, device: OpenHomeDevice
+    ) -> Optional["InfoController"]:
+        svc = device.get_service("Info")
+        return cls(svc) if svc else None
+
+    def track(self) -> dict[str, str]:
+        """Returns {uri, metadata} of the current track. The
+        Metadata field is the DIDL-Lite XML the device parsed out
+        of our Insert call; useful for verifying round-trip."""
+        result = invoke(self._service, "Track")
+        return {
+            "uri": result.get("Uri", ""),
+            "metadata": result.get("Metadata", ""),
+        }
+
+
+# ---------------------------------------------------------------------
 # Internals
 # ---------------------------------------------------------------------
 
