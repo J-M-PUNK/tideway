@@ -1,4 +1,5 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { Link } from "react-router-dom";
 import {
   ChevronDown,
   ChevronRight,
@@ -19,8 +20,69 @@ import { EmptyState } from "@/components/EmptyState";
 import { TrackListSkeleton } from "@/components/Skeletons";
 import { useToast } from "@/components/toast";
 import { usePlayerActions } from "@/hooks/PlayerContext";
-import { formatDuration } from "@/lib/utils";
+import { formatDuration, imageProxy } from "@/lib/utils";
 import { cn } from "@/lib/utils";
+
+// Resolved Tidal track metadata cached by tidal_id. Multiple group
+// sections asking for the same id share one in-flight request and
+// the resolved result. Keyed by tidal_id (string). The cache lives
+// for the page's lifetime — switching tabs / sort modes shouldn't
+// re-resolve. Also dedupes work across re-renders.
+const _trackResolutionCache = new Map<string, Track | null>();
+const _trackResolutionInflight = new Map<string, Promise<Track | null>>();
+
+function resolveTrack(tidalId: string): Promise<Track | null> {
+  const cached = _trackResolutionCache.get(tidalId);
+  if (cached !== undefined) return Promise.resolve(cached);
+  const inflight = _trackResolutionInflight.get(tidalId);
+  if (inflight) return inflight;
+  const p = api
+    .track(tidalId)
+    .then((t) => {
+      _trackResolutionCache.set(tidalId, t);
+      return t;
+    })
+    .catch(() => {
+      // Sign-out, network, rate limit. Cache the negative result
+      // so we don't retry on every render — the user will get a
+      // fresh resolution attempt only after a hard refresh.
+      _trackResolutionCache.set(tidalId, null);
+      return null;
+    })
+    .finally(() => {
+      _trackResolutionInflight.delete(tidalId);
+    });
+  _trackResolutionInflight.set(tidalId, p);
+  return p;
+}
+
+// Same idea for artist resolution. Used by the artists tab to fetch
+// the picture URL when a per-track lookup hands us an artist id.
+const _artistPictureCache = new Map<string, string | null>();
+const _artistPictureInflight = new Map<string, Promise<string | null>>();
+
+function resolveArtistPicture(artistId: string): Promise<string | null> {
+  const cached = _artistPictureCache.get(artistId);
+  if (cached !== undefined) return Promise.resolve(cached);
+  const inflight = _artistPictureInflight.get(artistId);
+  if (inflight) return inflight;
+  const p = api
+    .artist(artistId)
+    .then((a) => {
+      const pic = a.picture ?? null;
+      _artistPictureCache.set(artistId, pic);
+      return pic;
+    })
+    .catch(() => {
+      _artistPictureCache.set(artistId, null);
+      return null;
+    })
+    .finally(() => {
+      _artistPictureInflight.delete(artistId);
+    });
+  _artistPictureInflight.set(artistId, p);
+  return p;
+}
 
 /** How music on the local-library page is grouped:
  *  - "albums" (default): iTunes-style, one section per album. Best
@@ -72,6 +134,13 @@ export function LocalLibrary({
   const [videoSort, setVideoSort] = useState<VideoSort>("artists");
   const [tab, setTab] = useState<Tab>("music");
   const [collapsed, setCollapsed] = useState<Set<string>>(new Set());
+  // Track which sort modes have been initialized for default-collapse.
+  // The first time a sort/tab combination is rendered with at least one
+  // group, we collapse all of them so the user starts from a tidy
+  // overview rather than a 50-album wall of tracks. After that, the
+  // user's manual expand/collapse state stands. Switching back to a
+  // previously-initialized mode preserves whatever the user had open.
+  const initializedRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     let cancelled = false;
@@ -168,6 +237,43 @@ export function LocalLibrary({
   const totalBytes = data?.files.reduce((n, f) => n + f.size_bytes, 0) ?? 0;
   const totalVideoBytes =
     data?.videos.reduce((n, v) => n + v.size_bytes, 0) ?? 0;
+
+  // Default-collapse on first render of each sort mode. Album view
+  // and Artist view both benefit (the user can scroll a clean list
+  // and expand only what they want); Recent is flat with no groups
+  // so it doesn't apply. Same idea for the videos tab. We track per-
+  // mode initialization in a ref so toggling around the UI doesn't
+  // override the user's actual collapse choices.
+  useEffect(() => {
+    if (!data) return;
+    if (tab === "music") {
+      if (musicSort !== "albums" && musicSort !== "artists") return;
+      const seenKey = `music:${musicSort}`;
+      if (initializedRef.current.has(seenKey)) return;
+      if (musicGroups.length === 0) return;
+      initializedRef.current.add(seenKey);
+      setCollapsed((prev) => {
+        const next = new Set(prev);
+        for (const [key] of musicGroups) {
+          if (key) next.add(key);
+        }
+        return next;
+      });
+    } else if (tab === "videos") {
+      if (videoSort !== "artists") return;
+      const seenKey = `videos:${videoSort}`;
+      if (initializedRef.current.has(seenKey)) return;
+      if (videoGroups.length === 0) return;
+      initializedRef.current.add(seenKey);
+      setCollapsed((prev) => {
+        const next = new Set(prev);
+        for (const [key] of videoGroups) {
+          if (key) next.add(`video:${key}`);
+        }
+        return next;
+      });
+    }
+  }, [data, tab, musicSort, videoSort, musicGroups, videoGroups]);
 
   const toggleGroup = (key: string) => {
     setCollapsed((prev) => {
@@ -588,6 +694,45 @@ function MusicGroupSection({
   collapsed: Set<string>;
   onToggle: (key: string) => void;
 }) {
+  // Resolve the group's first track that carries a Tidal id, so we
+  // can fetch the album cover (albums view) or the artist picture
+  // (artists view). Tracks without a tidal_id (legacy / sideloaded
+  // files) are skipped here — the corresponding header just falls
+  // back to the icon placeholder.
+  const firstTidalId = useMemo(
+    () => files.find((f) => f.tidal_id)?.tidal_id ?? null,
+    [files],
+  );
+  const [resolved, setResolved] = useState<Track | null>(null);
+  useEffect(() => {
+    if (!firstTidalId) return;
+    let cancelled = false;
+    resolveTrack(firstTidalId).then((t) => {
+      if (!cancelled) setResolved(t);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [firstTidalId]);
+
+  // For the Artists tab we also want the artist's portrait — the
+  // album.cover we get from the track resolution is the wrong art.
+  // Chain a second fetch after the track resolves so we know which
+  // artist id to ask for.
+  const [artistPicture, setArtistPicture] = useState<string | null>(null);
+  useEffect(() => {
+    if (sort !== "artists") return;
+    const artistId = resolved?.artists[0]?.id;
+    if (!artistId) return;
+    let cancelled = false;
+    resolveArtistPicture(artistId).then((pic) => {
+      if (!cancelled) setArtistPicture(pic);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [sort, resolved]);
+
   if (groupKey === "") {
     // Recent mode — flat list, no header, no collapse.
     return (
@@ -597,42 +742,116 @@ function MusicGroupSection({
     );
   }
   const isCollapsed = collapsed.has(groupKey);
-  let headerIcon = User;
+
   let heading = groupKey;
   let subheading: string | null = null;
   if (sort === "albums") {
-    headerIcon = Disc3;
     const idx = groupKey.indexOf(" • ");
     if (idx > 0) {
       subheading = groupKey.slice(0, idx);
       heading = groupKey.slice(idx + 3);
     }
   }
-  const Icon = headerIcon;
+
+  // Clickable destinations come from the resolved Track object —
+  // null (sign-out, sideload, network) keeps the heading as plain
+  // text. Albums view links the title to /album, the artist
+  // subheading to /artist. Artists view links the title to /artist.
+  const albumHref =
+    sort === "albums" && resolved?.album?.id
+      ? `/album/${resolved.album.id}`
+      : null;
+  const artistHref = resolved?.artists[0]?.id
+    ? `/artist/${resolved.artists[0].id}`
+    : null;
+
+  // Avatar choice: Artists tab → artist portrait if we have one,
+  // otherwise the User glyph. Albums tab → album cover if we have
+  // one, otherwise the Disc glyph.
+  const avatar =
+    sort === "artists" ? (
+      artistPicture ? (
+        <img
+          src={imageProxy(artistPicture)}
+          alt=""
+          className="h-12 w-12 shrink-0 rounded-full object-cover"
+          loading="lazy"
+        />
+      ) : (
+        <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-full bg-secondary text-muted-foreground">
+          <User className="h-6 w-6" />
+        </div>
+      )
+    ) : resolved?.album?.cover ? (
+      <img
+        src={imageProxy(resolved.album.cover)}
+        alt=""
+        className="h-12 w-12 shrink-0 rounded-md object-cover"
+        loading="lazy"
+      />
+    ) : (
+      <div className="flex h-12 w-12 shrink-0 items-center justify-center rounded-md bg-secondary text-muted-foreground">
+        <Disc3 className="h-6 w-6" />
+      </div>
+    );
+
   return (
     <section>
-      <button
-        onClick={() => onToggle(groupKey)}
-        className="mb-2 flex w-full items-center gap-2 text-left"
-      >
-        {isCollapsed ? (
-          <ChevronRight className="h-4 w-4 text-muted-foreground" />
-        ) : (
-          <ChevronDown className="h-4 w-4 text-muted-foreground" />
-        )}
-        <Icon className="h-4 w-4 text-muted-foreground" />
-        <div className="min-w-0 flex-1">
-          <div className="truncate font-semibold">{heading}</div>
-          {subheading && (
-            <div className="truncate text-xs text-muted-foreground">
-              {subheading}
-            </div>
+      <div className="mb-2 flex items-center gap-3">
+        <button
+          onClick={() => onToggle(groupKey)}
+          className="flex h-6 w-6 shrink-0 items-center justify-center text-muted-foreground hover:text-foreground"
+          aria-label={isCollapsed ? "Expand" : "Collapse"}
+        >
+          {isCollapsed ? (
+            <ChevronRight className="h-4 w-4" />
+          ) : (
+            <ChevronDown className="h-4 w-4" />
           )}
+        </button>
+        {avatar}
+        <div className="min-w-0 flex-1">
+          {sort === "albums" && albumHref ? (
+            <Link
+              to={albumHref}
+              className="truncate font-semibold hover:underline"
+            >
+              {heading}
+            </Link>
+          ) : sort === "artists" && artistHref ? (
+            <Link
+              to={artistHref}
+              className="truncate font-semibold hover:underline"
+            >
+              {heading}
+            </Link>
+          ) : (
+            <button
+              type="button"
+              onClick={() => onToggle(groupKey)}
+              className="truncate font-semibold text-left"
+            >
+              {heading}
+            </button>
+          )}
+          {subheading &&
+            (artistHref ? (
+              <Link
+                to={artistHref}
+                className="block truncate text-xs text-muted-foreground hover:underline"
+              >
+                {subheading}
+              </Link>
+            ) : (
+              <div className="truncate text-xs text-muted-foreground">
+                {subheading}
+              </div>
+            ))}
         </div>
-        <span className="text-xs text-muted-foreground">
+        <span className="shrink-0 text-xs text-muted-foreground">
           {files.length} track{files.length === 1 ? "" : "s"}
         </span>
-      </button>
+      </div>
       {!isCollapsed && <LocalGroupList files={files} allFiles={allFiles} />}
     </section>
   );
