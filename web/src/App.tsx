@@ -82,9 +82,6 @@ const Library = lazy(() =>
 const LocalLibrary = lazy(() =>
   import("@/pages/LocalLibrary").then((m) => ({ default: m.LocalLibrary })),
 );
-const Explore = lazy(() =>
-  import("@/pages/Explore").then((m) => ({ default: m.Explore })),
-);
 const FolderDetail = lazy(() =>
   import("@/pages/FolderDetail").then((m) => ({ default: m.FolderDetail })),
 );
@@ -534,10 +531,6 @@ function Shell({
                       <Route
                         path="/search"
                         element={<Search onDownload={enqueue} />}
-                      />
-                      <Route
-                        path="/explore"
-                        element={<Explore onDownload={enqueue} />}
                       />
                       <Route
                         path="/genres"
