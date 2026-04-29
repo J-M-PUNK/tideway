@@ -554,6 +554,17 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     try:
         from app.audio.cast import cast_manager as _cast_manager
         _cast_manager.start_discovery()
+        # Wire the local-output silencer so PCMPlayer mutes its
+        # sounddevice output while a Cast session is open. PCM tap
+        # to the Cast encoder happens BEFORE the silencer in the
+        # callback ordering, so the device still gets full audio
+        # while local goes quiet.
+        try:
+            _cast_manager.set_local_silencer(
+                _native_player().set_external_output_active
+            )
+        except Exception as exc:
+            print(f"[cast] silencer wire failed: {exc}", flush=True)
     except Exception as exc:
         print(f"[cast] startup failed: {exc}", flush=True)
 
