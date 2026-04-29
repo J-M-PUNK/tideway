@@ -101,9 +101,19 @@ export function NowPlaying({
         <ContextMenu>
           <ContextMenuTrigger asChild>
             <div className="flex min-w-0 flex-1 items-center gap-3">
+              {/*
+                Track-change crossfade. Keying the cover + title block
+                on track.id makes React replay the `animate-track-change`
+                animation every time the queue advances; same track
+                (loop / restart) keeps the same key and reuses the
+                element without re-animating. Subtle fade-in-from-2px
+                so the bar reads as "the new track slid into place"
+                rather than "the bar redrew."
+              */}
               <button
+                key={`cover-${track.id}`}
                 onClick={onExpand}
-                className="group relative h-14 w-14 flex-shrink-0 overflow-hidden rounded bg-secondary"
+                className="group relative h-14 w-14 flex-shrink-0 animate-track-change overflow-hidden rounded bg-secondary"
                 title="Expand now playing"
               >
                 {cover ? (
@@ -129,7 +139,10 @@ export function NowPlaying({
                   </svg>
                 </span>
               </button>
-              <div className="min-w-0">
+              <div
+                key={`meta-${track.id}`}
+                className="min-w-0 animate-track-change"
+              >
                 <div className="truncate text-sm font-semibold">
                   {track.album ? (
                     <Link
@@ -342,7 +355,7 @@ function ProgressBar({
   useRecordPlays(track, currentTime);
   const pct = duration > 0 ? (currentTime / duration) * 100 : 0;
   return (
-    <div className="flex w-full max-w-xl items-center gap-2 text-[11px] text-muted-foreground">
+    <div className="group flex w-full max-w-xl items-center gap-2 text-[11px] text-muted-foreground">
       <span className="w-10 text-right tabular-nums">
         {formatDuration(currentTime)}
       </span>
@@ -353,7 +366,13 @@ function ProgressBar({
         step={0.1}
         value={Math.min(currentTime, duration || 0)}
         onChange={(e) => actions.seek(Number(e.target.value))}
-        className="h-1 flex-1 cursor-pointer appearance-none rounded-full bg-secondary accent-primary"
+        // Thicken from h-1 to h-1.5 when the row is hovered. The
+        // `group` modifier on the wrapper means the seek bar grows
+        // any time the cursor is anywhere over the time row, which
+        // matches the "the bar invites scrubbing" UX. transition
+        // covers the height change so the bar swells / settles
+        // instead of snapping.
+        className="h-1 flex-1 cursor-pointer appearance-none rounded-full bg-secondary accent-primary transition-[height] duration-150 ease-out group-hover:h-1.5"
         style={{
           background: `linear-gradient(to right, hsl(var(--primary)) ${pct}%, hsl(var(--secondary)) ${pct}%)`,
         }}
@@ -563,7 +582,7 @@ function VolumeControl({
   const muted = value === 0;
   return (
     <div
-      className={cn("flex items-center gap-2", disabled && "opacity-50")}
+      className={cn("group flex items-center gap-2", disabled && "opacity-50")}
       title={
         disabled
           ? "Force Volume is on — attenuate on your output device"
@@ -592,7 +611,12 @@ function VolumeControl({
         value={value}
         onChange={(e) => onChange(Number(e.target.value))}
         disabled={disabled}
-        className="h-1 w-20 cursor-pointer appearance-none rounded-full bg-secondary accent-primary disabled:cursor-not-allowed"
+        // Same hover-thicken pattern as the seek bar above. `group`
+        // on the wrapper means the slider grows whenever the cursor
+        // is anywhere in the volume row, including when hovering
+        // the mute button — invites adjustment without making the
+        // user pixel-hunt the 4px track.
+        className="h-1 w-20 cursor-pointer appearance-none rounded-full bg-secondary accent-primary transition-[height] duration-150 ease-out group-hover:h-1.5 disabled:cursor-not-allowed"
         style={{
           background: `linear-gradient(to right, hsl(var(--primary)) ${value * 100}%, hsl(var(--secondary)) ${value * 100}%)`,
         }}

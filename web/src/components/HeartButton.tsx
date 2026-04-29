@@ -25,31 +25,44 @@ interface Props {
 }
 
 /**
- * Run a brief scale-pop animation when `liked` flips from false to
+ * Run a brief one-shot animation when `active` flips from false to
  * true. Triggering on the transition (not on every render where
- * `liked` is already true) is what makes this a satisfying micro-
- * interaction rather than a perpetually animating button. Hook
- * lives at the shared component level so every consumer of
- * HeartButton — track rows, now-playing bar, detail-page action
- * rows, the inline overlay on cards (see MediaCard's mirrored
- * implementation) — gets the same treatment for free.
+ * `active` is already true) is what makes this a satisfying micro-
+ * interaction rather than a perpetually animating element. Hook
+ * lives at the shared component level so every consumer threads the
+ * same animation contract.
+ *
+ * Used by:
+ *   - HeartButton + every place that toggles a favorite (heart-pop, 360 ms)
+ *   - Download / Saved transitions (saved-pop, 280 ms)
+ *   - Artist Follow's Heart→Check swap (heart-pop, 360 ms)
  */
-function useHeartPop(liked: boolean): boolean {
-  const [popping, setPopping] = useState(false);
-  const prevLikedRef = useRef(liked);
+export function useArrivalPulse(active: boolean, durationMs = 360): boolean {
+  const [pulsing, setPulsing] = useState(false);
+  const prevRef = useRef(active);
   useEffect(() => {
-    const wasLiked = prevLikedRef.current;
-    prevLikedRef.current = liked;
-    // Only animate on the false→true transition. Unliking is a
-    // dismissal action; popping the icon as it disappears would
+    const wasActive = prevRef.current;
+    prevRef.current = active;
+    // Only animate on the false→true transition. Reverting is a
+    // dismissal action; pulsing the element as it disappears would
     // read as accidental enthusiasm.
-    if (!wasLiked && liked) {
-      setPopping(true);
-      const t = window.setTimeout(() => setPopping(false), 360);
+    if (!wasActive && active) {
+      setPulsing(true);
+      const t = window.setTimeout(() => setPulsing(false), durationMs);
       return () => window.clearTimeout(t);
     }
-  }, [liked]);
-  return popping;
+  }, [active, durationMs]);
+  return pulsing;
+}
+
+/**
+ * Heart-pop variant — same useArrivalPulse hook with the 360 ms
+ * heart-pop animation timing. Kept as a separate name so the
+ * heart-toggle call sites read intentionally rather than passing a
+ * magic number.
+ */
+function useHeartPop(active: boolean): boolean {
+  return useArrivalPulse(active, 360);
 }
 
 export function HeartButton({

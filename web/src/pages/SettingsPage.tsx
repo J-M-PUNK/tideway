@@ -530,7 +530,12 @@ function SettingsTab({
   return (
     <TabsTrigger
       value={value}
-      className="!justify-start !rounded-md !px-3 !py-2 text-left text-sm font-medium text-muted-foreground hover:!bg-accent/40 data-[state=active]:!bg-accent data-[state=active]:!text-foreground"
+      // Same left-edge primary indicator pattern as the sidebar
+      // NavLinks. The `before:` pseudo-element is invisible by
+      // default and grows to h-5 with primary tint when the tab is
+      // active. The h-transition makes clicking between tabs read
+      // as the indicator growing into the new row.
+      className="!relative !justify-start !rounded-md !px-3 !py-2 text-left text-sm font-medium text-muted-foreground before:absolute before:left-0 before:top-1/2 before:h-0 before:w-0.5 before:-translate-y-1/2 before:rounded-r before:bg-primary before:opacity-0 before:transition-all before:duration-200 hover:!bg-accent/40 data-[state=active]:!bg-accent data-[state=active]:!text-foreground data-[state=active]:before:h-5 data-[state=active]:before:opacity-100"
     >
       <Icon className="mr-2 h-4 w-4 shrink-0" />
       {label}
