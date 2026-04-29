@@ -151,6 +151,16 @@ class _SessionState:
     media_loaded: bool = False
     # The media stream URL we handed the device. Logged for support.
     stream_url: str = ""
+    # Latest receiver-side MediaStatus. Populated by the status
+    # listener registered in connect(). Critical for diagnosing
+    # "media_loaded but the TV's not playing" — values like
+    # ("IDLE", "ERROR") tell us the receiver tried our URL and
+    # rejected it (typically a format-support gap on vendor
+    # receivers like Hisense / TCL). All Optional so the snapshot
+    # still works before the first status arrives.
+    receiver_state: Optional[str] = None
+    receiver_idle_reason: Optional[str] = None
+    receiver_status_at: float = 0.0
 
 
 # ---------------------------------------------------------------------
@@ -292,6 +302,55 @@ class CastManager:
             disc["connected_name"] = sess.device.friendly_name if sess else None
             disc["bytes_encoded"] = sess.bytes_encoded if sess else 0
             disc["media_loaded"] = bool(sess and sess.media_loaded)
+            disc["receiver_state"] = sess.receiver_state if sess else None
+            disc["receiver_idle_reason"] = (
+                sess.receiver_idle_reason if sess else None
+            )
+            disc["receiver_status_age_s"] = (
+                round(time.monotonic() - sess.receiver_status_at, 1)
+                if sess and sess.receiver_status_at > 0.0
+                else None
+            )
+        # Pull cached state directly from pychromecast on top of the
+        # listener-push values. Listener fires only on transitions, so
+        # if the receiver settled into a state before we registered (or
+        # never sends another update) the listener fields stay None
+        # forever; the cached values give us the receiver's current
+        # truth on every poll. Best-effort — pychromecast's accessors
+        # can race with disconnect / reconnect cycles, and the whole
+        # block is diagnostic.
+        if sess is not None:
+            try:
+                cast_obj = sess.cast
+                mc = getattr(cast_obj, "media_controller", None)
+                ms = getattr(mc, "status", None) if mc is not None else None
+                if ms is not None:
+                    disc["mc_player_state"] = (
+                        getattr(ms, "player_state", None) or None
+                    )
+                    disc["mc_idle_reason"] = (
+                        getattr(ms, "idle_reason", None) or None
+                    )
+                    disc["mc_content_type"] = (
+                        getattr(ms, "content_type", None) or None
+                    )
+                    disc["mc_content_id"] = (
+                        getattr(ms, "content_id", None) or None
+                    )
+                cs = getattr(cast_obj, "status", None)
+                if cs is not None:
+                    disc["app_id"] = (
+                        getattr(cs, "app_id", None) or None
+                    )
+                    disc["app_display_name"] = (
+                        getattr(cs, "display_name", None) or None
+                    )
+                    disc["is_active_input"] = getattr(
+                        cs, "is_active_input", None
+                    )
+                    disc["is_stand_by"] = getattr(cs, "is_stand_by", None)
+            except Exception as exc:
+                log.debug("cast: receiver-status pull failed: %r", exc)
         return disc
 
     # ---- session lifecycle -----------------------------------------
@@ -400,6 +459,17 @@ class CastManager:
             )
             mc.block_until_active(timeout=10.0)
             session.media_loaded = True
+            # Subscribe to MediaStatus so the receiver's player_state
+            # / idle_reason transitions show up in /api/cast/devices
+            # and on stdout. Without this we have no visibility into
+            # why a receiver that claims "active" then doesn't play —
+            # vendor Cast receivers (Hisense, TCL, Vizio) routinely
+            # accept play_media, transition to IDLE/ERROR a second
+            # later because they can't decode our format, and the
+            # sender side never finds out.
+            mc.register_status_listener(
+                _MediaStatusListener(self, session)
+            )
         except Exception as exc:
             try:
                 if session.http_server is not None:
@@ -704,6 +774,53 @@ class CastManager:
             print(f"[cast] discovered: {device.friendly_name} "
                   f"({device.model_name or 'unknown model'}) "
                   f"@ {device.host}:{device.port}", flush=True)
+
+
+class _MediaStatusListener:
+    """pychromecast MediaStatus subscriber.
+
+    pychromecast invokes `new_media_status(status)` on every receiver
+    state transition. We capture player_state and idle_reason on the
+    associated session so /api/cast/devices can surface them, and
+    print transitions to stdout for live debugging. The receiver
+    pushes status messages on its own protocol thread so we mutate
+    via the manager's session lock to stay consistent with status()
+    readers.
+
+    Held for the lifetime of the session — pychromecast doesn't take
+    a strong ref, so the listener has to outlive the
+    register_status_listener call. CastSession holds the controller,
+    which holds this listener via pychromecast's internal list."""
+
+    def __init__(
+        self, manager: "CastManager", session: "_SessionState"
+    ) -> None:
+        self._manager = manager
+        self._session = session
+
+    def new_media_status(self, status) -> None:  # pychromecast API
+        player_state = getattr(status, "player_state", None) or None
+        idle_reason = getattr(status, "idle_reason", None) or None
+        prev_state = self._session.receiver_state
+        prev_reason = self._session.receiver_idle_reason
+        # Update under the session lock so /api/cast/devices reads
+        # are consistent. We only ever mutate this session's fields,
+        # so contention is negligible.
+        with self._manager._session_lock:
+            self._session.receiver_state = player_state
+            self._session.receiver_idle_reason = idle_reason
+            self._session.receiver_status_at = time.monotonic()
+        # High-signal print for the dev console. The combination
+        # (state, idle_reason) is what the receiver uses to mean
+        # "couldn't play": e.g. ('IDLE', 'ERROR') after a play_media
+        # is the format-rejection fingerprint we're chasing.
+        if (player_state, idle_reason) != (prev_state, prev_reason):
+            print(
+                f"[cast] receiver status: "
+                f"player_state={player_state!r} "
+                f"idle_reason={idle_reason!r}",
+                flush=True,
+            )
 
 
 def _uuid_or_str(s: str):
