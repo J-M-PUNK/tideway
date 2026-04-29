@@ -68,11 +68,21 @@ export function DownloadAlbumButton({
     e.stopPropagation();
   };
 
+  // When the album is fully downloaded, switch the button into a
+  // "completed" tone — text-sky-500 mirrors the existing high-
+  // lossless quality badge in NowPlaying, which is the codebase's
+  // established blue. The hover-to-foreground transition is dropped
+  // in this state because the affirmative blue is the message; the
+  // menu is still openable for re-download.
+  const triggerClasses = allHave
+    ? "flex flex-col items-center gap-1 text-sky-500 transition-colors hover:text-sky-400 data-[state=open]:text-sky-400"
+    : "flex flex-col items-center gap-1 text-muted-foreground transition-colors hover:text-foreground data-[state=open]:text-primary";
+
   return (
     <DropdownMenu open={open} onOpenChange={setOpen}>
       <DropdownMenuTrigger asChild onClick={stop}>
         <button
-          className="flex flex-col items-center gap-1 text-muted-foreground transition-colors hover:text-foreground data-[state=open]:text-primary"
+          className={triggerClasses}
           title={allHave ? "Re-download album" : "Download album"}
           aria-label={allHave ? "Re-download album" : "Download album"}
         >
