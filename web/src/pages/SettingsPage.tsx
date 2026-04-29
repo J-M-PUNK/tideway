@@ -2,11 +2,15 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import {
   Bell,
+  Bug,
   Check,
   ChevronRight,
+  Code2,
   Download,
+  ExternalLink,
   Headphones,
   Import as ImportIcon,
+  Info,
   Keyboard,
   Library as LibraryIcon,
   Loader2,
@@ -230,6 +234,7 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
           {showAirPlay && (
             <SettingsTab value="airplay" icon={RadioIcon} label="AirPlay" />
           )}
+          <SettingsTab value="about" icon={Info} label="About" />
         </TabsList>
 
         <div className="min-w-0 flex-1">
@@ -488,6 +493,10 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
               <ShortcutRow keys={["R"]} label="Cycle repeat" />
               <ShortcutRow keys={["L"]} label="Like / unlike current track" />
             </Section>
+          </TabsContent>
+
+          <TabsContent value="about" className="mt-0">
+            <AboutSection />
           </TabsContent>
         </div>
       </Tabs>
@@ -1556,5 +1565,129 @@ function ShortcutRow({ keys, label }: { keys: string[]; label: string }) {
         ))}
       </div>
     </div>
+  );
+}
+
+// Public repo. Used both as the source-code link and the destination
+// for "Report an issue" — the issue tracker lives there. Keeping it
+// as a single const here means a fork only has to retag this one
+// place to point links at their own infrastructure.
+const TIDEWAY_REPO_URL = "https://github.com/J-M-PUNK/tideway";
+
+/**
+ * About tab — version, update status, and outbound links to the
+ * project repo and issue tracker. Reuses the same /api/version and
+ * /api/update-check endpoints that drive the in-app update banner,
+ * so what shows here is consistent with the banner's logic. The
+ * panel does its own fetches because Settings doesn't otherwise
+ * need version data — there's no shared store to subscribe to.
+ */
+function AboutSection() {
+  const [version, setVersion] = useState<string | null>(null);
+  const [update, setUpdate] = useState<{
+    available: boolean;
+    latest: string | null;
+    url: string | null;
+  } | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .version()
+      .then((r) => {
+        if (!cancelled) setVersion(r.version);
+      })
+      .catch(() => {
+        if (!cancelled) setVersion(null);
+      });
+    api
+      .updateCheck()
+      .then((r) => {
+        if (!cancelled)
+          setUpdate({
+            available: r.available,
+            latest: r.latest,
+            url: r.url,
+          });
+      })
+      .catch(() => {
+        // Update probe failed (offline, GitHub rate limit, repo
+        // private). Show "version only" rather than a misleading
+        // "up to date".
+        if (!cancelled) setUpdate(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return (
+    <Section title="About" icon={Info}>
+      <div className="flex flex-col gap-1">
+        <div className="text-sm text-muted-foreground">Version</div>
+        <div className="text-2xl font-bold tracking-tight">
+          {version ? `Tideway ${version}` : "Tideway"}
+        </div>
+        {update && update.available && update.latest && (
+          <div className="mt-1 flex items-center gap-2 text-sm">
+            <span className="rounded bg-primary/15 px-2 py-0.5 text-xs font-semibold uppercase tracking-wider text-primary">
+              Update available
+            </span>
+            <span className="text-muted-foreground">
+              {update.latest} is out
+            </span>
+            {update.url && (
+              <a
+                href={update.url}
+                target="_blank"
+                rel="noreferrer noopener"
+                className="inline-flex items-center gap-1 text-primary hover:underline"
+              >
+                Release notes <ExternalLink className="h-3 w-3" />
+              </a>
+            )}
+          </div>
+        )}
+        {update && !update.available && version && (
+          <div className="mt-1 text-sm text-muted-foreground">
+            <Check className="mr-1 inline h-3.5 w-3.5 text-sky-500" />
+            You're on the latest release.
+          </div>
+        )}
+      </div>
+
+      <div className="mt-2 flex flex-col gap-2">
+        <a
+          href={TIDEWAY_REPO_URL}
+          target="_blank"
+          rel="noreferrer noopener"
+          className="group flex items-center gap-3 rounded-md border border-border/50 bg-card/60 p-3 text-sm transition-colors hover:bg-accent/40"
+        >
+          <Code2 className="h-4 w-4 text-primary" />
+          <div className="flex-1">
+            <div className="font-semibold">GitHub repo</div>
+            <div className="text-xs text-muted-foreground">
+              Source code, releases, license.
+            </div>
+          </div>
+          <ExternalLink className="h-4 w-4 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
+        </a>
+        <a
+          href={`${TIDEWAY_REPO_URL}/issues/new`}
+          target="_blank"
+          rel="noreferrer noopener"
+          className="group flex items-center gap-3 rounded-md border border-border/50 bg-card/60 p-3 text-sm transition-colors hover:bg-accent/40"
+        >
+          <Bug className="h-4 w-4 text-primary" />
+          <div className="flex-1">
+            <div className="font-semibold">Report an issue</div>
+            <div className="text-xs text-muted-foreground">
+              Bug, regression, or feature request.
+            </div>
+          </div>
+          <ExternalLink className="h-4 w-4 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
+        </a>
+      </div>
+    </Section>
   );
 }
