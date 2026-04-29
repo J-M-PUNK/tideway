@@ -1700,6 +1700,29 @@ class PCMPlayer:
         self._stream_sd_dtype = dtype
         self._stream_channels = channels
 
+        # Diagnostic line for the audio open. Shows the exact rate /
+        # depth / channel count / host API / exclusive flag we ended
+        # up using. Critical for triaging Windows-side audio bugs
+        # where a stutter or freeze typically traces back to a rate
+        # mismatch between the decoder and the device, or to
+        # exclusive-mode being on for a device that only supports a
+        # subset of the rates we're feeding. Printed unconditionally
+        # so it lands in the user's console log without needing a
+        # debug flag — the volume is one line per stream open.
+        try:
+            dev_info = sd.query_devices(device, kind="output")
+            ha = sd.query_hostapis(dev_info.get("hostapi"))
+            ha_name = ha.get("name") if isinstance(ha, dict) else "?"
+        except Exception:
+            ha_name = "?"
+        print(
+            f"[audio] stream open: device={device} rate={sample_rate}Hz "
+            f"channels={channels} dtype={dtype!r} hostapi={ha_name!r} "
+            f"exclusive={self._exclusive_mode}",
+            file=sys.stderr,
+            flush=True,
+        )
+
         # Rebuild the EQ against the new sample rate. Preserves the
         # user's bands / preamp across tracks.
         self._eq = Equalizer(sample_rate=sample_rate, channels=channels)
@@ -1783,9 +1806,26 @@ class PCMPlayer:
 
     def _audio_callback(self, outdata, frames, time_info, status) -> None:
         if status:
-            # Under/overruns surface here. log.warning rather than
-            # print so it's controllable at runtime.
-            log.warning("sounddevice status: %s", status)
+            # Under/overruns surface here. Rate-limit to once per
+            # second so a sustained underrun (audio glitching every
+            # callback at 44.1k/512 = 86 Hz) doesn't spam stderr at
+            # full speed. The first message + heartbeat is what the
+            # user / dev needs; the count is what tells us how bad
+            # it got. Critical diagnostic on Windows where stutter
+            # complaints typically trace back here.
+            now = time.monotonic()
+            self._cb_status_count = getattr(self, "_cb_status_count", 0) + 1
+            last = getattr(self, "_cb_status_last_print", 0.0)
+            if now - last >= 1.0:
+                count = self._cb_status_count
+                self._cb_status_count = 0
+                self._cb_status_last_print = now
+                print(
+                    f"[audio] callback status={status} "
+                    f"(count_since_last={count})",
+                    file=sys.stderr,
+                    flush=True,
+                )
 
         # Rate-limited heartbeat so we can see the callback is
         # actually running + advancing. Logs once per second at
