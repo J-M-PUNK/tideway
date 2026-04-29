@@ -5517,8 +5517,21 @@ def video_proxy(u: str):
         raise HTTPException(
             status_code=400, detail="Proxy target must be a Tidal host"
         )
+    # Decide upfront whether this is a manifest or a media segment.
+    # Manifests need the full body in memory so we can parse + rewrite
+    # URLs; segments are big and stream through chunk-by-chunk. The
+    # signal lives in the URL (`.m3u8` extension) since the upstream
+    # Content-Type isn't reliable until after we've made the request.
+    likely_manifest = ".m3u8" in parsed.path.lower()
     try:
-        r = SESSION.get(u, stream=True, timeout=30)
+        # Manifests open WITHOUT stream=True so the full body lands in
+        # `r.text` / `r.content` synchronously. curl-cffi's stream=True
+        # path was returning empty bodies for some Tidal HLS manifests
+        # (200 OK, correct Content-Type, len=0) — verified via the
+        # video-proxy diagnostic log. The audio downloader gets away
+        # with stream=True because it reads via iter_content(); the
+        # text path on the same Response object is the broken one.
+        r = SESSION.get(u, stream=not likely_manifest, timeout=30)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc))
     if r.status_code >= 400:
@@ -5547,13 +5560,9 @@ def video_proxy(u: str):
             base_for_rewrite = getattr(r, "url", None) or u
         finally:
             r.close()
-        # Diagnostic: hls.js was rejecting bodies with "no EXTM3U
-        # delimiter" — the first line wasn't `#EXTM3U`. Could be a
-        # BOM, a JSON wrapper (Tidal sometimes ships base64-encoded
-        # protobuf manifests under a `.m3u8` URL), or HTML from an
-        # upstream redirect / error. Logging a head-of-body snapshot
-        # tells us exactly what came back so we can branch on it
-        # rather than blindly handing it to the rewriter.
+        # Diagnostic line — kept while we shake out the proxy. Once
+        # the curl-cffi stream-mode workaround above proves stable
+        # across the supported manifest formats this can be dropped.
         head = text[:200].replace("\n", "\\n").replace("\r", "\\r")
         print(
             f"[video-proxy] manifest u={u[:100]!r} "
