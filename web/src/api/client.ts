@@ -375,6 +375,16 @@ export const api = {
       "/api/update/install",
       { method: "POST" },
     ),
+  /** Write a diagnostic snapshot to ~/Downloads. Backed by an
+   *  unauthenticated endpoint so the user can capture state even
+   *  while signed out. Returns the absolute path of the file the
+   *  server wrote so the UI can toast it.
+   */
+  saveActivityReport: () =>
+    req<{ path: string; size_bytes: number; report_schema: number }>(
+      "/api/diagnostics/save-activity-report",
+      { method: "POST" },
+    ),
   playReportLog: () =>
     req<{
       entries: {

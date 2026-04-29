@@ -2,16 +2,22 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import {
   Bell,
+  Bug,
   Check,
   ChevronRight,
+  Code2,
   Download,
+  ExternalLink,
+  FileDown,
   Headphones,
   Import as ImportIcon,
+  Info,
   Keyboard,
   Library as LibraryIcon,
   Loader2,
   LogOut,
   Moon,
+  Music2,
   Palette,
   Power,
   Radio as RadioIcon,
@@ -25,6 +31,7 @@ import type { QualityOption, Settings } from "@/api/types";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useToast } from "@/components/toast";
 import { useOfflineMode } from "@/hooks/useOfflineMode";
 import {
@@ -37,10 +44,27 @@ import { cn } from "@/lib/utils";
 
 type SaveStatus = "idle" | "saving" | "saved" | "error";
 
+// Tab key persisted in sessionStorage so navigating away to another
+// page and coming back keeps you on the same settings section. We
+// don't put it in URL state because there's no use-case for deep-
+// linking specific settings tabs from external sources, and the URL
+// pollution would be visible whenever the user copies the address.
+const TAB_STORAGE_KEY = "tideway:settings-tab";
+const DEFAULT_TAB = "playback";
+
+function readInitialTab(): string {
+  try {
+    return sessionStorage.getItem(TAB_STORAGE_KEY) || DEFAULT_TAB;
+  } catch {
+    return DEFAULT_TAB;
+  }
+}
+
 export function SettingsPage({ onLogout }: { onLogout: () => void }) {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [qualities, setQualities] = useState<QualityOption[]>([]);
   const [status, setStatus] = useState<SaveStatus>("idle");
+  const [tab, setTab] = useState<string>(readInitialTab);
   const toast = useToast();
   const ui = useUiPreferences();
   // Pull out the setter rather than the whole context object: the
@@ -170,242 +194,313 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
 
   const patch = (p: Partial<Settings>) => setSettings({ ...settings, ...p });
 
+  const showAirPlay = import.meta.env.VITE_SHOW_AIRPLAY === "1";
+  const onTabChange = (next: string) => {
+    setTab(next);
+    try {
+      sessionStorage.setItem(TAB_STORAGE_KEY, next);
+    } catch {
+      // sessionStorage can throw in private-browsing contexts. The
+      // tab still works for the current visit; we just lose the
+      // sticky-across-navigation property.
+    }
+  };
+
   return (
-    <div className="max-w-2xl">
+    <div className="max-w-4xl">
       <h1 className="mb-8 flex items-center gap-3 text-3xl font-bold tracking-tight">
         <SettingsIcon className="h-7 w-7" /> Settings
       </h1>
 
-      <Section title="Playback" icon={Headphones}>
-        <Field label="Streaming quality">
-          <select
-            value={
-              // Clamp the stored value against the filtered list so a
-              // stale "hi_res_lossless" pref doesn't show an off-list
-              // value after a subscription downgrade.
-              qualities.some((q) => q.value === ui.streamingQuality)
-                ? ui.streamingQuality
-                : (qualities[0]?.value ?? "low_320k")
-            }
-            onChange={(e) =>
-              ui.set({ streamingQuality: e.target.value as StreamingQuality })
-            }
-            className="h-10 rounded-md border border-input bg-secondary px-3 text-sm"
-          >
-            {qualities.map((q) => (
-              <option key={q.value} value={q.value}>
-                {q.label} — {q.bitrate}
-              </option>
-            ))}
-          </select>
-        </Field>
-        <AudioEngineFields />
-        <Field
-          label="Explicit content"
-          hint="Tidal returns both clean and explicit edits of the same album or track. Pick which copy you want to see when both exist."
-        >
-          <select
-            value={settings.explicit_content_preference}
-            onChange={(e) =>
-              patch({
-                explicit_content_preference: e.target
-                  .value as Settings["explicit_content_preference"],
-              })
-            }
-            className="h-10 rounded-md border border-input bg-secondary px-3 text-sm"
-          >
-            <option value="explicit">Show explicit</option>
-            <option value="clean">Show clean</option>
-            <option value="both">Show both</option>
-          </select>
-        </Field>
-        <Toggle
-          checked={settings.continue_with_artist_radio_after_album}
-          onChange={(v) => patch({ continue_with_artist_radio_after_album: v })}
-          label="After an album ends, continue with artist radio"
-          hint="When off, the player pauses on the album's first track so you can press Play to repeat. When on, it queues an Artist Radio mix from the album's primary artist."
-        />
-      </Section>
-
-      {import.meta.env.VITE_SHOW_AIRPLAY === "1" && <AirPlaySection />}
-
-      <Section
-        title="Downloads"
-        icon={Download}
-        description="Where and how your music is saved to disk."
+      <Tabs
+        orientation="vertical"
+        value={tab}
+        onValueChange={onTabChange}
+        className="flex gap-8"
       >
-        <Field label="Output folder">
-          <Input
-            value={settings.output_dir}
-            onChange={(e) => patch({ output_dir: e.target.value })}
-            placeholder="/path/to/music"
+        <TabsList className="sticky top-4 flex w-48 shrink-0 flex-col items-stretch gap-1 self-start">
+          <SettingsTab value="playback" icon={Headphones} label="Playback" />
+          <SettingsTab value="downloads" icon={Download} label="Downloads" />
+          <SettingsTab value="library" icon={LibraryIcon} label="Library" />
+          <SettingsTab value="import" icon={ImportIcon} label="Import" />
+          <SettingsTab value="appearance" icon={Palette} label="Appearance" />
+          <SettingsTab
+            value="notifications"
+            icon={Bell}
+            label="Notifications"
           />
-        </Field>
+          <SettingsTab value="autostart" icon={Power} label="Launch on login" />
+          <SettingsTab value="lastfm" icon={Music2} label="Last.fm" />
+          <SettingsTab value="shortcuts" icon={Keyboard} label="Shortcuts" />
+          {showAirPlay && (
+            <SettingsTab value="airplay" icon={RadioIcon} label="AirPlay" />
+          )}
+          <SettingsTab value="about" icon={Info} label="About" />
+        </TabsList>
 
-        <Field label="Videos folder">
-          <Input
-            value={settings.videos_dir}
-            onChange={(e) => patch({ videos_dir: e.target.value })}
-            placeholder="/path/to/videos"
-          />
-        </Field>
+        <div className="min-w-0 flex-1">
+          <TabsContent value="playback" className="mt-0">
+            <Section title="Playback" icon={Headphones}>
+              <Field label="Streaming quality">
+                <select
+                  value={
+                    // Clamp the stored value against the filtered list so a
+                    // stale "hi_res_lossless" pref doesn't show an off-list
+                    // value after a subscription downgrade.
+                    qualities.some((q) => q.value === ui.streamingQuality)
+                      ? ui.streamingQuality
+                      : (qualities[0]?.value ?? "low_320k")
+                  }
+                  onChange={(e) =>
+                    ui.set({
+                      streamingQuality: e.target.value as StreamingQuality,
+                    })
+                  }
+                  className="h-10 rounded-md border border-input bg-secondary px-3 text-sm"
+                >
+                  {qualities.map((q) => (
+                    <option key={q.value} value={q.value}>
+                      {q.label} — {q.bitrate}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+              <AudioEngineFields />
+              <Field
+                label="Explicit content"
+                hint="Tidal returns both clean and explicit edits of the same album or track. Pick which copy you want to see when both exist."
+              >
+                <select
+                  value={settings.explicit_content_preference}
+                  onChange={(e) =>
+                    patch({
+                      explicit_content_preference: e.target
+                        .value as Settings["explicit_content_preference"],
+                    })
+                  }
+                  className="h-10 rounded-md border border-input bg-secondary px-3 text-sm"
+                >
+                  <option value="explicit">Show explicit</option>
+                  <option value="clean">Show clean</option>
+                  <option value="both">Show both</option>
+                </select>
+              </Field>
+              <Toggle
+                checked={settings.continue_with_artist_radio_after_album}
+                onChange={(v) =>
+                  patch({ continue_with_artist_radio_after_album: v })
+                }
+                label="After an album ends, continue with artist radio"
+                hint="When off, the player pauses on the album's first track so you can press Play to repeat. When on, it queues an Artist Radio mix from the album's primary artist."
+              />
+            </Section>
+          </TabsContent>
 
-        <Field
-          label="Filename template"
-          hint={
-            <>
-              Tokens: <code>{"{artist}"}</code> <code>{"{title}"}</code>{" "}
-              <code>{"{album}"}</code> <code>{"{track_num}"}</code>
-            </>
-          }
-        >
-          <Input
-            value={settings.filename_template}
-            onChange={(e) => patch({ filename_template: e.target.value })}
-            placeholder="{artist} - {title}"
-          />
-        </Field>
+          {showAirPlay && (
+            <TabsContent value="airplay" className="mt-0">
+              <AirPlaySection />
+            </TabsContent>
+          )}
 
-        <Toggle
-          checked={settings.create_album_folders}
-          onChange={(v) => patch({ create_album_folders: v })}
-          label="Create a subfolder per album"
-        />
-        <Toggle
-          checked={settings.skip_existing}
-          onChange={(v) => patch({ skip_existing: v })}
-          label="Skip downloads that already exist on disk"
-        />
-        <Field
-          label={`Concurrent downloads — ${settings.concurrent_downloads}`}
-          hint="How many tracks download in parallel. Higher = faster, but risks Tidal rate-limiting."
-        >
-          <input
-            type="range"
-            min={1}
-            max={10}
-            step={1}
-            value={settings.concurrent_downloads}
-            onChange={(e) =>
-              patch({ concurrent_downloads: Number(e.target.value) })
-            }
-            className="h-2 w-full cursor-pointer appearance-none rounded-full bg-secondary accent-primary"
-            aria-label="Concurrent downloads"
-          />
-        </Field>
-        <Field
-          label={
-            settings.download_rate_limit_mbps > 0
-              ? `Download speed limit — ${settings.download_rate_limit_mbps} MB/s`
-              : "Download speed limit — unlimited"
-          }
-          hint="Capping your download rate makes the pattern look like aggressive prefetch instead of a scrape, the single most effective thing you can do to keep your Tidal account out of the anti-abuse bucket. Default 10 MB/s downloads a 4-minute Max track in about 4 seconds. Set to 0 for unlimited if you've accepted the ban risk."
-        >
-          <input
-            type="range"
-            min={0}
-            max={50}
-            step={5}
-            value={settings.download_rate_limit_mbps}
-            onChange={(e) =>
-              patch({ download_rate_limit_mbps: Number(e.target.value) })
-            }
-            className="h-2 w-full cursor-pointer appearance-none rounded-full bg-secondary accent-primary"
-            aria-label="Download speed limit"
-          />
-        </Field>
-      </Section>
+          <TabsContent value="downloads" className="mt-0">
+            <Section
+              title="Downloads"
+              icon={Download}
+              description="Where and how your music is saved to disk."
+            >
+              <Field label="Output folder">
+                <Input
+                  value={settings.output_dir}
+                  onChange={(e) => patch({ output_dir: e.target.value })}
+                  placeholder="/path/to/music"
+                />
+              </Field>
 
-      <Section
-        title="Library"
-        icon={LibraryIcon}
-        description="What shows up in your library and whether the app talks to Tidal."
-      >
-        <Toggle
-          checked={ui.offlineOnly}
-          onChange={(v) => ui.set({ offlineOnly: v })}
-          label="Show only downloaded tracks in lists"
-        />
-        <Toggle
-          checked={settings.offline_mode}
-          onChange={(v) => patch({ offline_mode: v })}
-          label="Work offline (hide search, explore, anything needing Tidal)"
-        />
-      </Section>
+              <Field label="Videos folder">
+                <Input
+                  value={settings.videos_dir}
+                  onChange={(e) => patch({ videos_dir: e.target.value })}
+                  placeholder="/path/to/videos"
+                />
+              </Field>
 
-      <Section
-        title="Import"
-        icon={ImportIcon}
-        description="Bring in playlists, liked songs, saved albums, and followed artists from Spotify, Deezer, or M3U / text files."
-      >
-        <Link
-          to="/import"
-          className="group flex items-center gap-3 rounded-md border border-border/50 bg-card/60 p-3 text-sm transition-colors hover:bg-accent/40"
-        >
-          <ImportIcon className="h-4 w-4 text-primary" />
-          <div className="flex-1">
-            <div className="font-semibold">Open import hub</div>
-            <div className="text-xs text-muted-foreground">
-              Pick what you want to import and which specific items to bring
-              over.
-            </div>
-          </div>
-          <ChevronRight className="h-4 w-4 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
-        </Link>
-        <Toggle
-          checked={!ui.importLinkDismissed}
-          onChange={(v) => ui.set({ importLinkDismissed: !v })}
-          label="Show Import in the sidebar"
-        />
-      </Section>
+              <Field
+                label="Filename template"
+                hint={
+                  <>
+                    Tokens: <code>{"{artist}"}</code> <code>{"{title}"}</code>{" "}
+                    <code>{"{album}"}</code> <code>{"{track_num}"}</code>
+                  </>
+                }
+              >
+                <Input
+                  value={settings.filename_template}
+                  onChange={(e) => patch({ filename_template: e.target.value })}
+                  placeholder="{artist} - {title}"
+                />
+              </Field>
 
-      <Section title="Appearance" icon={Palette}>
-        <Field label="Theme">
-          <ThemePicker
-            value={ui.theme}
-            onChange={(t) => ui.set({ theme: t })}
-          />
-        </Field>
-      </Section>
+              <Toggle
+                checked={settings.create_album_folders}
+                onChange={(v) => patch({ create_album_folders: v })}
+                label="Create a subfolder per album"
+              />
+              <Toggle
+                checked={settings.skip_existing}
+                onChange={(v) => patch({ skip_existing: v })}
+                label="Skip downloads that already exist on disk"
+              />
+              <Field
+                label={`Concurrent downloads — ${settings.concurrent_downloads}`}
+                hint="How many tracks download in parallel. Higher = faster, but risks Tidal rate-limiting."
+              >
+                <input
+                  type="range"
+                  min={1}
+                  max={10}
+                  step={1}
+                  value={settings.concurrent_downloads}
+                  onChange={(e) =>
+                    patch({ concurrent_downloads: Number(e.target.value) })
+                  }
+                  className="h-2 w-full cursor-pointer appearance-none rounded-full bg-secondary accent-primary"
+                  aria-label="Concurrent downloads"
+                />
+              </Field>
+              <Field
+                label={
+                  settings.download_rate_limit_mbps > 0
+                    ? `Download speed limit — ${settings.download_rate_limit_mbps} MB/s`
+                    : "Download speed limit — unlimited"
+                }
+                hint="Capping your download rate makes the pattern look like aggressive prefetch instead of a scrape, the single most effective thing you can do to keep your Tidal account out of the anti-abuse bucket. Default 10 MB/s downloads a 4-minute Max track in about 4 seconds. Set to 0 for unlimited if you've accepted the ban risk."
+              >
+                <input
+                  type="range"
+                  min={0}
+                  max={50}
+                  step={5}
+                  value={settings.download_rate_limit_mbps}
+                  onChange={(e) =>
+                    patch({ download_rate_limit_mbps: Number(e.target.value) })
+                  }
+                  className="h-2 w-full cursor-pointer appearance-none rounded-full bg-secondary accent-primary"
+                  aria-label="Download speed limit"
+                />
+              </Field>
+            </Section>
+          </TabsContent>
 
-      <Section
-        title="Notifications"
-        icon={Bell}
-        description="Native OS notifications. Track-change notifications only fire when the window is unfocused, so the in-app now-playing bar isn't duplicated by a bezel."
-      >
-        <Toggle
-          checked={settings.notify_on_complete}
-          onChange={(v) => patch({ notify_on_complete: v })}
-          label="Notify me when downloads finish"
-        />
-        <Toggle
-          checked={settings.notify_on_track_change}
-          onChange={(v) => patch({ notify_on_track_change: v })}
-          label="Notify me when the track changes (while the window is unfocused)"
-        />
-      </Section>
+          <TabsContent value="library" className="mt-0">
+            <Section
+              title="Library"
+              icon={LibraryIcon}
+              description="What shows up in your library and whether the app talks to Tidal."
+            >
+              <Toggle
+                checked={ui.offlineOnly}
+                onChange={(v) => ui.set({ offlineOnly: v })}
+                label="Show only downloaded tracks in lists"
+              />
+              <Toggle
+                checked={settings.offline_mode}
+                onChange={(v) => patch({ offline_mode: v })}
+                label="Work offline (hide search, explore, anything needing Tidal)"
+              />
+            </Section>
+          </TabsContent>
 
-      <AutostartSection settings={settings} patch={patch} />
+          <TabsContent value="import" className="mt-0">
+            <Section
+              title="Import"
+              icon={ImportIcon}
+              description="Bring in playlists, liked songs, saved albums, and followed artists from Spotify, Deezer, or M3U / text files."
+            >
+              <Link
+                to="/import"
+                className="group flex items-center gap-3 rounded-md border border-border/50 bg-card/60 p-3 text-sm transition-colors hover:bg-accent/40"
+              >
+                <ImportIcon className="h-4 w-4 text-primary" />
+                <div className="flex-1">
+                  <div className="font-semibold">Open import hub</div>
+                  <div className="text-xs text-muted-foreground">
+                    Pick what you want to import and which specific items to
+                    bring over.
+                  </div>
+                </div>
+                <ChevronRight className="h-4 w-4 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
+              </Link>
+              <Toggle
+                checked={!ui.importLinkDismissed}
+                onChange={(v) => ui.set({ importLinkDismissed: !v })}
+                label="Show Import in the sidebar"
+              />
+            </Section>
+          </TabsContent>
 
-      <LastFmSection />
+          <TabsContent value="appearance" className="mt-0">
+            <Section title="Appearance" icon={Palette}>
+              <Field label="Theme">
+                <ThemePicker
+                  value={ui.theme}
+                  onChange={(t) => ui.set({ theme: t })}
+                />
+              </Field>
+            </Section>
+          </TabsContent>
 
-      <Section
-        title="Keyboard shortcuts"
-        icon={Keyboard}
-        description="Window must be focused for these to fire. Media keys (Play/Pause/Next/Prev) also work globally — the app listens for them even when minimized."
-      >
-        <ShortcutRow keys={["⌘", "K"]} label="Search / command palette" />
-        <ShortcutRow keys={["⌘", ","]} label="Open Settings" />
-        <ShortcutRow keys={["Space"]} label="Play / pause" />
-        <ShortcutRow keys={["Shift", "→"]} label="Next track" />
-        <ShortcutRow keys={["Shift", "←"]} label="Previous track" />
-        <ShortcutRow keys={["↑"]} label="Volume up" />
-        <ShortcutRow keys={["↓"]} label="Volume down" />
-        <ShortcutRow keys={["M"]} label="Mute / unmute" />
-        <ShortcutRow keys={["S"]} label="Toggle shuffle" />
-        <ShortcutRow keys={["R"]} label="Cycle repeat" />
-        <ShortcutRow keys={["L"]} label="Like / unlike current track" />
-      </Section>
+          <TabsContent value="notifications" className="mt-0">
+            <Section
+              title="Notifications"
+              icon={Bell}
+              description="Native OS notifications. Track-change notifications only fire when the window is unfocused, so the in-app now-playing bar isn't duplicated by a bezel."
+            >
+              <Toggle
+                checked={settings.notify_on_complete}
+                onChange={(v) => patch({ notify_on_complete: v })}
+                label="Notify me when downloads finish"
+              />
+              <Toggle
+                checked={settings.notify_on_track_change}
+                onChange={(v) => patch({ notify_on_track_change: v })}
+                label="Notify me when the track changes (while the window is unfocused)"
+              />
+            </Section>
+          </TabsContent>
+
+          <TabsContent value="autostart" className="mt-0">
+            <AutostartSection settings={settings} patch={patch} />
+          </TabsContent>
+
+          <TabsContent value="lastfm" className="mt-0">
+            <LastFmSection />
+          </TabsContent>
+
+          <TabsContent value="shortcuts" className="mt-0">
+            <Section
+              title="Keyboard shortcuts"
+              icon={Keyboard}
+              description="Window must be focused for these to fire. Media keys (Play/Pause/Next/Prev) also work globally — the app listens for them even when minimized."
+            >
+              <ShortcutRow keys={["⌘", "K"]} label="Search / command palette" />
+              <ShortcutRow keys={["⌘", ","]} label="Open Settings" />
+              <ShortcutRow keys={["Space"]} label="Play / pause" />
+              <ShortcutRow keys={["Shift", "→"]} label="Next track" />
+              <ShortcutRow keys={["Shift", "←"]} label="Previous track" />
+              <ShortcutRow keys={["↑"]} label="Volume up" />
+              <ShortcutRow keys={["↓"]} label="Volume down" />
+              <ShortcutRow keys={["M"]} label="Mute / unmute" />
+              <ShortcutRow keys={["S"]} label="Toggle shuffle" />
+              <ShortcutRow keys={["R"]} label="Cycle repeat" />
+              <ShortcutRow keys={["L"]} label="Like / unlike current track" />
+            </Section>
+          </TabsContent>
+
+          <TabsContent value="about" className="mt-0">
+            <AboutSection />
+          </TabsContent>
+        </div>
+      </Tabs>
 
       <div className="mt-8 flex items-center gap-3">
         <Button variant="outline" onClick={onLogout}>
@@ -414,6 +509,32 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
         <SaveStatus status={status} />
       </div>
     </div>
+  );
+}
+
+/**
+ * Vertical-rail tab trigger. Wraps Radix's TabsTrigger but overrides
+ * the default centered-pill style so the rail's items sit flush left
+ * and span the rail width. The active state inverts to the foreground
+ * tone so the selected tab stands out against the dark rail.
+ */
+function SettingsTab({
+  value,
+  icon: Icon,
+  label,
+}: {
+  value: string;
+  icon: typeof Bell;
+  label: string;
+}) {
+  return (
+    <TabsTrigger
+      value={value}
+      className="!justify-start !rounded-md !px-3 !py-2 text-left text-sm font-medium text-muted-foreground hover:!bg-accent/40 data-[state=active]:!bg-accent data-[state=active]:!text-foreground"
+    >
+      <Icon className="mr-2 h-4 w-4 shrink-0" />
+      {label}
+    </TabsTrigger>
   );
 }
 
@@ -1445,5 +1566,174 @@ function ShortcutRow({ keys, label }: { keys: string[]; label: string }) {
         ))}
       </div>
     </div>
+  );
+}
+
+// Public repo. Used both as the source-code link and the destination
+// for "Report an issue" — the issue tracker lives there. Keeping it
+// as a single const here means a fork only has to retag this one
+// place to point links at their own infrastructure.
+const TIDEWAY_REPO_URL = "https://github.com/J-M-PUNK/tideway";
+
+/**
+ * About tab — version, update status, and outbound links to the
+ * project repo and issue tracker. Reuses the same /api/version and
+ * /api/update-check endpoints that drive the in-app update banner,
+ * so what shows here is consistent with the banner's logic. The
+ * panel does its own fetches because Settings doesn't otherwise
+ * need version data — there's no shared store to subscribe to.
+ */
+function AboutSection() {
+  const toast = useToast();
+  const [version, setVersion] = useState<string | null>(null);
+  const [update, setUpdate] = useState<{
+    available: boolean;
+    latest: string | null;
+    url: string | null;
+  } | null>(null);
+  const [savingReport, setSavingReport] = useState(false);
+
+  const saveReport = async () => {
+    if (savingReport) return;
+    setSavingReport(true);
+    try {
+      const res = await api.saveActivityReport();
+      // Quote the full path back to the user — they need to be able
+      // to attach this file to a bug report. Long paths wrap in the
+      // toast description, which is fine.
+      toast.show({
+        kind: "success",
+        title: "Activity report saved",
+        description: res.path,
+      });
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: "Couldn't save activity report",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setSavingReport(false);
+    }
+  };
+
+  useEffect(() => {
+    let cancelled = false;
+    api
+      .version()
+      .then((r) => {
+        if (!cancelled) setVersion(r.version);
+      })
+      .catch(() => {
+        if (!cancelled) setVersion(null);
+      });
+    api
+      .updateCheck()
+      .then((r) => {
+        if (!cancelled)
+          setUpdate({
+            available: r.available,
+            latest: r.latest,
+            url: r.url,
+          });
+      })
+      .catch(() => {
+        // Update probe failed (offline, GitHub rate limit, repo
+        // private). Show "version only" rather than a misleading
+        // "up to date".
+        if (!cancelled) setUpdate(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return (
+    <Section title="About" icon={Info}>
+      <div className="flex flex-col gap-1">
+        <div className="text-sm text-muted-foreground">Version</div>
+        <div className="text-2xl font-bold tracking-tight">
+          {version ? `Tideway ${version}` : "Tideway"}
+        </div>
+        {update && update.available && update.latest && (
+          <div className="mt-1 flex items-center gap-2 text-sm">
+            <span className="rounded bg-primary/15 px-2 py-0.5 text-xs font-semibold uppercase tracking-wider text-primary">
+              Update available
+            </span>
+            <span className="text-muted-foreground">
+              {update.latest} is out
+            </span>
+            {update.url && (
+              <a
+                href={update.url}
+                target="_blank"
+                rel="noreferrer noopener"
+                className="inline-flex items-center gap-1 text-primary hover:underline"
+              >
+                Release notes <ExternalLink className="h-3 w-3" />
+              </a>
+            )}
+          </div>
+        )}
+        {update && !update.available && version && (
+          <div className="mt-1 text-sm text-muted-foreground">
+            <Check className="mr-1 inline h-3.5 w-3.5 text-sky-500" />
+            You're on the latest release.
+          </div>
+        )}
+      </div>
+
+      <div className="mt-2 flex flex-col gap-2">
+        <a
+          href={TIDEWAY_REPO_URL}
+          target="_blank"
+          rel="noreferrer noopener"
+          className="group flex items-center gap-3 rounded-md border border-border/50 bg-card/60 p-3 text-sm transition-colors hover:bg-accent/40"
+        >
+          <Code2 className="h-4 w-4 text-primary" />
+          <div className="flex-1">
+            <div className="font-semibold">GitHub repo</div>
+            <div className="text-xs text-muted-foreground">
+              Source code, releases, license.
+            </div>
+          </div>
+          <ExternalLink className="h-4 w-4 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
+        </a>
+        <a
+          href={`${TIDEWAY_REPO_URL}/issues/new`}
+          target="_blank"
+          rel="noreferrer noopener"
+          className="group flex items-center gap-3 rounded-md border border-border/50 bg-card/60 p-3 text-sm transition-colors hover:bg-accent/40"
+        >
+          <Bug className="h-4 w-4 text-primary" />
+          <div className="flex-1">
+            <div className="font-semibold">Report an issue</div>
+            <div className="text-xs text-muted-foreground">
+              Bug, regression, or feature request.
+            </div>
+          </div>
+          <ExternalLink className="h-4 w-4 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
+        </a>
+        <button
+          type="button"
+          onClick={saveReport}
+          disabled={savingReport}
+          className="group flex items-center gap-3 rounded-md border border-border/50 bg-card/60 p-3 text-left text-sm transition-colors hover:bg-accent/40 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          {savingReport ? (
+            <Loader2 className="h-4 w-4 animate-spin text-primary" />
+          ) : (
+            <FileDown className="h-4 w-4 text-primary" />
+          )}
+          <div className="flex-1">
+            <div className="font-semibold">Save activity report</div>
+            <div className="text-xs text-muted-foreground">
+              Writes a JSON snapshot to your Downloads folder. Useful for
+              attaching to a bug report. Settings credentials are stripped.
+            </div>
+          </div>
+        </button>
+      </div>
+    </Section>
   );
 }
