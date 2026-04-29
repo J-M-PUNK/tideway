@@ -1,7 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import {
-  Compass,
   Disc3,
   Download,
   Heart,
@@ -115,14 +114,6 @@ export function CommandPalette({
         hint: "Go to home",
         icon: Music,
         run: () => navigate("/"),
-      },
-      {
-        kind: "action",
-        id: "go-explore",
-        title: "Explore",
-        hint: "Browse genres and moods",
-        icon: Compass,
-        run: () => navigate("/explore"),
       },
       {
         kind: "action",
