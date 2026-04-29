@@ -1975,6 +1975,34 @@ class PCMPlayer:
             # Never let AirPlay errors take down local playback.
             pass
 
+        # Cast tap. Same pre-EQ / pre-volume position as AirPlay —
+        # the Cast device has its own volume control, so muting
+        # locally shouldn't silence the remote speaker. The
+        # is_active() probe is lock-free in the common 'no
+        # session' case, so the cost when nobody's casting is one
+        # attribute read per audio callback. Skipped for float32
+        # sources because FLAC is integer-only; in practice every
+        # Tidal source decodes to int16 or int32, so the float
+        # skip is a safety net rather than a normal code path.
+        try:
+            from app.audio import cast as _cast_mod
+            if _cast_mod.cast_manager.is_active():
+                if outdata.dtype == np.int16:
+                    _dtype_name = "int16"
+                elif outdata.dtype == np.int32:
+                    _dtype_name = "int32"
+                else:
+                    _dtype_name = None
+                if _dtype_name is not None:
+                    _cast_mod.cast_manager.push_pcm(
+                        np.ascontiguousarray(outdata),
+                        sample_rate=self._stream_sample_rate or 44100,
+                        dtype=_dtype_name,
+                    )
+        except Exception:
+            # Never let Cast errors take down local playback.
+            pass
+
         # EQ (10-band biquad). Active only when the user has a
         # non-flat curve set — when disabled, `apply()` is an early
         # return and doesn't touch `outdata`, so bit-perfect

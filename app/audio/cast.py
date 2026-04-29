@@ -1,34 +1,35 @@
 """Chromecast sender.
 
-Discovers Cast devices on the LAN, exposes them to the frontend
-as a picker, and (in a later phase of this work) routes Tideway's
-audio to a selected device by handing the Cast Default Media
-Receiver an HTTP URL serving Tideway's encoded stream.
+Discovers Cast devices on the LAN and routes Tideway's audio to a
+selected device by handing the Cast Default Media Receiver an HTTP
+URL serving Tideway's encoded stream.
 
-The Cast story splits into two responsibilities. This file owns
-both behind one process-wide singleton:
+The module owns three responsibilities behind a process-wide
+singleton (`cast_manager`):
 
   Discovery — keep an up-to-date list of Cast devices on the LAN.
               pychromecast's `CastBrowser` does the mDNS work; we
-              translate its callbacks into a thread-safe dict and
-              hand snapshots to the API layer. Discovery is cheap
-              and runs continuously so the picker is up-to-date
-              when the user opens it.
+              translate its callbacks into a thread-safe dict.
 
-  Session   — once the user picks a device, connect to it, send
-              `play_media` against the encoded-stream URL, and
-              relay state changes (paused, volume, disconnect)
-              back to the player engine. This part lands in a
-              follow-up commit; right now we expose discovery
-              only so the picker has something real to show
-              before any audio routing exists.
+  Session   — a single `CastSession` represents the live connection
+              to one chosen device. Owns the FLAC encoder, the
+              ring buffer, and the LAN-reachable HTTP server that
+              the Cast device pulls audio from. Issues `play_media`
+              against the URL once everything's wired.
 
-The module mirrors `app/audio/upnp.py`'s pattern of degrading
-gracefully when the optional dep is missing — if pychromecast
-fails to import (wheel mismatch, hostile pip environment, etc.)
-the manager still constructs but `list_devices()` returns []
-and `start_discovery()` is a no-op. The rest of the app boots
-fine; the picker just shows "no Cast devices found."
+  PCM tap   — `push_pcm()` is called from PCMPlayer's audio
+              callback when a session is active. The PCM goes into
+              the FLAC encoder which fills the ring buffer; the
+              HTTP server hands those bytes to the Cast device.
+
+The module degrades gracefully when pychromecast is missing — if
+the wheel doesn't import, the manager constructs but every public
+method is a no-op. The picker just shows empty.
+
+There is exactly one Cast session at a time. Switching to a new
+device tears down the old session before connecting the new one.
+Cast doesn't have a multi-room concept the way Spotify Connect
+does, so a single-session model maps cleanly to what users expect.
 """
 from __future__ import annotations
 
@@ -36,24 +37,43 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Callable, Optional
+
+import numpy as np
+
+from app.audio.http_stream import (
+    FlacStreamEncoder,
+    RingBuffer,
+    StreamHTTPServer,
+    primary_lan_ip,
+    start_stream_http_server,
+)
 
 log = logging.getLogger(__name__)
 
 # pychromecast is an optional dep — if the wheel is unavailable
-# (it isn't, on the platforms we ship to today, but pip environments
-# in the wild are unpredictable) the rest of the audio stack still
-# works. The Cast picker will just show as empty in the UI.
+# the rest of the audio stack still works. The Cast picker just
+# shows as empty in the UI.
 try:
     import pychromecast
+    from pychromecast import Chromecast
     from pychromecast.discovery import CastBrowser, SimpleCastListener
     import zeroconf
 
     _CAST_AVAILABLE = True
 except Exception as _exc:  # pragma: no cover - environment dependent
     log.warning("pychromecast unavailable: %s", _exc)
+    pychromecast = None  # type: ignore
+    Chromecast = None  # type: ignore
+    CastBrowser = None  # type: ignore
+    SimpleCastListener = None  # type: ignore
+    zeroconf = None  # type: ignore
     _CAST_AVAILABLE = False
 
+
+# ---------------------------------------------------------------------
+# Device record
+# ---------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class CastDevice:
@@ -64,8 +84,8 @@ class CastDevice:
     device firmware. We use it as the persistence key for "remember
     last device." `friendly_name` is what the user sees ("Living
     Room speaker", "Kitchen Nest Mini"). The rest is metadata that
-    helps disambiguate (two Nest Minis next to each other) and
-    is logged for support purposes.
+    helps disambiguate (two Nest Minis next to each other) and is
+    logged for support purposes.
     """
 
     id: str
@@ -94,19 +114,61 @@ def is_audio_only(device: CastDevice) -> bool:
     return device.cast_type in _AUDIO_CAST_TYPES
 
 
+# ---------------------------------------------------------------------
+# CastSession — the live connection to one device
+# ---------------------------------------------------------------------
+
+# Configuration the session passes through to the FLAC encoder. PCMPlayer
+# emits audio at the source's native rate / dtype; the encoder receives
+# whatever shape arrives. The Cast Default Media Receiver supports FLAC
+# at 44.1k / 48k natively and most receivers up-convert hi-res down on
+# their own DAC, so we encode at the source rate and let the device
+# decide its ceiling.
+@dataclass
+class _SessionState:
+    device: CastDevice
+    cast: object  # pychromecast.Chromecast, kept opaque so type-check
+                  # doesn't complain when the optional dep is missing
+    buffer: RingBuffer = field(default_factory=RingBuffer)
+    http_server: Optional[StreamHTTPServer] = None
+    encoder: Optional[FlacStreamEncoder] = None
+    encoder_lock: threading.Lock = field(default_factory=threading.Lock)
+    # Last sample-rate / channel / dtype we built the encoder for.
+    # When PCMPlayer's source rate changes (track change, resample
+    # mode flip), the encoder has to be rebuilt to match the new
+    # input. We compare on every push and rebuild when these drift.
+    encoder_rate: int = 0
+    encoder_channels: int = 0
+    encoder_dtype: str = ""
+    # Bytes of FLAC successfully fed to the buffer since the session
+    # opened. Surfaces in the diagnostic endpoint so a stalled
+    # session shows up as "0 bytes encoded" instead of looking
+    # silently broken.
+    bytes_encoded: int = 0
+    # Set once `play_media` has been issued. Before that we're
+    # encoding into the buffer but the receiver hasn't been told
+    # to fetch it yet — useful state to surface for diagnostics.
+    media_loaded: bool = False
+    # The media stream URL we handed the device. Logged for support.
+    stream_url: str = ""
+
+
+# ---------------------------------------------------------------------
+# CastManager — process-wide owner
+# ---------------------------------------------------------------------
+
 class CastManager:
-    """Process-wide owner of Cast discovery.
+    """Process-wide owner of Cast discovery + the active session.
 
-    Construct once at server boot. `start_discovery()` is non-
-    blocking and spawns a zeroconf browser thread; the manager
-    accumulates devices as they appear and prunes them on the
-    `remove_cast` callback. `list_devices()` returns a snapshot
-    that's safe to hand to a request thread.
+    Construct once at server boot. Discovery starts on
+    `start_discovery()` and runs continuously. `connect(device_id)`
+    opens a session against a discovered device. `push_pcm()` feeds
+    PCM samples into the active session's encoder; called from
+    PCMPlayer's audio callback. `is_active()` is the cheap probe
+    that callback uses to decide whether to even reach for the lock.
 
-    Stopping is best-effort: zeroconf's browser holds OS-level
-    sockets and can take a moment to release. We don't block
-    server shutdown on it — the daemon flag handles cleanup if
-    the OS reaps us before zeroconf finishes.
+    There is at most one session. `connect()` to a different device
+    tears the existing session down first.
     """
 
     def __init__(self) -> None:
@@ -114,18 +176,23 @@ class CastManager:
         self._devices: dict[str, CastDevice] = {}
         self._browser: Optional["CastBrowser"] = None
         self._zconf: Optional["zeroconf.Zeroconf"] = None
-        # Track the last time we received an "add_cast" or
-        # "update_cast" callback for any device. Useful for the
-        # diagnostic endpoint that reports "discovery has been
-        # quiet for N seconds, are you on the right network?"
         self._last_event_at: float = 0.0
 
-    # ---- lifecycle --------------------------------------------------
+        # Active session and its protector. Held under a separate
+        # lock from the discovery dict so a slow connect() doesn't
+        # block list_devices() callers.
+        self._session_lock = threading.Lock()
+        self._session: Optional[_SessionState] = None
+
+        # External "session changed" listeners. SSE bus subscribes
+        # so the frontend's NowPlaying can show "casting to X" /
+        # "stopped casting" without polling.
+        self._listeners: list[Callable[[Optional[CastDevice]], None]] = []
+
+    # ---- discovery lifecycle ---------------------------------------
 
     def start_discovery(self) -> None:
-        """Begin browsing for Cast devices on the LAN. Idempotent —
-        a second call while the browser is already running is a
-        no-op (logs a debug line)."""
+        """Begin browsing for Cast devices on the LAN. Idempotent."""
         if not _CAST_AVAILABLE:
             print("[cast] pychromecast unavailable, discovery skipped",
                   flush=True)
@@ -148,18 +215,24 @@ class CastManager:
                 # Zeroconf can fail to bind on locked-down networks
                 # (managed corporate Wi-Fi, VPNs that block multicast)
                 # or if another process has the mDNS port. Fall
-                # through with no browser — list_devices() returns
-                # [] and the picker shows empty, which is the right
-                # UX for "no Cast devices reachable."
+                # through with no browser; list_devices() returns []
+                # and the picker is empty, which is the right UX for
+                # "no Cast devices reachable."
                 print(f"[cast] discovery failed to start: {exc!r}",
                       flush=True)
                 self._zconf = None
                 self._browser = None
 
     def stop_discovery(self) -> None:
-        """Tear down discovery. Called from the FastAPI shutdown
-        hook — keeps zeroconf from leaking sockets across process
-        restarts in dev runs."""
+        """Tear down discovery and any active session. Called from
+        the FastAPI shutdown hook."""
+        # Disconnect first; the session uses zeroconf indirectly
+        # via pychromecast's connection logic, and we want a clean
+        # session shutdown before zeroconf tears down its sockets.
+        try:
+            self.disconnect()
+        except Exception as exc:
+            log.debug("cast disconnect during shutdown failed: %r", exc)
         with self._lock:
             browser = self._browser
             zconf = self._zconf
@@ -176,13 +249,10 @@ class CastManager:
             except Exception as exc:
                 log.debug("zeroconf close failed: %r", exc)
 
-    # ---- public surface --------------------------------------------
+    # ---- discovery surface -----------------------------------------
 
     def list_devices(self) -> list[CastDevice]:
-        """Snapshot of the currently-known devices, sorted with
-        audio-only targets first then alphabetical by friendly
-        name. The sort is for the picker UX — speakers above TVs,
-        which is what users casting from a music app expect."""
+        """Snapshot of currently-known devices, audio-only first."""
         with self._lock:
             devices = list(self._devices.values())
         devices.sort(
@@ -192,18 +262,15 @@ class CastManager:
         return devices
 
     def get_device(self, device_id: str) -> Optional[CastDevice]:
-        """Lookup by Cast UUID. Returns None if the device hasn't
-        been discovered yet (or has gone offline since)."""
         with self._lock:
             return self._devices.get(device_id)
 
     def status(self) -> dict[str, object]:
-        """Diagnostic snapshot for /api/cast/status. Surfaces enough
-        to debug "I don't see my speaker" without needing logs:
-        whether the browser is running, how many devices we know
-        about, when we last saw a discovery event."""
+        """Diagnostic snapshot. Surfaces discovery state and
+        whether a session is open. Used by /api/cast/devices and
+        by the dev console for debugging."""
         with self._lock:
-            return {
+            disc = {
                 "available": _CAST_AVAILABLE,
                 "running": self._browser is not None,
                 "device_count": len(self._devices),
@@ -212,8 +279,312 @@ class CastManager:
                     else round(time.monotonic() - self._last_event_at, 1)
                 ),
             }
+        with self._session_lock:
+            sess = self._session
+            disc["connected_id"] = sess.device.id if sess else None
+            disc["connected_name"] = sess.device.friendly_name if sess else None
+            disc["bytes_encoded"] = sess.bytes_encoded if sess else 0
+            disc["media_loaded"] = bool(sess and sess.media_loaded)
+        return disc
 
-    # ---- pychromecast callbacks -------------------------------------
+    # ---- session lifecycle -----------------------------------------
+
+    def connect(self, device_id: str) -> CastDevice:
+        """Open a session against the given device. Tears down any
+        existing session first. Returns the connected CastDevice
+        on success; raises ValueError / RuntimeError on failure
+        (unknown device, connect timeout, play_media rejection).
+
+        This blocks for the duration of the Cast handshake — the
+        FastAPI handler that calls it returns to the user once the
+        device is ready and the stream URL has been issued. Typical
+        latency on the LAN is well under a second; we cap at 10s.
+        """
+        if not _CAST_AVAILABLE:
+            raise RuntimeError("pychromecast not available")
+        device = self.get_device(device_id)
+        if device is None:
+            raise ValueError(f"unknown cast device: {device_id}")
+
+        # Tear down anything already open. Safe to call with no
+        # session active (no-ops). Held outside the session lock
+        # because disconnect() takes the same lock and we'd self-
+        # deadlock.
+        self.disconnect()
+
+        # pychromecast's get_chromecast_from_cast_info is the modern
+        # entry point — takes the CastInfo we already have from the
+        # browser and skips re-discovery. Falls back to a UUID-based
+        # lookup if the API shifted in a later version.
+        cast_obj: object
+        cast_info = None
+        try:
+            with self._lock:
+                if self._browser is not None:
+                    cast_info = self._browser.devices.get(device.id) or \
+                                self._browser.devices.get(_uuid_or_str(device.id))
+            if cast_info is None:
+                raise RuntimeError(
+                    f"cast info missing for {device.friendly_name}; "
+                    "device may have just gone offline"
+                )
+            cast_obj = pychromecast.get_chromecast_from_cast_info(
+                cast_info, self._zconf
+            )
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            raise RuntimeError(
+                f"failed to construct Chromecast for "
+                f"{device.friendly_name}: {exc}"
+            ) from exc
+
+        # `wait` blocks until the device's status is read and the
+        # default media controller is available. Without this, a
+        # subsequent play_media races the controller's readiness
+        # and intermittently drops the command.
+        try:
+            cast_obj.wait(timeout=10.0)
+        except Exception as exc:
+            try:
+                cast_obj.disconnect()
+            except Exception:
+                pass
+            raise RuntimeError(
+                f"timed out waiting for {device.friendly_name} "
+                f"to become ready: {exc}"
+            ) from exc
+
+        # Set up the streaming pipeline. Buffer + HTTP server must
+        # exist before we issue play_media so the device's first
+        # GET hits a serving listener.
+        session = _SessionState(device=device, cast=cast_obj)
+        try:
+            session.http_server = start_stream_http_server(
+                session.buffer,
+                stream_path="/cast/stream",
+                content_type="audio/flac",
+            )
+            host_port = session.http_server.server_address[1]
+            session.stream_url = (
+                f"http://{primary_lan_ip()}:{host_port}/cast/stream"
+            )
+        except Exception as exc:
+            try:
+                cast_obj.disconnect()
+            except Exception:
+                pass
+            raise RuntimeError(
+                f"failed to start http stream server: {exc}"
+            ) from exc
+
+        # Hand the URL to the device. The Default Media Receiver
+        # is implicit; pychromecast launches it via play_media.
+        # `metadata` lights up the device's now-playing display
+        # (matters for Cast TVs / hubs with screens; ignored on
+        # speakers).
+        try:
+            mc = cast_obj.media_controller
+            mc.play_media(
+                session.stream_url,
+                "audio/flac",
+                title="Tideway",
+                stream_type="LIVE",
+            )
+            mc.block_until_active(timeout=10.0)
+            session.media_loaded = True
+        except Exception as exc:
+            try:
+                if session.http_server is not None:
+                    session.http_server.shutdown()
+                    session.http_server.server_close()
+            except Exception:
+                pass
+            try:
+                cast_obj.disconnect()
+            except Exception:
+                pass
+            raise RuntimeError(
+                f"play_media to {device.friendly_name} failed: {exc}"
+            ) from exc
+
+        with self._session_lock:
+            self._session = session
+
+        print(f"[cast] connected: {device.friendly_name} "
+              f"@ {device.host} streaming from {session.stream_url}",
+              flush=True)
+        self._notify_listeners(device)
+        return device
+
+    def disconnect(self) -> None:
+        """Tear down any active session. Idempotent."""
+        with self._session_lock:
+            session = self._session
+            self._session = None
+        if session is None:
+            return
+        # Order matters here. Encoder first (drains pending FLAC
+        # bytes), then buffer close (unblocks the HTTP serve loop's
+        # read), then HTTP server shutdown (the serve loop notices
+        # closed buffer and exits cleanly), then Cast disconnect.
+        try:
+            with session.encoder_lock:
+                if session.encoder is not None:
+                    try:
+                        tail = session.encoder.close()
+                        if tail:
+                            session.buffer.write(tail)
+                    except Exception as exc:
+                        log.debug("encoder close failed: %r", exc)
+                    session.encoder = None
+        except Exception as exc:
+            log.debug("encoder teardown error: %r", exc)
+        try:
+            session.buffer.close()
+        except Exception as exc:
+            log.debug("buffer close failed: %r", exc)
+        try:
+            if session.http_server is not None:
+                session.http_server.shutdown()
+                session.http_server.server_close()
+        except Exception as exc:
+            log.debug("http server shutdown failed: %r", exc)
+        try:
+            mc = getattr(session.cast, "media_controller", None)
+            if mc is not None:
+                try:
+                    mc.stop()
+                except Exception:
+                    pass
+            session.cast.disconnect()
+        except Exception as exc:
+            log.debug("cast disconnect failed: %r", exc)
+
+        print(f"[cast] disconnected: {session.device.friendly_name}",
+              flush=True)
+        self._notify_listeners(None)
+
+    # ---- PCM tap (called from PCMPlayer's audio callback) -----------
+
+    def is_active(self) -> bool:
+        """Cheap probe used by PCMPlayer's audio callback to decide
+        whether to reach for the session. Stays lock-free for the
+        common case (no session) — the callback runs at sub-
+        millisecond cadence and even a contended lock takes too
+        long.
+
+        Holds the GIL but doesn't acquire any explicit lock. The
+        `_session is not None` read is a single Python pointer
+        compare which is atomic. False positives (briefly seeing a
+        session that's about to close) are caught by the actual
+        lock+null check inside `push_pcm`."""
+        return self._session is not None
+
+    def push_pcm(self, pcm: np.ndarray, sample_rate: int, dtype: str) -> None:
+        """Feed a chunk of PCM into the active session's encoder.
+
+        `pcm` is a 2-D ndarray (frames, channels), int16 or int32.
+        `sample_rate` and `dtype` describe the current source so we
+        can rebuild the encoder when the source changes (e.g., a
+        track-change to a different rate). When no session is
+        active the call is a quick no-op.
+
+        Called from PCMPlayer's audio callback, which is the
+        realtime thread, so it has to be cheap. The encode +
+        ring-buffer write happens inline; profiling on a Mac mini
+        shows ~1ms per 4096-frame chunk for stereo 24/96, well
+        within budget.
+        """
+        if pcm.size == 0:
+            return
+        with self._session_lock:
+            session = self._session
+        if session is None:
+            return
+        channels = 1 if pcm.ndim == 1 else pcm.shape[1]
+        with session.encoder_lock:
+            need_new = (
+                session.encoder is None
+                or session.encoder_rate != sample_rate
+                or session.encoder_channels != channels
+                or session.encoder_dtype != dtype
+            )
+            if need_new:
+                # Rebuilding the encoder mid-stream produces a
+                # discontinuity at the boundary; the Cast device
+                # will glitch briefly. Rare in practice — happens
+                # on track-change to a different sample rate, which
+                # would discontinuity-glitch the local audio engine
+                # too because PCMPlayer reopens its OutputStream
+                # for cross-rate transitions.
+                if session.encoder is not None:
+                    try:
+                        tail = session.encoder.close()
+                        if tail:
+                            session.buffer.write(tail)
+                    except Exception as exc:
+                        log.debug("encoder close on rebuild: %r", exc)
+                try:
+                    session.encoder = FlacStreamEncoder(
+                        sample_rate=sample_rate,
+                        channels=channels,
+                        dtype=dtype,
+                    )
+                    session.encoder_rate = sample_rate
+                    session.encoder_channels = channels
+                    session.encoder_dtype = dtype
+                except Exception as exc:
+                    print(f"[cast] encoder build failed: {exc!r}",
+                          flush=True)
+                    return
+            # Ensure 2-D (frames, channels) for the encoder.
+            if pcm.ndim == 1:
+                pcm = pcm.reshape(-1, 1)
+            try:
+                encoded = session.encoder.encode(pcm)
+            except Exception as exc:
+                # Encoder errors mid-stream are a session-killer.
+                # Rather than try to recover here on the realtime
+                # thread, log and let the session run dry; the
+                # frontend will see media_loaded but bytes_encoded
+                # plateau, which is an obvious diagnostic signal.
+                log.debug("flac encode failed: %r", exc)
+                return
+        if encoded:
+            session.buffer.write(encoded)
+            # Atomic int update; no lock needed for a counter.
+            session.bytes_encoded += len(encoded)
+
+    # ---- listener bus ----------------------------------------------
+
+    def add_listener(
+        self,
+        callback: Callable[[Optional[CastDevice]], None],
+    ) -> Callable[[], None]:
+        """Subscribe to session-change events. Called whenever
+        connect / disconnect runs to completion. Returns an
+        unsubscribe callable. Used by server.py to push state
+        changes onto the SSE bus."""
+        with self._session_lock:
+            self._listeners.append(callback)
+
+        def _unsub() -> None:
+            with self._session_lock:
+                if callback in self._listeners:
+                    self._listeners.remove(callback)
+        return _unsub
+
+    def _notify_listeners(self, device: Optional[CastDevice]) -> None:
+        with self._session_lock:
+            listeners = list(self._listeners)
+        for cb in listeners:
+            try:
+                cb(device)
+            except Exception as exc:
+                log.debug("cast listener raised: %r", exc)
+
+    # ---- pychromecast discovery callbacks ---------------------------
 
     def _on_add(self, uuid, _service) -> None:
         self._upsert(uuid)
@@ -229,6 +600,18 @@ class CastManager:
         if existing is not None:
             print(f"[cast] removed: {existing.friendly_name} ({sid})",
                   flush=True)
+        # If the removed device is the one we're connected to, the
+        # session's about to die. Disconnect proactively so we don't
+        # keep encoding into a black hole. The device coming back
+        # online (Wi-Fi blip) will surface in discovery again and
+        # the user can reselect.
+        with self._session_lock:
+            sess = self._session
+        if sess is not None and sess.device.id == sid:
+            try:
+                self.disconnect()
+            except Exception:
+                pass
 
     def _upsert(self, uuid) -> None:
         """Translate pychromecast's CastInfo into our CastDevice and
@@ -268,9 +651,19 @@ class CastManager:
                   f"@ {device.host}:{device.port}", flush=True)
 
 
+def _uuid_or_str(s: str):
+    """pychromecast's `browser.devices` dict is keyed by UUID
+    objects. Our CastDevice carries the str representation. Try the
+    str first (some versions accept it), then fall back to a UUID
+    parse. Keeps us version-tolerant without binding hard to a
+    specific pychromecast major."""
+    try:
+        import uuid as _uuid
+        return _uuid.UUID(s)
+    except Exception:
+        return s
+
+
 # Module-level singleton. server.py calls `cast_manager.start_discovery()`
-# at boot and `cast_manager.stop_discovery()` on shutdown. Importing
-# this module is cheap (no network, no thread) so the singleton is
-# safe to construct even in test runs that don't actually exercise
-# Cast.
+# at boot and `cast_manager.stop_discovery()` on shutdown.
 cast_manager = CastManager()

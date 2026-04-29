@@ -910,6 +910,10 @@ export const api = {
           running: boolean;
           device_count: number;
           last_event_age_s: number | null;
+          connected_id?: string | null;
+          connected_name?: string | null;
+          bytes_encoded?: number;
+          media_loaded?: boolean;
         };
         devices: {
           id: string;
@@ -919,6 +923,21 @@ export const api = {
           cast_type: string;
         }[];
       }>("/api/cast/devices"),
+    connect: (deviceId: string) =>
+      req<{
+        ok: boolean;
+        device: {
+          id: string;
+          friendly_name: string;
+          model_name: string;
+          cast_type: string;
+        };
+      }>("/api/cast/connect", {
+        method: "POST",
+        body: JSON.stringify({ device_id: deviceId }),
+      }),
+    disconnect: () =>
+      req<{ ok: boolean }>("/api/cast/disconnect", { method: "POST" }),
   },
   airplay: {
     devices: () =>
