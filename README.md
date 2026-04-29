@@ -119,6 +119,13 @@ newer version is available a banner surfaces across the top of the
 UI, and clicking Install downloads the right asset for your OS and
 runs it.
 
+## Support
+
+If Tideway is useful to you and you'd like to support its
+development, you can [buy me a coffee on Ko-fi](https://ko-fi.com/jmpunk).
+Tideway is free and will stay that way; donations are appreciated
+but never expected.
+
 ## Install a released build
 
 Grab the latest from the Releases page for whichever fork of this
