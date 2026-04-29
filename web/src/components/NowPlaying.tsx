@@ -416,16 +416,19 @@ function formatKhz(hz: number | null | undefined): string | null {
 }
 
 /**
- * Build the user-visible pill label from a StreamInfo. Mirrors what
- * Tidal's own desktop puts in the now-playing tray: codec, rate,
- * depth — the full readout, no abbreviated tier name. Pieces that
- * aren't available (lossy streams have no bit_depth, for example)
- * are dropped so the result reads cleanly.
+ * Build the user-visible pill label from a StreamInfo. The codec
+ * is dropped from the readout — the tier-coded pill color
+ * (primary for hi-res, sky for lossless, amber/neutral for lossy)
+ * already carries the codec-class signal, and the rate / depth
+ * tells the user what they actually want to know about the stream
+ * they're listening to. Pieces that aren't available (lossy
+ * streams have no bit_depth) are dropped so the result reads
+ * cleanly.
  *
- *   FLAC streaming Hi-Res → "FLAC · 96kHz · 24-bit"
- *   FLAC CD-res lossless  → "FLAC · 44.1kHz · 16-bit"
- *   AAC 320               → "AAC · 44.1kHz"
- *   Local M4A             → "AAC · 44.1kHz"
+ *   FLAC streaming Hi-Res → "96kHz · 24-bit"
+ *   FLAC CD-res lossless  → "44.1kHz · 16-bit"
+ *   AAC 320               → "44.1kHz"
+ *   Local M4A             → "44.1kHz"
  *
  * Returns null when we don't have any usable info — caller should
  * render a placeholder ("Streaming"/"Loading") rather than an empty
@@ -433,10 +436,9 @@ function formatKhz(hz: number | null | undefined): string | null {
  */
 function streamInfoFullLabel(info: StreamInfo | null): string | null {
   if (!info) return null;
-  const codec = info.codec ? info.codec.toUpperCase() : null;
   const rate = formatKhz(info.sample_rate_hz);
   const depth = info.bit_depth ? `${info.bit_depth}-bit` : null;
-  const parts = [codec, rate ? `${rate}kHz` : null, depth].filter(Boolean);
+  const parts = [rate ? `${rate}kHz` : null, depth].filter(Boolean);
   return parts.length > 0 ? parts.join(" · ") : null;
 }
 
