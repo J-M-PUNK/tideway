@@ -83,7 +83,15 @@ export function VideoPlayerModal() {
   const playerActions = usePlayerActions();
   const { playing: audioPlaying } = usePlayerMeta();
 
-  const [playing, setPlaying] = useState(true);
+  // Defaults to false — the actual `<video>` element drives state via
+  // its onPlay / onPause handlers. The previous default of `true` was
+  // an optimistic lie: when the HLS manifest failed to parse or a
+  // segment fetch errored, MANIFEST_PARSED never fired, video.play()
+  // was never called, and the React state stayed at "playing" forever
+  // even though no frames were rendering. The user saw a pause icon
+  // on a frozen video and clicking it did nothing because v.play()
+  // rejected silently with no playable source loaded.
+  const [playing, setPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [duration, setDuration] = useState(0);
   const [volume, setVolume] = useState(() => readVolume());
@@ -115,11 +123,13 @@ export function VideoPlayerModal() {
 
   // Reset per-video state when switching tracks so the progress bar
   // and duration readout don't flash stale values from the previous
-  // video while the new one loads.
+  // video while the new one loads. `playing` resets to false; the
+  // <video> element's onPlay handler will flip it to true once the
+  // browser actually starts decoding frames.
   useEffect(() => {
     setCurrentTime(0);
     setDuration(0);
-    setPlaying(true);
+    setPlaying(false);
   }, [current?.id]);
 
   // Persist volume across sessions.
@@ -173,6 +183,26 @@ export function VideoPlayerModal() {
           return;
         }
         const hls = new Hls();
+        // Surface manifest-parse and segment-fetch failures. Without
+        // this, hls.js silently swallows errors, MANIFEST_PARSED
+        // never fires, video.play() never gets called, and the user
+        // sees a frozen modal with no signal what went wrong.
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        hls.on(Hls.Events.ERROR, (_event: unknown, data: any) => {
+          // hls.js error categories: NETWORK_ERROR, MEDIA_ERROR,
+          // MUX_ERROR, OTHER_ERROR. Fatal flag means hls.js can't
+          // recover. Log the full data so devtools shows enough to
+          // pinpoint a manifest 4xx, codec mismatch, or segment 502.
+          // eslint-disable-next-line no-console
+          console.error("[hls] error", {
+            type: data?.type,
+            details: data?.details,
+            fatal: !!data?.fatal,
+            response: data?.response,
+            url: data?.url,
+            reason: data?.reason,
+          });
+        });
         hls.loadSource(url);
         hls.attachMedia(video);
         hls.on(Hls.Events.MANIFEST_PARSED, () => {
@@ -183,9 +213,12 @@ export function VideoPlayerModal() {
           // unmutes. Same UX TikTok / Twitter / Instagram use.
           video.muted = true;
           setMuted(true);
-          video.play().catch(() => {
+          video.play().catch((err) => {
             // Even muted autoplay failed (iOS Low-Power Mode,
-            // locked-down enterprise policy). Show play button.
+            // locked-down enterprise policy, or stalled stream).
+            // Log the actual error so we can see why next time.
+            // eslint-disable-next-line no-console
+            console.warn("[video] muted autoplay failed", err);
             setPlaying(false);
           });
         });
@@ -270,8 +303,19 @@ export function VideoPlayerModal() {
   const togglePlay = useCallback(() => {
     const v = videoRef.current;
     if (!v) return;
-    if (v.paused) v.play();
-    else v.pause();
+    if (v.paused) {
+      // Catch + log: v.play() rejects when there's no playable
+      // source (manifest still loading, hls.js failed, etc.). The
+      // earlier code didn't catch, so the click just silently did
+      // nothing — the symptom the user sees as "play button does
+      // nothing." Logging makes the failure surface in devtools.
+      v.play().catch((err) => {
+        // eslint-disable-next-line no-console
+        console.warn("[video] play() failed", err);
+      });
+    } else {
+      v.pause();
+    }
   }, []);
 
   const seekBy = useCallback((sec: number) => {
@@ -462,6 +506,19 @@ export function VideoPlayerModal() {
       onLoadedMetadata={(e) =>
         setDuration((e.target as HTMLVideoElement).duration || 0)
       }
+      onError={(e) => {
+        // Native <video> error — separate channel from the hls.js
+        // error event. Fires for codec mismatches, decode failures,
+        // and (on the native HLS path) network errors. The MediaError
+        // codes are: 1=ABORTED, 2=NETWORK, 3=DECODE, 4=SRC_NOT_SUPPORTED.
+        const v = e.currentTarget as HTMLVideoElement;
+        // eslint-disable-next-line no-console
+        console.error("[video] element error", {
+          code: v.error?.code,
+          message: v.error?.message,
+          src: v.currentSrc,
+        });
+      }}
       onEnded={() => {
         if (repeat) return;
         advance();
