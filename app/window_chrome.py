@@ -117,20 +117,55 @@ def _apply_macos(nswindow: object, theme: str) -> None:
         log.exception("window_chrome: NSColor build failed")
         return
     try:
-        # titlebarAppearsTransparent makes the titlebar pick up the
-        # window's backgroundColor instead of the system gradient,
-        # which is what makes the chrome "blend" with the content.
+        # Extend the contentView under the titlebar. Without
+        # NSWindowStyleMaskFullSizeContentView, the titlebar is its
+        # own opaque region drawn above the contentView and the OS
+        # picks its background — `titlebarAppearsTransparent` +
+        # `setBackgroundColor` alone don't punch through that, which
+        # is why the chrome stays system-gray on a default window. With
+        # the mask set, WKWebView renders the page body all the way to
+        # the window's top edge, so wherever we paint #050505 in the
+        # page that's what shows behind the traffic lights. The
+        # buttons themselves stay visible because AppKit draws them
+        # on a higher layer than the contentView.
+        try:
+            mask = nswindow.styleMask()
+            nswindow.setStyleMask_(
+                mask | AppKit.NSWindowStyleMaskFullSizeContentView
+            )
+        except Exception:
+            # Pre-10.10 doesn't have the mask constant. Fall through
+            # — the rest of the tint still applies, just with a
+            # visibly-distinct titlebar zone.
+            pass
+        # titlebarAppearsTransparent kills the gradient so the
+        # window's backgroundColor shows through. This and
+        # setBackgroundColor together paint the title-bar zone our
+        # chosen tone.
         nswindow.setTitlebarAppearsTransparent_(True)
         nswindow.setBackgroundColor_(color)
-        # FullSizeContentView lets the WKWebView extend under the
-        # titlebar — without this there's still a strip of bare
-        # NSWindow backgroundColor above the content, which works,
-        # but the React layout doesn't naturally reserve space for
-        # the traffic-light buttons. Keeping it off means the React
-        # body sits below the titlebar and the titlebar shows
-        # backgroundColor; either way the user sees a unified color.
-        # We choose NOT to set FullSize here so the existing layout
-        # (top of NavBar at y=0 of WKWebView) stays correct.
+        # Hide the title text so "Tideway" doesn't print in the
+        # middle of the (now color-matched) title bar — letting the
+        # space read as part of the app body rather than as an OS
+        # chrome band. Traffic-light buttons stay; only the centered
+        # title text is suppressed.
+        try:
+            nswindow.setTitleVisibility_(AppKit.NSWindowTitleHidden)
+        except Exception:
+            pass
+        # Remove the 1-pixel separator macOS Big Sur+ draws between
+        # the title bar and the content view. Without this, even
+        # when both surfaces share a color, that hairline reads as a
+        # visible seam — the user's reported "title bar doesn't
+        # blend." Older macOS releases (pre-Big Sur) don't have this
+        # method on NSWindow; the fall-through is a no-op so they
+        # just keep the system separator they always had.
+        try:
+            nswindow.setTitlebarSeparatorStyle_(
+                AppKit.NSTitlebarSeparatorStyleNone
+            )
+        except (AttributeError, Exception):
+            pass
         # Match light/dark appearance so traffic-light glyphs are
         # readable against the backgroundColor we just set.
         appearance_name = (
@@ -146,6 +181,15 @@ def _apply_macos(nswindow: object, theme: str) -> None:
             # Older macOS releases have a different selector name —
             # fall through, the backgroundColor change still takes.
             pass
+        # Diagnostic — confirms the tint path actually ran. Cheap
+        # (one print per window construction) and answers the most
+        # common "did chrome tinting take effect on this build?"
+        # bug-report question without needing a debugger.
+        print(
+            f"[window_chrome] macOS tinted: theme={theme} "
+            f"color=#{r:02x}{g:02x}{b:02x}",
+            flush=True,
+        )
     except Exception:
         log.exception("window_chrome: NSWindow tint failed")
 
