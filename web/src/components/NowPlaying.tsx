@@ -44,7 +44,6 @@ import { DownloadButton } from "@/components/DownloadButton";
 import { HeartButton } from "@/components/HeartButton";
 import { OutputDevicePicker } from "@/components/OutputDevicePicker";
 import { SleepTimerButton } from "@/components/SleepTimerButton";
-import { StreamQualityBadge } from "@/components/StreamQualityBadge";
 import { useIsDownloaded } from "@/hooks/useDownloadedSet";
 import { useRecordPlays } from "@/hooks/useRecentlyPlayed";
 import {
@@ -157,7 +156,6 @@ export function NowPlaying({
                       Downloaded
                     </span>
                   )}
-                  <StreamQualityBadge info={streamInfo} className="ml-2" />
                 </div>
               </div>
               <div className="flex items-center">
@@ -390,11 +388,10 @@ const QUALITY_BADGE_CLASS: Record<StreamingQuality, string> = {
 
 /**
  * Map a Tidal `audio_quality` string back to one of our four
- * StreamingQuality buckets. Lets the picker pill reflect what
- * Tidal is actually delivering — so when the user has Max picked
- * but the current track only ships at Lossless, the pill reads
- * "High" instead of misleadingly claiming "Max" alongside the
- * StreamQualityBadge that already shows "High".
+ * StreamingQuality buckets. Used to colour-code the picker pill by
+ * the tier that's actually playing, even when it differs from the
+ * user's preference (e.g. a Lossless-only release while the user
+ * has Max selected).
  */
 function streamingQualityFromAudioQuality(
   aq: string | null | undefined,
@@ -408,18 +405,53 @@ function streamingQualityFromAudioQuality(
 }
 
 /**
- * Quality picker pill on the Now Playing bar. When the current track is
- * a downloaded local file, this is a no-op badge (playback is already at
- * the file's native quality) — only the streaming path actually switches.
+ * Format the kHz portion of the pill label. 44100 → "44.1", 96000
+ * → "96", 192000 → "192" — drop the ".0" off whole-number kHz
+ * values so the pill stays compact.
+ */
+function formatKhz(hz: number | null | undefined): string | null {
+  if (!hz || hz <= 0) return null;
+  const k = hz / 1000;
+  return k % 1 === 0 ? String(k) : k.toFixed(1);
+}
+
+/**
+ * Build the user-visible pill label from a StreamInfo. Mirrors what
+ * Tidal's own desktop puts in the now-playing tray: codec, rate,
+ * depth — the full readout, no abbreviated tier name. Pieces that
+ * aren't available (lossy streams have no bit_depth, for example)
+ * are dropped so the result reads cleanly.
  *
- * The pill LABEL reflects what Tidal is actually streaming right now,
- * not the user's preferred ceiling. A track that only ships at
- * LOSSLESS shows "High" even when the user has Max selected as their
- * preference, so the picker stays consistent with the
- * StreamQualityBadge ("High") and the album hero badge ("Lossless")
- * for the same release. The dropdown still shows the user's
- * preference highlighted with a "Current" tag so the choice itself
- * is never ambiguous; switching is a one-click change away.
+ *   FLAC streaming Hi-Res → "FLAC · 96kHz · 24-bit"
+ *   FLAC CD-res lossless  → "FLAC · 44.1kHz · 16-bit"
+ *   AAC 320               → "AAC · 44.1kHz"
+ *   Local M4A             → "AAC · 44.1kHz"
+ *
+ * Returns null when we don't have any usable info — caller should
+ * render a placeholder ("Streaming"/"Loading") rather than an empty
+ * pill in that case.
+ */
+function streamInfoFullLabel(info: StreamInfo | null): string | null {
+  if (!info) return null;
+  const codec = info.codec ? info.codec.toUpperCase() : null;
+  const rate = formatKhz(info.sample_rate_hz);
+  const depth = info.bit_depth ? `${info.bit_depth}-bit` : null;
+  const parts = [codec, rate ? `${rate}kHz` : null, depth].filter(Boolean);
+  return parts.length > 0 ? parts.join(" · ") : null;
+}
+
+/**
+ * Quality pill on the Now Playing bar. The pill shows the FULL
+ * codec / rate / depth readout for what's currently audible —
+ * Tidal's own desktop uses the same pattern in its now-playing
+ * chrome. Click to open the dropdown and change the streaming-
+ * quality preference (this only affects future tracks, since
+ * Tidal returns a fresh stream URL per quality tier per track).
+ *
+ * The pill colour is still tier-coded — primary for Max, sky for
+ * Lossless, amber for Medium, neutral for Low — so the at-a-glance
+ * "what kind of stream is this" signal stays even when the readout
+ * itself is dense codec text.
  */
 function StreamingQualityPicker({
   isLocal,
@@ -429,14 +461,21 @@ function StreamingQualityPicker({
   streamInfo: StreamInfo | null;
 }) {
   const { streamingQuality, set } = useUiPreferences();
-  // What's audible right now. Falls back to the user's preference
-  // when we have no stream info (idle, mid-load) — better than
-  // showing "Streaming" placeholder text while the bar is mounted.
+  // What's audible right now drives the colour and the dropdown's
+  // "Playing" tag. When stream_info is missing (idle or mid-load)
+  // we fall back to the user's preference so the pill still has a
+  // sensible tone.
   const effectiveQuality =
     streamingQualityFromAudioQuality(streamInfo?.audio_quality) ??
     streamingQuality;
-  const current = QUALITY_OPTIONS.find((q) => q.value === effectiveQuality);
-  const label = isLocal ? "Downloaded" : (current?.label ?? "Streaming");
+  // Pill text: the full codec/rate/depth readout. While loading or
+  // idle we show the user's preference label — rendering "Streaming"
+  // would be a placeholder that doesn't tell anyone anything.
+  const fullLabel = streamInfoFullLabel(streamInfo);
+  const fallbackLabel =
+    QUALITY_OPTIONS.find((q) => q.value === effectiveQuality)?.label ??
+    "Streaming";
+  const pillLabel = fullLabel ?? fallbackLabel;
 
   if (isLocal) {
     return (
@@ -444,7 +483,7 @@ function StreamingQualityPicker({
         className="flex items-center gap-1.5 rounded-full bg-primary/15 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wider text-primary"
         title="Playing the local file at its downloaded quality"
       >
-        <AudioLines className="h-3 w-3" /> {label}
+        <AudioLines className="h-3 w-3" /> {pillLabel}
       </div>
     );
   }
@@ -459,7 +498,7 @@ function StreamingQualityPicker({
           )}
           title="Streaming quality"
         >
-          <AudioLines className="h-3 w-3" /> {label}
+          <AudioLines className="h-3 w-3" /> {pillLabel}
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-64">
