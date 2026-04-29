@@ -512,7 +512,12 @@ class CastManager:
     def push_pcm(self, pcm: np.ndarray, sample_rate: int, dtype: str) -> None:
         """Feed a chunk of PCM into the active session's encoder.
 
-        `pcm` is a 2-D ndarray (frames, channels), int16 or int32.
+        `pcm` is a 2-D ndarray (frames, channels). `dtype` may be
+        "int16", "int32", or "float32"; float32 is converted to int32
+        here because FLAC is integer-only and Windows WASAPI shared
+        mode delivers the audio callback's PCM as float32 (the
+        device-mixer format). Without that conversion every Windows
+        shared-mode user would silently get a zero-byte stream.
         `sample_rate` and `dtype` describe the current source so we
         can rebuild the encoder when the source changes (e.g., a
         track-change to a different rate). When no session is
@@ -530,6 +535,18 @@ class CastManager:
             session = self._session
         if session is None:
             return
+        if dtype == "float32":
+            # WASAPI shared-mode samples are normalized floats in
+            # [-1.0, 1.0]. Scale to int32 full range; clip to handle
+            # intersample peaks > 1.0 that would otherwise wrap.
+            # Math runs in float64 because int32-max (2147483647)
+            # is not representable in float32 — clipping to it in
+            # float32 actually rounds up to 2147483648 and overflows
+            # to int32-min on the cast.
+            scaled = pcm.astype(np.float64) * 2147483647.0
+            np.clip(scaled, -2147483648.0, 2147483647.0, out=scaled)
+            pcm = scaled.astype(np.int32)
+            dtype = "int32"
         channels = 1 if pcm.ndim == 1 else pcm.shape[1]
         with session.encoder_lock:
             need_new = (

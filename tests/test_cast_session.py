@@ -113,6 +113,32 @@ class TestFirstCallBuild:
         assert sess.encoder_dtype == "int32"
         assert sess.encoder_rate == 96000
 
+    def test_float32_path_converts_to_int32(self):
+        """Windows WASAPI shared mode hands the audio callback
+        float32 PCM normalized to [-1.0, 1.0]. Without conversion
+        the FLAC encoder rejects float and the receiver hangs at
+        'Connecting' forever. push_pcm must scale + clip + cast to
+        int32 internally and build an int32-configured encoder."""
+        mgr = CastManager()
+        sess = _attach_session(mgr)
+        pcm = np.full((512, 2), 0.5, dtype=np.float32)
+        mgr.push_pcm(pcm, sample_rate=48000, dtype="float32")
+        assert sess.encoder is not None
+        assert sess.encoder_dtype == "int32"
+        assert sess.encoder_rate == 48000
+
+    def test_float32_intersample_peak_clips_safely(self):
+        """A float32 sample above 1.0 (intersample overshoot from
+        a brick-walled master) would overflow int32 if the scale
+        wasn't clipped. Verifies that push_pcm doesn't raise on
+        out-of-range floats — silent clip is correct here, the
+        same behavior every DAC's int conversion stage applies."""
+        mgr = CastManager()
+        _attach_session(mgr)
+        pcm = np.array([[1.5, -1.5]] * 256, dtype=np.float32)
+        # Should not raise; clip handles the overshoot.
+        mgr.push_pcm(pcm, sample_rate=44100, dtype="float32")
+
     def test_mono_input(self):
         """1-D arrays are reshaped to (frames, 1) inside push_pcm.
         The encoder sees mono and lays out the FLAC stream
