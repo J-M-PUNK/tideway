@@ -1656,6 +1656,36 @@ def quit_app(request: Request) -> dict:
         return {"ok": False, "reason": str(exc)}
 
 
+class _WindowThemeRequest(BaseModel):
+    theme: str
+
+
+@app.post("/api/_internal/window-theme", include_in_schema=False)
+def set_window_theme(request: Request, payload: _WindowThemeRequest) -> dict:
+    """Push the React UI's active theme down to the OS so the title
+    bar tints to match the app body. Loopback-only — only legitimate
+    caller is our own UI shell, and the side effect (recoloring the
+    OS-drawn window chrome) shouldn't be reachable from anywhere
+    else. Unauthenticated by design: theme switches need to work
+    even before the user signs in (login screen has the same chrome
+    as the rest of the app).
+    """
+    client = request.client
+    host = client.host if client else ""
+    if host not in ("127.0.0.1", "::1", "localhost"):
+        raise HTTPException(status_code=403)
+    if payload.theme not in ("dark", "light"):
+        raise HTTPException(status_code=400, detail="theme must be dark or light")
+    try:
+        from app import window_chrome
+        window_chrome.set_theme(payload.theme)
+        return {"ok": True, "theme": window_chrome.get_theme()}
+    except Exception as exc:
+        # Window chrome is decorative — never let a tint failure break
+        # the user's theme switch in the React UI.
+        return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+
+
 @app.post("/api/_internal/mini_player", include_in_schema=False)
 def open_mini_player(request: Request) -> dict:
     """Spawn a second, always-on-top pywebview window with the compact

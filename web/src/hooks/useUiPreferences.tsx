@@ -99,6 +99,18 @@ export function UiPreferencesProvider({ children }: { children: ReactNode }) {
     const root = document.documentElement;
     if (prefs.theme === "light") root.classList.add("light");
     else root.classList.remove("light");
+    // Push the theme down to the OS shell so the native window
+    // titlebar (where the close / minimize buttons live) tints to
+    // match the app body. Loopback-only endpoint, no auth, fire
+    // and forget — a 403/404 in browser-only dev mode (no shell)
+    // is the expected outcome and we want to swallow it silently.
+    fetch("/api/_internal/window-theme", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ theme: prefs.theme }),
+    }).catch(() => {
+      /* no shell, no problem */
+    });
   }, [prefs.theme]);
 
   // Sync across tabs — if the user changes the preference in another tab,
