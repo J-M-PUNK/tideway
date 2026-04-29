@@ -6676,7 +6676,7 @@ class SettingsPayload(BaseModel):
     notify_on_track_change: Optional[bool] = None
     exclusive_mode: Optional[bool] = None
     force_volume: Optional[bool] = None
-    continue_with_artist_radio_after_album: Optional[bool] = None
+    continue_playing_after_queue_ends: Optional[bool] = None
     start_minimized: Optional[bool] = None
     explicit_content_preference: Optional[str] = None
     download_rate_limit_mbps: Optional[int] = None

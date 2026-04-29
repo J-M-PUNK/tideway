@@ -77,6 +77,29 @@ def test_put_explicit_content_preference_persists(client):
         assert r.json()["explicit_content_preference"] == value
 
 
+def test_put_continue_playing_after_queue_ends_persists(client):
+    """The queue-end auto-radio toggle must survive PUT both ways. The
+    Settings dataclass + SettingsPayload mirror is the foot-gun this
+    file exists to guard against, and this field is what powers the
+    queue-end flow in usePlayer."""
+    for value in (False, True):
+        r = client.put(
+            "/api/settings", json={"continue_playing_after_queue_ends": value}
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["continue_playing_after_queue_ends"] is value
+
+
+def test_continue_playing_after_queue_ends_defaults_to_true():
+    """The toggle defaults on so the new install gets Spotify-style
+    autoplay out of the box. Pin this to catch a refactor that flips
+    the default back to False (which would silently turn off the
+    feature for everyone with a fresh settings.json)."""
+    from app.settings import Settings
+
+    assert Settings().continue_playing_after_queue_ends is True
+
+
 def test_put_unknown_field_is_silently_ignored(client):
     """Pydantic's default behaviour: unknown fields are dropped, not
     rejected. This matches the app's existing UX — frontend-to-backend

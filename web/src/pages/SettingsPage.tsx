@@ -220,10 +220,10 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
           </select>
         </Field>
         <Toggle
-          checked={settings.continue_with_artist_radio_after_album}
-          onChange={(v) => patch({ continue_with_artist_radio_after_album: v })}
-          label="After an album ends, continue with artist radio"
-          hint="When off, the player pauses on the album's first track so you can press Play to repeat. When on, it queues an Artist Radio mix from the album's primary artist."
+          checked={settings.continue_playing_after_queue_ends}
+          onChange={(v) => patch({ continue_playing_after_queue_ends: v })}
+          label="Continue playing music after your queue ends"
+          hint="When on, the player queues an Artist Radio mix seeded from the last track's primary artist so playback never stops on its own. When off, an album re-primes its first track paused (one tap of Play repeats the album); other queues just stop."
         />
       </Section>
 
