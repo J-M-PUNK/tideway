@@ -546,9 +546,103 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     except Exception as exc:
         print(f"[macos-np] startup failed: {exc}", flush=True)
 
+    # Wire the Tidal Connect manager to the audio engine. Silencer
+    # mutes local sounddevice output while a TC session is open;
+    # track URL resolver lets the manager mint signed Tidal stream
+    # URLs (via tidalapi) and pack them into the DIDL-Lite metadata
+    # that's handed to the OpenHome Playlist.Insert call. Both
+    # wired here so the tidal_connect module stays free of
+    # tidalapi / player imports — keeps the dependency graph one-way.
+    try:
+        from app.audio.tidal_connect import get_manager as _tc_get_manager
+        from app.audio.openhome import TrackMetadata as _TrackMetadata
+        _tc_mgr = _tc_get_manager()
+        _tc_mgr.set_local_silencer(
+            _native_player().set_external_output_active
+        )
+
+        def _tc_url_resolver(track_id: int):
+            """Tidal track id → (stream_url, TrackMetadata).
+
+            Goes through the same tidalapi path the local player
+            uses for stream resolution (see PCMPlayer's
+            _resolve_source). Hands the device the FIRST URL from
+            the manifest — for DASH/HLS that's the manifest
+            playlist URL, which OpenHome devices that speak
+            DASH/HLS internally will fetch and play. Direct-file
+            sources (some hi-res FLAC) come back as a single URL
+            that the device fetches as a normal HTTP audio
+            resource.
+
+            This is the bet from the scoping doc: Tidal Connect
+            targets accept signed Tidal URLs as DIDL-Lite <res>
+            content. If hardware testing shows the bet is wrong,
+            fix is localized to this resolver — try the manifest
+            URL instead of the segment URL, or inject Tidal-
+            Connect-specific URI scheme. We'll know in the first
+            minute of real-device testing.
+            """
+            track = tidal.session.track(int(track_id))
+            stream = track.get_stream()
+            manifest = stream.get_stream_manifest()
+            urls = list(getattr(manifest, "urls", []) or [])
+            if not urls:
+                raise RuntimeError(
+                    f"track {track_id}: manifest has no URLs"
+                )
+            stream_url = urls[0]
+            artists = getattr(track, "artists", None) or []
+            artist_name = (
+                artists[0].name if artists and getattr(artists[0], "name", None)
+                else getattr(track, "artist", None)
+                and getattr(track.artist, "name", "")
+                or ""
+            )
+            album = getattr(track, "album", None)
+            album_name = getattr(album, "name", "") if album else ""
+            cover_id = getattr(album, "cover", None) if album else None
+            cover_url = (
+                f"https://resources.tidal.com/images/"
+                f"{(cover_id or '').replace('-', '/')}/640x640.jpg"
+                if cover_id
+                else ""
+            )
+            duration_s = int(getattr(track, "duration", 0) or 0)
+            codec = (
+                getattr(manifest, "codecs", None)
+                or getattr(manifest, "get_codecs", lambda: None)()
+                or ""
+            )
+            mime_type = (
+                "audio/flac" if "flac" in str(codec).lower()
+                else "audio/mp4"
+            )
+            metadata = _TrackMetadata(
+                title=getattr(track, "name", "") or "",
+                artist=artist_name,
+                album=album_name,
+                duration_s=duration_s,
+                cover_url=cover_url,
+                track_uri=stream_url,
+                mime_type=mime_type,
+            )
+            return (stream_url, metadata)
+
+        _tc_mgr.set_track_url_resolver(_tc_url_resolver)
+    except Exception as exc:
+        print(f"[tidal-connect] startup wiring failed: {exc}", flush=True)
+
     try:
         yield
     finally:
+        # Disconnect any active Tidal Connect session before
+        # shutting down. Sends Stop to the device so it doesn't
+        # keep playing whatever was loaded.
+        try:
+            from app.audio.tidal_connect import get_manager as _tc_get_manager
+            _tc_get_manager().disconnect()
+        except Exception:
+            pass
         if stop_hotkeys is not None:
             try:
                 stop_hotkeys()
@@ -3789,6 +3883,75 @@ def _native_player() -> PCMPlayer:
     return _pcm_player_singleton
 
 
+# ---------------------------------------------------------------------
+# Tidal Connect dispatch
+# ---------------------------------------------------------------------
+#
+# When a Tidal Connect session is active, audio plays on the remote
+# device, not through PCMPlayer's local sounddevice output. Player
+# endpoints (play_track, pause, play, seek) divert to the
+# TidalConnectManager's transport methods. The state these endpoints
+# return is synthesized from the manager's polled state (track id,
+# position, duration) so the frontend's now-playing UI shows
+# something coherent — title plays on the device, scrubber roughly
+# tracks position via the 1s polling cadence.
+#
+# This is the integration layer for Tidal Connect's experimental
+# release. End-to-end audio handoff is a bet on hypothesis A from
+# docs/cast-and-connect-scope.md (signed Tidal stream URLs accepted
+# as DIDL-Lite <res> content). Verified-without-hardware up to the
+# SOAP layer; real-device feedback is what unblocks a non-experimental
+# release.
+
+
+def _tc_active() -> bool:
+    """True if a Tidal Connect session is currently open. Cheap probe
+    for the divert checks in the player endpoints."""
+    try:
+        from app.audio.tidal_connect import get_manager
+        return get_manager().status().get("control_plane_ready", False) is True
+    except Exception:
+        return False
+
+
+def _tc_snapshot(track_id: Optional[str] = None) -> dict:
+    """Synthesize a player-snapshot-shaped dict from Tidal Connect
+    state. Same fields the local PCMPlayer's snapshot produces, so
+    the frontend's now-playing UI reads them identically without
+    branching on which engine is active."""
+    from app.audio.tidal_connect import get_manager
+
+    mgr = get_manager()
+    status = mgr.status()
+    with mgr._session_lock:  # noqa: SLF001 — internal access for state read
+        session = mgr._session
+    if session is None:
+        return {
+            "state": "idle",
+            "track_id": None,
+            "position_ms": 0,
+            "duration_ms": 0,
+            "volume": 100,
+            "muted": False,
+            "error": None,
+            "seq": 0,
+            "stream_info": None,
+            "force_volume": False,
+        }
+    return {
+        "state": "playing" if session.current_track_id else "idle",
+        "track_id": track_id,
+        "position_ms": session.position_s * 1000,
+        "duration_ms": session.duration_s * 1000,
+        "volume": session.volume_percent,
+        "muted": session.muted,
+        "error": None,
+        "seq": int(status.get("device_count", 0)),  # bumped on poll
+        "stream_info": None,
+        "force_volume": False,
+    }
+
+
 def _snapshot_dict(snap) -> dict:
     """Serialize a PlayerSnapshot into a JSON-friendly dict."""
     stream_info = None
@@ -3925,8 +4088,23 @@ def player_load(req: _PlayerLoadRequest) -> dict:
 def player_play_track(req: _PlayerLoadRequest) -> dict:
     """Atomic load + play. Used by the auto-advance path so we
     don't pay two HTTP round-trips + two sequential awaits at
-    track-end. Shorter code path = smaller perceptible gap."""
+    track-end. Shorter code path = smaller perceptible gap.
+
+    When a Tidal Connect session is active, this diverts to
+    `tidal_connect_manager.load_track(track_id)` — the device fetches
+    the audio from Tidal directly, PCMPlayer stays idle. Returns a
+    synthesized snapshot in the same shape the local engine produces
+    so the frontend reads it identically."""
     _require_local_access()
+    if _tc_active():
+        from app.audio.tidal_connect import get_manager
+        try:
+            get_manager().load_track(int(req.track_id))
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502, detail=f"Tidal Connect: {exc}"
+            ) from exc
+        return _tc_snapshot(track_id=str(req.track_id))
     snap = _native_player().play_track(req.track_id, quality=req.quality)
     return _snapshot_dict(snap)
 
@@ -4016,30 +4194,88 @@ def player_preload_clear() -> dict:
 @app.post("/api/player/play")
 def player_play() -> dict:
     _require_local_access()
+    if _tc_active():
+        from app.audio.tidal_connect import get_manager
+        try:
+            get_manager().play()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502, detail=f"Tidal Connect: {exc}"
+            ) from exc
+        return _tc_snapshot()
     return _snapshot_dict(_native_player().play())
 
 
 @app.post("/api/player/pause")
 def player_pause() -> dict:
     _require_local_access()
+    if _tc_active():
+        from app.audio.tidal_connect import get_manager
+        try:
+            get_manager().pause()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502, detail=f"Tidal Connect: {exc}"
+            ) from exc
+        return _tc_snapshot()
     return _snapshot_dict(_native_player().pause())
 
 
 @app.post("/api/player/resume")
 def player_resume() -> dict:
     _require_local_access()
+    if _tc_active():
+        from app.audio.tidal_connect import get_manager
+        try:
+            get_manager().play()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502, detail=f"Tidal Connect: {exc}"
+            ) from exc
+        return _tc_snapshot()
     return _snapshot_dict(_native_player().resume())
 
 
 @app.post("/api/player/stop")
 def player_stop() -> dict:
     _require_local_access()
+    if _tc_active():
+        # Stop on Tidal Connect just clears the queue + pauses the
+        # device. Disconnecting is a separate user action through
+        # the picker — stopping a track shouldn't tear down the
+        # whole session.
+        from app.audio.tidal_connect import get_manager
+        try:
+            get_manager().pause()
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502, detail=f"Tidal Connect: {exc}"
+            ) from exc
+        return _tc_snapshot()
     return _snapshot_dict(_native_player().stop())
 
 
 @app.post("/api/player/seek")
 def player_seek(req: _PlayerSeekRequest) -> dict:
     _require_local_access()
+    if _tc_active():
+        from app.audio.tidal_connect import get_manager
+        # Resolve the fractional position into seconds using the
+        # last polled duration. SeekSecond is integer-only on the
+        # device side, so float-second precision is lost — fine for
+        # a UI scrubber.
+        mgr = get_manager()
+        with mgr._session_lock:  # noqa: SLF001
+            session = mgr._session
+        duration_s = session.duration_s if session else 0
+        position_s = int(max(0.0, min(req.fraction, 1.0)) * duration_s)
+        try:
+            mgr.seek(position_s)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502, detail=f"Tidal Connect: {exc}"
+            ) from exc
+        return _tc_snapshot()
     return _snapshot_dict(_native_player().seek(req.fraction))
 
 

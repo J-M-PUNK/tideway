@@ -213,6 +213,19 @@ class TidalConnectManager:
         self._state_listeners: list[
             "Callable[[dict[str, object]], None]"
         ] = []
+        # Local-output silencer hook. Same pattern as cast.py —
+        # server.py wires this to PCMPlayer's set_external_output_active
+        # at startup. Called with True on connect, False on
+        # disconnect, so the local sounddevice output mutes while
+        # audio is going to the Tidal Connect device.
+        self._local_silencer: Optional[Callable[[bool], None]] = None
+        # Track URL resolver. server.py wires this at startup with
+        # a closure that calls into tidalapi to mint a signed
+        # stream URL + extract metadata for any Tidal track id.
+        # Tests substitute a synthetic resolver via the same setter.
+        self._track_url_resolver: Optional[
+            Callable[[int], tuple[str, TrackMetadata]]
+        ] = None
         if _AVAILABLE:
             self._start_loop_thread()
 
@@ -365,6 +378,17 @@ class TidalConnectManager:
                 exc,
             )
 
+        # Resolver precedence: explicit per-call argument wins,
+        # else fall back to the manager-level resolver wired by
+        # server.py at startup. That lets tests pass a synthetic
+        # resolver per-call without mucking with the global
+        # while production wires once.
+        effective_resolver = (
+            track_url_resolver
+            if track_url_resolver is not None
+            else self._track_url_resolver
+        )
+
         session = _SessionState(
             device=device,
             openhome_device=openhome_device,
@@ -372,10 +396,24 @@ class TidalConnectManager:
             volume=volume,
             time=time_ctl,
             info=info,
-            track_url_resolver=track_url_resolver,
+            track_url_resolver=effective_resolver,
         )
         with self._session_lock:
             self._session = session
+
+        # Mute local audio output. PCMPlayer's audio callback
+        # writes silence while active; Tidal Connect doesn't
+        # decode locally at all, but the silencer defends against
+        # any latent decoder-thread output from a prior local
+        # playback that's draining.
+        if self._local_silencer is not None:
+            try:
+                self._local_silencer(True)
+            except Exception as exc:
+                log.debug(
+                    "tidal_connect: local silencer raised: %r", exc
+                )
+
         print(
             f"[tidal-connect] connected: {device.friendly_name} "
             f"(playlist+{'volume' if volume else 'no-volume'}+"
@@ -406,6 +444,19 @@ class TidalConnectManager:
                 session.device.friendly_name,
                 exc,
             )
+
+        # Restore local audio output. The user's volume / mute
+        # settings were preserved across the cycle so they don't
+        # have to re-set them now.
+        if self._local_silencer is not None:
+            try:
+                self._local_silencer(False)
+            except Exception as exc:
+                log.debug(
+                    "tidal_connect: local silencer raised on close: %r",
+                    exc,
+                )
+
         print(
             f"[tidal-connect] disconnected: {session.device.friendly_name}",
             flush=True,
@@ -508,6 +559,27 @@ class TidalConnectManager:
         return session
 
     # ---- state polling + listener bus -------------------------------
+
+    def set_local_silencer(
+        self, callback: Optional[Callable[[bool], None]]
+    ) -> None:
+        """Wire the audio engine's local-output silencer. The
+        callback gets `True` when a Tidal Connect session opens
+        and `False` when it closes, so the audio engine can mute
+        the local sounddevice output. Same pattern Cast uses;
+        server.py wires both at startup."""
+        self._local_silencer = callback
+
+    def set_track_url_resolver(
+        self,
+        resolver: Optional[Callable[[int], tuple[str, TrackMetadata]]],
+    ) -> None:
+        """Wire a tidal-track-id → (stream_url, TrackMetadata)
+        resolver. The audio engine wires this with a closure that
+        calls tidalapi.session.track(...).get_stream() to mint a
+        signed CDN URL. Tests substitute a synthetic resolver to
+        avoid hitting Tidal."""
+        self._track_url_resolver = resolver
 
     def add_state_listener(
         self,
