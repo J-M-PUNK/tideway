@@ -1,6 +1,7 @@
 import { Heart } from "lucide-react";
 import type { FavoriteKind } from "@/api/types";
 import { useFavorites } from "@/hooks/useFavorites";
+import { useHeartPop } from "@/components/HeartButton";
 import { cn } from "@/lib/utils";
 
 /**
@@ -20,6 +21,9 @@ export function AddToLibraryButton({
 }) {
   const favs = useFavorites();
   const liked = favs.has(kind, id);
+  // Same scale-pop on add as the heart-icon in track rows / cards /
+  // now-playing. See useHeartPop in HeartButton.tsx.
+  const popping = useHeartPop(liked);
   const label = liked ? "Added" : "Add";
   return (
     <button
@@ -32,7 +36,13 @@ export function AddToLibraryButton({
       title={liked ? "Remove from library" : "Add to library"}
       aria-pressed={liked}
     >
-      <Heart className={cn("h-5 w-5", liked && "fill-primary text-primary")} />
+      <Heart
+        className={cn(
+          "h-5 w-5",
+          liked && "fill-primary text-primary",
+          popping && "animate-heart-pop",
+        )}
+      />
       <div className="text-xs font-semibold">{label}</div>
     </button>
   );

@@ -4,7 +4,8 @@ import { Heart, Music } from "lucide-react";
 import type { Album, Artist, Playlist, FavoriteKind } from "@/api/types";
 import type { OnDownload } from "@/api/download";
 import { useFavorites } from "@/hooks/useFavorites";
-import { imageProxy } from "@/lib/utils";
+import { useHeartPop } from "@/components/HeartButton";
+import { cn, imageProxy } from "@/lib/utils";
 import { PlayMediaButton } from "@/components/PlayMediaButton";
 
 type Item = Album | Artist | Playlist;
@@ -44,7 +45,7 @@ export function MediaCard({
   return (
     <Link
       to={href}
-      className="group relative flex flex-col gap-3 rounded-lg bg-card p-4 transition-colors hover:bg-accent"
+      className="group relative flex flex-col gap-3 rounded-lg bg-card p-4 transition-colors duration-200 ease-out hover:bg-accent"
     >
       <div
         className={`relative aspect-square w-full overflow-hidden bg-secondary ${rounded}`}
@@ -54,7 +55,10 @@ export function MediaCard({
             src={cover}
             alt={item.name}
             loading="lazy"
-            className="h-full w-full object-cover transition-transform group-hover:scale-105"
+            // Slower, smoother ease so the zoom reads as "the cover
+            // gently leans toward you" rather than a snap. Matches
+            // Spotify-style card feel.
+            className="h-full w-full object-cover transition-transform duration-300 ease-out group-hover:scale-105"
           />
         ) : (
           <div className="flex h-full w-full items-center justify-center text-muted-foreground">
@@ -64,7 +68,7 @@ export function MediaCard({
         {showHoverActions && (
           <>
             <div
-              className={`absolute bottom-2 left-2 transition-all ${hoverGroup}`}
+              className={`absolute bottom-2 left-2 transition-all duration-200 ease-out ${hoverGroup}`}
             >
               <PlayMediaButton
                 kind={item.kind as "album" | "playlist"}
@@ -76,7 +80,7 @@ export function MediaCard({
             <InlineHeart
               kind={item.kind as FavoriteKind}
               id={item.id}
-              className={`absolute bottom-2 right-2 transition-all ${hoverGroup}`}
+              className={`absolute bottom-2 right-2 transition-all duration-200 ease-out ${hoverGroup}`}
             />
           </>
         )}
@@ -110,6 +114,11 @@ function InlineHeart({
 }) {
   const favs = useFavorites();
   const liked = favs.has(kind, id);
+  // Same animation contract as the main HeartButton — see useHeartPop
+  // in HeartButton.tsx. Sharing the hook means a like-toggle on the
+  // card overlay pops identically to a like-toggle on the now-playing
+  // bar / track row / detail page.
+  const popping = useHeartPop(liked);
   return (
     <button
       type="button"
@@ -121,10 +130,17 @@ function InlineHeart({
       aria-pressed={liked}
       aria-label={liked ? `Unlike ${kind}` : `Like ${kind}`}
       title={liked ? `Unlike ${kind}` : `Like ${kind}`}
-      className={`flex h-10 w-10 items-center justify-center rounded-full bg-black/70 text-white shadow-lg transition-colors hover:bg-black/90 ${className ?? ""}`}
+      className={cn(
+        "flex h-10 w-10 items-center justify-center rounded-full bg-black/70 text-white shadow-lg transition-colors hover:bg-black/90",
+        className,
+      )}
     >
       <Heart
-        className={`h-5 w-5 ${liked ? "fill-primary stroke-primary" : ""}`}
+        className={cn(
+          "h-5 w-5",
+          liked && "fill-primary stroke-primary",
+          popping && "animate-heart-pop",
+        )}
       />
     </button>
   );

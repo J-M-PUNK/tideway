@@ -1,11 +1,15 @@
 import { cn } from "@/lib/utils";
 
+/**
+ * Loading-state placeholder. Uses the gradient-shimmer animation
+ * defined in index.css (`animate-skeleton`) rather than Tailwind's
+ * default `animate-pulse`, which fades the whole block to ~50 %
+ * opacity. The shimmer keeps the surface visible while sweeping a
+ * highlight across — a softer "loading" cue that doesn't strobe
+ * the whole page on dense skeleton lists.
+ */
 export function Skeleton({ className }: { className?: string }) {
-  return (
-    <div
-      className={cn("animate-pulse rounded-md bg-secondary/70", className)}
-    />
-  );
+  return <div className={cn("animate-skeleton rounded-md", className)} />;
 }
 
 export function CardSkeleton() {

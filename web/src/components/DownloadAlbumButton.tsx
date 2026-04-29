@@ -10,6 +10,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
+import { useArrivalPulse } from "@/components/HeartButton";
 import { useDownloadedIds } from "@/hooks/useDownloadedSet";
 import { useQualities } from "@/hooks/useQualities";
 import {
@@ -52,6 +53,12 @@ export function DownloadAlbumButton({
   const have = tracks.filter((t) => downloaded.has(String(t.id))).length;
   const total = tracks.length;
   const allHave = total > 0 && have === total;
+  // Pulse the check icon on the false→true transition (last track
+  // of the album finishes downloading, allHave flips to true).
+  // Same arrival-pulse hook the heart-toggle uses, just with the
+  // saved-pop animation class so the celebratory beat reads as a
+  // family across heart and download surfaces.
+  const arriving = useArrivalPulse(allHave, 280);
 
   const Icon = allHave ? Check : Download;
   const label = allHave ? "Downloaded" : "Download";
@@ -90,7 +97,13 @@ export function DownloadAlbumButton({
           title={allHave ? "Re-download album" : "Download album"}
           aria-label={allHave ? "Re-download album" : "Download album"}
         >
-          <Icon className={cn("h-5 w-5", allHave && "text-sky-500")} />
+          <Icon
+            className={cn(
+              "h-5 w-5",
+              allHave && "text-sky-500",
+              arriving && "animate-saved-pop",
+            )}
+          />
           <div className="text-xs font-semibold">{label}</div>
         </button>
       </DropdownMenuTrigger>

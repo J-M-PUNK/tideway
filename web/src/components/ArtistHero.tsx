@@ -24,6 +24,7 @@ import { PlayAllButton } from "@/components/PlayAllButton";
 import { ShuffleButton } from "@/components/ShuffleButton";
 import { useToast } from "@/components/toast";
 import { useFavorites } from "@/hooks/useFavorites";
+import { useHeartPop } from "@/components/HeartButton";
 import { useLastfmArtistPlaycount } from "@/hooks/useLastfmPlaycount";
 import { useSpotifyArtistStats } from "@/hooks/useSpotifyEnrichment";
 import { cn, imageProxy } from "@/lib/utils";
@@ -152,6 +153,12 @@ export function ArtistHero({
 function FollowToggle({ artistId }: { artistId: string }) {
   const { has, toggle } = useFavorites();
   const following = has("artist", artistId);
+  // Same scale-pop as the heart-toggle elsewhere in the app — even
+  // though the icon changes glyph (Heart → Check) on follow, the
+  // animation contract is the same: a brief celebratory pulse on
+  // the false→true transition. Suppressed on unfollow because
+  // unfollowing isn't an "achievement" worth animating.
+  const popping = useHeartPop(following);
   return (
     <button
       onClick={() => toggle("artist", artistId)}
@@ -160,7 +167,7 @@ function FollowToggle({ artistId }: { artistId: string }) {
     >
       <div className={cn("flex h-5 items-center", following && "text-primary")}>
         {following ? (
-          <Check className="h-5 w-5" />
+          <Check className={cn("h-5 w-5", popping && "animate-heart-pop")} />
         ) : (
           <Heart className="h-5 w-5" />
         )}

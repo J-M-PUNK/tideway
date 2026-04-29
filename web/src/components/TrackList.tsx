@@ -21,7 +21,7 @@ import { useSpotifyTrackPlaycount } from "@/hooks/useSpotifyEnrichment";
 import { useHoverPrefetch } from "@/hooks/useTrackPrefetch";
 import { useTrackSelection } from "@/hooks/useTrackSelection";
 import { useUiPreferences } from "@/hooks/useUiPreferences";
-import { HeartButton } from "@/components/HeartButton";
+import { HeartButton, useArrivalPulse } from "@/components/HeartButton";
 import { CreditsDialog } from "@/components/CreditsDialog";
 import { cn } from "@/lib/utils";
 import {
@@ -386,6 +386,11 @@ function TrackRow({
   const isPlaying = isCurrent && meta.playing;
   const isLoading = isCurrent && meta.loading;
   const isDownloaded = useIsDownloaded(track.id);
+  // Pulse the "Saved" pill on the false→true transition (i.e. the
+  // track finishes downloading while this row is rendered). Tracks
+  // that were already downloaded when the row mounted don't pulse —
+  // useArrivalPulse only fires on transitions, not on mount.
+  const justDownloaded = useArrivalPulse(isDownloaded, 280);
   const [creditsOpen, setCreditsOpen] = useState(false);
   const selection = useTrackSelection();
   const isSelected = selection.has(track.id);
@@ -441,7 +446,11 @@ function TrackRow({
           style={sortableStyle}
           {...dragHandleProps}
           className={cn(
-            "group grid select-none items-center gap-4 rounded-md px-4 py-2 text-sm hover:bg-accent",
+            // transition-colors on hover smooths the bg-fade in / out
+            // so cursor-skim across a long track list reads as a
+            // continuous wave rather than discrete on/off steps. 150ms
+            // is fast enough to feel responsive on rapid mouse moves.
+            "group grid select-none items-center gap-4 rounded-md px-4 py-2 text-sm transition-colors duration-150 hover:bg-accent",
             showPlaycount
               ? "grid-cols-[24px_4fr_56px_3fr_auto]"
               : "grid-cols-[24px_4fr_3fr_auto]",
@@ -498,7 +507,10 @@ function TrackRow({
                 {isDownloaded && (
                   <span
                     title="Downloaded — plays from disk"
-                    className="flex-shrink-0 rounded-sm bg-primary/15 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-primary"
+                    className={cn(
+                      "flex-shrink-0 rounded-sm bg-primary/15 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-primary",
+                      justDownloaded && "animate-saved-pop",
+                    )}
                   >
                     Saved
                   </span>

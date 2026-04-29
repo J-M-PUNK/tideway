@@ -61,6 +61,22 @@ const offlineLibrary = [
   { to: "/library/local", label: "On this device", icon: HardDrive },
 ];
 
+// Shared NavLink classes. The `before:` pseudo-element is the active
+// indicator — a 2px primary-colored bar pinned to the left edge of
+// the active row. Inactive rows have it at h-0 (invisible); the
+// active class flips it to h-5 (matching the icon height) with a
+// 200 ms transition so clicking between tabs reads as the bar
+// growing into the new row rather than snapping. Same idea every
+// modern sidebar uses (Spotify, Linear, Notion).
+const navItemClass = (isActive: boolean) =>
+  cn(
+    "relative flex items-center gap-4 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground",
+    "before:absolute before:left-0 before:top-1/2 before:w-0.5 before:-translate-y-1/2 before:rounded-r before:bg-primary before:transition-all before:duration-200",
+    isActive
+      ? "text-foreground before:h-5 before:opacity-100"
+      : "before:h-0 before:opacity-0",
+  );
+
 export function Sidebar({
   activeDownloads,
   newDownloads,
@@ -116,12 +132,7 @@ export function Sidebar({
                 key={to}
                 to={to}
                 end={end}
-                className={({ isActive }) =>
-                  cn(
-                    "flex items-center gap-4 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground",
-                    isActive && "text-foreground",
-                  )
-                }
+                className={({ isActive }) => navItemClass(isActive)}
               >
                 <Icon className="h-5 w-5" />
                 <span className="flex-1">{label}</span>
@@ -149,12 +160,7 @@ export function Sidebar({
               <NavLink
                 key={to}
                 to={to}
-                className={({ isActive }) =>
-                  cn(
-                    "flex items-center gap-4 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground",
-                    isActive && "text-foreground",
-                  )
-                }
+                className={({ isActive }) => navItemClass(isActive)}
               >
                 <Icon className="h-5 w-5" />
                 {label}
@@ -194,8 +200,13 @@ export function Sidebar({
               to={to}
               className={({ isActive }) =>
                 cn(
-                  "flex items-center gap-4 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:bg-accent hover:text-foreground",
-                  isActive && "bg-accent text-foreground",
+                  navItemClass(isActive),
+                  // Library rows additionally fade the background on
+                  // hover so this section reads as a more
+                  // interaction-heavy surface than the primary /
+                  // discover blocks above. Keeps the user's
+                  // most-frequented area feeling distinct.
+                  "hover:bg-accent",
                 )
               }
             >
