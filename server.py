@@ -546,6 +546,17 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     except Exception as exc:
         print(f"[macos-np] startup failed: {exc}", flush=True)
 
+    # Begin Cast device discovery in the background. Cheap — opens
+    # one zeroconf browser thread that gets pruned on shutdown. The
+    # picker reads from `cast_manager.list_devices()` lazily, so
+    # there's no hot loop here, just a continuously-updated cache.
+    # See app/audio/cast.py.
+    try:
+        from app.audio.cast import cast_manager as _cast_manager
+        _cast_manager.start_discovery()
+    except Exception as exc:
+        print(f"[cast] startup failed: {exc}", flush=True)
+
     try:
         yield
     finally:
@@ -554,6 +565,13 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
                 stop_hotkeys()
             except Exception:
                 pass
+        # Stop Cast discovery — releases the zeroconf socket and the
+        # browser thread. Best-effort; we don't block shutdown on it.
+        try:
+            from app.audio.cast import cast_manager as _cast_manager
+            _cast_manager.stop_discovery()
+        except Exception:
+            pass
         # Close the shared requests session so sockets in its connection pool
         # are released cleanly on reload/shutdown.
         try:
@@ -4192,6 +4210,41 @@ def _airplay_manager():
     from app.audio.airplay import AirPlayManager  # noqa: WPS433
 
     return AirPlayManager.instance()
+
+
+@app.get("/api/cast/devices")
+def cast_devices() -> dict:
+    """Snapshot of Chromecast devices currently visible on the LAN.
+
+    Discovery runs continuously in the background (started by the
+    lifespan hook above), so this endpoint just reads the current
+    cache and translates it for the frontend. It does not block on
+    a fresh mDNS scan — devices come and go from the cache as
+    pychromecast's CastBrowser callbacks fire.
+
+    The picker polls this every few seconds while it's open, and on
+    initial open. We also include `status` so the picker can show
+    'Discovery not available on this network' or similar when the
+    browser failed to start (mDNS-blocked corporate Wi-Fi, etc.)
+    instead of just an empty list with no explanation.
+    """
+    _require_local_access()
+    from app.audio.cast import cast_manager  # noqa: WPS433 — lazy
+
+    devices = cast_manager.list_devices()
+    return {
+        "status": cast_manager.status(),
+        "devices": [
+            {
+                "id": d.id,
+                "friendly_name": d.friendly_name,
+                "model_name": d.model_name,
+                "manufacturer": d.manufacturer,
+                "cast_type": d.cast_type,
+            }
+            for d in devices
+        ],
+    }
 
 
 @app.get("/api/upnp/devices")
