@@ -126,6 +126,27 @@ def test_put_concurrent_downloads_validated(client):
     assert r.status_code == 400
 
 
+def test_default_concurrent_downloads_is_one():
+    """Serial download is the safest baseline against Tidal's per-
+    account rate-limit. A bumped default (e.g. someone setting it to
+    3 for "feels faster") would silently expose every fresh install
+    to the abuse threshold. Pin the conservative default so a
+    change has to be a deliberate edit to this test."""
+    from app.settings import Settings
+
+    assert Settings().concurrent_downloads == 1
+
+
+def test_default_download_rate_limit_is_20_mbps():
+    """20 MB/s is the new default — fast enough to feel instant on a
+    healthy connection, slow enough to look like steady streaming
+    rather than a bulk scrape. Pin the value because it's the kind
+    of setting that's tempting to "just bump" in a refactor."""
+    from app.settings import Settings
+
+    assert Settings().download_rate_limit_mbps == 20
+
+
 def test_put_multiple_fields_in_one_request(client):
     """Typical settings-page autosave sends multiple fields at once.
     All must apply atomically."""

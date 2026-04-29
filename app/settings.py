@@ -45,14 +45,16 @@ class Settings:
     skip_existing: bool = True
     # How many downloads may run in parallel. Gated by the Downloader's
     # semaphore so changing this doesn't require a process restart.
-    concurrent_downloads: int = 3
-    # Per-track download rate cap in MB/s. 0 = unlimited. Default 10
-    # MB/s keeps the CDN fetch cadence in the neighborhood of
-    # "aggressive prefetch during playback" rather than "scrape as
-    # fast as possible". A 4-minute track at Max (~40 MB) downloads in
-    # ~4 s, at a steady rate the CDN treats as a normal streaming
-    # session instead of flagging as suspicious bulk transfer.
-    download_rate_limit_mbps: int = 10
+    # Default 1 — serial download is the safest baseline against
+    # Tidal's per-account rate-limit. Users with stable accounts can
+    # raise this in Settings; the slider goes up to 10.
+    concurrent_downloads: int = 1
+    # Per-track download rate cap in MB/s. 0 = unlimited. Default 20
+    # MB/s — fast enough that a Max-quality 4-minute track finishes in
+    # ~2 seconds on a normal connection, slow enough that the CDN sees
+    # a steady streaming-shaped fetch instead of a "scrape as fast as
+    # possible" pattern that would attract anti-abuse attention.
+    download_rate_limit_mbps: int = 20
     # When True, the UI hides everything that needs a live Tidal session
     # (search, editorial, favorites, streaming fallback) and the server
     # stops requiring auth on the handful of endpoints that only touch
