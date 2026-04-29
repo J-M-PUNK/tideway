@@ -65,15 +65,45 @@ type CastDevicesResponse = {
   devices: CastDeviceSummary[];
 };
 
+type TidalConnectDeviceSummary = {
+  id: string;
+  friendly_name: string;
+  manufacturer: string;
+  model: string;
+  is_openhome: boolean;
+  has_credentials_service: boolean;
+};
+
+type TidalConnectDevicesResponse = {
+  status: {
+    available: boolean;
+    device_count: number;
+    last_scan_age_s?: number | null;
+    connected_id?: string | null;
+    connected_name?: string | null;
+    control_plane_ready?: boolean;
+  };
+  devices: TidalConnectDeviceSummary[];
+};
+
 const LOCAL_PREFIX = "local:";
 const CAST_PREFIX = "cast:";
+const TC_PREFIX = "tc:";
 
 export function OutputDevicePicker() {
   const toast = useToast();
   const opts = useAudioOptions();
   const [cast, setCast] = useState<CastDevicesResponse | null>(null);
+  const [tc, setTc] = useState<TidalConnectDevicesResponse | null>(null);
   const [busy, setBusy] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
+  // Pending Tidal Connect device — once the user picks one, we
+  // surface an "experimental" confirmation dialog before actually
+  // calling connect. The TC protocol is built blind without
+  // hardware verification (see docs/cast-and-connect-scope.md), so
+  // users get a heads-up about what they're testing.
+  const [pendingTcDevice, setPendingTcDevice] =
+    useState<TidalConnectDeviceSummary | null>(null);
 
   // Light Cast polling so the picker reflects mDNS arrivals /
   // departures and detects backend-initiated disconnects (Cast
@@ -106,28 +136,69 @@ export function OutputDevicePicker() {
         .devices()
         .then((res) => setCast(res))
         .catch(() => {}),
+      // Tidal Connect uses SSDP, which takes 5s to scan. Only
+      // refresh on dropdown open (not the polling timer) — the
+      // session state in `status.connected_id` is what we update
+      // live, and that doesn't need a fresh scan to read.
+      api.tidalConnect
+        .devices()
+        .then((res) => setTc(res))
+        .catch(() => {}),
     ]);
   };
 
-  // What the radio shows as selected. Casting wins — if a session
-  // is open, the Cast device is the active sound output. Otherwise
-  // we surface the local device id.
+  // What the radio shows as selected. Remote sessions win — if
+  // either Cast or Tidal Connect is open, the remote device is
+  // the active sound output. Otherwise we surface the local device id.
   const castConnectedId = cast?.status.connected_id ?? null;
+  const tcConnectedId = tc?.status.connected_id ?? null;
   const selectedValue = castConnectedId
     ? `${CAST_PREFIX}${castConnectedId}`
-    : `${LOCAL_PREFIX}${opts.current}`;
+    : tcConnectedId
+      ? `${TC_PREFIX}${tcConnectedId}`
+      : `${LOCAL_PREFIX}${opts.current}`;
 
   const showCastSection =
     cast !== null &&
     cast.status.available &&
     (cast.devices.length > 0 || castConnectedId !== null);
 
+  const showTcSection =
+    tc !== null &&
+    tc.status.available &&
+    (tc.devices.length > 0 || tcConnectedId !== null);
+
+  const switchAwayFromRemoteIfActive = async () => {
+    // Disconnecting whichever remote is currently active so the
+    // new selection has a clean slate. Order matters: we always
+    // close the existing session before opening a new one or
+    // returning to local; otherwise the audio engine briefly
+    // feeds two destinations and produces a stutter.
+    if (castConnectedId !== null) await api.cast.disconnect();
+    if (tcConnectedId !== null) await api.tidalConnect.disconnect();
+  };
+
   const onSelect = async (value: string) => {
     if (busy || value === selectedValue) return;
+
+    // Tidal Connect: don't connect immediately. Pop the
+    // experimental-notice dialog first so users know what they're
+    // testing. Confirming the dialog calls confirmConnectTc()
+    // below with the actual connect work.
+    if (value.startsWith(TC_PREFIX)) {
+      const deviceId = value.slice(TC_PREFIX.length);
+      const device = tc?.devices.find((d) => d.id === deviceId);
+      if (device) {
+        setPendingTcDevice(device);
+        return;
+      }
+    }
+
     setBusy(true);
     try {
       if (value.startsWith(CAST_PREFIX)) {
         const deviceId = value.slice(CAST_PREFIX.length);
+        await switchAwayFromRemoteIfActive();
         const result = await api.cast.connect(deviceId);
         toast.show({
           kind: "success",
@@ -136,16 +207,7 @@ export function OutputDevicePicker() {
         });
       } else if (value.startsWith(LOCAL_PREFIX)) {
         const localId = value.slice(LOCAL_PREFIX.length);
-        // If we're currently casting, switching to a local
-        // device implies stopping the cast. Order matters:
-        // disconnect cast first so the encoder closes cleanly,
-        // THEN flip the local output. Otherwise the brief
-        // overlap can produce a stutter on the local device as
-        // the audio engine rebinds while still feeding the cast
-        // ring buffer.
-        if (castConnectedId !== null) {
-          await api.cast.disconnect();
-        }
+        await switchAwayFromRemoteIfActive();
         await opts.setDevice(localId);
       }
       await refreshAll();
@@ -161,6 +223,35 @@ export function OutputDevicePicker() {
       await refreshAll();
     } finally {
       setBusy(false);
+    }
+  };
+
+  const confirmConnectTc = async () => {
+    if (!pendingTcDevice) return;
+    const device = pendingTcDevice;
+    setPendingTcDevice(null);
+    setBusy(true);
+    try {
+      await switchAwayFromRemoteIfActive();
+      const result = await api.tidalConnect.connect(device.id);
+      toast.show({
+        kind: "success",
+        title: `Connected to ${result.device.friendly_name}`,
+        description:
+          "Tidal Connect is experimental. Picking a track from " +
+          "Tideway should now play on the device. Please report " +
+          "what works and what doesn't.",
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      toast.show({
+        kind: "error",
+        title: "Tidal Connect failed",
+        description: message,
+      });
+    } finally {
+      setBusy(false);
+      await refreshAll();
     }
   };
 
@@ -188,16 +279,19 @@ export function OutputDevicePicker() {
     }
   };
 
-  // Trigger appearance: highlights when a Cast session is active
-  // OR when Exclusive Mode is on, because both are "audio's not
-  // going to default speakers" states the user might want at-a-
-  // glance confirmation of.
-  const triggerHighlight = castConnectedId !== null || opts.exclusiveMode;
+  // Trigger appearance: highlights when audio is going somewhere
+  // unusual — Cast / Tidal Connect active OR Exclusive Mode on.
+  // All three are "this isn't default speakers" states worth
+  // surfacing at a glance.
+  const triggerHighlight =
+    castConnectedId !== null || tcConnectedId !== null || opts.exclusiveMode;
   const currentLocalName =
     opts.devices.find((d) => d.id === opts.current)?.name ?? "System default";
   const triggerTitle = castConnectedId
     ? `Casting to ${cast?.status.connected_name ?? "device"}`
-    : `Output: ${currentLocalName}`;
+    : tcConnectedId
+      ? `Tidal Connect: ${tc?.status.connected_name ?? "device"}`
+      : `Output: ${currentLocalName}`;
 
   return (
     <>
@@ -297,8 +391,45 @@ export function OutputDevicePicker() {
                 )}
               </>
             )}
+
+            {showTcSection && (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuLabel className="flex items-center gap-2 text-muted-foreground">
+                  <span>Tidal Connect</span>
+                  <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-amber-500">
+                    Experimental
+                  </span>
+                </DropdownMenuLabel>
+                {tc.devices.length === 0 ? (
+                  <div className="px-2 py-1.5 text-xs text-muted-foreground">
+                    No Tidal Connect devices visible. Open the dropdown to
+                    re-scan; SSDP discovery takes a few seconds.
+                  </div>
+                ) : (
+                  tc.devices.map((d) => (
+                    <DropdownMenuRadioItem
+                      key={d.id}
+                      value={`${TC_PREFIX}${d.id}`}
+                      onSelect={(e) => e.preventDefault()}
+                      className="text-sm"
+                      disabled={busy}
+                    >
+                      <div className="flex flex-col">
+                        <span>{d.friendly_name}</span>
+                        <span className="text-[11px] text-muted-foreground">
+                          {d.manufacturer && d.model
+                            ? `${d.manufacturer} ${d.model}`
+                            : d.manufacturer || d.model || "OpenHome"}
+                        </span>
+                      </div>
+                    </DropdownMenuRadioItem>
+                  ))
+                )}
+              </>
+            )}
           </DropdownMenuRadioGroup>
-          {castConnectedId !== null && (
+          {(castConnectedId !== null || tcConnectedId !== null) && (
             <>
               <DropdownMenuSeparator />
               <DropdownMenuItem
@@ -307,7 +438,9 @@ export function OutputDevicePicker() {
                 }}
                 className="text-xs text-muted-foreground"
               >
-                Stop casting and return to local output
+                {castConnectedId !== null
+                  ? "Stop casting and return to local output"
+                  : "Stop Tidal Connect and return to local output"}
               </DropdownMenuItem>
             </>
           )}
@@ -323,7 +456,72 @@ export function OutputDevicePicker() {
         onExclusiveChange={flipExclusive}
         onForceVolumeChange={flipForceVolume}
       />
+
+      <TidalConnectExperimentalDialog
+        device={pendingTcDevice}
+        onCancel={() => setPendingTcDevice(null)}
+        onConfirm={confirmConnectTc}
+      />
     </>
+  );
+}
+
+/**
+ * Modal that surfaces the experimental nature of Tidal Connect
+ * before actually connecting. Tideway's Tidal Connect controller
+ * was built blind — no hardware was available to verify against
+ * during development. We expect the protocol path to work
+ * (hypothesis A from the scoping doc) but it isn't proven. Users
+ * who confirm the dialog are explicitly opting in to testing,
+ * with a clear ask to report results.
+ */
+function TidalConnectExperimentalDialog({
+  device,
+  onCancel,
+  onConfirm,
+}: {
+  device: TidalConnectDeviceSummary | null;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <Dialog
+      open={device !== null}
+      onOpenChange={(open) => {
+        if (!open) onCancel();
+      }}
+    >
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>
+            Connect to {device?.friendly_name ?? "Tidal Connect device"}?
+          </DialogTitle>
+          <DialogDescription>Experimental feature.</DialogDescription>
+        </DialogHeader>
+        <div className="flex flex-col gap-3 pt-2 text-sm text-foreground">
+          <p>
+            Tidal Connect support in Tideway is built against the published
+            OpenHome / UPnP-AV spec but hasn't been verified against real
+            hardware yet. Connecting may work end-to-end, or it may fail at the
+            audio-handoff step depending on how your specific device implements
+            the Tidal-side protocol.
+          </p>
+          <p className="text-muted-foreground">
+            If audio doesn't play after you select a track, please disconnect
+            and report what you see (device model + the error in the toast).
+            That feedback is what unblocks a non-experimental release.
+          </p>
+        </div>
+        <div className="flex justify-end gap-2 pt-3">
+          <Button variant="ghost" size="sm" onClick={onCancel}>
+            Cancel
+          </Button>
+          <Button size="sm" onClick={onConfirm}>
+            Connect
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 

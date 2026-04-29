@@ -939,6 +939,44 @@ export const api = {
     disconnect: () =>
       req<{ ok: boolean }>("/api/cast/disconnect", { method: "POST" }),
   },
+  tidalConnect: {
+    devices: () =>
+      req<{
+        status: {
+          available: boolean;
+          device_count: number;
+          last_scan_age_s?: number | null;
+          connected_id?: string | null;
+          connected_name?: string | null;
+          control_plane_ready?: boolean;
+        };
+        devices: {
+          id: string;
+          friendly_name: string;
+          manufacturer: string;
+          model: string;
+          is_openhome: boolean;
+          has_credentials_service: boolean;
+        }[];
+      }>("/api/tidal-connect/devices"),
+    connect: (deviceId: string) =>
+      req<{
+        ok: boolean;
+        device: {
+          id: string;
+          friendly_name: string;
+          manufacturer: string;
+          model: string;
+        };
+      }>("/api/tidal-connect/connect", {
+        method: "POST",
+        body: JSON.stringify({ device_id: deviceId }),
+      }),
+    disconnect: () =>
+      req<{ ok: boolean }>("/api/tidal-connect/disconnect", {
+        method: "POST",
+      }),
+  },
   airplay: {
     devices: () =>
       req<{
