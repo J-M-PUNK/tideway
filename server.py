@@ -546,6 +546,28 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     except Exception as exc:
         print(f"[macos-np] startup failed: {exc}", flush=True)
 
+    # Begin Cast device discovery in the background. Cheap — opens
+    # one zeroconf browser thread that gets pruned on shutdown. The
+    # picker reads from `cast_manager.list_devices()` lazily, so
+    # there's no hot loop here, just a continuously-updated cache.
+    # See app/audio/cast.py.
+    try:
+        from app.audio.cast import cast_manager as _cast_manager
+        _cast_manager.start_discovery()
+        # Wire the local-output silencer so PCMPlayer mutes its
+        # sounddevice output while a Cast session is open. PCM tap
+        # to the Cast encoder happens BEFORE the silencer in the
+        # callback ordering, so the device still gets full audio
+        # while local goes quiet.
+        try:
+            _cast_manager.set_local_silencer(
+                _native_player().set_external_output_active
+            )
+        except Exception as exc:
+            print(f"[cast] silencer wire failed: {exc}", flush=True)
+    except Exception as exc:
+        print(f"[cast] startup failed: {exc}", flush=True)
+
     try:
         yield
     finally:
@@ -554,6 +576,13 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
                 stop_hotkeys()
             except Exception:
                 pass
+        # Stop Cast discovery — releases the zeroconf socket and the
+        # browser thread. Best-effort; we don't block shutdown on it.
+        try:
+            from app.audio.cast import cast_manager as _cast_manager
+            _cast_manager.stop_discovery()
+        except Exception:
+            pass
         # Close the shared requests session so sockets in its connection pool
         # are released cleanly on reload/shutdown.
         try:
@@ -4234,6 +4263,93 @@ def _airplay_manager():
     from app.audio.airplay import AirPlayManager  # noqa: WPS433
 
     return AirPlayManager.instance()
+
+
+@app.get("/api/cast/devices")
+def cast_devices() -> dict:
+    """Snapshot of Chromecast devices currently visible on the LAN.
+
+    Discovery runs continuously in the background (started by the
+    lifespan hook above), so this endpoint just reads the current
+    cache and translates it for the frontend. It does not block on
+    a fresh mDNS scan — devices come and go from the cache as
+    pychromecast's CastBrowser callbacks fire.
+
+    The picker polls this every few seconds while it's open, and on
+    initial open. We also include `status` so the picker can show
+    'Discovery not available on this network' or similar when the
+    browser failed to start (mDNS-blocked corporate Wi-Fi, etc.)
+    instead of just an empty list with no explanation. Status also
+    surfaces the currently-connected device so the picker reflects
+    real state without needing a separate state endpoint.
+    """
+    _require_local_access()
+    from app.audio.cast import cast_manager  # noqa: WPS433 — lazy
+
+    devices = cast_manager.list_devices()
+    return {
+        "status": cast_manager.status(),
+        "devices": [
+            {
+                "id": d.id,
+                "friendly_name": d.friendly_name,
+                "model_name": d.model_name,
+                "manufacturer": d.manufacturer,
+                "cast_type": d.cast_type,
+            }
+            for d in devices
+        ],
+    }
+
+
+class _CastConnectRequest(BaseModel):
+    device_id: str
+
+
+@app.post("/api/cast/connect")
+def cast_connect(req: _CastConnectRequest) -> dict:
+    """Open a Cast session against the given device. Tears down any
+    existing session first. Blocks for the duration of the Cast
+    handshake — typically under a second on the LAN, capped at 10s
+    by the manager. Returns the connected device summary on
+    success; 404 if the device id isn't currently in discovery,
+    503 if pychromecast isn't installed, 502 for handshake failure.
+    """
+    _require_local_access()
+    from app.audio.cast import cast_manager  # noqa: WPS433
+
+    try:
+        device = cast_manager.connect(req.device_id)
+    except ValueError as exc:
+        # Unknown device id — picker is showing stale data, or
+        # device went offline between picker refresh and click.
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        # pychromecast unavailable, handshake timeout, http server
+        # bind failure. All are server-side problems; surface them
+        # as 502 so the frontend toast distinguishes "not ready" from
+        # "device gone."
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {
+        "ok": True,
+        "device": {
+            "id": device.id,
+            "friendly_name": device.friendly_name,
+            "model_name": device.model_name,
+            "cast_type": device.cast_type,
+        },
+    }
+
+
+@app.post("/api/cast/disconnect")
+def cast_disconnect() -> dict:
+    """Tear down the active Cast session, returning audio to the
+    local output. No-op if nothing is connected; idempotent."""
+    _require_local_access()
+    from app.audio.cast import cast_manager  # noqa: WPS433
+
+    cast_manager.disconnect()
+    return {"ok": True}
 
 
 @app.get("/api/upnp/devices")
