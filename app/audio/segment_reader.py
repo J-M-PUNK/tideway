@@ -44,6 +44,21 @@ class SegmentReader(io.RawIOBase):
         self._pos = 0
         self._lock = threading.Lock()
         self._session = requests.Session()
+        # Cancellation plumbing. The decoder thread blocks inside
+        # _fetch_next_segment for ~150-300ms per segment on a track
+        # change or seek. The player tears the thread down by calling
+        # close() from the foreground. Without active cancellation,
+        # close() would have to wait for the in-flight HTTP read to
+        # complete on its own, which is the bulk of the visible
+        # teardown latency on the play and seek paths. We track the
+        # current Response object and close it from close() to abort
+        # the read; the thread sees a connection error and exits.
+        self._closed = False
+        self._current_response: Optional[requests.Response] = None
+        # Separate, finer-grained lock for the response handle so
+        # close() can preempt a fetch in progress without waiting on
+        # the main read lock (which the fetching thread is holding).
+        self._response_lock = threading.Lock()
         # Byte-level prefetch fast path: if the caller hands us
         # pre-downloaded bytes for segment 0, 1, ..., N in order,
         # seed the buffer with them and advance _next_segment_idx
@@ -98,7 +113,26 @@ class SegmentReader(io.RawIOBase):
         return False
 
     def close(self) -> None:
+        # Idempotent close. The decoder's cancel_source() path calls
+        # this from the foreground thread to abort an in-flight fetch
+        # on the decoder thread; close() is also called normally when
+        # the decoder is torn down after the thread has already exited.
         super().close()
+        with self._response_lock:
+            self._closed = True
+            r = self._current_response
+            self._current_response = None
+        if r is not None:
+            # Closing the Response releases the underlying urllib3
+            # connection back to the pool with a forced abort, which
+            # raises a ConnectionError on the thread blocked in
+            # iter_content. That's the whole point: the decoder
+            # thread sees the exception and exits, instead of waiting
+            # out the rest of a 150-300ms segment download.
+            try:
+                r.close()
+            except Exception:
+                pass
         try:
             self._session.close()
         except Exception:
@@ -185,16 +219,69 @@ class SegmentReader(io.RawIOBase):
     def _fetch_next_segment(self) -> None:
         if self._next_segment_idx >= len(self._urls):
             return
+        if self._closed:
+            # close() was called between segments. Mark EOF so the
+            # caller's read() returns b"" cleanly instead of trying
+            # the next segment.
+            self._next_segment_idx = len(self._urls)
+            return
         idx = self._next_segment_idx
         url = self._urls[idx]
         # Tidal CDN URLs are signed with time-bounded policy params,
         # so this is the only place we hit the network. We keep the
         # requests.Session around for HTTP/2 connection reuse.
+        #
+        # `stream=True` is the part that makes the read interruptible.
+        # Without it, requests internally calls Response.content,
+        # which blocks until the full body has been buffered and
+        # cannot be preempted. With stream=True we hold the Response
+        # ourselves and iter_content yields chunks as the socket
+        # delivers them; close() can then abort the active socket
+        # mid-fetch by closing the Response.
         t0 = time.monotonic()
-        r = self._session.get(url, timeout=30)
-        r.raise_for_status()
-        size = len(r.content)
-        self._buf.extend(r.content)
+        r = self._session.get(url, timeout=30, stream=True)
+        with self._response_lock:
+            if self._closed:
+                # Lost the race: close() fired after we issued the
+                # GET. Drop the response and bail. _next_segment_idx
+                # is left short of the end so a subsequent read()
+                # would re-attempt — but in practice close() means
+                # the SegmentReader is on its way out and read()
+                # won't be called again.
+                try:
+                    r.close()
+                except Exception:
+                    pass
+                return
+            self._current_response = r
+        chunks: list[bytes] = []
+        size = 0
+        try:
+            r.raise_for_status()
+            # 64 KB is large enough to keep iter_content overhead
+            # negligible on a 2-3 MB segment but small enough that
+            # close() during a fetch interrupts within the time to
+            # download one chunk (~5 ms on a residential connection).
+            for chunk in r.iter_content(chunk_size=65536):
+                if self._closed:
+                    return
+                if chunk:
+                    chunks.append(chunk)
+                    size += len(chunk)
+        finally:
+            with self._response_lock:
+                # Only clear if we're still the current response —
+                # close() may have already nulled it out and called
+                # r.close() itself.
+                if self._current_response is r:
+                    self._current_response = None
+            try:
+                r.close()
+            except Exception:
+                pass
+        if self._closed:
+            return
+        self._buf.extend(b"".join(chunks))
         self._next_segment_idx += 1
         elapsed_ms = (time.monotonic() - t0) * 1000.0
         print(
