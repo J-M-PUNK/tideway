@@ -54,8 +54,19 @@ import asyncio
 import logging
 import threading
 import time
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Callable, Optional
+
+from app.audio.openhome import (
+    InfoController,
+    OpenHomeDevice,
+    PlaylistController,
+    TimeController,
+    TrackMetadata,
+    VolumeController,
+    build_didl_lite,
+    fetch_device,
+)
 
 log = logging.getLogger(__name__)
 
@@ -124,6 +135,34 @@ class TidalConnectDevice:
     service_types: tuple[str, ...]
 
 
+@dataclass
+class _SessionState:
+    """Internal state carried by an active Tidal Connect session.
+
+    Holds the discovered device, the parsed OpenHome device tree
+    (with all SCPD action lists), and the four service controllers
+    we need for transport + metadata. The current track's NewId is
+    stored so SeekSecond / SeekId calls target the right queue
+    entry — slice 4's track-handoff inserts at after_id=0 (head)
+    each time and stores the returned NewId here.
+    """
+
+    device: TidalConnectDevice
+    openhome_device: OpenHomeDevice
+    playlist: PlaylistController
+    volume: Optional[VolumeController]
+    time: Optional[TimeController]
+    info: Optional[InfoController]
+    current_track_id: int = 0  # Last Insert's NewId; 0 if no track loaded
+    # Stream-URL minter. Slice 4 takes a Tidal track id and produces
+    # the URL we hand the device. Set by the manager based on whether
+    # the user-provided session has a Tidal session attached. Kept as
+    # a callable rather than a hard import so tests can substitute.
+    track_url_resolver: Optional[
+        "Callable[[int], tuple[str, TrackMetadata]]"
+    ] = None
+
+
 class TidalConnectManager:
     """Process-wide owner of Tidal Connect discovery and (eventually)
     sessions.
@@ -148,10 +187,13 @@ class TidalConnectManager:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._loop_thread: Optional[threading.Thread] = None
         self._last_scan_at: float = 0.0
-        # Active session placeholder. Currently always None; the
-        # connect() stub doesn't transition this. Future work fills
-        # in a session state object similar to cast._SessionState.
-        self._session_id: Optional[str] = None
+        # Active session protector + state. Built by `connect()`,
+        # cleared by `disconnect()`. The `_SessionState` carries the
+        # OpenHome controllers we need for play / pause / track-
+        # handoff so callers don't keep refetching service references
+        # for every action.
+        self._session_lock = threading.Lock()
+        self._session: Optional[_SessionState] = None
         if _AVAILABLE:
             self._start_loop_thread()
 
@@ -163,25 +205,31 @@ class TidalConnectManager:
         return _AVAILABLE
 
     def status(self) -> dict[str, object]:
-        """Diagnostic snapshot. Surfaces enough to debug 'I don't
-        see my speaker' without needing logs: whether discovery is
-        even possible (lib installed), how recently we last
-        scanned, how many devices we have cached."""
+        """Diagnostic snapshot. Surfaces discovery state and
+        whether a session is open. Used by /api/tidal-connect/devices
+        and the picker UI."""
         with self._lock:
-            return {
+            disc = {
                 "available": _AVAILABLE,
                 "device_count": len(self._devices),
                 "last_scan_age_s": (
                     None if self._last_scan_at == 0.0
                     else round(time.monotonic() - self._last_scan_at, 1)
                 ),
-                "connected_id": self._session_id,
-                # Phase 2+ surface for the frontend so it can show
-                # 'Tidal Connect routing not yet implemented' or
-                # similar, instead of the picker silently failing
-                # on click.
-                "control_plane_ready": False,
             }
+        with self._session_lock:
+            sess = self._session
+            disc["connected_id"] = sess.device.id if sess else None
+            disc["connected_name"] = (
+                sess.device.friendly_name if sess else None
+            )
+            disc["current_track_id"] = sess.current_track_id if sess else 0
+            # control_plane_ready flips True once slice 4 lands
+            # because connect / load_track / pause / play actually
+            # do something. Tests should expect True on a successful
+            # connect() and False on a fresh manager.
+            disc["control_plane_ready"] = sess is not None
+        return disc
 
     def list_devices(self) -> list[TidalConnectDevice]:
         """Snapshot of currently-known Tidal Connect candidates. Sorted
@@ -223,39 +271,218 @@ class TidalConnectManager:
             self._last_scan_at = time.monotonic()
         return devices
 
-    # ---- session stubs (Phase 2 protocol work) ----------------------
+    # ---- session lifecycle ------------------------------------------
 
-    def connect(self, device_id: str) -> TidalConnectDevice:
+    def connect(
+        self,
+        device_id: str,
+        track_url_resolver: Optional[
+            Callable[[int], tuple[str, TrackMetadata]]
+        ] = None,
+    ) -> TidalConnectDevice:
         """Open a control session against the given device.
 
-        Currently a stub — raises NotImplementedError with a clear
-        message that the protocol layer is pending. The frontend
-        translates this into a 'Tidal Connect routing isn't ready
-        yet' toast on click, so the picker is testable end-to-end
-        for discovery without producing silent failures.
+        Fetches the device's full OpenHome description (root XML +
+        every service's SCPD), constructs the four service
+        controllers (Playlist, Volume, Time, Info), and clears the
+        device's queue with `Playlist.DeleteAll` so we start from
+        a known empty state.
 
-        Phase 2 work fills this in: SOAP control client, OpenHome
-        service descriptor parsing, the Tidal-specific track-handoff
-        commands once Phase 1 packet capture answers what they look
-        like.
+        `track_url_resolver` is a callable that, given a Tidal
+        track id, returns `(stream_url, TrackMetadata)`. The audio
+        engine wires this to `tidalapi.session.track(...).get_stream()`
+        when calling `connect()` from the player path. Tests pass
+        in a synthetic resolver to avoid hitting Tidal.
+
+        Tears down any existing session before opening the new one.
+        Raises ValueError on unknown device id, RuntimeError on
+        descriptor fetch / DeleteAll failure.
         """
+        if not _AVAILABLE:
+            raise RuntimeError("async-upnp-client not available")
         device = self.get_device(device_id)
         if device is None:
             raise ValueError(f"unknown tidal connect device: {device_id}")
-        raise NotImplementedError(
-            "Tidal Connect control plane isn't implemented yet. The "
-            "device was discovered correctly, but issuing play / pause / "
-            "track-load commands needs the OpenHome SOAP client + "
-            "pairing flow which require packet capture against a real "
-            "Tidal Connect target. See docs/cast-and-connect-scope.md."
+
+        # Drop any existing session first.
+        self.disconnect()
+
+        try:
+            openhome_device = fetch_device(device.location)
+        except Exception as exc:
+            raise RuntimeError(
+                f"failed to fetch OpenHome description from "
+                f"{device.location}: {exc}"
+            ) from exc
+
+        playlist = PlaylistController.from_device(openhome_device)
+        if playlist is None:
+            raise RuntimeError(
+                f"{device.friendly_name} doesn't expose an OpenHome "
+                "Playlist service — it advertises OpenHome but is "
+                "missing the action set we need to control playback."
+            )
+
+        # Optional services. Their absence isn't fatal; we degrade
+        # gracefully (no volume control, no position polling) rather
+        # than fail the whole connect.
+        volume = VolumeController.from_device(openhome_device)
+        time_ctl = TimeController.from_device(openhome_device)
+        info = InfoController.from_device(openhome_device)
+
+        # Clear the queue. Some devices preserve queues across
+        # controller switches and we don't want our subsequent
+        # Insert to land in slot 47 of someone else's leftover
+        # playlist. Failure here is recoverable — log and continue,
+        # the worst case is the user sees stale tracks until they
+        # play something new.
+        try:
+            playlist.delete_all()
+        except Exception as exc:
+            log.debug(
+                "tidal_connect: DeleteAll on %s failed: %r — "
+                "continuing with possibly stale queue",
+                device.friendly_name,
+                exc,
+            )
+
+        session = _SessionState(
+            device=device,
+            openhome_device=openhome_device,
+            playlist=playlist,
+            volume=volume,
+            time=time_ctl,
+            info=info,
+            track_url_resolver=track_url_resolver,
         )
+        with self._session_lock:
+            self._session = session
+        print(
+            f"[tidal-connect] connected: {device.friendly_name} "
+            f"(playlist+{'volume' if volume else 'no-volume'}+"
+            f"{'time' if time_ctl else 'no-time'})",
+            flush=True,
+        )
+        return device
 
     def disconnect(self) -> None:
-        """Tear down the current Tidal Connect session. Idempotent.
-        Currently a no-op — there's no session to tear down. Shape
-        is in place for the eventual protocol work."""
-        with self._lock:
-            self._session_id = None
+        """Tear down the active session. Sends `Playlist.Stop` on
+        the way out so the device doesn't keep playing whatever
+        track was loaded. Idempotent — fine to call with no
+        session active."""
+        with self._session_lock:
+            session = self._session
+            self._session = None
+        if session is None:
+            return
+        try:
+            session.playlist.stop()
+        except Exception as exc:
+            log.debug(
+                "tidal_connect: Stop on %s failed during disconnect: %r",
+                session.device.friendly_name,
+                exc,
+            )
+        print(
+            f"[tidal-connect] disconnected: {session.device.friendly_name}",
+            flush=True,
+        )
+
+    # ---- track handoff ---------------------------------------------
+
+    def load_track(self, tidal_track_id: int) -> int:
+        """Hand a Tidal track to the active device. Returns the
+        device's NewId so callers can later target SeekSecond /
+        SeekId at the same queue entry.
+
+        Resolves the streamable URL + metadata via the session's
+        configured `track_url_resolver`, builds DIDL-Lite, issues
+        `Playlist.Insert` followed by `Playlist.Play`. Replaces
+        whatever was previously playing — slice 4's model is one
+        track at a time, mirroring how Tidal's own controllers act
+        when the user picks a single track to play.
+
+        Raises RuntimeError if no session is open, if the resolver
+        isn't configured, or if any of the SOAP calls fail.
+        """
+        with self._session_lock:
+            session = self._session
+        if session is None:
+            raise RuntimeError(
+                "no active Tidal Connect session — call connect() first"
+            )
+        if session.track_url_resolver is None:
+            raise RuntimeError(
+                "session has no track URL resolver configured — the "
+                "audio engine should have wired it on connect()"
+            )
+
+        try:
+            stream_url, metadata = session.track_url_resolver(tidal_track_id)
+        except Exception as exc:
+            raise RuntimeError(
+                f"failed to resolve Tidal track {tidal_track_id}: {exc}"
+            ) from exc
+        didl = build_didl_lite(metadata)
+        try:
+            new_id = session.playlist.insert(
+                after_id=0, uri=stream_url, metadata=didl
+            )
+            session.playlist.play()
+        except Exception as exc:
+            raise RuntimeError(
+                f"failed to load track on {session.device.friendly_name}: {exc}"
+            ) from exc
+
+        with self._session_lock:
+            if self._session is session:
+                # Update only if our session is still the active one.
+                # A concurrent disconnect could have cleared it
+                # between the play() call and now; nothing wrong with
+                # that, just don't write into a torn-down session.
+                session.current_track_id = new_id
+        print(
+            f"[tidal-connect] loaded track {tidal_track_id} on "
+            f"{session.device.friendly_name} (NewId={new_id})",
+            flush=True,
+        )
+        return new_id
+
+    def pause(self) -> None:
+        """Pause the active session's playback. Raises if no session
+        is open or the SOAP call fails."""
+        session = self._require_session()
+        session.playlist.pause()
+
+    def play(self) -> None:
+        """Resume the active session's playback."""
+        session = self._require_session()
+        session.playlist.play()
+
+    def seek(self, position_s: int) -> None:
+        """Seek the currently-loaded track to the given second
+        offset."""
+        session = self._require_session()
+        session.playlist.seek_second(position_s)
+
+    def set_volume(self, level_percent: int) -> None:
+        """Set device volume from a 0-100 percentage. No-op if the
+        device doesn't expose a Volume service."""
+        session = self._require_session()
+        if session.volume is not None:
+            session.volume.set_volume(level_percent)
+
+    def set_mute(self, muted: bool) -> None:
+        session = self._require_session()
+        if session.volume is not None:
+            session.volume.set_mute(muted)
+
+    def _require_session(self) -> _SessionState:
+        with self._session_lock:
+            session = self._session
+        if session is None:
+            raise RuntimeError("no active Tidal Connect session")
+        return session
 
     # ---- internals --------------------------------------------------
 

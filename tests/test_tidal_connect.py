@@ -57,11 +57,12 @@ def manager(monkeypatch):
     # for tests that never touch async work.
     import threading
     fresh._lock = threading.Lock()
+    fresh._session_lock = threading.Lock()
     fresh._devices = {}
     fresh._loop = None
     fresh._loop_thread = None
     fresh._last_scan_at = 0.0
-    fresh._session_id = None
+    fresh._session = None
     monkeypatch.setattr(_mod, "_singleton", fresh)
     return fresh
 
@@ -124,19 +125,37 @@ class TestStatus:
         assert s["device_count"] == 0
         assert s["last_scan_age_s"] is None
         assert s["connected_id"] is None
+        assert s["connected_name"] is None
+        # control_plane_ready reflects whether a session is open.
+        # No session on a freshly-constructed manager.
         assert s["control_plane_ready"] is False
 
     def test_device_count_reflects_dict(self, manager):
         manager._devices = {"a": _device("a"), "b": _device("b", name="x")}
         assert manager.status()["device_count"] == 2
 
-    def test_control_plane_pinned_false(self, manager):
-        """Until Phase 2 protocol work lands, status MUST report
-        control_plane_ready=False so the frontend toast can warn
-        users that connect won't actually play music. A regression
-        here would let the picker silently appear functional when
-        it isn't."""
-        assert manager.status()["control_plane_ready"] is False
+    def test_control_plane_ready_flips_when_session_open(self, manager):
+        """Slice 4 contract: status['control_plane_ready'] reflects
+        whether a session is actually open. Frontend keys off this
+        to decide whether selecting a device shows a 'connected'
+        affordance vs the 'protocol pending' toast."""
+        from app.audio.tidal_connect import _SessionState
+        from unittest.mock import MagicMock
+
+        d = _device()
+        manager._devices[d.id] = d
+        manager._session = _SessionState(
+            device=d,
+            openhome_device=MagicMock(),
+            playlist=MagicMock(),
+            volume=None,
+            time=None,
+            info=None,
+        )
+        s = manager.status()
+        assert s["control_plane_ready"] is True
+        assert s["connected_id"] == d.id
+        assert s["connected_name"] == d.friendly_name
 
 
 class TestGetDevice:
@@ -154,25 +173,148 @@ class TestGetDevice:
 # ---------------------------------------------------------------------
 
 
-class TestConnectStub:
+class TestConnect:
     def test_unknown_device_raises_value_error(self, manager):
         with pytest.raises(ValueError) as exc:
             manager.connect("not-a-real-id")
         assert "unknown" in str(exc.value).lower()
 
-    def test_known_device_raises_not_implemented(self, manager):
-        """The control plane is gated on Phase 2 protocol scoping.
-        Until then, connect on a real device must produce a clear
-        NotImplementedError that the endpoint maps to 501. A
-        regression that silently returned would let the picker
-        appear functional when no audio is being routed."""
+    def test_descriptor_fetch_failure_raises_runtime_error(
+        self, manager, monkeypatch
+    ):
+        """A device that's no longer reachable (just went offline)
+        produces a RuntimeError on fetch_device, surfaced to the
+        endpoint layer as 502."""
+        from app.audio import tidal_connect as _mod
+
         d = _device("uuid:real")
         manager._devices[d.id] = d
-        with pytest.raises(NotImplementedError) as exc:
+
+        def _fail(_loc):
+            raise RuntimeError("connection refused")
+
+        monkeypatch.setattr(_mod, "fetch_device", _fail)
+        with pytest.raises(RuntimeError) as exc:
             manager.connect(d.id)
-        # Message should reference what's actually missing so a
-        # user reading the toast can self-diagnose.
-        assert "control plane" in str(exc.value).lower()
+        assert "openhome description" in str(exc.value).lower()
+
+    def test_missing_playlist_service_raises(self, manager, monkeypatch):
+        """A device that advertises OpenHome but doesn't expose the
+        Playlist service can't be controlled. Surface a clear
+        error rather than crashing later when load_track tries to
+        call into a None controller."""
+        from app.audio import tidal_connect as _mod
+        from app.audio.openhome import OpenHomeDevice
+
+        d = _device("uuid:real")
+        manager._devices[d.id] = d
+
+        # Synthetic device with no Playlist service.
+        empty_oh = OpenHomeDevice(
+            udn="uuid:real",
+            friendly_name="Test",
+            manufacturer="X",
+            model_name="Y",
+            model_number="1",
+            services=(),
+        )
+        monkeypatch.setattr(_mod, "fetch_device", lambda _loc: empty_oh)
+        with pytest.raises(RuntimeError) as exc:
+            manager.connect(d.id)
+        assert "playlist" in str(exc.value).lower()
+
+    def test_successful_connect_sets_session(self, manager, monkeypatch):
+        """Happy path. fetch_device returns a synthetic OpenHome
+        device with all four services; connect builds the
+        controllers and clears the queue. Tests that:
+          - manager._session is set after the call
+          - status() reflects the new connected state
+          - delete_all was called on the playlist controller
+        """
+        from app.audio import tidal_connect as _mod
+        from app.audio import openhome as _oh
+
+        d = _device("uuid:real")
+        manager._devices[d.id] = d
+
+        # Build a fake OpenHomeDevice with all four services.
+        services = tuple(
+            _oh.OpenHomeService(
+                service_type=f"urn:av-openhome-org:service:{name}:1",
+                service_id=f"urn:av-openhome-org:serviceId:{name}",
+                short_name=name,
+                control_url=f"http://x/{name}/control",
+                event_sub_url=f"http://x/{name}/event",
+                scpd_url=f"http://x/{name}/scpd.xml",
+                actions=(),
+            )
+            for name in ("Playlist", "Volume", "Time", "Info")
+        )
+        oh_device = _oh.OpenHomeDevice(
+            udn="uuid:real",
+            friendly_name="Test",
+            manufacturer="X",
+            model_name="Y",
+            model_number="1",
+            services=services,
+        )
+        monkeypatch.setattr(_mod, "fetch_device", lambda _loc: oh_device)
+
+        # Stub invoke() so DeleteAll doesn't actually try to hit
+        # the network.
+        invoke_calls = []
+        monkeypatch.setattr(
+            _oh, "invoke", lambda *a, **k: invoke_calls.append((a, k)) or {}
+        )
+
+        device = manager.connect(d.id)
+        assert device.id == d.id
+        assert manager._session is not None
+        assert manager._session.playlist is not None
+        assert manager._session.volume is not None
+        # Verify DeleteAll fired during connect.
+        action_names = [a[1] for a, _ in invoke_calls]
+        assert "DeleteAll" in action_names
+
+    def test_connect_replaces_existing_session(self, manager, monkeypatch):
+        """Connecting to a different device tears down the existing
+        session before opening the new one, so we never have two
+        active controllers fighting over the same audio engine."""
+        from app.audio import tidal_connect as _mod
+        from app.audio import openhome as _oh
+
+        d1 = _device("uuid:1", name="First")
+        d2 = _device("uuid:2", name="Second")
+        manager._devices[d1.id] = d1
+        manager._devices[d2.id] = d2
+
+        services = (
+            _oh.OpenHomeService(
+                service_type="urn:av-openhome-org:service:Playlist:1",
+                service_id="urn:av-openhome-org:serviceId:Playlist",
+                short_name="Playlist",
+                control_url="http://x/Playlist/control",
+                event_sub_url="http://x/Playlist/event",
+                scpd_url="http://x/Playlist/scpd.xml",
+                actions=(),
+            ),
+        )
+        oh_device = _oh.OpenHomeDevice(
+            udn="uuid:1",
+            friendly_name="X",
+            manufacturer="x",
+            model_name="x",
+            model_number="1",
+            services=services,
+        )
+        monkeypatch.setattr(_mod, "fetch_device", lambda _loc: oh_device)
+        monkeypatch.setattr(_oh, "invoke", lambda *a, **k: {})
+
+        manager.connect(d1.id)
+        first_session = manager._session
+        assert first_session is not None
+        manager.connect(d2.id)
+        assert manager._session is not first_session
 
 
 class TestDisconnect:
@@ -180,10 +322,187 @@ class TestDisconnect:
         manager.disconnect()
         manager.disconnect()  # no exceptions
 
-    def test_clears_session_id(self, manager):
-        manager._session_id = "fake-session"
+    def test_clears_session(self, manager):
+        from app.audio.tidal_connect import _SessionState
+        from unittest.mock import MagicMock
+
+        manager._session = _SessionState(
+            device=_device(),
+            openhome_device=MagicMock(),
+            playlist=MagicMock(),
+            volume=None,
+            time=None,
+            info=None,
+        )
         manager.disconnect()
-        assert manager._session_id is None
+        assert manager._session is None
+
+    def test_sends_stop_to_device(self, manager):
+        """Disconnect should attempt to send Playlist.Stop on the
+        way out so the device doesn't keep playing whatever was
+        loaded. A failed Stop call is logged but doesn't prevent
+        the session from being cleared."""
+        from app.audio.tidal_connect import _SessionState
+        from unittest.mock import MagicMock
+
+        playlist = MagicMock()
+        manager._session = _SessionState(
+            device=_device(),
+            openhome_device=MagicMock(),
+            playlist=playlist,
+            volume=None,
+            time=None,
+            info=None,
+        )
+        manager.disconnect()
+        playlist.stop.assert_called_once()
+        assert manager._session is None
+
+
+class TestLoadTrack:
+    def test_no_session_raises(self, manager):
+        with pytest.raises(RuntimeError) as exc:
+            manager.load_track(123)
+        assert "no active" in str(exc.value).lower()
+
+    def test_no_resolver_raises(self, manager):
+        from app.audio.tidal_connect import _SessionState
+        from unittest.mock import MagicMock
+
+        manager._session = _SessionState(
+            device=_device(),
+            openhome_device=MagicMock(),
+            playlist=MagicMock(),
+            volume=None,
+            time=None,
+            info=None,
+            track_url_resolver=None,
+        )
+        with pytest.raises(RuntimeError) as exc:
+            manager.load_track(123)
+        assert "resolver" in str(exc.value).lower()
+
+    def test_happy_path_inserts_and_plays(self, manager):
+        """Resolver returns (url, metadata); load_track wraps in
+        DIDL-Lite, calls Insert + Play, stores the returned NewId."""
+        from app.audio.tidal_connect import _SessionState
+        from app.audio.openhome import TrackMetadata
+        from unittest.mock import MagicMock
+
+        playlist = MagicMock()
+        playlist.insert.return_value = 42
+
+        def _resolver(track_id: int):
+            return (
+                "http://stream.tidal/track.flac",
+                TrackMetadata(
+                    title="Cry For Me",
+                    artist="The Weeknd",
+                    album="Hurry Up Tomorrow",
+                    duration_s=240,
+                    cover_url="http://cover/x.jpg",
+                    track_uri="http://stream.tidal/track.flac",
+                ),
+            )
+
+        manager._session = _SessionState(
+            device=_device(),
+            openhome_device=MagicMock(),
+            playlist=playlist,
+            volume=None,
+            time=None,
+            info=None,
+            track_url_resolver=_resolver,
+        )
+        new_id = manager.load_track(123)
+        assert new_id == 42
+        assert manager._session.current_track_id == 42
+        # Insert called with a DIDL-Lite that includes the track
+        # title.
+        playlist.insert.assert_called_once()
+        kwargs = playlist.insert.call_args.kwargs
+        assert "Cry For Me" in kwargs["metadata"]
+        assert kwargs["uri"] == "http://stream.tidal/track.flac"
+        assert kwargs["after_id"] == 0
+        playlist.play.assert_called_once()
+
+    def test_resolver_failure_propagates_as_runtime_error(self, manager):
+        from app.audio.tidal_connect import _SessionState
+        from unittest.mock import MagicMock
+
+        def _bad_resolver(_id):
+            raise ValueError("track not streamable in your region")
+
+        manager._session = _SessionState(
+            device=_device(),
+            openhome_device=MagicMock(),
+            playlist=MagicMock(),
+            volume=None,
+            time=None,
+            info=None,
+            track_url_resolver=_bad_resolver,
+        )
+        with pytest.raises(RuntimeError) as exc:
+            manager.load_track(123)
+        assert "resolve" in str(exc.value).lower()
+
+
+class TestTransportControls:
+    def _attach_session(self, manager, *, playlist=None, volume=None):
+        from app.audio.tidal_connect import _SessionState
+        from unittest.mock import MagicMock
+
+        manager._session = _SessionState(
+            device=_device(),
+            openhome_device=MagicMock(),
+            playlist=playlist or MagicMock(),
+            volume=volume,
+            time=None,
+            info=None,
+        )
+
+    def test_pause_routes_to_playlist(self, manager):
+        from unittest.mock import MagicMock
+
+        playlist = MagicMock()
+        self._attach_session(manager, playlist=playlist)
+        manager.pause()
+        playlist.pause.assert_called_once()
+
+    def test_play_routes_to_playlist(self, manager):
+        from unittest.mock import MagicMock
+
+        playlist = MagicMock()
+        self._attach_session(manager, playlist=playlist)
+        manager.play()
+        playlist.play.assert_called_once()
+
+    def test_seek_routes_to_seek_second(self, manager):
+        from unittest.mock import MagicMock
+
+        playlist = MagicMock()
+        self._attach_session(manager, playlist=playlist)
+        manager.seek(120)
+        playlist.seek_second.assert_called_once_with(120)
+
+    def test_set_volume_routes_to_volume_controller(self, manager):
+        from unittest.mock import MagicMock
+
+        volume = MagicMock()
+        self._attach_session(manager, volume=volume)
+        manager.set_volume(75)
+        volume.set_volume.assert_called_once_with(75)
+
+    def test_set_volume_no_op_without_volume_service(self, manager):
+        """A device that doesn't expose Volume should silently
+        ignore set_volume rather than crashing — degraded but
+        functional."""
+        self._attach_session(manager, volume=None)
+        manager.set_volume(75)  # no exception
+
+    def test_pause_without_session_raises(self, manager):
+        with pytest.raises(RuntimeError):
+            manager.pause()
 
 
 # ---------------------------------------------------------------------
@@ -241,7 +560,7 @@ class TestDevicesEndpoint:
 
 class TestConnectEndpoint:
     def test_unknown_device_returns_404(self, client, manager, monkeypatch):
-        def _raise(_did):
+        def _raise(_did, **_kw):
             raise ValueError("unknown tidal connect device: nope")
 
         monkeypatch.setattr(manager, "connect", _raise)
@@ -251,23 +570,39 @@ class TestConnectEndpoint:
         assert res.status_code == 404
         assert "unknown" in res.json()["detail"].lower()
 
-    def test_known_device_returns_501(self, client, manager, monkeypatch):
-        """Phase 1 contract: the protocol layer isn't implemented
-        yet, and 501 Not Implemented is what the endpoint must
-        return. A frontend toast keys off this status code to show
-        'Tidal Connect routing pending' rather than a generic
-        500."""
-        def _raise(_did):
-            raise NotImplementedError(
-                "Tidal Connect control plane isn't implemented yet."
-            )
+    def test_handshake_failure_returns_502(self, client, manager, monkeypatch):
+        """Slice 4 contract: descriptor fetch / DeleteAll failures
+        surface as 502, distinguishing 'server-side problem' from
+        'device gone' (404) from 'malformed request' (422)."""
+        def _raise(_did, **_kw):
+            raise RuntimeError("connection refused")
 
         monkeypatch.setattr(manager, "connect", _raise)
         res = client.post(
             "/api/tidal-connect/connect", json={"device_id": "any-id"}
         )
-        assert res.status_code == 501
-        assert "control plane" in res.json()["detail"].lower()
+        assert res.status_code == 502
+        assert "connection refused" in res.json()["detail"].lower()
+
+    def test_success_returns_device_summary(
+        self, client, manager, monkeypatch
+    ):
+        """Slice 4 contract: connect now actually opens a session,
+        so success is 200 with a device summary the frontend can
+        show in the picker."""
+        d = _device(name="Living Room Node", has_credentials=True)
+
+        def _ok(_did, **_kw):
+            return d
+
+        monkeypatch.setattr(manager, "connect", _ok)
+        res = client.post(
+            "/api/tidal-connect/connect", json={"device_id": d.id}
+        )
+        assert res.status_code == 200
+        body = res.json()
+        assert body["ok"] is True
+        assert body["device"]["friendly_name"] == "Living Room Node"
 
     def test_missing_device_id_is_validation_error(self, client, manager):
         res = client.post("/api/tidal-connect/connect", json={})
