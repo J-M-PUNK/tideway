@@ -1,0 +1,4 @@
+# Adds the Sponsor button on the GitHub repo page. ko_fi is the
+# only supported field that doesn't require GitHub Sponsors
+# enrollment. Username only — GitHub builds the full ko-fi.com URL.
+ko_fi: jmpunk
