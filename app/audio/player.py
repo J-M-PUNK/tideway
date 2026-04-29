@@ -176,8 +176,8 @@ class PCMPlayer:
         # this silencing (see audio_callback) so the receivers still
         # get full-amplitude audio at their own volume control.
         # Flag is owned by the various external-output managers
-        # (cast.py flips it on connect / disconnect; tidal_connect
-        # will do the same in slice 4 audio integration).
+        # (cast.py + tidal_connect.py both flip it on connect /
+        # disconnect via the registered silencer hook).
         self._external_output_active: bool = False
         # sounddevice device-index string ("" = system default).
         # Applied on the next _open_output_stream(). Device-switch
@@ -2036,14 +2036,15 @@ class PCMPlayer:
             pass
 
         # External output active: silence local. Done AFTER the
-        # AirPlay / Cast taps above (so the remote receiver gets
-        # full-amplitude audio at its own volume control) and
-        # BEFORE the volume / mute logic below (so the silencing
-        # is unconditional regardless of user volume state). The
-        # OutputStream still runs — we just hand it zeros — which
-        # keeps the realtime callback driving and avoids the
-        # underrun-recovery dance that stopping + restarting would
-        # cost when the user toggles back to local.
+        # AirPlay / Cast / Tidal Connect taps above (so the remote
+        # receiver gets full-amplitude audio at its own volume
+        # control) and BEFORE the volume / mute logic below (so the
+        # silencing is unconditional regardless of user volume
+        # state). The OutputStream still runs — we just hand it
+        # zeros — which keeps the realtime callback driving and
+        # avoids the underrun-recovery dance that stopping +
+        # restarting would cost when the user toggles back to
+        # local.
         if self._external_output_active:
             outdata.fill(0)
             self._samples_emitted += frames
