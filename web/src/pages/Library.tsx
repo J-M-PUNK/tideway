@@ -1,10 +1,10 @@
 import { useEffect, useMemo, useState } from "react";
 import {
-  Compass,
   Disc3,
   Download,
   Folder,
   Heart,
+  Home,
   LayoutGrid,
   Library as LibraryIcon,
   List,
@@ -299,8 +299,8 @@ export function Library({ onDownload }: { onDownload: OnDownload }) {
               />
             ) : (
               <Button asChild variant="secondary" size="sm">
-                <Link to="/explore">
-                  <Compass className="h-4 w-4" /> Explore Tidal
+                <Link to="/">
+                  <Home className="h-4 w-4" /> Browse Home
                 </Link>
               </Button>
             )

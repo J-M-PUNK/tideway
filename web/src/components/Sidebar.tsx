@@ -1,7 +1,6 @@
 import { NavLink } from "react-router-dom";
 import {
   BarChart3,
-  Compass,
   Disc3,
   Download,
   HardDrive,
@@ -28,14 +27,14 @@ import { cn } from "@/lib/utils";
 const primary = [
   { to: "/", label: "Home", icon: Home, end: true },
   { to: "/feed", label: "Feed", icon: Rss },
-  { to: "/explore", label: "Explore", icon: Compass },
 ];
 
 // Charts (Popular, Top, Rising) live behind a single entry — the
 // destination renders a tab strip so the sidebar doesn't have to.
 // Popular is the default since that's the first tab on the page.
-// Genres/Moods used to live here but they're already reachable from
-// Explore, so keeping them in the sidebar was noise.
+// Genres/Moods are reachable from the Charts page's tab strip; keeping
+// them out of the sidebar avoids the same-icon-twice noise that the
+// retired Explore entry used to have.
 const discover = [
   { to: "/charts/new", label: "New Releases", icon: Newspaper },
   { to: "/popular", label: "Charts", icon: TrendingUp },

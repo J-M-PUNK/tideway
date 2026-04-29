@@ -8,7 +8,7 @@ import { useOfflineMode } from "@/hooks/useOfflineMode";
  * themselves, no banner is shown (they already know). This is
  * only for the case where WiFi dropped / cable got unplugged /
  * the laptop woke from sleep with no connection, so the user
- * knows why Search, Explore, streaming, etc. suddenly don't work.
+ * knows why Search, Charts, streaming, etc. suddenly don't work.
  *
  * Vanishes automatically when `navigator.onLine` flips back to
  * true — the user doesn't need to acknowledge.
