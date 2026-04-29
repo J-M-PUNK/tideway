@@ -102,11 +102,9 @@ describe("filterAvailableQualities", () => {
   });
 
   it("hides hi_res_lossless when only LOSSLESS is tagged", () => {
-    expect(values(filterAvailableQualities(ALL_QUALITIES, ["LOSSLESS"]))).toEqual([
-      "low_96k",
-      "low_320k",
-      "high_lossless",
-    ]);
+    expect(
+      values(filterAvailableQualities(ALL_QUALITIES, ["LOSSLESS"])),
+    ).toEqual(["low_96k", "low_320k", "high_lossless"]);
   });
 
   it("keeps high_lossless when HIRES_LOSSLESS is tagged (hires implies lossless)", () => {
@@ -125,10 +123,8 @@ describe("filterAvailableQualities", () => {
   });
 
   it("normalizes tag case", () => {
-    expect(values(filterAvailableQualities(ALL_QUALITIES, ["lossless"]))).toEqual([
-      "low_96k",
-      "low_320k",
-      "high_lossless",
-    ]);
+    expect(
+      values(filterAvailableQualities(ALL_QUALITIES, ["lossless"])),
+    ).toEqual(["low_96k", "low_320k", "high_lossless"]);
   });
 });
