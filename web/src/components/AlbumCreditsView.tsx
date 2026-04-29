@@ -58,8 +58,17 @@ export function AlbumCreditsView({ albumId }: { albumId: string }) {
     );
   }
 
+  // Row-major grid with the 2-column breakpoint at md (768px) so
+  // the cards reliably lay out left-to-right in track order on a
+  // typical Tideway window (default 1280px). At lg (1024px), the
+  // previous breakpoint, narrower windows or split-screen setups
+  // saw the cards stack into a single column instead — same
+  // information but the user's eye had to scan vertically through
+  // every track on the album to find a specific one. Default
+  // grid-auto-flow:row gives the natural reading order: track 1
+  // top-left, track 2 top-right, track 3 second-row-left, etc.
   return (
-    <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+    <div className="grid grid-cols-1 grid-flow-row gap-4 md:grid-cols-2">
       {tracks.map((t) => (
         <TrackCreditsCard key={t.track_id} track={t} />
       ))}
