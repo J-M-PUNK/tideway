@@ -43,6 +43,11 @@ const HIDDEN_HOME_ROW_TITLES = [
   // the playlist itself is already in Your Library.
   "your listening history",
   "spotlighted uploads",
+  // Editorial playlists with an algorithmic sheen — the items inside
+  // are the same recommendations already surfacing in mixes and
+  // suggestions, just rebranded. The row reads as filler on the home
+  // page, so drop it like the "Because you liked X" rows below.
+  "user playlists you'll love",
   // "Because you liked X" / "Because you listened to X" rows are a
   // long tail of duplicates of the items that sit right above them.
   // The user can still find the same recommendations inside the full
@@ -69,13 +74,18 @@ const COMPACT_ROW_TITLES = new Set([
   normalizeTitle(MERGED_ROW_TITLE),
 ]);
 
-// Desired order for the card-style rows that render through PageView.
+// "Suggested new albums for you" gets pulled out of the page-view
+// stream entirely and rendered as a single card row between the
+// Recently played pills and the Suggested new songs pills. Keeps
+// album recommendations sitting visually above the song
+// recommendations they pair with — bigger artwork up top, dense
+// pill row underneath.
+const HOISTED_ALBUMS_TITLE = "suggested new albums for you";
+
+// Desired order for the card-style rows that still render through
+// PageView (i.e., everything except the hoisted albums row above).
 // Anything not listed here keeps whatever order Tidal sent.
-const PRIORITY_ROW_ORDER = [
-  "suggested new albums for you",
-  "custom mixes",
-  "personal radio stations",
-];
+const PRIORITY_ROW_ORDER = ["custom mixes", "personal radio stations"];
 
 function normalizeTitle(s: string): string {
   return s
@@ -86,6 +96,7 @@ function normalizeTitle(s: string): string {
 
 function filterHomeRows(page: TidalPage): {
   compactRows: PageCategory[];
+  hoistedAlbums: PageCategory | null;
   page: TidalPage;
 } {
   const hideNeedles = HIDDEN_HOME_ROW_TITLES.map(normalizeTitle);
@@ -129,15 +140,22 @@ function filterHomeRows(page: TidalPage): {
     };
   }
 
-  // Second pass: split out the compact pill rows (rendered above the
-  // fold) from everything else (rendered as big cards via PageView).
+  // Second pass: split rows into three buckets — compact pill rows
+  // (rendered above the fold), the hoisted albums row (rendered
+  // between the recently-played pills and the suggested-songs pills),
+  // and everything else (rendered as big cards via PageView).
   // Compact rows come out in the order declared in COMPACT_ROW_TITLES
   // so the visual sequence on the page stays predictable regardless
   // of Tidal's feed order.
   const compactByTitle = new Map<string, PageCategory>();
   const otherRows: PageCategory[] = [];
+  let hoistedAlbums: PageCategory | null = null;
   for (const cat of kept) {
     const title = normalizeTitle(cat.title ?? "");
+    if (title === HOISTED_ALBUMS_TITLE) {
+      hoistedAlbums = cat;
+      continue;
+    }
     if (COMPACT_ROW_TITLES.has(title)) {
       compactByTitle.set(title, cat);
     } else {
@@ -174,6 +192,7 @@ function filterHomeRows(page: TidalPage): {
 
   return {
     compactRows,
+    hoistedAlbums,
     page: { ...page, categories: finalCategories },
   };
 }
@@ -610,14 +629,39 @@ export function Home({ onDownload }: { onDownload: OnDownload }) {
   if (error || !data)
     return <ErrorView error={error ?? "Couldn't load home"} />;
 
-  const { compactRows, page: filteredPage } = filterHomeRows(data);
+  const {
+    compactRows,
+    hoistedAlbums,
+    page: filteredPage,
+  } = filterHomeRows(data);
+
+  // The compact rows come out of `filterHomeRows` in the order
+  // declared in COMPACT_ROW_TITLES — recently played first, then
+  // suggested new songs. We render the hoisted albums card row
+  // BETWEEN them: recently-played pills → suggested-albums cards →
+  // suggested-songs pills → everything else.
+  const [firstCompact, ...remainingCompact] = compactRows;
 
   return (
     <div>
       <LastfmConnectNudge />
-      {compactRows.map((cat, i) => (
+      {firstCompact && (
         <CompactRow
-          key={`compact-${i}`}
+          key="compact-0"
+          category={firstCompact}
+          onDownload={onDownload}
+        />
+      )}
+      {hoistedAlbums && (
+        <PageView
+          page={{ ...data, categories: [hoistedAlbums] }}
+          onDownload={onDownload}
+          forceSingleRow
+        />
+      )}
+      {remainingCompact.map((cat, i) => (
+        <CompactRow
+          key={`compact-${i + 1}`}
           category={cat}
           onDownload={onDownload}
         />

@@ -117,18 +117,22 @@ export function ArtistDetail({ onDownload }: { onDownload: OnDownload }) {
         viewMoreTo={`/artist/${id}/all/eps`}
         onDownload={onDownload}
       />
-      <MediaRow
-        title="Appears on"
-        items={artist.appears_on}
-        viewMoreTo={`/artist/${id}/all/appears-on`}
-        onDownload={onDownload}
-      />
+      {/* Music videos sit above Appears on. The artist's own video
+       *  output is more representative of "their work" than guest
+       *  appearances on someone else's album, so it deserves the
+       *  higher slot. Appears on is closer to a footnote. */}
       {artist.videos.length > 0 && (
         <VideoRow
           videos={artist.videos}
           viewMoreTo={`/artist/${id}/all/videos`}
         />
       )}
+      <MediaRow
+        title="Appears on"
+        items={artist.appears_on}
+        viewMoreTo={`/artist/${id}/all/appears-on`}
+        onDownload={onDownload}
+      />
       <MediaRow
         title="Fans also like"
         items={artist.similar}
