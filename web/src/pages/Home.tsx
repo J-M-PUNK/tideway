@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { Link } from "react-router-dom";
 import { Loader2, MoreHorizontal, Music, Play } from "lucide-react";
 import { api } from "@/api/client";
@@ -10,6 +10,13 @@ import { PageView } from "@/components/PageView";
 import { ErrorView } from "@/components/ErrorView";
 import { GridSkeleton } from "@/components/Skeletons";
 import { LastfmConnectNudge } from "@/components/LastfmConnectNudge";
+import { CreditsDialog } from "@/components/CreditsDialog";
+import { DROPDOWN_MENU_PARTS, TrackMenuItems } from "@/components/TrackMenu";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { useToast } from "@/components/toast";
 import { imageProxy } from "@/lib/utils";
 import type {
@@ -179,7 +186,13 @@ function filterHomeRows(page: TidalPage): {
 // ---------------------------------------------------------------------------
 const COMPACT_VISIBLE_COUNT = 9;
 
-function CompactRow({ category }: { category: PageCategory }) {
+function CompactRow({
+  category,
+  onDownload,
+}: {
+  category: PageCategory;
+  onDownload: OnDownload;
+}) {
   const items = category.items.slice(0, COMPACT_VISIBLE_COUNT);
   if (items.length === 0) return null;
   // View more routes to the dedicated drill-down page Tidal emits for
@@ -202,6 +215,7 @@ function CompactRow({ category }: { category: PageCategory }) {
             key={`${item.kind}-${pillId(item, i)}`}
             item={item}
             rowTracks={rowTracks(items)}
+            onDownload={onDownload}
           />
         ))}
       </div>
@@ -235,13 +249,17 @@ const PILL_CLASS =
 function CompactPill({
   item,
   rowTracks,
+  onDownload,
 }: {
   item: PageItem;
   rowTracks: Track[];
+  onDownload: OnDownload;
 }) {
   switch (item.kind) {
     case "track":
-      return <TrackPill track={item} rowTracks={rowTracks} />;
+      return (
+        <TrackPill track={item} rowTracks={rowTracks} onDownload={onDownload} />
+      );
     case "album":
       return <AlbumPill album={item} />;
     case "playlist":
@@ -269,6 +287,7 @@ function PlayablePill({
   titleTo,
   subtitle,
   subtitleTo,
+  trailing,
 }: {
   cover: string | null;
   isPlaying: boolean;
@@ -279,6 +298,15 @@ function PlayablePill({
   titleTo: string | null;
   subtitle: string | null;
   subtitleTo: string | null;
+  /**
+   * Optional trailing slot — typically a three-dots dropdown for
+   * track pills, omitted for album / playlist / mix / artist pills
+   * where the cover-and-titles already cover the actions worth
+   * exposing here. Previously this slot rendered a non-interactive
+   * `MoreHorizontal` icon for every pill kind, which looked like an
+   * affordance but did nothing on click.
+   */
+  trailing?: ReactNode;
 }) {
   return (
     <div className={`${PILL_CLASS} group`}>
@@ -340,32 +368,84 @@ function PlayablePill({
             </div>
           ))}
       </div>
-      <MoreHorizontal className="h-4 w-4 flex-shrink-0 text-muted-foreground" />
+      {trailing}
     </div>
   );
 }
 
-function TrackPill({ track, rowTracks }: { track: Track; rowTracks: Track[] }) {
+function TrackPill({
+  track,
+  rowTracks,
+  onDownload,
+}: {
+  track: Track;
+  rowTracks: Track[];
+  onDownload: OnDownload;
+}) {
   const actions = usePlayerActions();
   const meta = usePlayerMeta();
   const isCurrent = meta.track?.id === track.id;
   const isPlaying = isCurrent && meta.playing;
   const primaryArtist = track.artists[0];
+  // Per-row credits-dialog state. Hoisted to TrackPill rather than
+  // PlayablePill because dialogs are track-specific; sharing a single
+  // dialog across the row would let one click on a row's third pill
+  // open credits for the first.
+  const [creditsOpen, setCreditsOpen] = useState(false);
   return (
-    <PlayablePill
-      cover={track.album?.cover ?? null}
-      isPlaying={isPlaying}
-      busy={false}
-      ariaPlay={isPlaying ? `Pause ${track.name}` : `Play ${track.name}`}
-      onPlay={() => {
-        if (isCurrent) actions.toggle();
-        else actions.play(track, rowTracks);
-      }}
-      title={track.name}
-      titleTo={track.album ? `/album/${track.album.id}` : null}
-      subtitle={track.artists.map((a) => a.name).join(", ") || null}
-      subtitleTo={primaryArtist ? `/artist/${primaryArtist.id}` : null}
-    />
+    <>
+      <PlayablePill
+        cover={track.album?.cover ?? null}
+        isPlaying={isPlaying}
+        busy={false}
+        ariaPlay={isPlaying ? `Pause ${track.name}` : `Play ${track.name}`}
+        onPlay={() => {
+          if (isCurrent) actions.toggle();
+          else actions.play(track, rowTracks);
+        }}
+        title={track.name}
+        titleTo={track.album ? `/album/${track.album.id}` : null}
+        subtitle={track.artists.map((a) => a.name).join(", ") || null}
+        subtitleTo={primaryArtist ? `/artist/${primaryArtist.id}` : null}
+        trailing={
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button
+                type="button"
+                onClick={(e) => {
+                  // Stop the click from bubbling into the row's
+                  // outer hover-play wrapper. Without this, opening
+                  // the menu would also fire onPlay.
+                  e.preventDefault();
+                  e.stopPropagation();
+                }}
+                aria-label={`More actions for ${track.name}`}
+                title="More"
+                className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground data-[state=open]:bg-accent data-[state=open]:text-foreground"
+              >
+                <MoreHorizontal className="h-4 w-4" />
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-60">
+              <TrackMenuItems
+                parts={DROPDOWN_MENU_PARTS}
+                track={track}
+                context={rowTracks.length > 0 ? rowTracks : [track]}
+                onDownload={onDownload}
+                onShowCredits={() => setCreditsOpen(true)}
+                showSelect={false}
+              />
+            </DropdownMenuContent>
+          </DropdownMenu>
+        }
+      />
+      <CreditsDialog
+        trackId={track.id}
+        trackName={track.name}
+        open={creditsOpen}
+        onOpenChange={setCreditsOpen}
+      />
+    </>
   );
 }
 
@@ -450,7 +530,6 @@ function ArtistPill({ artist }: { artist: Artist }) {
         <div className="truncate text-sm font-semibold">{artist.name}</div>
         <div className="truncate text-xs text-muted-foreground">Artist</div>
       </div>
-      <MoreHorizontal className="h-4 w-4 flex-shrink-0 text-muted-foreground" />
     </Link>
   );
 }
@@ -537,7 +616,11 @@ export function Home({ onDownload }: { onDownload: OnDownload }) {
     <div>
       <LastfmConnectNudge />
       {compactRows.map((cat, i) => (
-        <CompactRow key={`compact-${i}`} category={cat} />
+        <CompactRow
+          key={`compact-${i}`}
+          category={cat}
+          onDownload={onDownload}
+        />
       ))}
       <PageView page={filteredPage} onDownload={onDownload} forceSingleRow />
     </div>
