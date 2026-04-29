@@ -14,7 +14,7 @@ import {
   DOWNLOAD_GATE_TOOLTIP,
   useSubscription,
 } from "@/hooks/useSubscription";
-import { effectiveFormatLabel } from "@/lib/quality";
+import { effectiveFormatLabel, filterAvailableQualities } from "@/lib/quality";
 import { cn } from "@/lib/utils";
 
 interface Props {
@@ -49,7 +49,8 @@ export function DownloadButton({
   onOpenChange,
   mediaTags,
 }: Props) {
-  const qualities = useQualities() ?? [];
+  const allQualities = useQualities() ?? [];
+  const qualities = filterAvailableQualities(allQualities, mediaTags);
   const sub = useSubscription();
 
   const stop = (e: React.SyntheticEvent) => {
