@@ -236,6 +236,13 @@ class DownloadItem:
     error: Optional[str] = None
     quality: Optional[str] = None  # overrides session quality for this item
     file_path: Optional[str] = None  # final on-disk path once complete
+    # Realtime download throughput in bytes per second, computed as a
+    # rolling delta between SSE updates while the worker is in
+    # IN_PROGRESS. Reset to 0.0 outside of that state — the UI only
+    # renders this when the row's status reads "Downloading", so the
+    # value being stale at COMPLETE / TAGGING wouldn't matter, but
+    # we zero it anyway so the field never carries surprising data.
+    speed_bps: float = 0.0
 
 
 class Downloader:
@@ -984,11 +991,34 @@ class Downloader:
                 total_urls = len(urls)
                 first_len = int(first_resp.headers.get("Content-Length", 0))
                 last_published = 0.0
+                # Realtime throughput tracking. We don't measure on
+                # every chunk because that's noisy and would require a
+                # high-frequency timer; instead we compute the delta
+                # between successive SSE publishes (~every
+                # PROGRESS_UPDATE_THRESHOLD of progress, typically 4-8
+                # times per track). That cadence is a good fit for the
+                # UI's display refresh — fast enough to feel live, slow
+                # enough that the number doesn't jitter.
+                bytes_total = 0
+                speed_window_bytes = 0
+                speed_window_start = time.monotonic()
 
                 def _bump(url_idx: int, inner: float) -> None:
-                    nonlocal last_published
+                    nonlocal last_published, speed_window_bytes, speed_window_start
                     item.progress = min(0.999, (url_idx + inner) / total_urls)
                     if item.progress - last_published >= PROGRESS_UPDATE_THRESHOLD:
+                        now = time.monotonic()
+                        elapsed = now - speed_window_start
+                        # Guard against div-by-tiny on a fast burst.
+                        # 50ms is plenty — at 64KB chunks even 100MB/s
+                        # downloads only take 0.5ms per chunk, so a sub-
+                        # 50ms window means we got several chunks back-
+                        # to-back from a connection-pool warm path.
+                        if elapsed >= 0.05:
+                            delta = bytes_total - speed_window_bytes
+                            item.speed_bps = max(0.0, delta / elapsed)
+                            speed_window_bytes = bytes_total
+                            speed_window_start = now
                         last_published = item.progress
                         self._publish_update(item)
 
@@ -1012,6 +1042,7 @@ class Downloader:
                         self._check_cancel(item.item_id)
                         f.write(chunk)
                         got += len(chunk)
+                        bytes_total += len(chunk)
                         _AGGREGATE_LIMITER.consume(len(chunk))
                         if limiter is not None:
                             limiter.consume(len(chunk))
@@ -1035,6 +1066,7 @@ class Downloader:
                                 self._check_cancel(item.item_id)
                                 f.write(chunk)
                                 seg_got += len(chunk)
+                                bytes_total += len(chunk)
                                 _AGGREGATE_LIMITER.consume(len(chunk))
                                 if limiter is not None:
                                     limiter.consume(len(chunk))
@@ -1054,6 +1086,10 @@ class Downloader:
 
             item.progress = 1.0
             item.status = DownloadStatus.TAGGING
+            # Zero the throughput readout — the download phase is over,
+            # tagging doesn't transfer bytes, and a stale "12 MB/s" on
+            # a row that's no longer downloading would be misleading.
+            item.speed_bps = 0.0
             self._publish_update(item)
 
             # Tagging is best-effort after the atomic rename. If we
@@ -1130,6 +1166,7 @@ class Downloader:
             _tb.print_exc(file=_sys.stderr)
             item.status = DownloadStatus.FAILED
             item.error = str(exc)
+            item.speed_bps = 0.0
             self._publish_update(item)
             # Clean up a partial file so the next attempt starts fresh and
             # skip-existing can't be fooled by it.
