@@ -2012,10 +2012,11 @@ class PCMPlayer:
         # locally shouldn't silence the remote speaker. The
         # is_active() probe is lock-free in the common 'no
         # session' case, so the cost when nobody's casting is one
-        # attribute read per audio callback. Skipped for float32
-        # sources because FLAC is integer-only; in practice every
-        # Tidal source decodes to int16 or int32, so the float
-        # skip is a safety net rather than a normal code path.
+        # attribute read per audio callback. Tidal sources decode
+        # to int16 or int32, but on Windows WASAPI shared mode the
+        # OutputStream comes out as float32 (device mixer format),
+        # so we hand all three through; cast_manager.push_pcm
+        # converts float32 to int32 internally for the FLAC encoder.
         try:
             from app.audio import cast as _cast_mod
             if _cast_mod.cast_manager.is_active():
@@ -2023,6 +2024,8 @@ class PCMPlayer:
                     _dtype_name = "int16"
                 elif outdata.dtype == np.int32:
                     _dtype_name = "int32"
+                elif outdata.dtype == np.float32:
+                    _dtype_name = "float32"
                 else:
                     _dtype_name = None
                 if _dtype_name is not None:
