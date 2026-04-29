@@ -4244,26 +4244,37 @@ class _TidalConnectConnectRequest(BaseModel):
 def tidal_connect_connect(req: _TidalConnectConnectRequest) -> dict:
     """Open a Tidal Connect session against the given device.
 
-    Currently returns 501 Not Implemented — discovery works but the
-    OpenHome SOAP control plane that issues play / pause / track-
-    load commands needs Phase 2 protocol work (packet capture
-    against a real Tidal Connect target + the official Tidal
-    desktop app). The endpoint exists with this shape so the
-    picker UI can plumb against the eventual real surface today,
-    and so users testing discovery hit a deterministic 501 instead
-    of a 404 dead end.
+    Fetches the OpenHome description, builds the service controllers,
+    and clears the device's queue so we start from a known state.
+    Audio handoff (loading a Tidal track on the device) is a
+    separate `load_track` flow — connect just opens the control
+    channel.
+
+    Status codes:
+      200  session opened
+      404  device id isn't in the discovery cache
+      502  descriptor fetch failed, or the device doesn't expose
+           the OpenHome services we need
     """
     _require_local_access()
     from app.audio.tidal_connect import get_manager  # noqa: WPS433
 
     mgr = get_manager()
     try:
-        mgr.connect(req.device_id)
+        device = mgr.connect(req.device_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except NotImplementedError as exc:
-        raise HTTPException(status_code=501, detail=str(exc)) from exc
-    return {"ok": True}
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {
+        "ok": True,
+        "device": {
+            "id": device.id,
+            "friendly_name": device.friendly_name,
+            "manufacturer": device.manufacturer,
+            "model": device.model,
+        },
+    }
 
 
 @app.post("/api/tidal-connect/disconnect")

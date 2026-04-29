@@ -790,6 +790,114 @@ class InfoController:
 
 
 # ---------------------------------------------------------------------
+# DIDL-Lite generator (slice 4 prep)
+#
+# DIDL-Lite is the UPnP-AV metadata XML embedded as the Metadata
+# argument of Playlist.Insert. The device parses it to get title,
+# artist, album, cover URL, duration, and the streamable URI's
+# protocolInfo (codec + transport hint). Spec: UPnP-AV ContentDirectory:1.
+#
+# Tideway hands one of these to a Tidal Connect device on each
+# Insert call. The inputs come from a Tidal track via tidalapi
+# (slice 4's connect() flow). The output is escaped + embedded
+# inside the SOAP envelope by the SOAP layer's _xml_escape.
+# ---------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class TrackMetadata:
+    """Subset of a Tidal track's fields that DIDL-Lite needs.
+
+    Built from the tidalapi `Track` object inside the Tidal Connect
+    manager's load_track flow. Kept as its own record (rather than
+    threading the tidalapi object through openhome.py) so the
+    DIDL-Lite generator is independently testable and free of any
+    Tidal-specific imports.
+    """
+
+    title: str
+    artist: str
+    album: str
+    duration_s: int
+    cover_url: str  # Empty string if not available
+    track_uri: str  # The streamable URL we hand the device
+    # Codec hint for the protocolInfo attribute. Common values:
+    # "audio/flac", "audio/mp4" (AAC), "audio/wav". Tidal's hi-res
+    # FLAC is "audio/flac"; if the source is HLS / DASH, the device
+    # may need a different mime hint (audio/x-mpegurl etc.).
+    mime_type: str = "audio/flac"
+
+
+def build_didl_lite(track: TrackMetadata) -> str:
+    """Render a TrackMetadata into DIDL-Lite XML. Returns a single-
+    line string ready to be passed as the Metadata argument of
+    Playlist.Insert (the SOAP layer escapes it for embedding).
+
+    The output declares the three namespace aliases UPnP-AV
+    requires (DIDL-Lite default, dc, upnp). Some devices reject
+    documents that omit them even though they're 'optional' per
+    spec — Bluesound and Linn both enforce.
+
+    Duration is rendered as `H:MM:SS.fff` per UPnP-AV convention.
+    Spec also accepts `HH:MM:SS` but the fff form is what every
+    open-source reference implementation emits, so we match.
+    """
+    duration_str = _format_duration(track.duration_s)
+    # protocolInfo is a four-field colon-separated string.
+    # Standard form: "<protocol>:<network>:<contentFormat>:<additionalInfo>"
+    # `*` in network/additional means "any" — spec-compliant for
+    # an http-get streamable resource where the device negotiates
+    # the rest.
+    protocol_info = f"http-get:*:{track.mime_type}:*"
+
+    # Album-art element only emitted when we have a URL; an empty
+    # albumArtURI element makes some devices silently reject the
+    # whole DIDL-Lite. Better to omit cleanly.
+    album_art = (
+        f"<upnp:albumArtURI>{_xml_escape(track.cover_url)}</upnp:albumArtURI>"
+        if track.cover_url
+        else ""
+    )
+
+    # Item id is conventionally "0" for ad-hoc inserts (the device
+    # mints its own id for the queue entry; the dc:* fields are
+    # what it stores). parentID="0" + restricted="1" together
+    # mean "the controller is in charge of this entry's lifetime,
+    # don't try to browse a parent container."
+    return (
+        '<DIDL-Lite '
+        'xmlns="urn:schemas-upnp-org:metadata-1-0/DIDL-Lite/" '
+        'xmlns:dc="http://purl.org/dc/elements/1.1/" '
+        'xmlns:upnp="urn:schemas-upnp-org:metadata-1-0/upnp/">'
+        '<item id="0" parentID="0" restricted="1">'
+        f"<dc:title>{_xml_escape(track.title)}</dc:title>"
+        f"<dc:creator>{_xml_escape(track.artist)}</dc:creator>"
+        f"<upnp:artist>{_xml_escape(track.artist)}</upnp:artist>"
+        f"<upnp:album>{_xml_escape(track.album)}</upnp:album>"
+        f"{album_art}"
+        "<upnp:class>object.item.audioItem.musicTrack</upnp:class>"
+        f'<res protocolInfo="{_xml_escape(protocol_info)}" '
+        f'duration="{duration_str}">'
+        f"{_xml_escape(track.track_uri)}"
+        "</res>"
+        "</item>"
+        "</DIDL-Lite>"
+    )
+
+
+def _format_duration(seconds: int) -> str:
+    """Format an integer second count as `H:MM:SS.fff`. UPnP-AV's
+    spec allows leading H to be one digit; we don't pad it because
+    Bluesound rejects a `00:` prefix on durations under an hour."""
+    if seconds < 0:
+        seconds = 0
+    h = seconds // 3600
+    m = (seconds % 3600) // 60
+    s = seconds % 60
+    return f"{h}:{m:02d}:{s:02d}.000"
+
+
+# ---------------------------------------------------------------------
 # Internals
 # ---------------------------------------------------------------------
 
