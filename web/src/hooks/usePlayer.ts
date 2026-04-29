@@ -648,37 +648,40 @@ export function usePlayer() {
       });
   }, [state.track]);
 
-  // Album-end "continue with artist radio" preference, mirrored from
+  // "Continue playing after queue ends" preference, mirrored from
   // the backend Settings dataclass. Read on mount and refreshed
   // whenever the SettingsPage dispatches the `tidal-settings-updated`
   // event (it does this after a successful PUT). Held in a ref so
-  // the album-end branch in advanceRef can read the latest value
+  // the queue-end branch in advanceRef can read the latest value
   // without taking it as a dep — the advance code path is set up
   // once and would otherwise need to redefine on every settings
   // change.
-  const continueRadioRef = useRef(false);
+  //
+  // Default true here mirrors the backend default. If the settings
+  // fetch fails (no auth, network), keep the default-on behavior so
+  // the user gets the same experience the backend ships.
+  const continuePlayingRef = useRef(true);
   useEffect(() => {
     let cancelled = false;
     api.settings
       .get()
       .then((s) => {
         if (!cancelled) {
-          continueRadioRef.current = !!s.continue_with_artist_radio_after_album;
+          continuePlayingRef.current = !!s.continue_playing_after_queue_ends;
         }
       })
       .catch(() => {
-        /* default: false */
+        /* default: true (set above) */
       });
     const handler = (event: Event) => {
       const detail = (event as CustomEvent).detail as {
-        continue_with_artist_radio_after_album?: boolean;
+        continue_playing_after_queue_ends?: boolean;
       } | null;
       if (
         detail &&
-        typeof detail.continue_with_artist_radio_after_album === "boolean"
+        typeof detail.continue_playing_after_queue_ends === "boolean"
       ) {
-        continueRadioRef.current =
-          detail.continue_with_artist_radio_after_album;
+        continuePlayingRef.current = detail.continue_playing_after_queue_ends;
       }
     };
     window.addEventListener("tidal-settings-updated", handler);
@@ -894,65 +897,74 @@ export function usePlayer() {
         playAtIndex(n);
         return;
       }
-      // Queue ended with no next index. Three behaviors:
-      //   1. Album source AND user has the "continue with artist
-      //      radio" setting on: append an artist radio mix and
-      //      auto-play the first new track. Asynchronous (radio
-      //      fetch); falls back to behavior 2 on any error.
-      //   2. Album source (default): re-prime track 0 of the same
-      //      queue, paused. Standard Spotify / Apple Music behavior.
-      //      One tap of Play repeats the album.
-      //   3. Anything else (playlist, mix, artist, single track,
-      //      unknown source): stop and clear, same as before.
+      // Queue ended with no next index. Behavior tree:
+      //
+      //   "Continue playing" toggle ON (default):
+      //     - Append an Artist Radio mix seeded from the LAST played
+      //       track's primary artist and auto-play the first new
+      //       track. Source-agnostic — works for albums, playlists,
+      //       mixes, single-track plays, anything where the queue
+      //       can run out.
+      //     - On any failure (no artist on the last track, radio
+      //       fetch error, empty results) fall back to the toggle-
+      //       OFF branch so the user still gets a sensible end-state.
+      //
+      //   "Continue playing" toggle OFF:
+      //     - Album source: prime track 0 paused so one tap of Play
+      //       repeats the album. The Spotify / Apple Music "queue
+      //       finished but stay on the album" pattern.
+      //     - Everything else: stop and clear.
       const cur = stateRef.current;
-      if (cur.source?.type === "ALBUM" && cur.queue.length > 0) {
-        if (continueRadioRef.current) {
-          // Behavior 1: artist radio takeover.
-          const lastTrack = cur.queue[cur.queueIndex];
-          const artistId = lastTrack?.artists?.[0]?.id;
-          if (artistId) {
-            void (async () => {
-              try {
-                const radio = await api.artistRadio(String(artistId));
-                if (!radio || radio.length === 0) {
-                  // No radio results — fall back to pause-on-track-0.
-                  loadAtIndexPaused(0);
-                  return;
-                }
-                // Filter out tracks already in the album queue so we
-                // don't immediately replay what just finished.
-                const albumIds = new Set(cur.queue.map((t) => t.id));
-                const fresh = radio.filter((t) => !albumIds.has(t.id));
-                const radioTail = fresh.length > 0 ? fresh : radio;
-                const newQueue = [...cur.queue, ...radioTail];
-                playAtIndex(cur.queueIndex + 1, newQueue, {
-                  type: "ARTIST",
-                  id: String(artistId),
-                });
-              } catch {
-                // Network / API failure — graceful fallback.
-                loadAtIndexPaused(0);
-              }
-            })();
-            return;
-          }
-          // Missing artist on the last track — fall through to the
-          // default album-end behavior.
+      const stopAndClear = () => {
+        api.player.stop().catch(() => {});
+        setState((s) => ({
+          ...s,
+          playing: false,
+          loading: false,
+          currentTime: 0,
+          queueIndex: -1,
+          track: null,
+        }));
+      };
+      const fallbackOff = () => {
+        if (cur.source?.type === "ALBUM" && cur.queue.length > 0) {
+          loadAtIndexPaused(0);
+        } else {
+          stopAndClear();
         }
-        // Behavior 2: pause on track 0.
-        loadAtIndexPaused(0);
-        return;
+      };
+
+      if (continuePlayingRef.current && cur.queue.length > 0) {
+        const lastTrack = cur.queue[cur.queueIndex];
+        const artistId = lastTrack?.artists?.[0]?.id;
+        if (artistId) {
+          void (async () => {
+            try {
+              const radio = await api.artistRadio(String(artistId));
+              if (!radio || radio.length === 0) {
+                fallbackOff();
+                return;
+              }
+              // De-dupe against what just finished so we don't
+              // immediately replay one of the tracks the user was
+              // just listening to.
+              const playedIds = new Set(cur.queue.map((t) => t.id));
+              const fresh = radio.filter((t) => !playedIds.has(t.id));
+              const radioTail = fresh.length > 0 ? fresh : radio;
+              const newQueue = [...cur.queue, ...radioTail];
+              playAtIndex(cur.queueIndex + 1, newQueue, {
+                type: "ARTIST",
+                id: String(artistId),
+              });
+            } catch {
+              fallbackOff();
+            }
+          })();
+          return;
+        }
+        // No artist id on the last track — fall through.
       }
-      // Behavior 3: stop.
-      api.player.stop().catch(() => {});
-      setState((s) => ({
-        ...s,
-        playing: false,
-        loading: false,
-        currentTime: 0,
-        queueIndex: -1,
-        track: null,
-      }));
+      fallbackOff();
     };
   }, [playAtIndex, loadAtIndexPaused]);
 
