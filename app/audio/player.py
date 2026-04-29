@@ -408,15 +408,6 @@ class PCMPlayer:
             initial_source = _build_source(source_spec, prefetched=prefetched_bytes)
             decoder = Decoder(initial_source)
             t_decoder = time.monotonic()
-            print(
-                f"[perf] load track={track_id} "
-                f"total={(t_decoder - load_t0) * 1000.0:.0f}ms "
-                f"teardown={(t_teardown - load_t0) * 1000.0:.0f}ms "
-                f"resolve={(t_resolved - t_teardown) * 1000.0:.0f}ms "
-                f"decoder_init={(t_decoder - t_resolved) * 1000.0:.0f}ms",
-                file=sys.stderr,
-                flush=True,
-            )
         except Exception as exc:
             log.exception("failed to resolve/open source for %s", track_id)
             with self._lock:
@@ -440,9 +431,11 @@ class PCMPlayer:
             else:
                 self._source_urls = list(source_spec)
                 self._source_path = None
+            t_before_stream = time.monotonic()
             self._open_output_stream(
                 decoder.sample_rate, decoder.channels, decoder.sounddevice_dtype
             )
+            t_stream_open = time.monotonic()
             self._samples_emitted = 0
             self._callback_carry = None
             self._paused = False
@@ -470,6 +463,27 @@ class PCMPlayer:
             self._transition("paused")
 
         self._start_decoder_thread()
+        t_thread_started = time.monotonic()
+        # Emit the full breakdown at the bottom so all phases are on
+        # one line. Each segment in milliseconds, total for the
+        # click-to-loaded path. The two phases users care about most
+        # are `resolve` (Tidal API roundtrip) and `decoder_init`
+        # (manifest fetch + first segment fetch + libav probe).
+        # `stream_open` is the sounddevice OutputStream open and
+        # `thread_start` is the producer-thread spawn cost; both
+        # stable across calls so they're floor values.
+        print(
+            f"[perf] load track={track_id} "
+            f"total={(t_thread_started - load_t0) * 1000.0:.0f}ms "
+            f"teardown={(t_teardown - load_t0) * 1000.0:.0f}ms "
+            f"resolve={(t_resolved - t_teardown) * 1000.0:.0f}ms "
+            f"decoder_init={(t_decoder - t_resolved) * 1000.0:.0f}ms "
+            f"stream_open={(t_stream_open - t_before_stream) * 1000.0:.0f}ms "
+            f"thread_start="
+            f"{(t_thread_started - t_stream_open) * 1000.0:.0f}ms",
+            file=sys.stderr,
+            flush=True,
+        )
         self._emit()
         return self.snapshot()
 
@@ -584,22 +598,40 @@ class PCMPlayer:
         for local files, = approximate segment start for DASH —
         which may be up to one segment before target_s).
         """
+        seek_t0 = time.monotonic()
         self._stop_flag.set()
+        # Cancel the decoder's source BEFORE joining the thread.
+        # `stop_flag` only gets checked between PCM frames; if the
+        # decoder is mid-segment-fetch in SegmentReader (the common
+        # case during user seeks because the queue is small) we'd
+        # otherwise wait out the rest of the HTTP read — 150-300 ms
+        # of "nothing happens" between click and audio. cancel_source
+        # closes the in-flight Response so iter_content raises and
+        # the thread exits in single-digit ms.
+        old_decoder = self._decoder
+        if old_decoder is not None:
+            try:
+                old_decoder.cancel_source()
+            except Exception:
+                pass
         thread = self._decoder_thread
         self._decoder_thread = None
         if thread is not None and thread.is_alive():
             thread.join(timeout=2.0)
+        t_thread_joined = time.monotonic()
 
-        old_decoder = self._decoder
         self._decoder = None
         if old_decoder is not None:
             try:
                 old_decoder.close()
             except Exception:
                 pass
+        t_old_closed = time.monotonic()
 
         new_source, start_offset_s = self._build_source_at(target_s)
+        t_source_built = time.monotonic()
         new_decoder = Decoder(new_source)
+        t_decoder_init = time.monotonic()
         # For local files the new container starts at t=0; tell it
         # to seek forward to the precise target. For DASH we already
         # opened at the right segment, so the decoder starts near
@@ -619,6 +651,33 @@ class PCMPlayer:
             self._pcm_queue = queue.Queue(maxsize=_PCM_QUEUE_MAX)
 
         self._start_decoder_thread()
+        t_thread_started = time.monotonic()
+
+        # Same shape as the load() perf line so users / devs can read
+        # both with the same eyes. `thread_join` covers waiting on
+        # the previous decoder to exit (capped at 2 s — long values
+        # here mean a stuck producer); `source_build` is the segment-
+        # picking arithmetic for DASH or path lookup for local;
+        # `decoder_init` is libav opening the new source. Stream
+        # stays open across a seek so there's no `stream_open`
+        # phase here.
+        kind = "local" if start_offset_s is None else "dash"
+        print(
+            f"[perf] seek target_s={target_s:.2f} kind={kind} "
+            f"effective_s={effective_s:.2f} "
+            f"total={(t_thread_started - seek_t0) * 1000.0:.0f}ms "
+            f"thread_join={(t_thread_joined - seek_t0) * 1000.0:.0f}ms "
+            f"old_close="
+            f"{(t_old_closed - t_thread_joined) * 1000.0:.0f}ms "
+            f"source_build="
+            f"{(t_source_built - t_old_closed) * 1000.0:.0f}ms "
+            f"decoder_init="
+            f"{(t_decoder_init - t_source_built) * 1000.0:.0f}ms "
+            f"thread_start="
+            f"{(t_thread_started - t_decoder_init) * 1000.0:.0f}ms",
+            file=sys.stderr,
+            flush=True,
+        )
         return effective_s
 
     def _build_source_at(
@@ -763,6 +822,15 @@ class PCMPlayer:
             if pre is None:
                 return
             pre.stop_flag.set()
+            # Abort any in-flight HTTP fetch on the preload's decoder
+            # so its thread exits promptly instead of waiting out the
+            # rest of a 150-300 ms segment download. Drop-preload
+            # fires on every track change while a preload is buffering;
+            # without this, a fast skip stalls behind the dead preload.
+            try:
+                pre.decoder.cancel_source()
+            except Exception:
+                pass
             if pre.thread.is_alive():
                 pre.thread.join(timeout=2.0)
             try:
@@ -1922,6 +1990,17 @@ class PCMPlayer:
         # Outside the lock (well — RLock held; cleanup stays
         # short): signal + close the old pipeline's resources.
         old_stop_flag.set()
+        # Cancel the old decoder's source BEFORE joining. Same
+        # reasoning as _teardown / _restart_decoder_at: stop_flag
+        # only gets checked between PCM frames, and the old thread
+        # is very often mid-HTTP-fetch on a track change. Closing
+        # the source aborts the in-flight read so the join returns
+        # in milliseconds instead of waiting the segment out.
+        if old_decoder is not None:
+            try:
+                old_decoder.cancel_source()
+            except Exception:
+                pass
         if old_thread is not None and old_thread.is_alive():
             # Short bounded join: gives the thread a chance to
             # notice the stop flag and release its PyAV container
