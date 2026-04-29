@@ -12,6 +12,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { useToast } from "@/components/toast";
 import { api } from "@/api/client";
+import { cn } from "@/lib/utils";
 
 /**
  * Chromecast device picker. Shows up next to the volume / output-
@@ -20,16 +21,18 @@ import { api } from "@/api/client";
  * mDNS browser running, so opening the picker after powering on a
  * speaker shows it within a couple of seconds.
  *
- * Phase 1 (this commit): discovery only. Selecting a device shows
- * a coming-soon toast — the actual session / sink wiring lands in
- * the next commit. Building the UI now keeps the verification loop
- * tight: we know discovery works on the user's network before we
- * sink time into the routing layer.
+ * Selecting a Cast device kicks off /api/cast/connect — the audio
+ * engine begins encoding to FLAC and serving an HTTP stream that
+ * the device fetches via play_media. Selecting "This device" calls
+ * /api/cast/disconnect and audio returns to the local output.
  *
  * The icon hides itself entirely when pychromecast isn't available
  * (broken wheel install) or when discovery has had no events for a
  * long time AND no devices are known. That keeps the cluster lean
- * for users on networks where Cast simply isn't reachable.
+ * for users on networks where Cast simply isn't reachable. Once a
+ * device IS connected we always render the icon with a
+ * primary-colored highlight so the user can see at a glance that
+ * audio is going elsewhere.
  */
 
 type CastDeviceSummary = {
@@ -46,6 +49,10 @@ type CastDevicesResponse = {
     running: boolean;
     device_count: number;
     last_event_age_s: number | null;
+    connected_id?: string | null;
+    connected_name?: string | null;
+    bytes_encoded?: number;
+    media_loaded?: boolean;
   };
   devices: CastDeviceSummary[];
 };
@@ -55,70 +62,101 @@ const LOCAL_VALUE = "__local__";
 export function CastPicker() {
   const toast = useToast();
   const [data, setData] = useState<CastDevicesResponse | null>(null);
-  const [selected, setSelected] = useState<string>(LOCAL_VALUE);
-  const [loading, setLoading] = useState(false);
+  const [busy, setBusy] = useState(false);
 
-  // Initial fetch so we know whether to render the icon at all.
-  // Subsequent opens refetch via onOpenChange below; this is the
-  // boot-time peek that decides whether the user even has Cast
-  // devices on their LAN.
+  // Initial fetch + light polling so the icon's connected-state
+  // highlight reflects what the backend actually thinks. 5s is fine
+  // — connecting is a manual action that the picker triggers, not
+  // something we discover passively. The poll mostly handles the
+  // case where the backend disconnects on its own (device went
+  // offline) so the icon clears.
   useEffect(() => {
     let cancelled = false;
-    void api.cast
-      .devices()
-      .then((res) => {
+    const refresh = async () => {
+      try {
+        const res = await api.cast.devices();
         if (!cancelled) setData(res);
-      })
-      .catch(() => {
-        // Silent — Cast isn't a guaranteed feature. The picker just
-        // doesn't render; the rest of the app keeps working.
-      });
+      } catch {
+        // silent — Cast isn't a guaranteed feature
+      }
+    };
+    void refresh();
+    const handle = window.setInterval(refresh, 5000);
     return () => {
       cancelled = true;
+      window.clearInterval(handle);
     };
   }, []);
 
-  // Hide the picker entirely when:
-  //   - pychromecast didn't import (status.available = false)
-  //   - discovery never started (status.running = false AND no
-  //     devices ever surfaced)
-  // We DO show it when discovery is running but no devices are
-  // currently known — empty-state messaging in the dropdown is
-  // useful diagnostic.
   if (data === null) return null;
   if (!data.status.available) return null;
-  if (!data.status.running && data.devices.length === 0) return null;
+  if (
+    !data.status.running &&
+    data.devices.length === 0 &&
+    !data.status.connected_id
+  ) {
+    return null;
+  }
+
+  const connectedId = data.status.connected_id ?? null;
+  const connected = connectedId !== null;
+  const selected = connectedId ?? LOCAL_VALUE;
 
   const refresh = async () => {
-    setLoading(true);
     try {
       const res = await api.cast.devices();
       setData(res);
     } catch {
       // ignore — keep last good data
-    } finally {
-      setLoading(false);
     }
   };
 
-  const onSelect = (next: string) => {
-    if (next === LOCAL_VALUE) {
-      setSelected(LOCAL_VALUE);
-      return;
+  const onSelect = async (next: string) => {
+    if (busy) return;
+    if (next === selected) return;
+    setBusy(true);
+    try {
+      if (next === LOCAL_VALUE) {
+        await api.cast.disconnect();
+        toast.show({
+          kind: "success",
+          title: "Stopped casting",
+          description: "Audio is back on this device.",
+        });
+      } else {
+        const device = data.devices.find((d) => d.id === next);
+        const result = await api.cast.connect(next);
+        toast.show({
+          kind: "success",
+          title: `Casting to ${result.device.friendly_name}`,
+          description:
+            device?.cast_type === "group"
+              ? "Audio is streaming to the speaker group."
+              : "Audio is streaming to the device.",
+        });
+      }
+      await refresh();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      toast.show({
+        kind: "error",
+        title: next === LOCAL_VALUE ? "Couldn't stop casting" : "Couldn't cast",
+        description: message,
+      });
+      // Refresh anyway — backend may have changed state in spite
+      // of the error response, and stale UI is worse than a
+      // contradictory toast.
+      await refresh();
+    } finally {
+      setBusy(false);
     }
-    // Phase 1 stub. The session wiring that actually routes audio
-    // lands in the next commit; for now, surface a toast so users
-    // testing the discovery layer aren't confused by a click that
-    // appears to do nothing.
-    toast.show({
-      kind: "info",
-      title: "Cast routing coming soon",
-      description:
-        "Discovery works — your devices show up here. Audio routing to " +
-        "Cast targets is still in progress and will land in a follow-up " +
-        "release.",
-    });
   };
+
+  const triggerTitle = connected
+    ? `Casting to ${data.status.connected_name ?? "device"}`
+    : data.devices.length > 0
+      ? `Cast (${data.devices.length} device${data.devices.length === 1 ? "" : "s"})`
+      : "Cast";
 
   return (
     <DropdownMenu
@@ -130,12 +168,11 @@ export function CastPicker() {
         <Button
           variant="ghost"
           size="icon"
-          className="h-8 w-8 data-[state=open]:text-primary"
-          title={
-            data.devices.length > 0
-              ? `Cast (${data.devices.length} device${data.devices.length === 1 ? "" : "s"})`
-              : "Cast"
-          }
+          className={cn(
+            "h-8 w-8 data-[state=open]:text-primary",
+            connected && "text-primary",
+          )}
+          title={triggerTitle}
         >
           <Cast className="h-4 w-4" />
         </Button>
@@ -148,6 +185,7 @@ export function CastPicker() {
             value={LOCAL_VALUE}
             onSelect={(e) => e.preventDefault()}
             className="text-sm"
+            disabled={busy}
           >
             <div className="flex flex-col">
               <span>This device</span>
@@ -156,7 +194,7 @@ export function CastPicker() {
               </span>
             </div>
           </DropdownMenuRadioItem>
-          {data.devices.length === 0 && !loading && (
+          {data.devices.length === 0 && (
             <div className="px-2 py-1.5 text-xs text-muted-foreground">
               No Cast devices on your network.
               {data.status.last_event_age_s !== null
@@ -170,6 +208,7 @@ export function CastPicker() {
               value={d.id}
               onSelect={(e) => e.preventDefault()}
               className="text-sm"
+              disabled={busy}
             >
               <div className="flex flex-col">
                 <span>{d.friendly_name}</span>
