@@ -8,6 +8,7 @@ import {
   Code2,
   Download,
   ExternalLink,
+  FileDown,
   Headphones,
   Import as ImportIcon,
   Info,
@@ -1583,12 +1584,38 @@ const TIDEWAY_REPO_URL = "https://github.com/J-M-PUNK/tideway";
  * need version data — there's no shared store to subscribe to.
  */
 function AboutSection() {
+  const toast = useToast();
   const [version, setVersion] = useState<string | null>(null);
   const [update, setUpdate] = useState<{
     available: boolean;
     latest: string | null;
     url: string | null;
   } | null>(null);
+  const [savingReport, setSavingReport] = useState(false);
+
+  const saveReport = async () => {
+    if (savingReport) return;
+    setSavingReport(true);
+    try {
+      const res = await api.saveActivityReport();
+      // Quote the full path back to the user — they need to be able
+      // to attach this file to a bug report. Long paths wrap in the
+      // toast description, which is fine.
+      toast.show({
+        kind: "success",
+        title: "Activity report saved",
+        description: res.path,
+      });
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: "Couldn't save activity report",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setSavingReport(false);
+    }
+  };
 
   useEffect(() => {
     let cancelled = false;
@@ -1687,6 +1714,25 @@ function AboutSection() {
           </div>
           <ExternalLink className="h-4 w-4 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
         </a>
+        <button
+          type="button"
+          onClick={saveReport}
+          disabled={savingReport}
+          className="group flex items-center gap-3 rounded-md border border-border/50 bg-card/60 p-3 text-left text-sm transition-colors hover:bg-accent/40 disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          {savingReport ? (
+            <Loader2 className="h-4 w-4 animate-spin text-primary" />
+          ) : (
+            <FileDown className="h-4 w-4 text-primary" />
+          )}
+          <div className="flex-1">
+            <div className="font-semibold">Save activity report</div>
+            <div className="text-xs text-muted-foreground">
+              Writes a JSON snapshot to your Downloads folder. Useful for
+              attaching to a bug report. Settings credentials are stripped.
+            </div>
+          </div>
+        </button>
       </div>
     </Section>
   );

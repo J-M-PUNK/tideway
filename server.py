@@ -22,7 +22,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from dataclasses import asdict
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Generator, Optional
 from urllib.parse import quote, urljoin, urlparse
@@ -1008,6 +1008,161 @@ def _parse_semver(v: str) -> tuple[int, ...]:
 @app.get("/api/version")
 def app_version() -> dict:
     return {"version": APP_VERSION}
+
+
+# Settings fields to redact when included in the activity report.
+# Anything here gets replaced with a "<redacted>" sentinel before
+# the report is written. Anchors against the credentials guarantee
+# in the user-facing description of the activity-report feature:
+# "settings (with credentials stripped)".
+_DIAGNOSTICS_REDACT_KEYS = ("spotify_client_id",)
+
+
+def _build_activity_report() -> dict:
+    """Assemble the full diagnostic snapshot used by the Save Activity
+    Report button. Everything here is best-effort — if any single
+    section fails, it's recorded as an error string and the rest of
+    the report is still produced. The whole point is to be useful
+    even when the app is in a degraded state (e.g. user can't sign
+    in and is reporting a bug)."""
+    report: dict = {
+        "schema": 1,
+        "generated_at": datetime.now(timezone.utc)
+        .replace(microsecond=0)
+        .isoformat()
+        .replace("+00:00", "Z"),
+        "app": {
+            "version": APP_VERSION,
+            "frozen": bool(getattr(sys, "frozen", False)),
+        },
+        "platform": {
+            "system": platform.system(),
+            "release": platform.release(),
+            "version": platform.version(),
+            "machine": platform.machine(),
+            "python": platform.python_version(),
+        },
+        "auth": {
+            # Just the boolean, not the token. Knowing whether the
+            # user is signed in is part of "what state was the app in
+            # when this happened"; the token is irrelevant to a bug
+            # report and a credential.
+            "logged_in": _is_logged_in(),
+        },
+    }
+
+    # Settings (redacted). Build directly from the live `settings`
+    # global — that way the report reflects what the running process
+    # is actually using, not whatever's currently on disk.
+    try:
+        settings_dict = asdict(settings)
+        for key in _DIAGNOSTICS_REDACT_KEYS:
+            if key in settings_dict and settings_dict[key]:
+                settings_dict[key] = "<redacted>"
+        report["settings"] = settings_dict
+    except Exception as exc:
+        report["settings"] = {"error": f"{type(exc).__name__}: {exc}"}
+
+    # Player snapshot — only if the player is already constructed.
+    # Calling _native_player() here would lazily construct it just
+    # to dump diagnostics, which would leave a side effect on a
+    # process that previously never touched audio. Read the
+    # singleton directly instead.
+    try:
+        if _pcm_player_singleton is not None:
+            report["player"] = _snapshot_dict(_pcm_player_singleton.snapshot())
+        else:
+            report["player"] = {"state": "not_initialized"}
+    except Exception as exc:
+        report["player"] = {"error": f"{type(exc).__name__}: {exc}"}
+
+    # Audio devices. Three pieces:
+    #   - what the user picked in settings (the id),
+    #   - what the player resolved that to (best-effort device name),
+    #   - the full sounddevice enumeration (host APIs, channel counts,
+    #     default sample rates) — this is where most "wrong device
+    #     selected" bug reports actually get answered.
+    audio: dict = {
+        "configured_device_id": getattr(settings, "audio_output_device", "") or None,
+    }
+    try:
+        if _pcm_player_singleton is not None:
+            audio["player_devices"] = _pcm_player_singleton.list_output_devices()
+        else:
+            audio["player_devices"] = None
+    except Exception as exc:
+        audio["player_devices"] = {"error": f"{type(exc).__name__}: {exc}"}
+    try:
+        import sounddevice as sd  # type: ignore
+
+        # query_devices() returns a list of dicts plus host APIs
+        # available via query_hostapis(). Capture both — the host
+        # API id stored on each device only makes sense alongside
+        # the host APIs list.
+        devices = sd.query_devices()
+        # `query_devices()` may return either a list of dicts or, in
+        # some sounddevice versions, a DeviceList that's iterable but
+        # not a plain list. Coerce to list[dict] for JSON.
+        audio["sounddevice_devices"] = [dict(d) for d in devices]
+        audio["sounddevice_hostapis"] = [
+            dict(h) for h in sd.query_hostapis()
+        ]
+        defaults = sd.default.device
+        audio["sounddevice_default_input_idx"] = (
+            defaults[0] if isinstance(defaults, (list, tuple)) else None
+        )
+        audio["sounddevice_default_output_idx"] = (
+            defaults[1] if isinstance(defaults, (list, tuple)) else None
+        )
+    except Exception as exc:
+        audio["sounddevice_error"] = f"{type(exc).__name__}: {exc}"
+    report["audio"] = audio
+
+    return report
+
+
+@app.post("/api/diagnostics/save-activity-report")
+def save_activity_report() -> dict:
+    """Write a diagnostic snapshot to ~/Downloads/tideway-activity-
+    <timestamp>.json. Intentionally unauthenticated so users who
+    can't sign in can still produce one when they file a bug.
+
+    The path is OS-aware: ~/Downloads on macOS / Linux, the user's
+    Downloads folder on Windows resolved through the shell's known-
+    folder if available, otherwise the home directory as a fallback.
+    """
+    report = _build_activity_report()
+    # Filename-safe ISO-ish timestamp with the colons swapped out so
+    # Windows accepts it (NTFS won't allow `:`). Local time so users
+    # filing reports recognize the time they hit the button.
+    ts = datetime.now().strftime("%Y%m%dT%H%M%S")
+    filename = f"tideway-activity-{ts}.json"
+
+    # Resolve the Downloads folder. Path.home()/"Downloads" works on
+    # all three platforms when the OS uses the standard locale and
+    # the user hasn't moved the folder. If it doesn't exist (locale
+    # difference, custom folder structure, server-style install),
+    # fall through to $HOME so the report still lands somewhere
+    # discoverable.
+    downloads = Path.home() / "Downloads"
+    target_dir = downloads if downloads.is_dir() else Path.home()
+    target_path = target_dir / filename
+    try:
+        with open(target_path, "w", encoding="utf-8") as fh:
+            json.dump(report, fh, indent=2, default=str, sort_keys=True)
+    except OSError as exc:
+        # Out of disk, permission denied, weird path. Surface as a
+        # 500 so the frontend can render an actionable error toast.
+        raise HTTPException(
+            status_code=500,
+            detail=f"Couldn't write activity report: {exc}",
+        )
+
+    return {
+        "path": str(target_path),
+        "size_bytes": target_path.stat().st_size,
+        "report_schema": report["schema"],
+    }
 
 
 def _match_release_asset(release_data: dict) -> Optional[str]:
