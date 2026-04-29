@@ -5536,9 +5536,17 @@ def video_proxy(u: str):
     if is_manifest:
         try:
             text = r.text
+            # Use the FINAL URL after any redirects, not the URL the
+            # caller asked for. Tidal sometimes serves manifests via
+            # a redirect chain (signed CloudFront → CDN edge), and
+            # relative URIs inside the manifest resolve against the
+            # last redirect, not the first request. Falling back to
+            # `u` when the response object doesn't expose `.url`
+            # (older curl-cffi versions) keeps the existing behavior.
+            base_for_rewrite = getattr(r, "url", None) or u
         finally:
             r.close()
-        rewritten = _rewrite_m3u8(text, u)
+        rewritten = _rewrite_m3u8(text, base_for_rewrite)
         return Response(
             rewritten, media_type="application/vnd.apple.mpegurl"
         )
