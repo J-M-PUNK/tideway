@@ -285,6 +285,17 @@ class StreamHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
 
 class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
+    # Python's BaseHTTPRequestHandler defaults to HTTP/1.0. Combined
+    # with our chunked Transfer-Encoding, that's a spec violation —
+    # chunked encoding is HTTP/1.1+ only. Cast / AirPlay receivers
+    # that see "HTTP/1.0 200 OK" plus "Transfer-Encoding: chunked"
+    # apply HTTP/1.0's "close after body" semantics, get a stream
+    # that never closes a body they can't parse, and bail silently.
+    # Hisense's Cast receiver in particular drops back to its prior
+    # screen with no error to either side. Force HTTP/1.1 so the
+    # response line and the chunked encoding agree.
+    protocol_version = "HTTP/1.1"
+
     def log_message(self, format, *args):  # type: ignore[override]
         # Quiet by default; switch to log.debug so `run.sh` doesn't
         # drown in per-chunk access-log lines during streaming.
