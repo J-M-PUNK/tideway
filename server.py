@@ -5536,6 +5536,7 @@ def video_proxy(u: str):
     if is_manifest:
         try:
             text = r.text
+            content_type_header = r.headers.get("Content-Type")
             # Use the FINAL URL after any redirects, not the URL the
             # caller asked for. Tidal sometimes serves manifests via
             # a redirect chain (signed CloudFront → CDN edge), and
@@ -5546,6 +5547,21 @@ def video_proxy(u: str):
             base_for_rewrite = getattr(r, "url", None) or u
         finally:
             r.close()
+        # Diagnostic: hls.js was rejecting bodies with "no EXTM3U
+        # delimiter" — the first line wasn't `#EXTM3U`. Could be a
+        # BOM, a JSON wrapper (Tidal sometimes ships base64-encoded
+        # protobuf manifests under a `.m3u8` URL), or HTML from an
+        # upstream redirect / error. Logging a head-of-body snapshot
+        # tells us exactly what came back so we can branch on it
+        # rather than blindly handing it to the rewriter.
+        head = text[:200].replace("\n", "\\n").replace("\r", "\\r")
+        print(
+            f"[video-proxy] manifest u={u[:100]!r} "
+            f"content_type={content_type_header!r} "
+            f"len={len(text)} head={head!r}",
+            file=sys.stderr,
+            flush=True,
+        )
         rewritten = _rewrite_m3u8(text, base_for_rewrite)
         return Response(
             rewritten, media_type="application/vnd.apple.mpegurl"
