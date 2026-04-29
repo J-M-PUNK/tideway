@@ -4194,6 +4194,90 @@ def _airplay_manager():
     return AirPlayManager.instance()
 
 
+@app.get("/api/tidal-connect/devices")
+def tidal_connect_devices() -> dict:
+    """Snapshot of Tidal Connect-capable devices on the LAN.
+
+    SSDP-scans for OpenHome MediaRenderer devices each call. We
+    don't keep a continuous browser running like Cast does because
+    SSDP is more network-noisy than mDNS, and Tidal Connect
+    devices are a smaller set the user typically already knows
+    about — on-demand refresh is enough.
+
+    Status surfaces `control_plane_ready: false` for now so the
+    frontend picker can reflect that the actual play/pause/track-
+    load isn't wired yet — discovery works, but selecting a device
+    produces a 'Tidal Connect routing pending' toast rather than
+    silent failure.
+    """
+    _require_local_access()
+    from app.audio.tidal_connect import get_manager  # noqa: WPS433
+
+    mgr = get_manager()
+    if not mgr.is_available():
+        return {
+            "status": {"available": False, "device_count": 0},
+            "devices": [],
+        }
+    devices = mgr.refresh(timeout=5.0)
+    return {
+        "status": mgr.status(),
+        "devices": [
+            {
+                "id": d.id,
+                "friendly_name": d.friendly_name,
+                "manufacturer": d.manufacturer,
+                "model": d.model,
+                "is_openhome": d.is_openhome,
+                "has_credentials_service": d.has_credentials_service,
+            }
+            for d in devices
+        ],
+    }
+
+
+class _TidalConnectConnectRequest(BaseModel):
+    device_id: str
+
+
+@app.post("/api/tidal-connect/connect")
+def tidal_connect_connect(req: _TidalConnectConnectRequest) -> dict:
+    """Open a Tidal Connect session against the given device.
+
+    Currently returns 501 Not Implemented — discovery works but the
+    OpenHome SOAP control plane that issues play / pause / track-
+    load commands needs Phase 2 protocol work (packet capture
+    against a real Tidal Connect target + the official Tidal
+    desktop app). The endpoint exists with this shape so the
+    picker UI can plumb against the eventual real surface today,
+    and so users testing discovery hit a deterministic 501 instead
+    of a 404 dead end.
+    """
+    _require_local_access()
+    from app.audio.tidal_connect import get_manager  # noqa: WPS433
+
+    mgr = get_manager()
+    try:
+        mgr.connect(req.device_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except NotImplementedError as exc:
+        raise HTTPException(status_code=501, detail=str(exc)) from exc
+    return {"ok": True}
+
+
+@app.post("/api/tidal-connect/disconnect")
+def tidal_connect_disconnect() -> dict:
+    """Tear down the active Tidal Connect session. Idempotent.
+    Currently a no-op — there's no session to tear down — but the
+    endpoint shape is in place for the future control plane."""
+    _require_local_access()
+    from app.audio.tidal_connect import get_manager  # noqa: WPS433
+
+    get_manager().disconnect()
+    return {"ok": True}
+
+
 @app.get("/api/upnp/devices")
 def upnp_devices() -> dict:
     """SSDP-scan the LAN for UPnP MediaRenderers. Used by the
