@@ -204,9 +204,8 @@ export function setSpotifyEnrichmentEnabled(enabled: boolean): void {
 
 /**
  * Seed the playcount cache with a batch of pre-fetched results. Used
- * by the Popular page to avoid firing N concurrent per-track lookups
- * from the browser — instead the page pulls every playcount in one
- * server-side bounded-pool request and preseeds here so the per-row
+ * by `useSpotifyTrackPlaycountBatch` (and the Popular page directly
+ * for its `refresh: true` case) so the per-row
  * `useSpotifyTrackPlaycount` hook renders from cache on first paint.
  */
 export function preseedSpotifyPlaycounts(
@@ -225,4 +224,75 @@ export function preseedSpotifyPlaycounts(
   for (const key of keys) {
     notify(playcountSubs, key);
   }
+}
+
+interface PreseedTrack {
+  id?: string;
+  isrc?: string | null;
+  name?: string;
+  artists?: { name: string }[];
+}
+
+/**
+ * One bulk request for all tracks' playcounts when a page mounts a
+ * list of them. Without this, every TrackList row's
+ * `useSpotifyTrackPlaycount` fires its own browser→backend round
+ * trip, the browser throttles to ~6 parallel, and a 12-track album
+ * cold-cache takes 5-6 seconds to fill in numbers (two waves of
+ * 500-1000ms each). The batch endpoint runs the per-track lookups
+ * through a 5-worker pool server-side so the wall time is one
+ * round-trip plus parallel work — typically 1-3 seconds for a
+ * full album.
+ *
+ * Idempotent: the same set of ISRCs hits the same server-side cache
+ * key, so calling this from AlbumDetail, ArtistDetail, and the
+ * tracklist's own per-row hooks won't double-up the upstream cost.
+ *
+ * Skips the request entirely when none of the tracks carry an ISRC
+ * (rare; obscure catalog entries) or when the cache already has every
+ * key — no point paying for a no-op.
+ */
+export function useSpotifyTrackPlaycountBatch(
+  tracks: PreseedTrack[] | null | undefined,
+): void {
+  // Stable comma-joined ISRC key so the effect only refires when the
+  // set of tracks actually changes — page mounts and re-renders that
+  // produce the same list don't re-batch.
+  const lookup =
+    tracks
+      ?.map((t) => ({
+        isrc: (t.isrc ?? "").toUpperCase(),
+        title: t.name ?? "",
+        artist: t.artists?.[0]?.name ?? "",
+      }))
+      .filter((x) => x.isrc) ?? [];
+  const cacheKey = lookup
+    .map((x) => x.isrc)
+    .sort()
+    .join(",");
+
+  useEffect(() => {
+    if (!cacheKey || !spotifyEnabled) return;
+    // Already cached for every ISRC? Skip the round trip.
+    const allCached = lookup.every((x) => playcountCache.has(x.isrc));
+    if (allCached) return;
+    let cancelled = false;
+    api.spotify
+      .trackPlaycounts(lookup)
+      .then((r) => {
+        if (cancelled) return;
+        preseedSpotifyPlaycounts(r.playcounts);
+      })
+      .catch(() => {
+        /* per-row hooks fall back to their own fetch */
+      });
+    return () => {
+      cancelled = true;
+    };
+    // `cacheKey` covers the contents of `lookup`. Re-deriving lookup
+    // from `tracks` on every render would tempt a deps-array thrash;
+    // we capture it once per cacheKey and the effect doesn't read it
+    // again after the call.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cacheKey]);
 }
