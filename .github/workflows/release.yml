@@ -354,9 +354,19 @@ jobs:
           # asset names (Tideway-0.1.0.dmg, Tideway-setup-0.1.0.exe,
           # Tideway-setup-0.1.0-arm64.exe) land without hardcoding the
           # version in two places.
+          #
+          # `**` is required because download-artifact@v4 with separate
+          # `name:` invocations places each artifact in a subdirectory
+          # named after the artifact (e.g. artifacts/Tideway-macOS/
+          # Tideway-0.4.12.dmg). The previous flat `artifacts/Tideway-*`
+          # glob silently matched nothing — the v0.4.12 release shipped
+          # with no installers attached until the assets were uploaded
+          # manually. Either an upstream behavior change in v4 or a
+          # quirk that's been latent since v3→v4; **/ pattern is safe
+          # either way.
           files: |
-            artifacts/Tideway-*.dmg
-            artifacts/Tideway-setup-*.exe
+            artifacts/**/Tideway-*.dmg
+            artifacts/**/Tideway-setup-*.exe
           # draft: true so the maintainer can review the auto-populated
           # notes (and edit / restructure if needed) before publishing.
           # Publishing a draft is what actually triggers the auto-update
