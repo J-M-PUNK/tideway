@@ -16,7 +16,7 @@ import {
   DOWNLOAD_GATE_TOOLTIP,
   useSubscription,
 } from "@/hooks/useSubscription";
-import { effectiveFormatLabel } from "@/lib/quality";
+import { effectiveFormatLabel, filterAvailableQualities } from "@/lib/quality";
 
 /**
  * Album-level download button for a detail-page actions row. Visually
@@ -39,7 +39,12 @@ export function DownloadAlbumButton({
   onDownload: OnDownload;
 }) {
   const downloaded = useDownloadedIds();
-  const qualities = useQualities() ?? [];
+  const allQualities = useQualities() ?? [];
+  // Hide quality tiers that aren't actually deliverable for this
+  // album. Picking Max on a non-hi-res album just downloads the
+  // same FLAC the Lossless tier would; better to not offer the
+  // illusion of a choice in the first place.
+  const qualities = filterAvailableQualities(allQualities, mediaTags);
   const sub = useSubscription();
   const [open, setOpen] = useState(false);
 

@@ -31,7 +31,7 @@ import {
 } from "@/hooks/useSubscription";
 import { useToast } from "@/components/toast";
 import { CreatePlaylistDialog } from "@/components/CreatePlaylistDialog";
-import { effectiveFormatLabel } from "@/lib/quality";
+import { effectiveFormatLabel, filterAvailableQualities } from "@/lib/quality";
 import { cn, imageProxy } from "@/lib/utils";
 import {
   ContextMenuItem,
@@ -380,7 +380,12 @@ function DownloadSubmenu({
   mediaTags?: string[];
 }) {
   const { Item, Sub, SubTrigger, SubContent } = parts;
-  const qualities = useQualities() ?? [];
+  const allQualities = useQualities() ?? [];
+  // Hide tiers that aren't deliverable for this specific track —
+  // a non-hi-res release shouldn't list Max because it'd just give
+  // back the same FLAC the High tier serves. Lossy tracks lose
+  // both lossless tiers.
+  const qualities = filterAvailableQualities(allQualities, mediaTags);
   const sub = useSubscription();
 
   if (!sub.canDownload) {
