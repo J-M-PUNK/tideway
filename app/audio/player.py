@@ -167,6 +167,18 @@ class PCMPlayer:
         self._seeking = False
         self._volume = 100  # 0..100
         self._muted = False
+        # External output active: when something else is rendering
+        # the audio (Cast device, AirPlay receiver, Tidal Connect
+        # target), the local sounddevice OutputStream still runs but
+        # writes silence so the user doesn't hear two copies of
+        # the music coming from their Mac speakers and the remote
+        # device. The PCM tap to those external sinks happens BEFORE
+        # this silencing (see audio_callback) so the receivers still
+        # get full-amplitude audio at their own volume control.
+        # Flag is owned by the various external-output managers
+        # (cast.py + tidal_connect.py both flip it on connect /
+        # disconnect via the registered silencer hook).
+        self._external_output_active: bool = False
         # sounddevice device-index string ("" = system default).
         # Applied on the next _open_output_stream(). Device-switch
         # live is a Phase 6 refinement.
@@ -892,6 +904,26 @@ class PCMPlayer:
             self._muted = bool(muted)
             self._seq += 1
         return self.snapshot()
+
+    def set_external_output_active(self, active: bool) -> None:
+        """Toggle local-output silencing.
+
+        Called by the Cast / AirPlay / Tidal Connect managers when
+        a remote output session opens or closes. While true, the
+        audio callback writes silence to the local sounddevice
+        OutputStream so the user doesn't hear duplicate audio from
+        Mac speakers and the remote device. Source PCM still
+        flows to the remote tap before silencing, so the receiver
+        gets full-amplitude audio at its own volume control.
+
+        Idempotent. Doesn't change `_volume` or `_muted` — the
+        user's manual mute / volume settings are preserved across
+        a cast cycle so they don't have to re-set them when audio
+        returns to local.
+        """
+        with self._lock:
+            self._external_output_active = bool(active)
+            self._seq += 1
 
     # --- EQ --------------------------------------------------------
     #
@@ -1974,6 +2006,29 @@ class PCMPlayer:
         except Exception:
             # Never let AirPlay errors take down local playback.
             pass
+
+        # External output active: silence local. Done AFTER the
+        # AirPlay / Cast / Tidal Connect taps above (so the remote
+        # receiver gets full-amplitude audio at its own volume
+        # control) and BEFORE the volume / mute logic below (so the
+        # silencing is unconditional regardless of user volume
+        # state). The OutputStream still runs — we just hand it
+        # zeros — which keeps the realtime callback driving and
+        # avoids the underrun-recovery dance that stopping +
+        # restarting would cost when the user toggles back to
+        # local.
+        if self._external_output_active:
+            outdata.fill(0)
+            self._samples_emitted += frames
+            # Bump seq so the frontend's position scrubber still
+            # advances even though local is silent — playback is
+            # still happening, just on the remote.
+            _cb_counter = getattr(self, "_seq_bump_counter", 0) + 1
+            if _cb_counter >= 20:
+                self._seq += 1
+                _cb_counter = 0
+            self._seq_bump_counter = _cb_counter
+            return
 
         # EQ (10-band biquad). Active only when the user has a
         # non-flat curve set — when disabled, `apply()` is an early

@@ -64,6 +64,8 @@ def manager(monkeypatch):
     fresh._last_scan_at = 0.0
     fresh._session = None
     fresh._state_listeners = []
+    fresh._local_silencer = None
+    fresh._track_url_resolver = None
     monkeypatch.setattr(_mod, "_singleton", fresh)
     return fresh
 
@@ -671,6 +673,122 @@ class TestStateListeners:
         )
         manager.poll_state_once()
         assert len(called) == 1
+
+
+class TestSilencerWiring:
+    """Slice 4 audio integration: when a TC session opens the
+    audio engine should silence local output via the registered
+    silencer hook. Mirrors the Cast manager's pattern so the deploy
+    branch can land both engines using the same PCMPlayer flag."""
+
+    def test_set_local_silencer_stores_callback(self, manager):
+        from unittest.mock import MagicMock
+
+        cb = MagicMock()
+        manager.set_local_silencer(cb)
+        assert manager._local_silencer is cb
+
+    def test_disconnect_fires_silencer_false(self, manager):
+        from app.audio.tidal_connect import _SessionState
+        from unittest.mock import MagicMock
+
+        cb = MagicMock()
+        manager.set_local_silencer(cb)
+        playlist = MagicMock()
+        manager._session = _SessionState(
+            device=_device(),
+            openhome_device=MagicMock(),
+            playlist=playlist,
+            volume=None,
+            time=None,
+            info=None,
+        )
+        manager.disconnect()
+        cb.assert_called_once_with(False)
+
+    def test_silencer_failure_doesnt_break_disconnect(self, manager):
+        """A buggy silencer raising shouldn't prevent the rest of
+        disconnect from running. Stop on the device + session
+        teardown matter more than the local-mute flip."""
+        from app.audio.tidal_connect import _SessionState
+        from unittest.mock import MagicMock
+
+        def _bad(_active):
+            raise RuntimeError("silencer broke")
+
+        manager.set_local_silencer(_bad)
+        playlist = MagicMock()
+        manager._session = _SessionState(
+            device=_device(),
+            openhome_device=MagicMock(),
+            playlist=playlist,
+            volume=None,
+            time=None,
+            info=None,
+        )
+        manager.disconnect()  # should not raise
+        assert manager._session is None
+
+
+class TestResolverPrecedence:
+    """Connect's track_url_resolver argument takes precedence over
+    the manager-level resolver. Tests substitute per-call; production
+    wires once at startup."""
+
+    def test_per_call_resolver_wins(self, manager):
+        from unittest.mock import MagicMock
+
+        manager_resolver = MagicMock()
+        per_call_resolver = MagicMock()
+        manager.set_track_url_resolver(manager_resolver)
+
+        # Connect with a per-call resolver. We can't fully connect
+        # without mocking fetch_device etc., but we can verify the
+        # resolver-precedence logic in isolation by constructing
+        # a session with the precedence rule applied.
+        # The actual precedence check happens inside connect();
+        # exercise it by overriding the relevant pieces.
+        from app.audio import tidal_connect as _mod
+        from app.audio.openhome import OpenHomeDevice, OpenHomeService
+
+        d = _device("uuid:test")
+        manager._devices[d.id] = d
+        oh_device = OpenHomeDevice(
+            udn="uuid:test",
+            friendly_name="X",
+            manufacturer="x",
+            model_name="x",
+            model_number="1",
+            services=(
+                OpenHomeService(
+                    service_type=(
+                        "urn:av-openhome-org:service:Playlist:1"
+                    ),
+                    service_id=(
+                        "urn:av-openhome-org:serviceId:Playlist"
+                    ),
+                    short_name="Playlist",
+                    control_url="http://x/Playlist/control",
+                    event_sub_url="http://x/Playlist/event",
+                    scpd_url="http://x/Playlist/scpd.xml",
+                    actions=(),
+                ),
+            ),
+        )
+        from unittest import mock as _mock
+        with _mock.patch.object(
+            _mod, "fetch_device", return_value=oh_device
+        ):
+            with _mock.patch.object(
+                _mod.PlaylistController,
+                "delete_all",
+                return_value=None,
+            ):
+                manager.connect(d.id, track_url_resolver=per_call_resolver)
+        # The session should have the per-call resolver attached.
+        assert (
+            manager._session.track_url_resolver is per_call_resolver
+        )
 
 
 class TestTransportControls:
