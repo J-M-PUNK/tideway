@@ -4999,6 +4999,43 @@ def library_local() -> dict:
 # ---------------------------------------------------------------------------
 
 
+# Strips the parenthetical / bracketed variant tags Tidal hangs off
+# album names so that "Hurry Up Tomorrow", "Hurry Up Tomorrow
+# (Deluxe)", "Hurry Up Tomorrow [Explicit]", and "Hurry Up Tomorrow
+# - Deluxe Edition" all reduce to the same key. Used by the More By
+# row to keep the same album from filling six slots when Tidal
+# carries it under multiple variant IDs (explicit / clean / region /
+# deluxe / standard / re-release). Conservative on purpose: we only
+# strip text inside () or [] and a trailing " - <something> Edition"
+# tail, so an album whose actual title contains a parenthetical
+# (rare but it happens — "Some Album (2024 Remaster)" is genuinely
+# distinct from "Some Album") still reduces to a different key from
+# the un-remastered version once we carry the variant tag through.
+_VARIANT_SUFFIX_RE = re.compile(
+    r"\s*[\(\[][^)\]]*[\)\]]\s*$"  # trailing parenthetical / bracketed tag
+    r"|\s*-\s*[A-Za-z0-9 ]*?(edition|version|remaster|mix)\s*$",
+    re.IGNORECASE,
+)
+
+
+def _normalize_album_title(title: str) -> str:
+    """Reduce an album title to a comparison key. Lowercased, with
+    trailing variant tags stripped, whitespace collapsed. Returns
+    empty string if the title is empty / falsy."""
+    if not title:
+        return ""
+    s = title.strip()
+    # Strip variant suffixes one at a time in case Tidal stacks them
+    # (e.g. "Album (Deluxe) [Explicit]"). Bounded loop so a malformed
+    # title can't cause infinite work.
+    for _ in range(4):
+        new = _VARIANT_SUFFIX_RE.sub("", s).strip()
+        if new == s:
+            break
+        s = new
+    return " ".join(s.lower().split())
+
+
 @app.get("/api/album/{album_id}")
 def album_detail(album_id: int) -> dict:
     _require_auth()
@@ -5031,12 +5068,28 @@ def album_detail(album_id: int) -> dict:
         eps = _safe(lambda: list(primary.get_ep_singles(limit=20)) or [], [])
         out: list[dict] = []
         current_id = str(album.id)
-        seen: set[str] = set()
+        # Tidal's catalog regularly carries the same release under
+        # multiple album IDs — explicit / clean variants, region-locked
+        # editions, deluxe / standard pairs, label re-issues. An ID-
+        # only dedupe lets all of those slip through and the user sees
+        # what looks like the same album twice. Dedupe by a normalized
+        # title key as well, so a title that already appeared (or that
+        # matches the album we're currently viewing) gets dropped.
+        # `_normalize_album_title` lowercases, strips parenthetical
+        # variant tags, and collapses whitespace.
+        current_title_key = _normalize_album_title(getattr(album, "name", "") or "")
+        seen_ids: set[str] = set()
+        seen_titles: set[str] = {current_title_key} if current_title_key else set()
         for a in full + eps:
             aid = str(getattr(a, "id", "") or "")
-            if not aid or aid == current_id or aid in seen:
+            if not aid or aid == current_id or aid in seen_ids:
                 continue
-            seen.add(aid)
+            title_key = _normalize_album_title(getattr(a, "name", "") or "")
+            if title_key and title_key in seen_titles:
+                continue
+            seen_ids.add(aid)
+            if title_key:
+                seen_titles.add(title_key)
             out.append(album_to_dict(a))
             if len(out) >= 12:
                 break
