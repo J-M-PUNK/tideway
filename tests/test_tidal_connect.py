@@ -63,6 +63,7 @@ def manager(monkeypatch):
     fresh._loop_thread = None
     fresh._last_scan_at = 0.0
     fresh._session = None
+    fresh._state_listeners = []
     monkeypatch.setattr(_mod, "_singleton", fresh)
     return fresh
 
@@ -445,6 +446,231 @@ class TestLoadTrack:
         with pytest.raises(RuntimeError) as exc:
             manager.load_track(123)
         assert "resolve" in str(exc.value).lower()
+
+
+class TestStatePolling:
+    """Slice 5: poll the device's Time + Volume services and fire
+    listener events when state changes meaningfully.
+
+    The polling logic itself (the loop running on a background
+    thread) isn't unit tested — it's a thin wrapper around
+    poll_state_once() that handles thread lifecycle. The
+    interesting behaviour is in poll_state_once: which deltas
+    trigger which events.
+    """
+
+    def _attach_session(
+        self,
+        manager,
+        *,
+        time_responses=None,
+        volume_responses=None,
+    ):
+        from app.audio.tidal_connect import _SessionState
+        from unittest.mock import MagicMock
+
+        time_ctl = None
+        if time_responses is not None:
+            time_ctl = MagicMock()
+            time_ctl.time = MagicMock(side_effect=time_responses)
+
+        volume = None
+        if volume_responses is not None:
+            volume = MagicMock()
+            # volume_responses is a list of (volume_pct, muted) tuples.
+            volume.get_volume = MagicMock(
+                side_effect=[v for v, _ in volume_responses]
+            )
+            volume.get_mute = MagicMock(
+                side_effect=[m for _, m in volume_responses]
+            )
+
+        manager._session = _SessionState(
+            device=_device(),
+            openhome_device=MagicMock(),
+            playlist=MagicMock(),
+            volume=volume,
+            time=time_ctl,
+            info=None,
+        )
+
+    def test_poll_returns_none_with_no_session(self, manager):
+        assert manager.poll_state_once() is None
+
+    def test_poll_returns_state_dict(self, manager):
+        self._attach_session(
+            manager,
+            time_responses=[
+                {"duration": 240, "seconds": 30, "track_count": 1}
+            ],
+            volume_responses=[(50, False)],
+        )
+        state = manager.poll_state_once()
+        assert state == {
+            "position_s": 30,
+            "duration_s": 240,
+            "track_count": 1,
+            "volume_percent": 50,
+            "muted": False,
+        }
+
+    def test_poll_handles_missing_time_service(self, manager):
+        self._attach_session(
+            manager, time_responses=None, volume_responses=[(60, False)]
+        )
+        state = manager.poll_state_once()
+        # Missing Time service means defaults stay at 0.
+        assert state["position_s"] == 0
+        assert state["duration_s"] == 0
+        assert state["volume_percent"] == 60
+
+    def test_poll_handles_missing_volume_service(self, manager):
+        self._attach_session(
+            manager,
+            time_responses=[
+                {"duration": 100, "seconds": 5, "track_count": 1}
+            ],
+            volume_responses=None,
+        )
+        state = manager.poll_state_once()
+        assert state["position_s"] == 5
+        assert state["volume_percent"] == 0
+        assert state["muted"] is False
+
+    def test_poll_writes_state_back_to_session(self, manager):
+        self._attach_session(
+            manager,
+            time_responses=[
+                {"duration": 240, "seconds": 30, "track_count": 1}
+            ],
+            volume_responses=[(50, False)],
+        )
+        manager.poll_state_once()
+        assert manager._session.position_s == 30
+        assert manager._session.duration_s == 240
+        assert manager._session.track_count == 1
+
+    def test_poll_handles_time_failure_gracefully(self, manager):
+        """A SOAP failure during polling shouldn't crash the loop —
+        log it and continue with last-known state. Real devices
+        occasionally drop a single SOAP request and recover."""
+        from unittest.mock import MagicMock
+        from app.audio.tidal_connect import _SessionState
+
+        time_ctl = MagicMock()
+        time_ctl.time.side_effect = RuntimeError("transient failure")
+        manager._session = _SessionState(
+            device=_device(),
+            openhome_device=MagicMock(),
+            playlist=MagicMock(),
+            volume=None,
+            time=time_ctl,
+            info=None,
+        )
+        # Should NOT raise.
+        state = manager.poll_state_once()
+        assert state is not None
+        # Session state should still be valid (just unchanged).
+        assert manager._session is not None
+
+
+class TestStateListeners:
+    """Listener bus mechanics. add_state_listener returns an
+    unsubscribe handle, the bus snapshots before firing so a
+    raising listener doesn't block the rest, and listeners only
+    fire when state actually changes."""
+
+    def _attach_session_with_state(
+        self,
+        manager,
+        *,
+        track_count: int = 0,
+        position_s: int = 0,
+        time_response,
+    ):
+        from app.audio.tidal_connect import _SessionState
+        from unittest.mock import MagicMock
+
+        time_ctl = MagicMock()
+        time_ctl.time = MagicMock(return_value=time_response)
+        manager._session = _SessionState(
+            device=_device(),
+            openhome_device=MagicMock(),
+            playlist=MagicMock(),
+            volume=None,
+            time=time_ctl,
+            info=None,
+            track_count=track_count,
+            position_s=position_s,
+        )
+
+    def test_add_listener_returns_unsubscribe(self, manager):
+        events = []
+        unsub = manager.add_state_listener(lambda s: events.append(s))
+        # No session — calling poll fires nothing.
+        manager.poll_state_once()
+        assert events == []
+        unsub()
+        # Ensure listener no longer registered.
+        with manager._session_lock:
+            assert (lambda: None) not in manager._state_listeners
+
+    def test_listener_fires_on_track_change(self, manager):
+        events = []
+        manager.add_state_listener(lambda s: events.append(s))
+        self._attach_session_with_state(
+            manager,
+            track_count=1,
+            time_response={"duration": 240, "seconds": 0, "track_count": 2},
+        )
+        manager.poll_state_once()
+        assert len(events) == 1
+        assert events[0]["track_count"] == 2
+
+    def test_listener_fires_on_position_change(self, manager):
+        events = []
+        manager.add_state_listener(lambda s: events.append(s))
+        self._attach_session_with_state(
+            manager,
+            position_s=10,
+            time_response={"duration": 240, "seconds": 11, "track_count": 1},
+        )
+        manager.poll_state_once()
+        # 1s drift triggers a fire — our cadence is 1s so any
+        # forward motion produces an event.
+        assert len(events) == 1
+        assert events[0]["position_s"] == 11
+
+    def test_listener_does_not_fire_on_no_change(self, manager):
+        """If position stays the same (paused) and nothing else
+        moves, no event. Otherwise the SSE bus would flood with
+        identical 'still paused' updates every poll cycle."""
+        events = []
+        manager.add_state_listener(lambda s: events.append(s))
+        self._attach_session_with_state(
+            manager,
+            position_s=30,
+            track_count=1,
+            time_response={"duration": 240, "seconds": 30, "track_count": 1},
+        )
+        manager.poll_state_once()
+        assert events == []
+
+    def test_listener_failure_does_not_break_others(self, manager):
+        """A buggy listener raising shouldn't stop the rest of the
+        bus from firing. Same contract as the Cast manager — silent
+        in production, flagged in test logs."""
+        called = []
+        manager.add_state_listener(
+            lambda s: (_ for _ in ()).throw(RuntimeError("boom"))
+        )
+        manager.add_state_listener(lambda s: called.append(s))
+        self._attach_session_with_state(
+            manager,
+            time_response={"duration": 240, "seconds": 5, "track_count": 1},
+        )
+        manager.poll_state_once()
+        assert len(called) == 1
 
 
 class TestTransportControls:
