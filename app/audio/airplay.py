@@ -54,12 +54,10 @@ actually happening at every boundary.
 from __future__ import annotations
 
 import asyncio
-import http.server
 import json
 import logging
 import os
 import queue
-import socketserver
 import threading
 import time
 from dataclasses import dataclass
@@ -67,6 +65,13 @@ from typing import Optional
 
 import numpy as np
 
+from app.audio.http_stream import (
+    FlacStreamEncoder,
+    RingBuffer,
+    StreamHTTPServer,
+    primary_lan_ip,
+    start_stream_http_server,
+)
 from app.paths import user_data_dir
 
 log = logging.getLogger(__name__)
@@ -116,205 +121,10 @@ class _ConnectedSession:
     channels: int
     pcm_queue: "queue.Queue[bytes]"
     flac_buffer: "RingBuffer"
-    http_server: Optional["_StreamHTTPServer"] = None
+    http_server: Optional["StreamHTTPServer"] = None
     http_port: int = 0
     encoder_thread: Optional[threading.Thread] = None
 
-
-class RingBuffer:
-    """A bounded byte buffer with blocking read. Used by the HTTP
-    stream endpoint to pull encoded FLAC bytes in chunks. Not a
-    speed-critical path: readers poll at a low rate and writers
-    produce at realtime audio rate (a few hundred KB/s for hi-res
-    FLAC), well under any reasonable buffer limit."""
-
-    def __init__(self, max_bytes: int = 8 * 1024 * 1024) -> None:
-        self._max = max_bytes
-        self._buf = bytearray()
-        self._cv = threading.Condition()
-        self._closed = False
-
-    def write(self, data: bytes) -> None:
-        with self._cv:
-            if self._closed:
-                return
-            # Drop oldest bytes if we'd blow the cap. Prevents the
-            # encoder blocking indefinitely if no one is reading
-            # (e.g. pyatv died silently).
-            overflow = len(self._buf) + len(data) - self._max
-            if overflow > 0:
-                # Silent drops mask a stalled receiver. Log at debug
-                # so the first real-hardware test surfaces the fact
-                # that bytes are being lost.
-                log.debug(
-                    "airplay ring buffer overflow: dropping %d bytes", overflow
-                )
-                del self._buf[:overflow]
-            self._buf.extend(data)
-            self._cv.notify_all()
-
-    def read(self, n: int, timeout: float = 1.0) -> bytes:
-        deadline = time.monotonic() + timeout
-        with self._cv:
-            while not self._buf and not self._closed:
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    return b""
-                self._cv.wait(timeout=remaining)
-            chunk = bytes(self._buf[:n])
-            del self._buf[: len(chunk)]
-            return chunk
-
-    def close(self) -> None:
-        with self._cv:
-            self._closed = True
-            self._cv.notify_all()
-
-
-class FlacStreamEncoder:
-    """PCM chunks in, FLAC bytes out.
-
-    PyAV is already a project dependency and has a FLAC encoder. We
-    open an output container to a `BytesIO`-like sink and push
-    encoded frames as they come out. Because FLAC's frame structure
-    is self-contained, an open-ended encoded stream is valid to
-    consume mid-flight; the receiver doesn't need a seekable
-    container.
-    """
-
-    def __init__(self, sample_rate: int, channels: int, dtype: str) -> None:
-        self.sample_rate = sample_rate
-        self.channels = channels
-        # av.format expects "s16" / "s32" depending on dtype. FLAC is
-        # integer-only — PyAV's FLAC encoder will raise at setup time
-        # if we hand it a float sample format. Fail fast here with a
-        # clearer message so the /api/airplay/connect handler can
-        # surface something useful instead of an opaque codec error.
-        if dtype == "int16":
-            self.av_format = "s16"
-            self.np_dtype = np.int16
-        elif dtype == "int32":
-            self.av_format = "s32"
-            self.np_dtype = np.int32
-        else:
-            raise ValueError(
-                f"FlacStreamEncoder: unsupported dtype {dtype!r}. "
-                "FLAC is integer-only; pass int16 or int32."
-            )
-        self._setup()
-
-    def _setup(self) -> None:
-        import av  # type: ignore
-
-        self._buffer = bytearray()
-
-        class _SinkFile:
-            """File-like sink PyAV writes to. The FLAC muxer writes
-            linearly during live encoding, but on container close
-            it seeks back to the start to rewrite the STREAMINFO
-            header with the now-known total sample count. So we
-            do need to support seek / tell, even if mid-stream it
-            never fires. The underlying bytearray grows as writes
-            hit new positions.
-            """
-
-            def __init__(self, sink: bytearray) -> None:
-                self._sink = sink
-                self._pos = 0
-
-            def write(self, data: bytes) -> int:
-                needed = self._pos + len(data)
-                if needed > len(self._sink):
-                    self._sink.extend(b"\x00" * (needed - len(self._sink)))
-                self._sink[self._pos:needed] = data
-                self._pos = needed
-                return len(data)
-
-            def tell(self) -> int:
-                return self._pos
-
-            def seek(self, offset: int, whence: int = 0) -> int:
-                if whence == 0:
-                    self._pos = offset
-                elif whence == 1:
-                    self._pos += offset
-                elif whence == 2:
-                    self._pos = len(self._sink) + offset
-                else:
-                    raise ValueError(f"unsupported seek whence {whence}")
-                return self._pos
-
-            def flush(self) -> None:
-                pass
-
-            def close(self) -> None:
-                pass
-
-        self._sink = _SinkFile(self._buffer)
-        # `mode="w"` + `format="flac"` opens a FLAC muxer. Live
-        # encoding writes frames linearly; STREAMINFO rewrite at
-        # container-close seeks back to byte 0, but by that point
-        # we're tearing the session down anyway.
-        self._container = av.open(self._sink, mode="w", format="flac")  # type: ignore
-        self._stream = self._container.add_stream(  # type: ignore
-            "flac", rate=self.sample_rate
-        )
-        # PyAV 17 moved channel / format configuration onto the
-        # codec_context and made the stream shortcut attributes
-        # read-only. Configure through codec_context. FLAC only
-        # accepts integer sample formats (s16 / s32 / s32p); we
-        # never send "flt" to a FLAC stream.
-        codec_ctx = self._stream.codec_context  # type: ignore
-        codec_ctx.layout = "stereo" if self.channels == 2 else "mono"
-        codec_ctx.format = av.AudioFormat(self.av_format)  # type: ignore
-        codec_ctx.sample_rate = self.sample_rate
-
-    def encode(self, pcm: np.ndarray) -> bytes:
-        """Feed one chunk of interleaved PCM. Returns whatever
-        encoded bytes came out. May return b"" if PyAV buffered
-        the frame."""
-        import av  # type: ignore
-
-        if pcm.ndim != 2:
-            raise ValueError(f"expected 2-D PCM, got shape {pcm.shape}")
-        _frames, ch = pcm.shape
-        if ch != self.channels:
-            raise ValueError(
-                f"channel mismatch: encoder set for {self.channels}, got {ch}"
-            )
-        # FLAC codec takes packed (interleaved) samples. PyAV's
-        # `from_ndarray` expects packed arrays shaped (1, frames*ch)
-        # with all samples concatenated in channel-interleaved order.
-        # Input here is already interleaved as (frames, channels), so
-        # a row-major flatten followed by reshape to (1, -1) lands in
-        # the exact layout the encoder wants without a real copy if
-        # the input is already contiguous.
-        flat = np.ascontiguousarray(
-            pcm.astype(self.np_dtype, copy=False)
-        ).reshape(1, -1)
-        frame = av.AudioFrame.from_ndarray(  # type: ignore
-            flat,
-            format=self.av_format,
-            layout="stereo" if self.channels == 2 else "mono",
-        )
-        frame.rate = self.sample_rate
-        before = len(self._buffer)
-        for packet in self._stream.encode(frame):  # type: ignore
-            self._container.mux(packet)  # type: ignore
-        return bytes(self._buffer[before:])
-
-    def close(self) -> bytes:
-        """Flush + close. Returns final trailing bytes."""
-        import av  # type: ignore
-
-        before = len(self._buffer)
-        try:
-            for packet in self._stream.encode():  # type: ignore
-                self._container.mux(packet)  # type: ignore
-            self._container.close()  # type: ignore
-        except Exception:
-            pass
-        return bytes(self._buffer[before:])
 
 
 class AirPlayManager:
@@ -581,9 +391,9 @@ class AirPlayManager:
         )
 
         # Stand up a tiny LAN-reachable HTTP server just for this
-        # session's stream. See _StreamHTTPServer for why this is
-        # separate from FastAPI.
-        http_server = _start_stream_http_server(session.flac_buffer)
+        # session's stream. See StreamHTTPServer in http_stream.py
+        # for why this is separate from FastAPI.
+        http_server = start_stream_http_server(session.flac_buffer)
         session.http_server = http_server
         session.http_port = http_server.server_address[1]
         log.info("airplay http server bound on port %s", session.http_port)
@@ -617,7 +427,7 @@ class AirPlayManager:
             # address; good enough for the common "both devices on
             # the same wifi" case. A future refinement is to let the
             # user pick the interface or advertise via mDNS.
-            url = f"http://{_primary_lan_ip()}:{http_port}/stream"
+            url = f"http://{primary_lan_ip()}:{http_port}/stream"
             log.info("airplay: opening stream against %s", url)
             await atv.stream.stream_file(url)
             log.info("airplay: stream_file returned")
@@ -736,125 +546,3 @@ class AirPlayManager:
         except queue.Full:
             pass
 
-class _StreamHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
-    """Dedicated HTTP server, bound to 0.0.0.0 on an ephemeral port,
-    used solely for AirPlay stream delivery.
-
-    Why not just expose the stream endpoint on the main FastAPI
-    server: FastAPI binds to 127.0.0.1 in both dev and packaged
-    builds. An AirPlay receiver is on the LAN and can't reach that
-    address. Binding FastAPI to 0.0.0.0 would fix the reachability
-    but would also expose every other /api/* endpoint to the LAN,
-    which is a security regression. Running a tiny dedicated
-    listener just for the stream endpoint keeps the blast radius
-    to exactly this one stream.
-
-    Lifecycle is bolted to the AirPlay session. Started on connect,
-    shut down on disconnect. Serves `GET /stream` and nothing else.
-    """
-
-    allow_reuse_address = True
-    daemon_threads = True
-
-    # Populated by the manager when binding so the handler can read
-    # the current session's ring buffer without plumbing it through
-    # the HTTP-server constructor chain.
-    buffer: Optional["RingBuffer"] = None
-
-
-class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
-    def log_message(self, format, *args):  # type: ignore[override]
-        # Quiet by default; switch to log.debug so `run.sh` doesn't
-        # drown in per-chunk access-log lines during streaming.
-        log.debug("airplay http: " + format, *args)
-
-    def do_HEAD(self) -> None:  # noqa: N802 - stdlib API
-        # Some AirPlay receivers (and plenty of middleboxes) probe
-        # headers with a HEAD before GET to check Content-Type and
-        # confirm the stream exists. Answer with the same response
-        # line GET uses so they don't fall back or abort.
-        server = self.server  # type: ignore[assignment]
-        if not isinstance(server, _StreamHTTPServer) or server.buffer is None:
-            self.send_error(503, "airplay session not ready")
-            return
-        if self.path != "/stream":
-            self.send_error(404, "not found")
-            return
-        self.send_response(200)
-        self.send_header("Content-Type", "audio/flac")
-        self.send_header("Transfer-Encoding", "chunked")
-        self.send_header("Connection", "close")
-        self.end_headers()
-
-    def do_GET(self) -> None:  # noqa: N802 - stdlib API
-        server = self.server  # type: ignore[assignment]
-        if not isinstance(server, _StreamHTTPServer) or server.buffer is None:
-            self.send_error(503, "airplay session not ready")
-            return
-        if self.path != "/stream":
-            self.send_error(404, "not found")
-            return
-        self.send_response(200)
-        self.send_header("Content-Type", "audio/flac")
-        # Chunked transfer lets us keep writing FLAC frames as long
-        # as the session is alive. Tells pyatv it's a stream, not a
-        # file with a known length.
-        self.send_header("Transfer-Encoding", "chunked")
-        self.send_header("Connection", "close")
-        self.end_headers()
-        buf = server.buffer
-        try:
-            while True:
-                chunk = buf.read(16384, timeout=2.0)
-                if not chunk:
-                    # Idle read with a closed buffer ends the stream.
-                    if getattr(buf, "_closed", False):
-                        self._write_chunk(b"")
-                        return
-                    continue
-                self._write_chunk(chunk)
-        except (BrokenPipeError, ConnectionResetError):
-            # pyatv disconnected / receiver stopped pulling. Clean
-            # exit; the session-end path will tear down the server.
-            return
-
-    def _write_chunk(self, data: bytes) -> None:
-        """Write one HTTP chunked-transfer frame."""
-        header = f"{len(data):x}\r\n".encode()
-        self.wfile.write(header)
-        self.wfile.write(data)
-        self.wfile.write(b"\r\n")
-        self.wfile.flush()
-
-
-def _start_stream_http_server(buffer: "RingBuffer") -> _StreamHTTPServer:
-    server = _StreamHTTPServer(("0.0.0.0", 0), _StreamRequestHandler)
-    server.buffer = buffer
-    thread = threading.Thread(
-        target=server.serve_forever, name="airplay-http", daemon=True
-    )
-    thread.start()
-    return server
-
-
-def _primary_lan_ip() -> str:
-    """Best-effort local IP address for the AirPlay receiver to
-    reach back to this machine. Connecting a UDP socket to a public
-    address without sending forces the OS to populate the socket's
-    source address, which gives us the right interface. Falls back
-    to 127.0.0.1 if something blocks the lookup; that won't work
-    for a real AirPlay receiver but keeps the app from crashing on
-    disconnected networks."""
-    import socket
-
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        s.connect(("8.8.8.8", 80))
-        return s.getsockname()[0]
-    except Exception:
-        return "127.0.0.1"
-    finally:
-        try:
-            s.close()
-        except Exception:
-            pass
