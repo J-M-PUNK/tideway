@@ -19,7 +19,9 @@ import pytest
 from app.audio.http_stream import (
     FlacStreamEncoder,
     RingBuffer,
+    _StreamRequestHandler,
     primary_lan_ip,
+    start_stream_http_server,
 )
 
 
@@ -234,3 +236,63 @@ class TestPrimaryLanIp:
 
         monkeypatch.setattr(_socket, "socket", _BrokenSocket)
         assert primary_lan_ip() == "127.0.0.1"
+
+
+# ---------------------------------------------------------------------
+# Stream HTTP server protocol-version contract
+# ---------------------------------------------------------------------
+
+
+class TestStreamHTTPServerProtocol:
+    def test_handler_uses_http_1_1(self):
+        """The request handler must advertise HTTP/1.1. Python's
+        BaseHTTPRequestHandler defaults to HTTP/1.0; combined with
+        the chunked Transfer-Encoding the handler emits, that's a
+        spec violation that makes Cast / AirPlay receivers (Hisense
+        especially) silently drop the stream. Pinned as a class
+        attribute so the value is observable without spinning up a
+        real server."""
+        assert _StreamRequestHandler.protocol_version == "HTTP/1.1"
+
+    def test_get_response_line_is_http_1_1(self):
+        """End-to-end: the bytes on the wire actually start with
+        'HTTP/1.1 200 OK', not 'HTTP/1.0 200 OK'. Spins up a real
+        server bound to loopback, pumps a small FLAC frame into
+        the ring buffer so the handler has something to send, and
+        reads the raw response line via a plain socket so we see
+        exactly what a Cast receiver would see."""
+        import socket as _socket
+
+        buffer = RingBuffer()
+        # The do_GET loop blocks on buffer.read() until something
+        # arrives. Seed enough bytes that the first read returns
+        # immediately; otherwise the test races the 2s read timeout.
+        buffer.write(b"\x00" * 256)
+        server = start_stream_http_server(
+            buffer, stream_path="/test", content_type="audio/flac"
+        )
+        try:
+            # server.server_address is ('0.0.0.0', port) — that's a
+            # bind address, not connectable on Windows. Reach the
+            # listener through loopback explicitly.
+            port = server.server_address[1]
+            sock = _socket.create_connection(("127.0.0.1", port), timeout=3.0)
+            try:
+                sock.sendall(
+                    b"GET /test HTTP/1.1\r\n"
+                    b"Host: localhost\r\n"
+                    b"\r\n"
+                )
+                # First line of the response is the status line. Read
+                # just enough to capture it; we don't care about the
+                # body payload here.
+                data = sock.recv(64)
+            finally:
+                sock.close()
+            assert data.startswith(b"HTTP/1.1 200"), (
+                f"expected HTTP/1.1 status line, got: {data!r}"
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+            buffer.close()
