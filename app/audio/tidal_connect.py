@@ -161,6 +161,17 @@ class _SessionState:
     track_url_resolver: Optional[
         "Callable[[int], tuple[str, TrackMetadata]]"
     ] = None
+    # Last polled state from the device. Slice 5's state-poll loop
+    # populates this and compares against the previous reading to
+    # decide which listener events to fire. Position is the second
+    # offset into the current track; track_count increments each
+    # time the device moves to a new track (which is how we detect
+    # 'song ended' without an explicit event).
+    position_s: int = 0
+    duration_s: int = 0
+    track_count: int = 0
+    volume_percent: int = 0
+    muted: bool = False
 
 
 class TidalConnectManager:
@@ -194,6 +205,14 @@ class TidalConnectManager:
         # for every action.
         self._session_lock = threading.Lock()
         self._session: Optional[_SessionState] = None
+        # State-change listeners. SSE bus subscribes so the frontend
+        # gets push updates on track / volume changes the device-
+        # side state poll detects. Held under _session_lock; the
+        # poll loop snapshots the list before firing so a listener
+        # raising can't break the bus for everyone else.
+        self._state_listeners: list[
+            "Callable[[dict[str, object]], None]"
+        ] = []
         if _AVAILABLE:
             self._start_loop_thread()
 
@@ -363,6 +382,10 @@ class TidalConnectManager:
             f"{'time' if time_ctl else 'no-time'})",
             flush=True,
         )
+        # Start the state-poll thread that fires listener events on
+        # track / position / volume changes. Lives until disconnect
+        # clears the session.
+        self._start_state_poll_thread()
         return device
 
     def disconnect(self) -> None:
@@ -483,6 +506,146 @@ class TidalConnectManager:
         if session is None:
             raise RuntimeError("no active Tidal Connect session")
         return session
+
+    # ---- state polling + listener bus -------------------------------
+
+    def add_state_listener(
+        self,
+        callback: "Callable[[dict[str, object]], None]",
+    ) -> "Callable[[], None]":
+        """Subscribe to state-change events. Called whenever the
+        polling loop detects a meaningful change (track advanced,
+        position updated, volume / mute changed). Returns an
+        unsubscribe callable. Mirrors the listener pattern in
+        `cast_manager` so the SSE bus in server.py can hand
+        either manager's events to the same frontend stream.
+
+        The callback receives a dict of the current state — same
+        shape as `status()`'s session block — so listeners don't
+        have to remember which fields exist.
+        """
+        with self._session_lock:
+            self._state_listeners.append(callback)
+
+        def _unsub() -> None:
+            with self._session_lock:
+                if callback in self._state_listeners:
+                    self._state_listeners.remove(callback)
+        return _unsub
+
+    def poll_state_once(self) -> Optional[dict[str, object]]:
+        """Single state poll. Reads Time + Volume + Mute from the
+        active session, stores the values back into the session
+        record, fires listeners on any change, and returns the
+        new state dict.
+
+        Designed to be called from a single owning thread (the
+        polling loop) — multiple concurrent calls would race on
+        which listener event each fires for. Returns None when no
+        session is active.
+
+        SOAP failures during polling are not fatal — log them and
+        return the last-known state. A device that briefly stops
+        responding shouldn't tear down the session; the user
+        explicitly disconnects to stop.
+        """
+        with self._session_lock:
+            session = self._session
+        if session is None:
+            return None
+
+        new_state = {
+            "position_s": session.position_s,
+            "duration_s": session.duration_s,
+            "track_count": session.track_count,
+            "volume_percent": session.volume_percent,
+            "muted": session.muted,
+        }
+
+        if session.time is not None:
+            try:
+                t = session.time.time()
+                new_state["position_s"] = t["seconds"]
+                new_state["duration_s"] = t["duration"]
+                new_state["track_count"] = t["track_count"]
+            except Exception as exc:
+                log.debug("tidal_connect: time poll failed: %r", exc)
+
+        if session.volume is not None:
+            try:
+                new_state["volume_percent"] = session.volume.get_volume()
+                new_state["muted"] = session.volume.get_mute()
+            except Exception as exc:
+                log.debug("tidal_connect: volume poll failed: %r", exc)
+
+        # Detect changes worth firing on. Position-only changes
+        # are too chatty for SSE-grade listeners (they'd get an
+        # event every poll). Fire only when something else moved
+        # OR when position has drifted by ≥ 1s (typical poll
+        # cadence) since the last fire.
+        with self._session_lock:
+            if self._session is not session:
+                # Disconnected mid-poll. Don't write into a torn-
+                # down session.
+                return new_state
+            previous_position = session.position_s
+            track_changed = new_state["track_count"] != session.track_count
+            volume_changed = (
+                new_state["volume_percent"] != session.volume_percent
+                or new_state["muted"] != session.muted
+            )
+            position_changed = (
+                abs(new_state["position_s"] - previous_position) >= 1
+            )
+            session.position_s = new_state["position_s"]
+            session.duration_s = new_state["duration_s"]
+            session.track_count = new_state["track_count"]
+            session.volume_percent = new_state["volume_percent"]
+            session.muted = new_state["muted"]
+            should_notify = (
+                track_changed or volume_changed or position_changed
+            )
+            listeners = list(self._state_listeners) if should_notify else []
+
+        for cb in listeners:
+            try:
+                cb(new_state)
+            except Exception as exc:
+                log.debug("tidal_connect: listener raised: %r", exc)
+        return new_state
+
+    def _start_state_poll_thread(self) -> None:
+        """Spawn the per-session poll thread. Lives until disconnect()
+        clears the session — sees `self._session is None` on the
+        next iteration and exits. One-second cadence is enough for
+        UI-grade state updates without flooding the device with
+        SOAP requests."""
+        def _run() -> None:
+            while True:
+                with self._session_lock:
+                    if self._session is None:
+                        return
+                try:
+                    self.poll_state_once()
+                except Exception as exc:
+                    log.debug(
+                        "tidal_connect: poll loop raised: %r", exc
+                    )
+                # Use a short sleep with checks rather than a
+                # single 1s sleep so disconnect() returns
+                # promptly.
+                for _ in range(10):
+                    with self._session_lock:
+                        if self._session is None:
+                            return
+                    time.sleep(0.1)
+
+        t = threading.Thread(
+            target=_run,
+            name="tidal-connect-poll",
+            daemon=True,
+        )
+        t.start()
 
     # ---- internals --------------------------------------------------
 
