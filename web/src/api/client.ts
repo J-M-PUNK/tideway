@@ -902,6 +902,24 @@ export const api = {
         body: JSON.stringify(state ?? {}),
       }).catch(() => ({ ok: false })),
   },
+  cast: {
+    devices: () =>
+      req<{
+        status: {
+          available: boolean;
+          running: boolean;
+          device_count: number;
+          last_event_age_s: number | null;
+        };
+        devices: {
+          id: string;
+          friendly_name: string;
+          model_name: string;
+          manufacturer: string;
+          cast_type: string;
+        }[];
+      }>("/api/cast/devices"),
+  },
   airplay: {
     devices: () =>
       req<{
