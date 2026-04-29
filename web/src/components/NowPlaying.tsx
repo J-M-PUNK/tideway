@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   AudioLines,
@@ -14,6 +14,7 @@ import {
   Shuffle,
   SkipBack,
   SkipForward,
+  Volume1,
   Volume2,
   VolumeX,
 } from "lucide-react";
@@ -581,10 +582,75 @@ function VolumeControl({
   onChange: (v: number) => void;
   disabled?: boolean;
 }) {
+  // Hover-popover pattern. The icon stays inline at its 8x8
+  // size in the right cluster; a vertical slider pops up above
+  // it on hover. Two reasons over the old inline horizontal
+  // slider:
+  //   - Density. The inline slider ate ~80px of horizontal real
+  //     estate that the now-playing right cluster has to share
+  //     with five other controls. Collapsing to an icon frees
+  //     it for the picker, lyrics, queue, etc.
+  //   - Convention. Spotify, Apple Music, Tidal Web all do
+  //     vertical popups for their volume control on the desktop;
+  //     users reach for the icon expecting a vertical slider.
+  //
+  // A short close delay (~120ms) keeps the popover visible
+  // while the cursor crosses the gap from icon to slider, and
+  // keeps it from flickering shut if the user briefly leaves
+  // the slider's pixel-thin track during a drag. Long enough to
+  // feel deliberate, short enough that it doesn't hang around.
+  const [open, setOpen] = useState(false);
+  // Keep the popover open while a drag is in progress, even if
+  // the cursor leaves the popover's bounding box (which range
+  // inputs let you do — you can pull the cursor 100px off the
+  // slider and the value still tracks). Resets when mouseup
+  // fires anywhere.
+  const [dragging, setDragging] = useState(false);
+  const closeTimer = useRef<number | null>(null);
+
   const muted = value === 0;
+  const Icon = muted ? VolumeX : value < 0.5 ? Volume1 : Volume2;
+
+  const cancelClose = () => {
+    if (closeTimer.current !== null) {
+      window.clearTimeout(closeTimer.current);
+      closeTimer.current = null;
+    }
+  };
+
+  const scheduleClose = () => {
+    cancelClose();
+    closeTimer.current = window.setTimeout(() => {
+      if (!dragging) setOpen(false);
+      closeTimer.current = null;
+    }, 120);
+  };
+
+  // While a slider drag is in progress, listen globally for
+  // mouseup so we know to release the open-state lock even if
+  // the user releases outside the popover.
+  useEffect(() => {
+    if (!dragging) return;
+    const onUp = () => setDragging(false);
+    window.addEventListener("mouseup", onUp);
+    window.addEventListener("touchend", onUp);
+    return () => {
+      window.removeEventListener("mouseup", onUp);
+      window.removeEventListener("touchend", onUp);
+    };
+  }, [dragging]);
+
+  // Idle clean-up on unmount.
+  useEffect(() => () => cancelClose(), []);
+
   return (
     <div
-      className={cn("group flex items-center gap-2", disabled && "opacity-50")}
+      className={cn("relative", disabled && "opacity-50")}
+      onMouseEnter={() => {
+        cancelClose();
+        if (!disabled) setOpen(true);
+      }}
+      onMouseLeave={scheduleClose}
       title={
         disabled
           ? "Force Volume is on — attenuate on your output device"
@@ -598,32 +664,52 @@ function VolumeControl({
         onClick={() => onChange(muted ? 1 : 0)}
         disabled={disabled}
         title={muted ? "Unmute" : "Mute"}
+        aria-label={muted ? "Unmute" : "Mute"}
       >
-        {muted ? (
-          <VolumeX className="h-4 w-4" />
-        ) : (
-          <Volume2 className="h-4 w-4" />
-        )}
+        <Icon className="h-4 w-4" />
       </Button>
-      <input
-        type="range"
-        min={0}
-        max={1}
-        step={0.01}
-        value={value}
-        onChange={(e) => onChange(Number(e.target.value))}
-        disabled={disabled}
-        // Same hover-thicken pattern as the seek bar above. `group`
-        // on the wrapper means the slider grows whenever the cursor
-        // is anywhere in the volume row, including when hovering
-        // the mute button — invites adjustment without making the
-        // user pixel-hunt the 4px track.
-        className="h-1 w-20 cursor-pointer appearance-none rounded-full bg-secondary accent-primary transition-[height] duration-150 ease-out group-hover:h-1.5 disabled:cursor-not-allowed"
-        style={{
-          background: `linear-gradient(to right, hsl(var(--primary)) ${value * 100}%, hsl(var(--secondary)) ${value * 100}%)`,
-        }}
-        aria-label="Volume"
-      />
+
+      {/* Popover. Rendered conditionally so unmounting clears
+       *  the global mouseup listener cleanly when the user
+       *  isn't using the slider. Positioned above the trigger
+       *  (bottom-full) with a small gap so the rounded ends
+       *  read as separate from the icon button. The interior
+       *  range input is rotated -90deg via writing-mode so it
+       *  drags vertically but reuses the OS native range
+       *  control's interaction model (no custom drag math). */}
+      {open && !disabled && (
+        <div
+          className="absolute bottom-full left-1/2 z-30 mb-2 flex h-32 w-9 -translate-x-1/2 items-center justify-center rounded-full border border-border bg-popover shadow-md animate-in fade-in-0 zoom-in-95 duration-150"
+          onMouseEnter={cancelClose}
+          onMouseLeave={scheduleClose}
+        >
+          <input
+            type="range"
+            min={0}
+            max={1}
+            step={0.01}
+            value={value}
+            onChange={(e) => onChange(Number(e.target.value))}
+            onMouseDown={() => setDragging(true)}
+            onTouchStart={() => setDragging(true)}
+            disabled={disabled}
+            // The browser's native vertical range styling is
+            // inconsistent across engines (`-webkit-appearance:
+            // slider-vertical` is gone in Chromium 121+, Safari
+            // never had it). Rotate a horizontal range -90deg
+            // for portable vertical behavior — drag direction
+            // matches expectation (up = louder), value still
+            // maps 0..1 the same way.
+            className="h-1.5 w-24 cursor-pointer appearance-none rounded-full bg-secondary accent-primary disabled:cursor-not-allowed"
+            style={{
+              transform: "rotate(-90deg)",
+              background: `linear-gradient(to right, hsl(var(--primary)) ${value * 100}%, hsl(var(--secondary)) ${value * 100}%)`,
+            }}
+            aria-label="Volume"
+            aria-orientation="vertical"
+          />
+        </div>
+      )}
     </div>
   );
 }
