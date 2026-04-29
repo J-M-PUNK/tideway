@@ -494,16 +494,18 @@ function StreamingQualityPicker({
                     </span>
                   )}
                 </div>
-                <div className="text-xs text-muted-foreground">{q.sublabel}</div>
+                <div className="text-xs text-muted-foreground">
+                  {q.sublabel}
+                </div>
               </div>
             </DropdownMenuItem>
           );
         })}
         <DropdownMenuSeparator />
         <div className="px-2 py-1.5 text-[11px] text-muted-foreground">
-          The pill shows what Tidal is delivering for this track. If the
-          release doesn't go up to your selected tier, you'll get the
-          highest tier it does have.
+          The pill shows what Tidal is delivering for this track. If the release
+          doesn't go up to your selected tier, you'll get the highest tier it
+          does have.
         </div>
       </DropdownMenuContent>
     </DropdownMenu>
