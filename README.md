@@ -140,6 +140,30 @@ On Windows, download `Tideway-setup-<version>.exe` and run it. The
 installer drops the app under your user profile, registers a Start
 Menu entry, and offers an optional desktop shortcut.
 
+On Linux, download `Tideway-<version>-x86_64.AppImage`, mark it
+executable (`chmod +x Tideway-*-x86_64.AppImage`), and run it. The
+AppImage is portable — no install step, no root needed, runs on any
+glibc-based distro.
+
+> **Linux support is experimental.** There is no maintainer Linux
+> test environment, so cold-launch issues on real distros only
+> surface through user reports. The AppImage relies on these
+> packages being installed on your host (most desktop distros have
+> them by default):
+>
+> - **GTK 3** + **WebKit2GTK 4.1** — Debian/Ubuntu:
+>   `libgtk-3-0 libwebkit2gtk-4.1-0`. Fedora: `gtk3 webkit2gtk4.1`.
+> - **PortAudio** — Debian/Ubuntu: `libportaudio2`.
+>   Fedora: `portaudio`.
+> - **libnotify** — Debian/Ubuntu: `libnotify4`.
+>   Fedora: `libnotify`.
+>
+> Global media keys require an X11 session (Wayland will degrade —
+> the player still works, the global hotkeys do not). The tray icon
+> needs a desktop with AppIndicator support; on GNOME this means
+> the AppIndicator extension. ARM Linux (Raspberry Pi etc.) is not
+> built today.
+
 ### Why the OS warns you on first launch
 
 The builds are not code signed. Signing costs 99 dollars a year
@@ -154,6 +178,9 @@ and confirm **Open** in the dialog that appears.
 
 On Windows, click **More info** in the SmartScreen dialog, then
 **Run anyway**.
+
+Linux AppImages have no equivalent warning — the kernel just runs
+whatever the user marked executable.
 
 If you would rather verify the build yourself, clone the repo and
 follow **Run it from source** below. PyInstaller produces the same
