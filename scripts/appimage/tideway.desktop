@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Tideway
+Comment=Native desktop client for Tidal — bit-perfect playback, hi-res downloads, library management.
+Exec=Tideway
+Icon=tideway
+Type=Application
+Categories=AudioVideo;Audio;Player;
+Terminal=false
+StartupWMClass=Tideway

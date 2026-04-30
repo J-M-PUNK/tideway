@@ -1,0 +1,18 @@
+#!/bin/bash
+# AppRun — entry point invoked when an AppImage is executed.
+#
+# AppImages mount themselves to a temporary directory and call this
+# script. We need to:
+#   1. Locate the bundled binary inside the mounted tree.
+#   2. Make sure the bundled libs ride alongside it on
+#      LD_LIBRARY_PATH so the dynamic linker prefers them over
+#      whatever the host happens to have installed.
+#   3. exec the binary so it inherits this shell's stdio and signal
+#      handlers — without exec, Ctrl+C kills only the shell and
+#      leaves the app orphaned.
+#
+# We do NOT bundle GTK / WebKit2GTK / PortAudio / libnotify —
+# those are expected from the host system. Documented in the README.
+HERE="$(dirname "$(readlink -f "${0}")")"
+export LD_LIBRARY_PATH="${HERE}/usr/bin:${LD_LIBRARY_PATH}"
+exec "${HERE}/usr/bin/Tideway" "$@"
