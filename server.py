@@ -4963,22 +4963,54 @@ async def player_events(request: Request):
 def search(q: str, limit: int = 25) -> dict:
     _require_auth()
     if not q.strip():
-        return {"tracks": [], "albums": [], "artists": [], "playlists": []}
+        return {"top_hit": None, "tracks": [], "albums": [], "artists": [], "playlists": []}
     limit = max(1, min(limit, 100))
     try:
         results = tidal.search(q, limit=limit)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Search failed: {exc}")
     pref = (settings.explicit_content_preference or "explicit").lower()
-    tracks = filter_explicit_dupes(results.get("tracks", []), pref, kind="track")
-    albums = filter_explicit_dupes(results.get("albums", []), pref, kind="album")
+    raw_tracks = list(results.get("tracks", []))
+    raw_albums = list(results.get("albums", []))
     artists = _rerank_artists(q, list(results.get("artists", [])))
+    top_hit = results.get("top_hit")
+    # When the query points at a specific artist, splice that artist's
+    # top tracks into the results. Tidal's raw `tracks` array ranks by
+    # title-match relevance, so a query like "oliv" returns random
+    # songs whose names contain "oliv" rather than Olivia Rodrigo's
+    # catalog. Has to run before explicit-dedupe so the spliced-in
+    # tracks participate in the explicit/clean collapse.
+    tracks = _rerank_tracks(q, top_hit, artists, raw_tracks)
+    tracks = filter_explicit_dupes(tracks, pref, kind="track")
+    albums = filter_explicit_dupes(raw_albums, pref, kind="album")
     return {
+        "top_hit": _top_hit_to_dict(top_hit),
         "tracks": [track_to_dict(t) for t in tracks],
         "albums": [album_to_dict(a) for a in albums],
         "artists": [artist_to_dict(a) for a in artists],
         "playlists": [playlist_to_dict(p) for p in results.get("playlists", [])],
     }
+
+
+def _top_hit_to_dict(top_hit) -> Optional[dict]:
+    """Serialize Tidal's `top_hit` — the single most-relevant result it
+    nominates — to one of the standard *_to_dict shapes. Returns None
+    when Tidal didn't pick one (uncommon for popular queries, common
+    for typos) or when the hit is a type we don't render (Video).
+
+    We deliberately don't dedupe against the per-type sections: the
+    Spotify-style hero card and its row representation co-exist."""
+    if top_hit is None:
+        return None
+    if isinstance(top_hit, tidalapi.Track):
+        return track_to_dict(top_hit)
+    if isinstance(top_hit, tidalapi.Album):
+        return album_to_dict(top_hit)
+    if isinstance(top_hit, tidalapi.Artist):
+        return artist_to_dict(top_hit)
+    if isinstance(top_hit, tidalapi.Playlist):
+        return playlist_to_dict(top_hit)
+    return None
 
 
 def _rerank_artists(query: str, artists: list) -> list:
@@ -5035,6 +5067,82 @@ def _rerank_artists(query: str, artists: list) -> list:
     similar = [a for a in similar if str(getattr(a, "id", "") or "") not in rest_ids]
 
     return [top_hit, *similar, *rest]
+
+
+def _detect_target_artist(query: str, top_hit, artists: list):
+    """Decide whether the query is reaching for a specific artist's
+    catalog, and if so return that artist (a tidalapi.Artist).
+
+    Three signals, in order of confidence:
+      1. Tidal's `top_hit` is itself an artist.
+      2. Tidal's `top_hit` is an album or track; use its primary artist.
+      3. The first reranked artist's normalised name starts with the
+         normalised query — covers partial typing ("oliv" → Olivia
+         Rodrigo) where top_hit might be ambiguous or missing.
+
+    Returns None when no clear target — caller should leave Tidal's
+    raw track ordering alone."""
+    if isinstance(top_hit, tidalapi.Artist):
+        return top_hit
+    if isinstance(top_hit, (tidalapi.Album, tidalapi.Track)):
+        primary = next(iter(getattr(top_hit, "artists", None) or []), None)
+        if primary is not None:
+            return primary
+    if artists:
+        norm_query = _norm_title(query)
+        if norm_query:
+            first = artists[0]
+            first_norm = _norm_title(getattr(first, "name", ""))
+            if first_norm and first_norm.startswith(norm_query):
+                return first
+    return None
+
+
+def _rerank_tracks(query: str, top_hit, artists: list, tracks: list) -> list:
+    """Make the Songs row useful for artist-shaped queries.
+
+    Tidal's `/search` endpoint ranks the `tracks` array by literal
+    title-match relevance, which collapses for partial artist names:
+    searching "oliv" returns tracks whose titles contain "oliv"
+    (random songs by random artists) and never includes Olivia
+    Rodrigo's catalog because none of her track titles match.
+
+    When we can confidently identify an artist behind the query, we
+    fetch that artist's top tracks and put them in front of Tidal's
+    title-matched list. The original ordering is preserved as a
+    fallback tail so unrelated-but-relevant matches aren't lost.
+
+    Best-effort. If detection fails or the top-tracks call errors out
+    (network blip, missing artist, rate-limit), the function returns
+    Tidal's tracks unchanged."""
+    if not tracks and not top_hit:
+        return tracks
+    target = _detect_target_artist(query, top_hit, artists)
+    if target is None:
+        return tracks
+
+    try:
+        artist_top = list(target.get_top_tracks(limit=10) or [])
+    except Exception:
+        return tracks
+    if not artist_top:
+        return tracks
+
+    seen_ids: set[str] = set()
+    out: list = []
+    for t in artist_top:
+        tid = str(getattr(t, "id", "") or "")
+        if not tid or tid in seen_ids:
+            continue
+        seen_ids.add(tid)
+        out.append(t)
+    for t in tracks:
+        tid = str(getattr(t, "id", "") or "")
+        if not tid or tid in seen_ids:
+            continue
+        seen_ids.add(tid)
+        out.append(t)
+    return out
 
 
 # ---------------------------------------------------------------------------
