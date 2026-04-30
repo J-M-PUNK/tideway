@@ -110,6 +110,16 @@ export function ArtistDetail({ onDownload }: { onDownload: OnDownload }) {
         </>
       )}
 
+      {/* Spotify-style "Popular" row — mixed-format top releases ranked
+       *  by popularity with a recency boost (computed server-side).
+       *  Sits above Albums / EPs because it surfaces the artist's most
+       *  relevant work first regardless of release type. No "View more"
+       *  — this is a curated cap, not a slice of a bigger list. */}
+      <MediaRow
+        title="Popular releases"
+        items={artist.popular_releases}
+        onDownload={onDownload}
+      />
       <MediaRow
         title="Albums"
         items={artist.albums}
@@ -261,19 +271,23 @@ function MediaRow<T extends Album | Artist>({
 }: {
   title: string;
   items: T[];
-  viewMoreTo: string;
+  /** Omit on curated rows that aren't a slice of a larger list (e.g.
+   *  "Popular releases" — there is no "all popular releases" page to
+   *  link to). When omitted, no link is rendered even if the row is
+   *  capped by the breakpoint. */
+  viewMoreTo?: string;
   onDownload?: OnDownload;
 }) {
   const cols = useColumnCount();
   const visible = useMemo(() => items.slice(0, cols), [items, cols]);
   if (items.length === 0) return null;
-  const hasMore = items.length > cols;
+  const hasMore = !!viewMoreTo && items.length > cols;
 
   return (
     <div>
       <div className="mb-4 mt-8 flex items-baseline justify-between gap-4">
         <h2 className="text-2xl font-bold tracking-tight">{title}</h2>
-        {hasMore && <ViewMoreLink to={viewMoreTo} />}
+        {hasMore && <ViewMoreLink to={viewMoreTo!} />}
       </div>
       <Grid>
         {visible.map((item) => (
