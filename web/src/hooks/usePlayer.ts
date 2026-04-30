@@ -133,6 +133,52 @@ export function pickNextIndex(
   return null;
 }
 
+/**
+ * Compute the queue + jump-target for an Artist Radio takeover at
+ * end-of-queue. Pure-ish (only side effect is the
+ * `api.artistRadio` HTTP call); returns `null` whenever a
+ * takeover can't fire so the caller can fall through to its
+ * stop / pause-on-track-0 path.
+ *
+ * Cases that return null:
+ *   - Empty queue (nothing to seed the takeover from).
+ *   - The just-played track has no artist (rare — search results
+ *     for raw uploads sometimes lack artist metadata).
+ *   - Tidal's artist radio endpoint failed or returned empty.
+ *
+ * Dedupes radio tracks against what's already in the queue so we
+ * don't immediately replay one of the tracks the user was just
+ * listening to. If the dedupe filters EVERYTHING out (the radio
+ * is entirely the album we just played), falls back to the
+ * unfiltered radio list — better to repeat a song than to stop
+ * playback.
+ */
+async function fetchRadioTakeover(
+  cur: PlayerState,
+): Promise<
+  | { newQueue: Track[]; index: number; source: PlaySource }
+  | null
+> {
+  if (cur.queue.length === 0) return null;
+  const lastTrack = cur.queue[cur.queueIndex];
+  const artistId = lastTrack?.artists?.[0]?.id;
+  if (!artistId) return null;
+  try {
+    const radio = await api.artistRadio(String(artistId));
+    if (!radio || radio.length === 0) return null;
+    const playedIds = new Set(cur.queue.map((t) => t.id));
+    const fresh = radio.filter((t) => !playedIds.has(t.id));
+    const radioTail = fresh.length > 0 ? fresh : radio;
+    return {
+      newQueue: [...cur.queue, ...radioTail],
+      index: cur.queueIndex + 1,
+      source: { type: "ARTIST", id: String(artistId) },
+    };
+  } catch {
+    return null;
+  }
+}
+
 export function pickPrevIndex(state: PlayerState): number | null {
   if (state.queue.length === 0) return null;
   if (state.shuffle) {
@@ -813,35 +859,16 @@ export function usePlayer() {
         }
       };
 
-      if (continuePlayingRef.current && cur.queue.length > 0) {
-        const lastTrack = cur.queue[cur.queueIndex];
-        const artistId = lastTrack?.artists?.[0]?.id;
-        if (artistId) {
-          void (async () => {
-            try {
-              const radio = await api.artistRadio(String(artistId));
-              if (!radio || radio.length === 0) {
-                fallbackOff();
-                return;
-              }
-              // De-dupe against what just finished so we don't
-              // immediately replay one of the tracks the user was
-              // just listening to.
-              const playedIds = new Set(cur.queue.map((t) => t.id));
-              const fresh = radio.filter((t) => !playedIds.has(t.id));
-              const radioTail = fresh.length > 0 ? fresh : radio;
-              const newQueue = [...cur.queue, ...radioTail];
-              playAtIndex(cur.queueIndex + 1, newQueue, {
-                type: "ARTIST",
-                id: String(artistId),
-              });
-            } catch {
-              fallbackOff();
-            }
-          })();
-          return;
-        }
-        // No artist id on the last track — fall through.
+      if (continuePlayingRef.current) {
+        void (async () => {
+          const takeover = await fetchRadioTakeover(cur);
+          if (takeover) {
+            playAtIndex(takeover.index, takeover.newQueue, takeover.source);
+          } else {
+            fallbackOff();
+          }
+        })();
+        return;
       }
       fallbackOff();
     };
