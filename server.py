@@ -1983,6 +1983,76 @@ def open_mini_player(request: Request) -> dict:
         return {"ok": False, "reason": str(exc)}
 
 
+# ---------------------------------------------------------------------------
+# Window controls — minimize / maximize / close from the React titlebar.
+# Only relevant on Windows where the main window is created with
+# frameless=True and the OS no longer draws those buttons. macOS keeps
+# the native traffic lights, so the React shell skips its own controls
+# but still calls /info to learn the platform.
+# ---------------------------------------------------------------------------
+
+
+def _ensure_loopback(request: Request) -> None:
+    """Reject anything that didn't come from this machine. Window
+    controls are an internal UI hook; nothing on the LAN should be able
+    to minimize or close someone's app."""
+    client = request.client
+    host = client.host if client else ""
+    if host not in ("127.0.0.1", "::1", "localhost"):
+        raise HTTPException(status_code=403)
+
+
+@app.get("/api/_internal/window/info", include_in_schema=False)
+def window_info(request: Request) -> dict:
+    """Tell the React shell what kind of chrome to render: platform,
+    whether the OS chrome was suppressed (frameless), and the current
+    maximized state (so the middle button shows the right icon)."""
+    _ensure_loopback(request)
+    try:
+        from app import window_controls
+        return {"ok": True, **window_controls.info()}
+    except Exception as exc:
+        return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+
+
+@app.post("/api/_internal/window/minimize", include_in_schema=False)
+def window_minimize(request: Request) -> dict:
+    _ensure_loopback(request)
+    try:
+        from app import window_controls
+        ok = window_controls.minimize()
+        return {"ok": ok}
+    except Exception as exc:
+        return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+
+
+@app.post("/api/_internal/window/maximize", include_in_schema=False)
+def window_maximize(request: Request) -> dict:
+    """Toggle maximize/restore on Windows. Returns the new maximized
+    state so the React side can flip its icon without re-polling."""
+    _ensure_loopback(request)
+    try:
+        from app import window_controls
+        maximized = window_controls.maximize_toggle()
+        return {"ok": True, "maximized": maximized}
+    except Exception as exc:
+        return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+
+
+@app.post("/api/_internal/window/close", include_in_schema=False)
+def window_close(request: Request) -> dict:
+    """Trigger the window's close path. Goes through pywebview's
+    `closing` event, so close-to-tray (when the tray is up) takes over
+    from here exactly as it does for the native red-X."""
+    _ensure_loopback(request)
+    try:
+        from app import window_controls
+        ok = window_controls.close()
+        return {"ok": ok}
+    except Exception as exc:
+        return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+
+
 class _NotifyRequest(BaseModel):
     title: str
     body: str

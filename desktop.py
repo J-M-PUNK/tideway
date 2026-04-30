@@ -504,6 +504,17 @@ def main(argv: Optional[list[str]] = None) -> int:
     except Exception:
         start_hidden = False
 
+    # On Windows we suppress the OS-drawn caption (min/max/close) and
+    # let the React shell paint its own integrated titlebar — same
+    # pattern as VS Code, Discord, Spotify. macOS keeps the native
+    # traffic lights (re-implementing them faithfully is a tar pit and
+    # Mac users have strong muscle memory for their position and
+    # behavior); the existing transparent-titlebar tinting in
+    # window_chrome.py already blends them into the app body. Linux
+    # stays untouched — GTK CSD theming varies too much across distros
+    # to do reliably.
+    use_frameless = sys.platform == "win32"
+
     window = webview.create_window(
         "Tideway",
         f"http://{HOST}:{PORT}/",
@@ -511,6 +522,12 @@ def main(argv: Optional[list[str]] = None) -> int:
         height=800,
         min_size=(800, 600),
         hidden=start_hidden,
+        frameless=use_frameless,
+        # easy_drag would make every mousedown try to drag the window,
+        # which breaks button clicks and feels laggy. We declare drag
+        # regions explicitly via CSS `-webkit-app-region: drag` on the
+        # React titlebar instead.
+        easy_drag=False,
     )
 
     # --- Hide-on-close + tray wiring ---------------------------------
@@ -1106,6 +1123,53 @@ def main(argv: Optional[list[str]] = None) -> int:
     # Register the mini-player callback so the in-app "Open mini
     # player" control can spawn a second pywebview window.
     _server.register_mini_player_callback(_open_mini_player)
+
+    # Register the integrated-titlebar control callbacks. The React
+    # shell calls /api/_internal/window/{info,minimize,maximize,close}
+    # to drive a custom titlebar when the OS chrome is suppressed
+    # (Windows frameless mode). On macOS the React shell reads /info
+    # to learn the platform, then defers to the native traffic lights
+    # — minimize/close still wire up so a future Linux/in-app menu can
+    # reach them, but maximize_toggle is a Windows-only HWND ShowWindow
+    # call.
+    try:
+        from app import window_chrome as _window_chrome
+        from app import window_controls as _window_controls
+
+        def _close_via_chrome() -> None:
+            # Equivalent to clicking the OS red-X. pywebview's
+            # `closing` event handler intercepts and either hides the
+            # window to tray or lets it close, depending on tray
+            # availability — so the in-app close button matches the
+            # native one's behavior in either configuration.
+            try:
+                window.destroy()
+            except Exception:
+                pass
+
+        def _hwnd_provider() -> int:
+            try:
+                hwnd = _window_chrome.find_pywebview_hwnd(window)
+                return int(hwnd) if hwnd else 0
+            except Exception:
+                return 0
+
+        _window_controls.configure(
+            frameless=use_frameless,
+            hwnd_provider=_hwnd_provider,
+            on_minimize=lambda: window.minimize(),
+            on_close=_close_via_chrome,
+        )
+    except Exception as exc:
+        # window_controls registration is decorative — failing here
+        # leaves the React titlebar without working buttons but the
+        # rest of the app intact. Log so a packaged build can be
+        # diagnosed via the captured uvicorn output.
+        print(
+            f"[desktop] window_controls registration failed: {exc!r}",
+            file=sys.stderr,
+            flush=True,
+        )
     # Register the in-app login callback so the frontend can kick off
     # the PKCE flow without the user having to copy the Oops URL.
     # macOS has two complications the other platforms don't:

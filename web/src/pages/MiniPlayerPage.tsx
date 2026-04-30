@@ -30,7 +30,7 @@ export function MiniPlayerPage() {
 
   if (!track) {
     return (
-      <div className="flex h-screen w-screen items-center justify-center bg-[hsl(var(--now-playing-bg))] text-xs text-muted-foreground">
+      <div className="flex h-full w-full flex-1 items-center justify-center bg-[hsl(var(--now-playing-bg))] text-xs text-muted-foreground">
         <Music className="mr-2 h-4 w-4" />
         Nothing playing
       </div>
@@ -42,7 +42,7 @@ export function MiniPlayerPage() {
   const artists = track.artists.map((a) => a.name).join(", ");
 
   return (
-    <div className="flex h-screen w-screen select-none flex-col gap-2 bg-[hsl(var(--now-playing-bg))] px-3 py-2">
+    <div className="flex h-full w-full flex-1 select-none flex-col gap-2 bg-[hsl(var(--now-playing-bg))] px-3 py-2">
       <div className="flex items-center gap-3">
         <div className="h-12 w-12 flex-shrink-0 overflow-hidden rounded bg-secondary">
           {cover ? (
