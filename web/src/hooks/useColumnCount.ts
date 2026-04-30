@@ -2,15 +2,19 @@ import { useEffect, useState } from "react";
 
 /**
  * How many cards fit in one row of a single-row section at the current
- * viewport width. Matches the Tailwind breakpoints used in
- * `PageView` / `Home` so we can cap item lists to exactly what fits
- * — avoids the ugly "one full row + one trailing card" wrap.
+ * viewport width. **Must stay in lockstep with the column breakpoints
+ * in `Grid`** ([components/Grid.tsx]) — the slice this returns caps
+ * what we render, and `Grid`'s CSS decides how many fit per row. If
+ * the two diverge, a sliced trailing card wraps to a phantom second
+ * row, which is exactly the "ugly one full row + one trailing card"
+ * this hook exists to prevent.
  *
- * Breakpoints:
+ * Grid's classes: `grid-cols-2 sm:grid-cols-3 lg:grid-cols-4
+ *                  xl:grid-cols-5 2xl:grid-cols-6`. That means:
  *   base  < 640   → 2
  *   sm   >= 640   → 3
- *   md   >= 768   → 4
- *   lg   >= 1024  → 5
+ *   lg   >= 1024  → 4
+ *   xl   >= 1280  → 5
  *   2xl  >= 1536  → 6
  */
 export function useColumnCount(): number {
@@ -33,8 +37,8 @@ function safeWindowWidth(): number {
 
 function compute(width: number): number {
   if (width >= 1536) return 6;
-  if (width >= 1024) return 5;
-  if (width >= 768) return 4;
+  if (width >= 1280) return 5;
+  if (width >= 1024) return 4;
   if (width >= 640) return 3;
   return 2;
 }
