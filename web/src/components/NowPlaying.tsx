@@ -676,38 +676,51 @@ function VolumeControl({
        *  read as separate from the icon button. The interior
        *  range input is rotated -90deg via writing-mode so it
        *  drags vertically but reuses the OS native range
-       *  control's interaction model (no custom drag math). */}
+       *  control's interaction model (no custom drag math).
+       *
+       *  Two nested divs: the outer one owns the positioning
+       *  (including the -translate-x-1/2 that centers the
+       *  popover on the icon), the inner one owns the enter
+       *  animation. They have to be separate because
+       *  animate-in's keyframes set `transform` outright, which
+       *  would override the centering translate for the 150ms
+       *  the animation runs — long enough to shove the popover
+       *  ~18px right of where it belongs, past the viewport
+       *  edge (the volume icon lives in the far-right cluster),
+       *  which briefly triggers the document scrollbars. */}
       {open && !disabled && (
         <div
-          className="absolute bottom-full left-1/2 z-30 mb-2 flex h-32 w-9 -translate-x-1/2 items-center justify-center rounded-full border border-border bg-popover shadow-md animate-in fade-in-0 zoom-in-95 duration-150"
+          className="absolute bottom-full left-1/2 z-30 mb-2 -translate-x-1/2"
           onMouseEnter={cancelClose}
           onMouseLeave={scheduleClose}
         >
-          <input
-            type="range"
-            min={0}
-            max={1}
-            step={0.01}
-            value={value}
-            onChange={(e) => onChange(Number(e.target.value))}
-            onMouseDown={() => setDragging(true)}
-            onTouchStart={() => setDragging(true)}
-            disabled={disabled}
-            // The browser's native vertical range styling is
-            // inconsistent across engines (`-webkit-appearance:
-            // slider-vertical` is gone in Chromium 121+, Safari
-            // never had it). Rotate a horizontal range -90deg
-            // for portable vertical behavior — drag direction
-            // matches expectation (up = louder), value still
-            // maps 0..1 the same way.
-            className="h-1.5 w-24 cursor-pointer appearance-none rounded-full bg-secondary accent-primary disabled:cursor-not-allowed"
-            style={{
-              transform: "rotate(-90deg)",
-              background: `linear-gradient(to right, hsl(var(--primary)) ${value * 100}%, hsl(var(--secondary)) ${value * 100}%)`,
-            }}
-            aria-label="Volume"
-            aria-orientation="vertical"
-          />
+          <div className="flex h-32 w-9 items-center justify-center rounded-full border border-border bg-popover shadow-md animate-in fade-in-0 zoom-in-95 duration-150">
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.01}
+              value={value}
+              onChange={(e) => onChange(Number(e.target.value))}
+              onMouseDown={() => setDragging(true)}
+              onTouchStart={() => setDragging(true)}
+              disabled={disabled}
+              // The browser's native vertical range styling is
+              // inconsistent across engines (`-webkit-appearance:
+              // slider-vertical` is gone in Chromium 121+, Safari
+              // never had it). Rotate a horizontal range -90deg
+              // for portable vertical behavior — drag direction
+              // matches expectation (up = louder), value still
+              // maps 0..1 the same way.
+              className="h-1.5 w-24 cursor-pointer appearance-none rounded-full bg-secondary accent-primary disabled:cursor-not-allowed"
+              style={{
+                transform: "rotate(-90deg)",
+                background: `linear-gradient(to right, hsl(var(--primary)) ${value * 100}%, hsl(var(--secondary)) ${value * 100}%)`,
+              }}
+              aria-label="Volume"
+              aria-orientation="vertical"
+            />
+          </div>
         </div>
       )}
     </div>
