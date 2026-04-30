@@ -7,6 +7,7 @@ import {
 } from "react-router-dom";
 import { ChevronLeft, ChevronRight, Search as SearchIcon } from "lucide-react";
 import { Input } from "@/components/ui/input";
+import { SearchSuggestions } from "@/components/SearchSuggestions";
 import { UserMenu } from "@/components/UserMenu";
 import { cn } from "@/lib/utils";
 
@@ -109,6 +110,12 @@ export function NavBar({
  * /search?q=<query>; the Search page reads its query back out of the
  * URL so both stays in sync. Empty input on a non-Search route does
  * nothing — we only push once there's something to look for.
+ *
+ * While the input has focus and contains text, an inline typeahead
+ * dropdown ({@link SearchSuggestions}) hangs underneath it with a
+ * compact preview of the top matches across all kinds. Picking a row
+ * navigates to that result; pressing Enter without a selection just
+ * stays on the live-updating Search page.
  */
 function NavBarSearch({ className }: { className?: string }) {
   const navigate = useNavigate();
@@ -117,6 +124,8 @@ function NavBarSearch({ className }: { className?: string }) {
   // Seed from the URL so navigating directly to /search?q=foo shows
   // "foo" in the input.
   const [value, setValue] = useState(() => params.get("q") ?? "");
+  const [focused, setFocused] = useState(false);
+  const inputRef = useRef<HTMLInputElement | null>(null);
 
   // Keep the input in sync when the URL changes from elsewhere (e.g.
   // clicking a saved search, using Back / Forward, external links).
@@ -141,12 +150,25 @@ function NavBarSearch({ className }: { className?: string }) {
     }
   };
 
+  // Dropdown is "open" only when both: the input has focus AND there's
+  // something to search for. Empty + focused renders nothing — no
+  // gratuitous "Start typing" panel, that's the placeholder's job.
+  const dropdownOpen = focused && value.trim().length > 0;
+
+  const closeDropdown = () => {
+    setFocused(false);
+    inputRef.current?.blur();
+  };
+
   return (
     <div className={cn("relative w-72", className)}>
       <SearchIcon className="pointer-events-none absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-muted-foreground" />
       <Input
+        ref={inputRef}
         value={value}
         onChange={onChange}
+        onFocus={() => setFocused(true)}
+        onBlur={() => setFocused(false)}
         placeholder="Search"
         aria-label="Search"
         // Search queries are artist / track / album names; the OS's
@@ -164,6 +186,12 @@ function NavBarSearch({ className }: { className?: string }) {
         spellCheck={false}
         enterKeyHint="search"
         className="h-9 pl-9"
+      />
+      <SearchSuggestions
+        query={value}
+        open={dropdownOpen}
+        onActivate={closeDropdown}
+        onCloseRequested={closeDropdown}
       />
     </div>
   );
