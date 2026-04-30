@@ -439,50 +439,83 @@ export function usePlayer() {
       ) {
         return;
       }
-      // Rehydrate the now-playing bar after a reload. When the
-      // backend is already playing something and the frontend has
-      // no record of the track (empty queue on boot), fetch the
-      // full Track dict and drop it into state so the bar can
-      // render name, artist, cover, etc. Only fires once per id.
+      // Sync the now-playing bar to whatever the backend says is
+      // playing. Two sources, in priority order:
+      //
+      //   1. Queue-sourced (fast path): if the queue contains the
+      //      track_id, point state.track at it directly. This is
+      //      the source of truth for autoplay / radio takeover —
+      //      `playAtIndex` already pushed the full Track object into
+      //      the queue, we just hand it back to the bar. No HTTP.
+      //
+      //   2. API-sourced (cold-boot rehydrate): the backend is
+      //      playing something we don't have in the queue at all
+      //      — happens after a reload while the backend session is
+      //      still live. Fetch the Track dict and splice it in.
+      //
+      // Why path 1 exists: relying on `playAtIndex`'s optimistic
+      // setState alone has a race. The SSE "playing" snapshot can
+      // arrive before stateRef catches up (useEffect commits stateRef
+      // *after* the React render, so a snapshot processed during the
+      // render window sees stale stateRef.current.track), at which
+      // point the rehydrate API fetch returns the same track we just
+      // put in the queue — extra round trip for nothing, and during
+      // the in-flight window the bar shows the previous track.
       const cur = stateRef.current;
-      const needsRehydrate =
+      const trackOutOfSync =
         snap.track_id !== null &&
         snap.state !== "idle" &&
         snap.state !== "ended" &&
-        (!cur.track || cur.track.id !== snap.track_id) &&
-        rehydratingTrackIdRef.current !== snap.track_id;
-      if (needsRehydrate && snap.track_id) {
+        (!cur.track || cur.track.id !== snap.track_id);
+      if (trackOutOfSync && snap.track_id) {
         const id = snap.track_id;
-        rehydratingTrackIdRef.current = id;
-        expectedTrackIdRef.current = id;
-        api
-          .track(id)
-          .then((t) => {
-            setState((s) => {
-              // Race guard: if the backend has since moved on to a
-              // different track, drop this late response.
-              if (expectedTrackIdRef.current !== id) return s;
-              // Splice the rehydrated track into the queue at a
-              // deterministic index so Next/Prev arithmetic works.
-              // If the queue already contains this track, use that
-              // index; otherwise prepend a single-track queue.
-              const existingIdx = s.queue.findIndex((q) => q.id === id);
-              if (existingIdx >= 0) {
-                return { ...s, track: t, queueIndex: existingIdx };
-              }
-              return {
-                ...s,
-                track: t,
-                queue: [t],
-                queueIndex: 0,
-              };
-            });
-          })
-          .catch(() => {
-            // Leave the bar in its pre-rehydrate state if the fetch
-            // fails. Next snapshot will retry via the same gate.
-            rehydratingTrackIdRef.current = null;
+        const queueIdx = cur.queue.findIndex((q) => q.id === id);
+        if (queueIdx >= 0) {
+          // Path 1: queue has it. Sync state.track from queue.
+          expectedTrackIdRef.current = id;
+          setState((s) => {
+            // Re-check inside the reducer: another setState may have
+            // already synced track (e.g. playAtIndex's optimistic
+            // update commits between the outer check and here).
+            if (s.track?.id === id) return s;
+            const idx = s.queue.findIndex((q) => q.id === id);
+            if (idx < 0) return s;
+            return { ...s, track: s.queue[idx], queueIndex: idx };
           });
+        } else if (rehydratingTrackIdRef.current !== id) {
+          // Path 2: cold-boot rehydrate. Queue is empty / doesn't
+          // contain this track. Fetch from API.
+          rehydratingTrackIdRef.current = id;
+          expectedTrackIdRef.current = id;
+          api
+            .track(id)
+            .then((t) => {
+              setState((s) => {
+                // Race guard: if the backend has since moved on to
+                // a different track, drop this late response.
+                if (expectedTrackIdRef.current !== id) return s;
+                // If something else (e.g. playAtIndex on a manual
+                // queue change) put the track into the queue while
+                // our fetch was in flight, prefer the queue's index
+                // over a single-track replacement.
+                const existingIdx = s.queue.findIndex((q) => q.id === id);
+                if (existingIdx >= 0) {
+                  return { ...s, track: t, queueIndex: existingIdx };
+                }
+                return {
+                  ...s,
+                  track: t,
+                  queue: [t],
+                  queueIndex: 0,
+                };
+              });
+            })
+            .catch(() => {
+              // Leave the bar in its pre-rehydrate state if the
+              // fetch fails. Next snapshot retries via the same gate.
+              rehydratingTrackIdRef.current = null;
+            });
+        }
       }
       setState((s) => {
         const currentTime = snap.position_ms / 1000;
@@ -513,6 +546,15 @@ export function usePlayer() {
         };
       });
       if (snap.state === "ended") advanceRef.current();
+      // Skip past tracks the backend can't play. Without this,
+      // autoplay halts the moment radio hands us a region-locked or
+      // otherwise unstreamable id — the user sees a "Playback failed"
+      // banner and the music stops mid-session. The expected-track
+      // guard above naturally dedupes repeat error frames for the
+      // same track, so we only advance once per failure.
+      if (snap.state === "error" && continuePlayingRef.current) {
+        advanceRef.current();
+      }
 
       // Preload the next queue item about ten seconds into the
       // current track. The old rule was fifteen seconds from the
