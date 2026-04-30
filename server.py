@@ -3271,16 +3271,55 @@ def lastfm_chart_top_tracks_resolved(limit: int = 50) -> list[dict]:
     limit = max(1, min(limit, 100))
 
     def _resolve_all() -> list[dict]:
+        from app import lastfm_disk_cache
+
         entries = lastfm.get_chart_top_tracks(limit=limit)
 
         pref = (settings.explicit_content_preference or "explicit").lower()
+        username = lastfm.status().get("username") or ""
+
+        # Per-track resolution cache.
+        #
+        # The 1-hour chart-level cache (further down) makes repeat
+        # visits within an hour instant. But when it expires, the
+        # whole 50-search fan-out runs again — even though most of
+        # those 50 chart entries are typically the same songs as
+        # before. Cache each (artist, title) → Tidal track dict for
+        # a long TTL so a chart-cache miss only pays the resolve
+        # cost for entries that *changed*.
+        #
+        # 30-day TTL is conservative enough that a Tidal track id
+        # going stale (track removal, region change) refreshes on
+        # its own, but long enough that the user only pays the
+        # resolve cost for genuinely new chart entries between
+        # visits.
+        #
+        # `pref` is in the key because filter_explicit_dupes is
+        # settings-dependent — flipping the explicit-content
+        # preference can change which dedupe survivor we pick.
+        # Different `pref` → different cache lane.
+        #
+        # Failures (None) are *not* cached — a transient Tidal
+        # hiccup shouldn't blank a popular song from the chart for
+        # 30 days. Genuine "not on Tidal" cases will re-resolve
+        # each time but that's still a single search, not 50.
+        _PER_TRACK_TTL = 86400.0 * 30  # 30 days
 
         def _one(entry: dict) -> Optional[dict]:
-            tidal_jitter_sleep()
             title = (entry.get("name") or "").strip()
             artist = (entry.get("artist") or "").strip()
             if not title or not artist:
                 return None
+
+            cache_key = (
+                f"{username}|resolve-track:{pref}:"
+                f"{artist.lower()}:{title.lower()}"
+            )
+            cached = lastfm_disk_cache.get(cache_key, _PER_TRACK_TTL)
+            if cached is not None:
+                return cached
+
+            tidal_jitter_sleep()
             try:
                 results = tidal.search(f"{artist} {title}", limit=5)
             except Exception:
@@ -3304,13 +3343,24 @@ def lastfm_chart_top_tracks_resolved(limit: int = 50) -> list[dict]:
                 ),
                 None,
             )
-            return track_to_dict(exact or tracks[0])
+            resolved = track_to_dict(exact or tracks[0])
+            # Only persist on success — see comment above.
+            try:
+                lastfm_disk_cache.set(cache_key, resolved)
+            except Exception:
+                # Disk write failed. Fall through with the resolved
+                # value; persistence is a perf optimisation, not a
+                # correctness requirement.
+                pass
+            return resolved
 
         # 3 workers. The whole-chart resolve was one of the heavier
         # bursts of Tidal traffic per user session — 50 searches in
         # ~7 s is exactly the kind of pattern that trips abuse
-        # detection over time. Slower wall-clock (~18 s cold load)
-        # but the result is cached so subsequent visits are instant.
+        # detection over time. The per-track cache above means a
+        # chart-cache miss usually only fires a handful of fresh
+        # searches (the entries that changed), so the wall-clock
+        # bursts are typically much smaller in practice.
         with ThreadPoolExecutor(max_workers=3) as pool:
             results = list(pool.map(_one, entries))
 
