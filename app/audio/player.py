@@ -240,6 +240,30 @@ class PCMPlayer:
         self._eq_bands: list[float] = []
         self._eq_preamp: Optional[float] = None
 
+        # Audio-callback diagnostics. Each pair is (count, last-print
+        # time) for a different rate-limited stderr message:
+        #   _cb_status: PortAudio over/underrun flags from the
+        #     callback's `status` arg (driver-level glitch).
+        #   _cb_starve: our decoder didn't push a chunk in time
+        #     (our-side fault — slow disk / network / CPU).
+        # Initialised here rather than lazy-init via getattr in the
+        # callback so the attribute names live in one place and a
+        # typo at the use site is a fail-fast AttributeError, not a
+        # silently-zeroed counter.
+        self._cb_status_count = 0
+        self._cb_status_last_print = 0.0
+        self._cb_starve_count = 0
+        self._cb_starve_last_print = 0.0
+        # Heartbeat tick counter, only incremented when _DEBUG is on.
+        # 1-per-callback log every 100 ticks confirms the callback
+        # is actually running + advancing.
+        self._callback_counter = 0
+        # Seq-bump counter for the audio callback's position-tick
+        # nudges. Bumped every callback; emits a fresh seq every
+        # 20 callbacks (~4-5 Hz at typical 86 Hz callback rate) so
+        # the SSE position-update path lets the snapshot through.
+        self._seq_bump_counter = 0
+
         # macOS audio-route listener. Subscribes to TWO CoreAudio
         # events:
         #   1. Default output device changed (headphones unplug
@@ -1611,9 +1635,8 @@ class PCMPlayer:
             # it got. Critical diagnostic on Windows where stutter
             # complaints typically trace back here.
             now = time.monotonic()
-            self._cb_status_count = getattr(self, "_cb_status_count", 0) + 1
-            last = getattr(self, "_cb_status_last_print", 0.0)
-            if now - last >= 1.0:
+            self._cb_status_count += 1
+            if now - self._cb_status_last_print >= 1.0:
                 count = self._cb_status_count
                 self._cb_status_count = 0
                 self._cb_status_last_print = now
@@ -1628,7 +1651,7 @@ class PCMPlayer:
         # actually running + advancing. Logs once per second at
         # typical 44.1k/512-frame cadence.
         if PCMPlayer._DEBUG:
-            self._callback_counter = getattr(self, "_callback_counter", 0) + 1
+            self._callback_counter += 1
             if self._callback_counter % 100 == 0:
                 qsize = self._pcm_queue.qsize()
                 print(
@@ -1689,11 +1712,8 @@ class PCMPlayer:
                     # isolating "slow disk", "slow network", and
                     # "slow CPU" cases when a user reports stutter.
                     now = time.monotonic()
-                    self._cb_starve_count = (
-                        getattr(self, "_cb_starve_count", 0) + 1
-                    )
-                    last = getattr(self, "_cb_starve_last_print", 0.0)
-                    if now - last >= 1.0:
+                    self._cb_starve_count += 1
+                    if now - self._cb_starve_last_print >= 1.0:
                         count = self._cb_starve_count
                         self._cb_starve_count = 0
                         self._cb_starve_last_print = now
@@ -1792,11 +1812,10 @@ class PCMPlayer:
             # Bump seq so the frontend's position scrubber still
             # advances even though local is silent — playback is
             # still happening, just on the remote.
-            _cb_counter = getattr(self, "_seq_bump_counter", 0) + 1
-            if _cb_counter >= 20:
+            self._seq_bump_counter += 1
+            if self._seq_bump_counter >= 20:
                 self._seq += 1
-                _cb_counter = 0
-            self._seq_bump_counter = _cb_counter
+                self._seq_bump_counter = 0
             return
 
         # EQ (10-band biquad). Active only when the user has a
@@ -1846,11 +1865,10 @@ class PCMPlayer:
         # position update. The callback fires ~90Hz at 44.1k /512
         # frames, so ~every 20th call keeps us close to 4-5Hz —
         # smooth for a scrubber, cheap on CPU.
-        _cb_counter = getattr(self, "_seq_bump_counter", 0) + 1
-        if _cb_counter >= 20:
+        self._seq_bump_counter += 1
+        if self._seq_bump_counter >= 20:
             self._seq += 1
-            _cb_counter = 0
-        self._seq_bump_counter = _cb_counter
+            self._seq_bump_counter = 0
 
     def _adopt_preload_locked(self, pre: _Preload) -> PlayerSnapshot:
         """Synchronous version of the callback's gapless swap,
