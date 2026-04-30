@@ -1035,7 +1035,21 @@ export function usePlayer() {
   }, []);
 
   const next = useCallback(() => {
-    const n = pickNextIndex(stateRef.current);
+    // The naive answer is `pickNextIndex(stateRef.current)`, but
+    // stateRef updates through a useEffect that runs *after* React
+    // commits — so a quick second Next click before that commit
+    // sees stale `queueIndex`, computes the same next index we
+    // already asked for, and the user sees the skip as the song
+    // restarting from the beginning. `expectedTrackIdRef` is set
+    // synchronously inside `playAtIndex`, so it's the truth-of-
+    // what-we-just-asked-for; resolve it back to an index here.
+    const s = stateRef.current;
+    const intendedId = expectedTrackIdRef.current;
+    const intendedIdx = intendedId
+      ? s.queue.findIndex((t) => t.id === intendedId)
+      : -1;
+    const fromIdx = intendedIdx >= 0 ? intendedIdx : s.queueIndex;
+    const n = pickNextIndex({ ...s, queueIndex: fromIdx });
     if (n !== null) playAtIndex(n);
   }, [playAtIndex]);
 
@@ -1045,7 +1059,14 @@ export function usePlayer() {
       void api.player.seek(0).catch(() => {});
       return;
     }
-    const p = pickPrevIndex(stateRef.current);
+    // Same stale-stateRef guard as `next`; see comment there.
+    const s = stateRef.current;
+    const intendedId = expectedTrackIdRef.current;
+    const intendedIdx = intendedId
+      ? s.queue.findIndex((t) => t.id === intendedId)
+      : -1;
+    const fromIdx = intendedIdx >= 0 ? intendedIdx : s.queueIndex;
+    const p = pickPrevIndex({ ...s, queueIndex: fromIdx });
     if (p !== null) playAtIndex(p);
   }, [playAtIndex]);
 
