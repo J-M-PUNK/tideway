@@ -954,17 +954,26 @@ class Downloader:
                 file=_sys.stderr,
                 flush=True,
             )
-            urls, ext_hint = self._fetch_stream_sources(
+            urls, ext_hint, codec = self._fetch_stream_sources(
                 track, item.quality, item_id=item.item_id
             )
             if not urls:
                 raise RuntimeError("Tidal returned no stream URLs")
             print(
                 f"[downloader] _download id={item.item_id[:8]} got "
-                f"{len(urls)} URL(s) ext_hint={ext_hint!r}",
+                f"{len(urls)} URL(s) ext_hint={ext_hint!r} codec={codec!r}",
                 file=_sys.stderr,
                 flush=True,
             )
+
+            # Tidal's hi-res FLAC ships as fragmented MP4 segments — the
+            # codec inside is FLAC but the container is MP4, so tidalapi's
+            # file_extension hint says ".m4a". Detect that case and plan
+            # to remux into a native .flac container after the download.
+            # The user gets the right extension and standard FLAC framing
+            # (which most players prefer over FLAC-in-MP4 even though
+            # both are bit-identical audio).
+            needs_flac_remux = codec == "FLAC" and ext_hint != ".flac"
 
             # For the device-code path we can't know the final extension
             # until the first response's Content-Type arrives. For PKCE
@@ -979,10 +988,18 @@ class Downloader:
             first_resp = first_resp_cm.__enter__()
             try:
                 first_resp.raise_for_status()
-                ext = ext_hint or _ext_from_response(first_resp)
-                out_path = _build_path(item, s, ext)
-                out_path.parent.mkdir(parents=True, exist_ok=True)
-                tmp_path = out_path.with_suffix(out_path.suffix + ".part")
+                if needs_flac_remux:
+                    # We know the final file is .flac (after remux); the
+                    # download itself lands in an .mp4.part intermediate.
+                    ext = ".flac"
+                    out_path = _build_path(item, s, ext)
+                    out_path.parent.mkdir(parents=True, exist_ok=True)
+                    tmp_path = out_path.with_suffix(".mp4.part")
+                else:
+                    ext = ext_hint or _ext_from_response(first_resp)
+                    out_path = _build_path(item, s, ext)
+                    out_path.parent.mkdir(parents=True, exist_ok=True)
+                    tmp_path = out_path.with_suffix(out_path.suffix + ".part")
 
                 # Progress tracking. For multi-URL DASH downloads we
                 # don't know total bytes up front, so we treat each URL
@@ -1078,6 +1095,33 @@ class Downloader:
                         first_resp_cm.__exit__(None, None, None)
                     except Exception:
                         pass
+
+            if needs_flac_remux:
+                # Strip the FLAC stream out of the MP4 container into a
+                # native .flac file. Stream-copy via PyAV — no decode /
+                # encode, output is bit-identical to what Tidal sent.
+                # Lands in a .flac.part intermediate so the atomic rename
+                # below still gives skip-existing an all-or-nothing view.
+                flac_part = out_path.with_suffix(".flac.part")
+                try:
+                    _remux_mp4_to_flac(tmp_path, flac_part)
+                except Exception as exc:
+                    # Clean up both intermediates so a retry starts fresh.
+                    for stray in (tmp_path, flac_part):
+                        try:
+                            stray.unlink(missing_ok=True)
+                        except Exception:
+                            pass
+                    raise RuntimeError(
+                        f"FLAC remux failed: {type(exc).__name__}: {exc}"
+                    ) from exc
+                # Drop the MP4 intermediate; the .flac.part now holds the
+                # canonical bytes and is what we atomic-rename into place.
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+                tmp_path = flac_part
 
             # Atomic rename — the next skip-existing scan sees a complete file
             # or nothing at all.
@@ -1189,18 +1233,24 @@ class Downloader:
 
     def _fetch_stream_sources(
         self, track, quality: Optional[str], item_id: Optional[str] = None
-    ) -> tuple[list[str], Optional[str]]:
-        """Fetch the list of URLs we need to download + a file-extension
-        hint. Handles both session types:
+    ) -> tuple[list[str], Optional[str], Optional[str]]:
+        """Fetch the list of URLs we need to download, a file-extension
+        hint, and the audio codec. Handles both session types:
 
         * Device-code sessions use `track.get_url()` — a single streamable
-          URL. One entry in the returned list, no extension hint.
+          URL. One entry in the returned list, no extension or codec hint.
         * PKCE sessions can't call get_url (tidalapi raises URLNotAvailable
           immediately). They use `track.get_stream()` which returns a
           manifest (MPEG-DASH or BTS) whose `urls` is a list of segment
           URLs. For DASH hi-res content that list may have dozens of
           short segments which we concatenate into one FLAC file. The
-          manifest also carries a reliable file_extension.
+          manifest also carries a file_extension hint and a codec name.
+
+        The codec is the source of truth for what's actually inside the
+        bytes — tidalapi's file_extension hint looks at the URL string
+        and labels DASH FLAC segments as `.m4a` (because the segments
+        are fragmented MP4 containers). The downloader uses the codec
+        to override that hint when needed and remux to native FLAC.
 
         Both paths retry once on auth error with a forced token refresh
         since tidalapi's built-in refresh triggers only on a very
@@ -1213,7 +1263,7 @@ class Downloader:
             except KeyError:
                 override = None
 
-        def _call() -> tuple[list[str], Optional[str]]:
+        def _call() -> tuple[list[str], Optional[str], Optional[str]]:
             with self.quality_lock:
                 original = self.tidal.session.config.quality
                 try:
@@ -1231,9 +1281,11 @@ class Downloader:
                                 "Tidal returned an encrypted stream we can't decrypt"
                             )
                         ext_hint = getattr(manifest, "file_extension", None)
-                        return (list(manifest.urls or []), ext_hint)
+                        codec = getattr(manifest, "codecs", None)
+                        codec = codec.upper() if isinstance(codec, str) else None
+                        return (list(manifest.urls or []), ext_hint, codec)
                     # Device-code path: single direct URL.
-                    return ([track.get_url()], None)
+                    return ([track.get_url()], None, None)
                 finally:
                     if override is not None:
                         self.tidal.session.config.quality = original
@@ -1280,6 +1332,45 @@ class Downloader:
 # ------------------------------------------------------------------
 # Helpers
 # ------------------------------------------------------------------
+
+
+def _remux_mp4_to_flac(mp4_path: Path, flac_path: Path) -> None:
+    """Stream-copy a FLAC audio stream out of an MP4 container into a
+    native .flac file.
+
+    No decode, no encode — libav reads packets out of the MP4 demuxer
+    and hands them straight to the FLAC muxer. Output bytes are
+    bit-identical to the FLAC frames Tidal sent; the only thing that
+    changes is the container around them.
+
+    Same PyAV idiom as `app.video_downloader._remux_hls_to_mp4`. PyAV
+    is already a hard dependency of the audio engine, so no new
+    install requirements.
+
+    Raises on any failure — the caller cleans up the intermediates and
+    surfaces the error to the user.
+    """
+    import av  # local import: keeps module load cheap if remux is never needed
+
+    input_container = av.open(str(mp4_path))
+    try:
+        if not input_container.streams.audio:
+            raise RuntimeError("MP4 input has no audio stream")
+        in_stream = input_container.streams.audio[0]
+        output_container = av.open(str(flac_path), mode="w", format="flac")
+        try:
+            out_stream = output_container.add_stream_from_template(in_stream)
+            for packet in input_container.demux(in_stream):
+                # Flush packets from libav have no DTS — skip them, same
+                # as the video remux path.
+                if packet.dts is None:
+                    continue
+                packet.stream = out_stream
+                output_container.mux(packet)
+        finally:
+            output_container.close()
+    finally:
+        input_container.close()
 
 
 def _looks_like_rate_limit(exc: Exception) -> bool:
