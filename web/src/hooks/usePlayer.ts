@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { PlayerSnapshot, StreamInfo, Track } from "@/api/types";
 import { api } from "@/api/client";
+import { useContinuePlayingPref } from "./useContinuePlayingPref";
 import { useSleepTimer } from "./useSleepTimer";
 import { useUiPreferences, type StreamingQuality } from "./useUiPreferences";
 import {
@@ -564,47 +565,10 @@ export function usePlayer() {
   }, [state.track]);
 
   // "Continue playing after queue ends" preference, mirrored from
-  // the backend Settings dataclass. Read on mount and refreshed
-  // whenever the SettingsPage dispatches the `tidal-settings-updated`
-  // event (it does this after a successful PUT). Held in a ref so
-  // the queue-end branch in advanceRef can read the latest value
-  // without taking it as a dep — the advance code path is set up
-  // once and would otherwise need to redefine on every settings
-  // change.
-  //
-  // Default true here mirrors the backend default. If the settings
-  // fetch fails (no auth, network), keep the default-on behavior so
-  // the user gets the same experience the backend ships.
-  const continuePlayingRef = useRef(true);
-  useEffect(() => {
-    let cancelled = false;
-    api.settings
-      .get()
-      .then((s) => {
-        if (!cancelled) {
-          continuePlayingRef.current = !!s.continue_playing_after_queue_ends;
-        }
-      })
-      .catch(() => {
-        /* default: true (set above) */
-      });
-    const handler = (event: Event) => {
-      const detail = (event as CustomEvent).detail as {
-        continue_playing_after_queue_ends?: boolean;
-      } | null;
-      if (
-        detail &&
-        typeof detail.continue_playing_after_queue_ends === "boolean"
-      ) {
-        continuePlayingRef.current = detail.continue_playing_after_queue_ends;
-      }
-    };
-    window.addEventListener("tidal-settings-updated", handler);
-    return () => {
-      cancelled = true;
-      window.removeEventListener("tidal-settings-updated", handler);
-    };
-  }, []);
+  // the backend Settings as a live-updating ref. See
+  // useContinuePlayingPref for the mount-fetch + custom-event
+  // update mechanism.
+  const continuePlayingRef = useContinuePlayingPref();
 
   // Restore the persisted "now playing" track on app launch. We seed
   // the track + queueIndex + currentTime synchronously in the state
