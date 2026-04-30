@@ -516,6 +516,7 @@ def _cleanup_part_files(root: Path) -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     broker.bind_loop(asyncio.get_running_loop())
+    from app.routers.hotkey import bus as _hotkey_bus
     _hotkey_bus.bind_loop(asyncio.get_running_loop())
     output_root = Path(settings.output_dir).expanduser()
     _cleanup_part_files(output_root)
@@ -721,8 +722,10 @@ app.add_middleware(
 # `app/routers/__init__.py` for the playbook + which domains have
 # moved. New extractions add their `include_router` call here.
 from app.routers.autostart import router as autostart_router
+from app.routers.hotkey import router as hotkey_router
 
 app.include_router(autostart_router)
+app.include_router(hotkey_router)
 
 
 # ---------------------------------------------------------------------------
@@ -4896,113 +4899,9 @@ def airplay_disconnect() -> dict:
 # directly.
 
 
-# ---------------------------------------------------------------------------
-# Global media-key event bus
-#
-# Global hotkeys (play-pause / next / previous) fire on a pynput thread
-# in the backend. We publish each to this bus; the frontend subscribes
-# via SSE and runs the corresponding action through its player hook —
-# that way queue/shuffle/repeat decisions stay in the frontend instead
-# of being re-implemented server-side.
-# ---------------------------------------------------------------------------
-
-
-class _HotkeyBus:
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._subscribers: list[asyncio.Queue] = []
-        self._loop: Optional[asyncio.AbstractEventLoop] = None
-
-    def bind_loop(self, loop: asyncio.AbstractEventLoop) -> None:
-        with self._lock:
-            self._loop = loop
-
-    def publish(self, action: str) -> None:
-        """Safe to call from any thread (including pynput's listener
-        thread). Schedules the payload put on the FastAPI event loop."""
-        with self._lock:
-            loop = self._loop
-            subs = list(self._subscribers)
-        if loop is None:
-            return
-        for q in subs:
-            try:
-                loop.call_soon_threadsafe(q.put_nowait, action)
-            except Exception:
-                pass
-
-    def subscribe(self) -> asyncio.Queue:
-        q: asyncio.Queue = asyncio.Queue(maxsize=32)
-        with self._lock:
-            self._subscribers.append(q)
-        return q
-
-    def unsubscribe(self, q: asyncio.Queue) -> None:
-        with self._lock:
-            try:
-                self._subscribers.remove(q)
-            except ValueError:
-                pass
-
-
-_hotkey_bus = _HotkeyBus()
-
-
-def _emit_hotkey(action: str) -> dict:
-    _hotkey_bus.publish(action)
-    return {"ok": True, "action": action}
-
-
-@app.post("/api/hotkey/play_pause")
-def hotkey_play_pause() -> dict:
-    _require_local_access()
-    return _emit_hotkey("play_pause")
-
-
-@app.post("/api/hotkey/next")
-def hotkey_next() -> dict:
-    _require_local_access()
-    return _emit_hotkey("next")
-
-
-@app.post("/api/hotkey/previous")
-def hotkey_previous() -> dict:
-    _require_local_access()
-    return _emit_hotkey("previous")
-
-
-@app.get("/api/hotkey/events")
-async def hotkey_events(request: Request):
-    """SSE stream of hotkey events. The frontend's usePlayer hook
-    subscribes and maps each action onto its own toggle/next/prev
-    so queue state + advance logic stay in one place."""
-    _require_local_access()
-    _hotkey_bus.bind_loop(asyncio.get_running_loop())
-    q = _hotkey_bus.subscribe()
-
-    async def _gen():
-        try:
-            # Initial ping so the frontend knows the subscription is up.
-            yield "data: {\"action\": \"_ready\"}\n\n"
-            while True:
-                if await request.is_disconnected():
-                    break
-                try:
-                    action = await asyncio.wait_for(q.get(), timeout=20.0)
-                except asyncio.TimeoutError:
-                    # Keepalive comment — prevents proxies from closing
-                    # a silent connection.
-                    yield ": keepalive\n\n"
-                    continue
-                yield f"data: {json.dumps({'action': action})}\n\n"
-        finally:
-            _hotkey_bus.unsubscribe(q)
-
-    return StreamingResponse(
-        _gen(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
+# Hotkey bus + routes moved to `app/routers/hotkey.py`. The
+# lifespan call below binds the bus to the running event loop on
+# startup so the pynput listener thread can fan events out.
 
 
 @app.get("/api/player/events")
