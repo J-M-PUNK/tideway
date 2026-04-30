@@ -1288,13 +1288,13 @@ def main(argv: Optional[list[str]] = None) -> int:
                             return
                         _window_chrome.register_windows_hwnd(hwnd)
                         # When the launcher created the window
-                        # frameless (Windows VS-Code-style chrome), the
-                        # OS no longer hands us drag or resize. Hook
-                        # WM_NCHITTEST + WM_NCCALCSIZE so the React
-                        # titlebar zone behaves like a native caption
-                        # row and the window edges accept resize.
+                        # frameless (Windows VS-Code-style chrome),
+                        # add WS_THICKFRAME back so the OS can run
+                        # native edge resize. Drag is handled by the
+                        # React titlebar calling /start_drag —
+                        # see window_controls.start_window_drag.
                         if use_frameless:
-                            _window_controls_mod.install_native_hit_test(hwnd)
+                            _window_controls_mod.enable_native_resize(hwnd)
                     except Exception:
                         # Anything in the lookup or DWM call going wrong
                         # leaves the OS-default titlebar — visible but

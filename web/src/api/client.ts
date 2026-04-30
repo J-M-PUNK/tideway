@@ -182,6 +182,14 @@ export const api = {
       ),
     close: () =>
       req<{ ok: boolean }>("/api/_internal/window/close", { method: "POST" }),
+    /** Start a native drag from the cursor's current position. The
+     *  React titlebar calls this on mousedown — WebView2 ignores
+     *  `app-region: drag`, so we route through Win32's move loop
+     *  via SendMessage(WM_SYSCOMMAND, SC_MOVE) on the backend. */
+    startDrag: () =>
+      req<{ ok: boolean }>("/api/_internal/window/start_drag", {
+        method: "POST",
+      }),
   },
   /** Fire an OS-native notification. The frontend owns the decision
    *  of when to call this (only when window unfocused + pref enabled)
