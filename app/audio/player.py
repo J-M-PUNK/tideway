@@ -48,6 +48,7 @@ from app.audio.eq import (
     PRESETS as EQ_PRESETS,
     preset_bands as eq_preset_bands,
 )
+from app.audio.manifest_cache import ManifestCache
 from app.audio.segment_reader import SegmentReader
 
 log = logging.getLogger(__name__)
@@ -221,36 +222,12 @@ class PCMPlayer:
         # callback at end-of-track.
         self._preload: Optional[_Preload] = None
 
-        # Stream-manifest cache. Keyed by (track_id, quality_or_None);
-        # value is (urls, duration_s, stream_info, cached_at_monotonic,
-        # bytes_map). The bytes_map holds optional pre-downloaded
-        # segment bytes (idx -> bytes) so byte-level prefetch can
-        # skip the network entirely when the user clicks play on a
-        # warmed track. Empty dict = URLs-only warm (manifest only,
-        # no pre-fetched bytes).
-        #
-        # Kept short (3 min) because Tidal's signed CDN URLs expire
-        # inside that window. Frontend hover / album-mount prefetch
-        # writes here so the first real click is free of the
-        # playbackinfo round-trip and, if bytes are warmed, of the
-        # init + first-media segment fetches too.
-        self._manifest_cache: dict[
-            tuple[str, Optional[str]],
-            tuple[list[str], Optional[float], StreamInfo, float, dict[int, bytes]],
-        ] = {}
-        self._manifest_cache_lock = threading.Lock()
-        self._manifest_cache_ttl = 180.0
-        # Hit / miss counters for the cache, surfaced by
-        # /api/player/cache-stats so you can watch them while testing.
-        self._manifest_cache_hits = 0
-        self._manifest_cache_misses = 0
-        # Rolling byte-level memory cap. Each cached bytes_map can
-        # run ~1 MB at max quality (init + first media segment).
-        # FIFO-evict entries when we exceed the cap so a long
-        # playlist doesn't blow memory. 30 MB fits ~30 max-quality
-        # tracks or hundreds at low quality.
-        self._manifest_cache_bytes = 0
-        self._manifest_cache_bytes_cap = 30 * 1024 * 1024
+        # Stream-manifest cache. Keyed by (track_id, quality_or_None).
+        # Frontend hover / album-mount prefetch writes here so the
+        # first real click is free of the playbackinfo round-trip
+        # and, if bytes are warmed, of the init + first-media
+        # segment fetches too. See app/audio/manifest_cache.py.
+        self._manifest_cache = ManifestCache()
 
         # 10-band biquad EQ applied in the audio callback. One
         # instance owned for the lifetime of the player; when the
@@ -1396,7 +1373,7 @@ class PCMPlayer:
         # TTL stays well inside Tidal's signed-URL expiry window.
         cache_key = (track_id, quality)
         t0 = time.monotonic()
-        cached_urls_info = self._cache_lookup(cache_key)
+        cached_urls_info = self._manifest_cache.lookup(cache_key)
         if cached_urls_info is not None:
             urls, duration, info, bytes_map = cached_urls_info
             print(
@@ -1445,11 +1422,11 @@ class PCMPlayer:
                 audio_mode=getattr(stream, "audio_mode", None),
             )
             duration_s = float(duration) if duration else None
-            self._cache_store(cache_key, list(urls), duration_s, info)
-            # After _cache_store, any previously-warmed bytes are
-            # preserved — pick them back up so a MISS on manifest
-            # that still has bytes cached returns the bytes too.
-            cached = self._cache_lookup(cache_key)
+            self._manifest_cache.store(cache_key, list(urls), duration_s, info)
+            # After store, any previously-warmed bytes are preserved
+            # — pick them back up so a MISS on manifest that still
+            # has bytes cached returns the bytes too.
+            cached = self._manifest_cache.lookup(cache_key)
             bytes_map = cached[3] if cached is not None else {}
             print(
                 f"[perf] resolve track={track_id} quality={quality} cache=MISS "
@@ -1466,126 +1443,11 @@ class PCMPlayer:
             if override is not None:
                 session.config.quality = original
 
-    def _cache_lookup(
-        self, key: tuple[str, Optional[str]]
-    ) -> Optional[tuple[list[str], Optional[float], StreamInfo, dict[int, bytes]]]:
-        now = time.monotonic()
-        with self._manifest_cache_lock:
-            entry = self._manifest_cache.get(key)
-            if entry is None:
-                self._manifest_cache_misses += 1
-                return None
-            urls, duration, info, cached_at, bytes_map = entry
-            if now - cached_at > self._manifest_cache_ttl:
-                self._manifest_cache_bytes -= sum(len(v) for v in bytes_map.values())
-                self._manifest_cache.pop(key, None)
-                self._manifest_cache_misses += 1
-                return None
-            self._manifest_cache_hits += 1
-            return list(urls), duration, info, dict(bytes_map)
-
-    def _cache_update_bytes(
-        self, key: tuple[str, Optional[str]], new_bytes: dict[int, bytes]
-    ) -> None:
-        """Merge pre-fetched segment bytes into an existing cache
-        entry. Only stores bytes for entries we already have URLs
-        for (no-op if the URLs got evicted mid-prefetch). Runs the
-        FIFO eviction pass afterwards so a long prefetch queue
-        can't blow past the memory cap."""
-        if not new_bytes:
-            return
-        with self._manifest_cache_lock:
-            entry = self._manifest_cache.get(key)
-            if entry is None:
-                return
-            urls, duration, info, cached_at, bytes_map = entry
-            merged = dict(bytes_map)
-            added = 0
-            for idx, data in new_bytes.items():
-                if idx in merged:
-                    continue
-                merged[idx] = data
-                added += len(data)
-            self._manifest_cache[key] = (urls, duration, info, cached_at, merged)
-            self._manifest_cache_bytes += added
-            self._evict_bytes_over_cap_locked()
-
-    def _evict_bytes_over_cap_locked(self) -> None:
-        """FIFO-evict byte-level entries until we're under the cap.
-        Drops bytes only, preserves the URL/manifest metadata so
-        subsequent plays still skip the Tidal round-trips. Caller
-        holds the cache lock."""
-        if self._manifest_cache_bytes <= self._manifest_cache_bytes_cap:
-            return
-        # Python 3.7+ dict preserves insertion order — pop in insertion
-        # order until we're back under the cap.
-        for key in list(self._manifest_cache.keys()):
-            urls, duration, info, cached_at, bytes_map = self._manifest_cache[key]
-            if not bytes_map:
-                continue
-            freed = sum(len(v) for v in bytes_map.values())
-            self._manifest_cache[key] = (urls, duration, info, cached_at, {})
-            self._manifest_cache_bytes -= freed
-            if self._manifest_cache_bytes <= self._manifest_cache_bytes_cap:
-                break
-
     def cache_stats(self) -> dict:
         """Snapshot of the manifest cache for the /api/player/cache-stats
         endpoint. Read while testing the prefetch path to confirm
         hovers / album-mount prefetches are landing."""
-        with self._manifest_cache_lock:
-            now = time.monotonic()
-            entries = [
-                {
-                    "track_id": tid,
-                    "quality": q,
-                    "age_ms": int((now - cached_at) * 1000.0),
-                    "segments": len(urls),
-                    "prefetched_segments": len(bytes_map),
-                    "prefetched_bytes": sum(len(v) for v in bytes_map.values()),
-                }
-                for (tid, q), (urls, _dur, _info, cached_at, bytes_map) in list(
-                    self._manifest_cache.items()
-                )
-            ]
-            return {
-                "hits": self._manifest_cache_hits,
-                "misses": self._manifest_cache_misses,
-                "ttl_seconds": int(self._manifest_cache_ttl),
-                "size": len(self._manifest_cache),
-                "bytes_cached": self._manifest_cache_bytes,
-                "bytes_cap": self._manifest_cache_bytes_cap,
-                "entries": entries,
-            }
-
-    def _cache_store(
-        self,
-        key: tuple[str, Optional[str]],
-        urls: list[str],
-        duration: Optional[float],
-        info: StreamInfo,
-    ) -> None:
-        with self._manifest_cache_lock:
-            # Preserve any pre-fetched bytes from a prior prefetch
-            # for the same key so re-resolving doesn't wipe the
-            # warmed segments. Caller will merge bytes in later via
-            # _cache_update_bytes if a fresh prefetch is running.
-            existing = self._manifest_cache.get(key)
-            existing_bytes = existing[4] if existing is not None else {}
-            self._manifest_cache[key] = (
-                urls, duration, info, time.monotonic(), existing_bytes,
-            )
-            # Evict expired siblings while we have the lock; keeps
-            # memory bounded without a background janitor thread.
-            if len(self._manifest_cache) > 128:
-                cutoff = time.monotonic() - self._manifest_cache_ttl
-                stale = [k for k, v in self._manifest_cache.items() if v[3] < cutoff]
-                for k in stale:
-                    dropped = self._manifest_cache.pop(k, None)
-                    if dropped is not None:
-                        self._manifest_cache_bytes -= sum(
-                            len(v) for v in dropped[4].values()
-                        )
+        return self._manifest_cache.stats()
 
     def prefetch(
         self, track_id: str, quality: Optional[str] = None, *, warm_bytes: bool = True
@@ -1621,7 +1483,7 @@ class PCMPlayer:
         hover events don't re-download. Fire-and-forget: any failure
         leaves the cache at URL-only and the eventual play path
         falls through to the normal SegmentReader fetch."""
-        cached = self._cache_lookup(key)
+        cached = self._manifest_cache.lookup(key)
         have = cached[3] if cached is not None else {}
         targets = [i for i in (0, 1) if i < len(urls) and i not in have]
         if not targets:
@@ -1647,7 +1509,7 @@ class PCMPlayer:
                     fetched[idx] = content
         if fetched:
             total = sum(len(v) for v in fetched.values())
-            self._cache_update_bytes(key, fetched)
+            self._manifest_cache.update_bytes(key, fetched)
             print(
                 f"[perf] prefetch bytes track={key[0]} quality={key[1]} "
                 f"segments={sorted(fetched.keys())} "
