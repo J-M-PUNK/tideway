@@ -243,6 +243,16 @@ class DownloadItem:
     # value being stale at COMPLETE / TAGGING wouldn't matter, but
     # we zero it anyway so the field never carries surprising data.
     speed_bps: float = 0.0
+    # Extra metadata used by the filename template engine. Empty / zero
+    # defaults are intentional — any of these may be unavailable from
+    # tidalapi (older catalog entries, single-track submits without an
+    # album lookup) and the template renderer treats missing values as
+    # empty strings rather than crashing the download.
+    album_artist: str = ""
+    year: Optional[int] = None
+    disc_num: int = 0
+    track_explicit: bool = False
+    album_explicit_flag: bool = False
 
 
 class Downloader:
@@ -412,11 +422,7 @@ class Downloader:
         )
         for track, album_obj in pairs:
             item = DownloadItem(item_id=str(uuid.uuid4()), url="")
-            item.title = track.name
-            item.artist = _artist_names(track)
-            item.album = _album_name(album_obj or getattr(track, "album", None))
-            item.track_num = getattr(track, "track_num", 0)
-            item.quality = quality
+            _populate_item_from_track(item, track, album_obj, quality)
             self._track_map_put(item.item_id, (track, album_obj))
             self.on_add(item)
             # Persist so a restart can resume. Per-track records use
@@ -560,11 +566,7 @@ class Downloader:
 
         if len(pairs) == 1:
             track, album_obj = pairs[0]
-            placeholder.title = track.name
-            placeholder.artist = _artist_names(track)
-            placeholder.album = _album_name(album_obj or getattr(track, "album", None))
-            placeholder.track_num = getattr(track, "track_num", 0)
-            placeholder.quality = quality
+            _populate_item_from_track(placeholder, track, album_obj, quality)
             self._track_map_put(placeholder.item_id, (track, album_obj))
             self.on_update(placeholder)
             tid = getattr(track, "id", None)
@@ -587,11 +589,7 @@ class Downloader:
 
             for track, album_obj in pairs:
                 item = DownloadItem(item_id=str(uuid.uuid4()), url=url)
-                item.title = track.name
-                item.artist = _artist_names(track)
-                item.album = _album_name(album_obj or getattr(track, "album", None))
-                item.track_num = getattr(track, "track_num", 0)
-                item.quality = quality
+                _populate_item_from_track(item, track, album_obj, quality)
                 self._track_map_put(item.item_id, (track, album_obj))
                 self.on_add(item)
                 tid = getattr(track, "id", None)
@@ -1431,6 +1429,25 @@ def _looks_like_auth_error(exc: Exception) -> bool:
     return "401" in msg or "Unauthorized" in msg
 
 
+def _populate_item_from_track(
+    item: DownloadItem, track, album_obj, quality: Optional[str]
+) -> None:
+    """Single source of truth for setting a DownloadItem's metadata
+    from tidalapi objects. Called from every enqueue path so adding a
+    new template token only needs one wiring change here, not three."""
+    resolved_album = album_obj or getattr(track, "album", None)
+    item.title = track.name
+    item.artist = _artist_names(track)
+    item.album = _album_name(resolved_album)
+    item.track_num = getattr(track, "track_num", 0)
+    item.quality = quality
+    item.album_artist = _album_artist_name(resolved_album, track)
+    item.year = _album_year(resolved_album)
+    item.disc_num = getattr(track, "volume_num", 0) or 0
+    item.track_explicit = bool(getattr(track, "explicit", False))
+    item.album_explicit_flag = bool(getattr(resolved_album, "explicit", False))
+
+
 def _artist_names(track) -> str:
     try:
         return ", ".join(a.name for a in track.artists)
@@ -1447,6 +1464,50 @@ def _album_name(album_obj) -> str:
         return album_obj.name
     except Exception:
         return ""
+
+
+def _album_artist_name(album_obj, track) -> str:
+    """Return the album-level artist (single name), falling back to the
+    track's primary artist when the album object doesn't carry one.
+
+    This matters most for compilations / VA releases / collabs, where
+    the track artist is just a contributor and the album artist is the
+    canonical credit (e.g. "Various Artists" or "DJ Khaled" while
+    individual tracks list a different artist). Without a separate
+    album-artist token, library scanners group every contributor's
+    track under its own artist tree instead of one album folder.
+    """
+    try:
+        if album_obj is not None and getattr(album_obj, "artist", None):
+            name = getattr(album_obj.artist, "name", None)
+            if name:
+                return name
+    except Exception:
+        pass
+    try:
+        if track is not None and getattr(track, "artist", None):
+            return getattr(track.artist, "name", "") or ""
+    except Exception:
+        pass
+    return ""
+
+
+def _album_year(album_obj) -> Optional[int]:
+    """Year an album was released, parsed off whichever date field
+    tidalapi populated. `release_date` is the editorial release date;
+    `tidal_release_date` is when Tidal first hosted the stream — for
+    most catalog music these match, for back-catalog reissues the
+    editorial date is what users want in their folder names."""
+    if album_obj is None:
+        return None
+    for attr in ("release_date", "tidal_release_date"):
+        try:
+            dt = getattr(album_obj, attr, None)
+            if dt is not None and getattr(dt, "year", None):
+                return int(dt.year)
+        except Exception:
+            continue
+    return None
 
 
 def _ext_from_response(resp) -> str:
@@ -1491,29 +1552,135 @@ def _sanitize_segment(name: str) -> str:
     return name or "_"
 
 
-def _build_path(item: DownloadItem, settings, ext: str) -> Path:
-    # Defense-in-depth: sanitize each interpolation value BEFORE the
-    # template renders it, then sanitize the whole name afterwards. That
-    # way a literal path separator in either the template or any tidalapi-
-    # supplied field still collapses to an underscore instead of escaping
-    # the output directory.
-    name = settings.filename_template.format(
-        title=_sanitize_segment(item.title),
-        artist=_sanitize_segment(item.artist),
-        album=_sanitize_segment(item.album),
-        track_num=str(item.track_num).zfill(2),
+class _SafeTokens(dict):
+    """str.format_map dict that returns the literal "{key}" for any
+    token the template references but the renderer doesn't supply.
+    Keeps a typo'd token (e.g. "{albmu}") visible in the output
+    filename so the user notices instead of silently dropping the
+    request, and never crashes the download with a KeyError."""
+
+    def __missing__(self, key):  # type: ignore[override]
+        return "{" + key + "}"
+
+
+def _explicit_marker(flag: bool) -> str:
+    """Render an explicit-content flag as a path-safe marker. Leading
+    space so users can write `{title}{explicit}` without an extra
+    separator and still get readable output. Empty when the track or
+    album isn't flagged so non-explicit items don't carry a trailing
+    space."""
+    return " [E]" if flag else ""
+
+
+def _render_template(template: str, item: DownloadItem) -> str:
+    """Interpolate the user's filename_template with sanitized token
+    values. Each token's VALUE is sanitized for path-unsafe chars
+    before rendering — that's how we keep an album literally named
+    "AC/DC" from creating a phantom subdirectory. The rendered string
+    may still contain `/` from the TEMPLATE itself; the caller treats
+    those as intentional directory separators.
+
+    Unknown tokens render as the literal `{key}` (see _SafeTokens) so
+    the user sees a wonky filename and fixes their template instead of
+    the download just dying with a KeyError mid-batch.
+    """
+    year_str = "" if item.year is None else str(item.year)
+    return template.format_map(
+        _SafeTokens(
+            title=_sanitize_segment(item.title),
+            track_title=_sanitize_segment(item.title),
+            artist=_sanitize_segment(item.artist),
+            album=_sanitize_segment(item.album),
+            album_title=_sanitize_segment(item.album),
+            album_artist=_sanitize_segment(item.album_artist or item.artist),
+            track_num=str(item.track_num).zfill(2),
+            disc_num=str(item.disc_num or 1).zfill(2) if item.disc_num else "01",
+            year=year_str,
+            explicit=_explicit_marker(item.track_explicit),
+            album_explicit=_explicit_marker(item.album_explicit_flag),
+        )
     )
+
+
+def _split_template_path(rendered: str) -> list[str]:
+    """Split a rendered template into path segments. Forward slash is
+    the documented separator; backslash is also accepted because
+    Windows users naturally type it and there's no scenario where a
+    literal `\\` should appear inside a single filename segment.
+
+    Empty segments (from leading slashes or `//` typos) are dropped so
+    the resulting Path doesn't accidentally root itself or carry a
+    no-op `.` segment."""
+    pieces = re.split(r"[/\\]+", rendered)
+    return [p for p in pieces if p]
+
+
+def _template_has_separator(template: str) -> bool:
+    """Does the user's template define its own directory structure? If
+    so, `create_album_folders` becomes a no-op — the template is in
+    charge. Detected by checking whether any `/` or `\\` appears
+    *outside* a token (so `{album}` containing slashes through user
+    data doesn't accidentally enable directory mode at the template
+    level — that's handled per-segment after rendering)."""
+    stripped = re.sub(r"\{[^{}]*\}", "", template)
+    return "/" in stripped or "\\" in stripped
+
+
+def _build_path(item: DownloadItem, settings, ext: str) -> Path:
+    """Render the user's filename template into an absolute output
+    path under settings.output_dir.
+
+    Two-stage sanitization, same intent as before but extended to
+    cope with templates that contain `/` separators:
+
+    1. Per-token values are sanitized BEFORE rendering so a literal
+       slash inside any tidalapi field collapses to `_`, never
+       escaping into the path structure.
+    2. The rendered string is split on `/` (and `\\`) into segments;
+       each segment is sanitized AGAIN to catch anything weird the
+       template's literal text introduced (control bytes, trailing
+       dots/spaces, Windows-reserved stems).
+
+    `create_album_folders` is a backward-compat shortcut for users who
+    haven't customized their template — it prepends an album folder
+    only when the template is single-segment. Once the user adopts a
+    template with `/`, the template controls structure and the toggle
+    is silent (avoid double-nesting like
+    `output_dir/AlbumName/AlbumName/Track.flac`).
+    """
+    rendered = _render_template(settings.filename_template, item)
+    segments = _split_template_path(rendered)
+    # Render produced nothing usable (template was all-whitespace or
+    # all-empty-tokens). Fall back to a stable identifier so the
+    # download lands somewhere instead of crashing on a zero-length
+    # filename — `_` is what _sanitize_segment would have produced for
+    # an empty string anyway.
+    if not segments:
+        segments = ["_"]
+    safe_segments = [_sanitize_segment(s) for s in segments]
+
     base = Path(settings.output_dir)
-    if settings.create_album_folders and item.album:
+    if (
+        settings.create_album_folders
+        and item.album
+        and not _template_has_separator(settings.filename_template)
+    ):
         base = base / _sanitize_segment(item.album)
-    final = base / (_sanitize_segment(name) + ext)
+
+    *dirs, last = safe_segments
+    final = base
+    for d in dirs:
+        final = final / d
+    final = final / (last + ext)
+
     # Hard containment check: after all the sanitization, the resolved
     # path must still live under output_dir. If it somehow doesn't, a
     # future regression introduced a vector we missed — fail loudly
     # rather than silently write outside the sandbox.
     try:
         root = Path(settings.output_dir).resolve()
-        if root not in final.resolve().parents and final.resolve() != root:
+        resolved = final.resolve()
+        if resolved != root and root not in resolved.parents:
             raise RuntimeError(f"Resolved path escaped output_dir: {final}")
     except RuntimeError:
         raise
