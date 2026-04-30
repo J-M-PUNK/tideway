@@ -83,9 +83,7 @@ describe("previewFilenameTemplateAsString", () => {
       "/Music/Tidal",
       true,
     );
-    expect(out).toBe(
-      "/Music/Tidal/Travis Scott/Astroworld/02 Sicko Mode.flac",
-    );
+    expect(out).toBe("/Music/Tidal/Travis Scott/Astroworld/02 Sicko Mode.flac");
   });
 
   it("appends the explicit marker only where placed in the template", () => {

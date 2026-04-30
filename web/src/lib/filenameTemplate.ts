@@ -59,7 +59,10 @@ export function sanitizeSegment(name: string): string {
 /** Mirror of the backend SafeDict — unknown tokens render as their
  *  literal `{key}` form so the user sees a wonky filename and fixes
  *  the typo. */
-export function renderTemplate(template: string, tokens: TemplateTokens): string {
+export function renderTemplate(
+  template: string,
+  tokens: TemplateTokens,
+): string {
   return template.replace(/\{([^{}]*)\}/g, (_, key: string) => {
     if (Object.prototype.hasOwnProperty.call(tokens, key)) {
       return sanitizeSegment(tokens[key] ?? "");
@@ -160,6 +163,6 @@ export const TEMPLATE_TOKENS: ReadonlyArray<{
   },
   {
     token: "{album_explicit}",
-    description: 'Same marker, but driven by the album-level flag',
+    description: "Same marker, but driven by the album-level flag",
   },
 ];
