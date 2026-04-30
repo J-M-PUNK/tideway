@@ -49,6 +49,7 @@ from app.audio.eq import (
     preset_bands as eq_preset_bands,
 )
 from app.audio.manifest_cache import ManifestCache
+from app.audio.output_devices import list_output_devices
 from app.audio.segment_reader import SegmentReader
 
 log = logging.getLogger(__name__)
@@ -957,144 +958,19 @@ class PCMPlayer:
     # --- Device selection -------------------------------------------
 
     def list_output_devices(self) -> list[dict]:
-        """Enumerate output-capable audio devices via sounddevice and
-        filter to the same set macOS System Settings → Sound → Output
-        shows.
+        """Enumerate output-capable audio devices for the picker UI.
 
-        Returns `[{"id": "<int-as-str>", "name": "<human>"}]`, with
-        an empty-id "System default" entry first.
+        Thin wrapper around `output_devices.list_output_devices`:
+        captures `stream_active` under the lock so the listing
+        function knows whether it's safe to re-init PortAudio
+        (which would tear down a live stream).
 
-        Refresh: PortAudio caches its CoreAudio device list at the
-        time of initialization. We terminate + re-initialize when
-        no stream is open so devices that connected after launch
-        (USB DACs, Bluetooth headphones) appear in the picker.
-        While a stream IS open, the macOS audio-route listener
-        (see `_on_audio_route_changed`) drives the refresh: any
-        device list change fires recovery, which terminates +
-        re-initializes PortAudio as part of reopening the stream.
-        So by the time the user opens the picker, PortAudio's
-        cache is already fresh — no in-place re-init needed here.
-
-        Each platform has its own filter, both grounded in the OS's
-        own visibility API rather than substring-name guesswork:
-
-        macOS — `app.audio.macos_audio_devices.visible_output_device_names`
-        asks CoreAudio for the OUTPUT-scope visibility property
-        macOS itself uses to build System Settings. Microsoft Teams
-        Audio, ZoomAudioDevice, BlackHole, microphones with no
-        output streams, and aggregate devices the user hasn't
-        enabled all return False on
-        `kAudioDevicePropertyDeviceCanBeDefaultDevice` and get
-        filtered. Real hardware (speakers, AirPods, USB DACs, HDMI,
-        AirPlay endpoints) returns True and passes.
-
-        Windows — PortAudio exposes the same physical device through
-        multiple host APIs (MME, DirectSound, WASAPI, WDM-KS) so
-        without filtering every speaker / DAC shows up four times,
-        and the MME / DirectSound entries also include devices the
-        user has DISABLED in Windows Sound settings (those backends
-        ignore device state). `_wasapi_host_api_index()` finds the
-        WASAPI host-api index and we skip every other host-api on
-        the way out, which both deduplicates and respects WASAPI's
-        IMMDevice DEVICE_STATE_ACTIVE filter.
-
-        Linux — only ALSA host API exists in the typical PortAudio
-        build, so the duplicate-host problem doesn't apply. No
-        filter is run; the picker shows whatever PortAudio
-        enumerates.
-
-        Logs the full enumeration via `[audio]` print lines so
-        users debugging "my headphones aren't showing up" can see
-        what PortAudio reports AND which entries each filter
-        accepted vs. rejected.
+        See `app/audio/output_devices.py` for per-platform filter
+        rationale and the picker payload shape.
         """
-        out: list[dict] = [{"id": "", "name": "System default"}]
         with self._lock:
             stream_active = self._stream is not None
-        if not stream_active:
-            try:
-                sd._terminate()
-            except Exception:
-                pass
-            try:
-                sd._initialize()
-            except Exception:
-                log.exception("sd._initialize after refresh failed")
-        try:
-            devices = sd.query_devices()
-        except Exception:
-            log.exception("sd.query_devices failed")
-            print(
-                "[audio] device enumeration failed — see traceback above",
-                flush=True,
-            )
-            return out
-
-        # macOS visibility set (None on non-darwin / on query failure
-        # — in which case we skip the macOS filter and let the
-        # platform-agnostic + Windows-WASAPI checks below decide).
-        visible = _macos_visible_output_names()
-        if visible is not None:
-            print(
-                f"[audio] CoreAudio reports {len(visible)} visible output "
-                f"device(s): {sorted(visible)!r}",
-                flush=True,
-            )
-
-        # Windows WASAPI host-api index (None on non-Windows / on
-        # query failure — we then fall through to "show every
-        # output-capable device", which is the right behavior on
-        # macOS/Linux anyway).
-        wasapi_idx = _wasapi_host_api_index()
-        if wasapi_idx is not None:
-            print(
-                f"[audio] WASAPI host-api index = {wasapi_idx}; "
-                "Windows picker will hide non-WASAPI entries",
-                flush=True,
-            )
-
-        print(
-            f"[audio] PortAudio enumerated {len(devices)} device(s) "
-            f"(stream_active={stream_active}):",
-            flush=True,
-        )
-        for i, d in enumerate(devices):
-            ch_in = int(d.get("max_input_channels", 0) or 0)
-            ch_out = int(d.get("max_output_channels", 0) or 0)
-            try:
-                ha_name = sd.query_hostapis(d["hostapi"])["name"]
-            except Exception:
-                ha_name = f"hostapi={d.get('hostapi')}"
-            name = d.get("name") or f"Device {i}"
-            kind = "OUT" if ch_out > 0 else ("IN " if ch_in > 0 else "?  ")
-
-            if ch_out > 0:
-                # Two filters, OR'd into a single accept decision.
-                # On macOS the visibility set is the only signal;
-                # on Windows the WASAPI host-api index is. On Linux
-                # both are None and every output-capable device
-                # passes.
-                accepted = True
-                if visible is not None and name not in visible:
-                    accepted = False
-                if (
-                    wasapi_idx is not None
-                    and d.get("hostapi") != wasapi_idx
-                ):
-                    accepted = False
-                tag = "OUT " if accepted else "HIDE"
-            else:
-                accepted = False
-                tag = kind
-
-            print(
-                f"[audio]   [{i:2d}] {tag} ch={ch_out}/{ch_in} "
-                f"hostapi={ha_name!r} name={name!r}",
-                flush=True,
-            )
-            if accepted:
-                out.append({"id": str(i), "name": name})
-        return out
+        return list_output_devices(stream_active)
 
     def set_output_device(self, device_id: str) -> None:
         """Remember the device-id selection and, if a stream is
@@ -2517,50 +2393,6 @@ def _safe_int(v: object) -> Optional[int]:
         return int(v)
     except (TypeError, ValueError):
         return None
-
-
-def _macos_visible_output_names() -> Optional[set[str]]:
-    """Thin wrapper around the CoreAudio query so this module
-    doesn't pay an import cost on non-darwin and so a missing
-    framework dlopen is logged once rather than on every picker
-    open. Returns None on failure / non-darwin."""
-    if sys.platform != "darwin":
-        return None
-    try:
-        from app.audio.macos_audio_devices import (
-            visible_output_device_names,
-        )
-    except Exception:
-        log.exception("macos_audio_devices import failed; falling back")
-        return None
-    try:
-        return visible_output_device_names()
-    except Exception:
-        log.exception("visible_output_device_names raised; falling back")
-        return None
-
-
-def _wasapi_host_api_index() -> Optional[int]:
-    """Return the PortAudio host-api index for WASAPI on Windows, or
-    None on every other platform / when WASAPI isn't built into this
-    PortAudio.
-
-    Used by `list_output_devices()` to filter out the duplicate
-    listings PortAudio creates when the same physical device is
-    exposed via MME, DirectSound, WASAPI, and WDM-KS — and to skip
-    devices the user has disabled in Windows Sound settings, which
-    the older host APIs still enumerate but WASAPI doesn't.
-    """
-    if sys.platform != "win32":
-        return None
-    try:
-        for idx, ha in enumerate(sd.query_hostapis()):
-            name = (ha.get("name") or "").lower()
-            if name == "windows wasapi" or "wasapi" in name:
-                return idx
-    except Exception:
-        log.exception("query_hostapis failed; falling back to all-host-API listing")
-    return None
 
 
 def _normalize_codec(raw: object) -> Optional[str]:
