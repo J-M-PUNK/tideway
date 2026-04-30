@@ -157,6 +157,32 @@ export const api = {
     req<{ ok: boolean; reason?: string }>("/api/_internal/mini_player", {
       method: "POST",
     }),
+  /** Integrated window chrome — drives the React-rendered titlebar on
+   *  Windows where the native min/max/close buttons are suppressed.
+   *  `info` is fetched once on mount; the action endpoints reach the
+   *  pywebview window via callbacks registered by desktop.py. */
+  window: {
+    info: () =>
+      req<{
+        ok: boolean;
+        platform?: "win32" | "darwin" | "linux" | string;
+        frameless?: boolean;
+        maximized?: boolean;
+        launcher?: boolean;
+        reason?: string;
+      }>("/api/_internal/window/info").catch(() => ({ ok: false as const })),
+    minimize: () =>
+      req<{ ok: boolean }>("/api/_internal/window/minimize", {
+        method: "POST",
+      }),
+    maximize: () =>
+      req<{ ok: boolean; maximized?: boolean }>(
+        "/api/_internal/window/maximize",
+        { method: "POST" },
+      ),
+    close: () =>
+      req<{ ok: boolean }>("/api/_internal/window/close", { method: "POST" }),
+  },
   /** Fire an OS-native notification. The frontend owns the decision
    *  of when to call this (only when window unfocused + pref enabled)
    *  because it has the full context. */
