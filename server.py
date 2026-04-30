@@ -717,6 +717,13 @@ app.add_middleware(
     allow_credentials=True,
 )
 
+# Per-domain routers extracted from the all-in-one server.py — see
+# `app/routers/__init__.py` for the playbook + which domains have
+# moved. New extractions add their `include_router` call here.
+from app.routers.autostart import router as autostart_router
+
+app.include_router(autostart_router)
+
 
 # ---------------------------------------------------------------------------
 # Serialization helpers
@@ -2114,9 +2121,6 @@ class _NotifyRequest(BaseModel):
     subtitle: Optional[str] = None
 
 
-class _AutostartRequest(BaseModel):
-    enabled: bool
-
 
 class _VideoDownloadRequest(BaseModel):
     quality: Optional[str] = None  # "HIGH" | "MEDIUM" | "LOW"
@@ -2214,26 +2218,8 @@ def video_downloads_list() -> list[dict]:
     return video_downloader.list_all()
 
 
-@app.get("/api/autostart")
-def autostart_status() -> dict:
-    """Report whether the app is registered to launch at login.
-
-    `available` is False in dev mode (no frozen exe path); the UI
-    grays out the toggle in that case.
-    """
-    _require_local_access()
-    from app import autostart
-    return autostart.status()
-
-
-@app.put("/api/autostart")
-def autostart_set(req: _AutostartRequest) -> dict:
-    _require_local_access()
-    from app import autostart
-    try:
-        return autostart.set_enabled(req.enabled)
-    except RuntimeError as exc:
-        raise HTTPException(status_code=500, detail=str(exc))
+# Autostart routes moved to `app/routers/autostart.py` — see that
+# module + `app/routers/__init__.py` for the splitting playbook.
 
 
 @app.post("/api/notify", include_in_schema=False)
