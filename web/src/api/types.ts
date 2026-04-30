@@ -159,6 +159,12 @@ export interface AlbumDetail extends Album {
 
 export interface ArtistDetail extends Artist {
   top_tracks: Track[];
+  /** Spotify-style mixed-format "Popular" row — top albums, EPs, and
+   *  singles ranked by popularity with a recency boost. Computed
+   *  server-side from the deduped discography. Capped at 12 so the
+   *  responsive single-row reflow always has more material than any
+   *  breakpoint will show. */
+  popular_releases: Album[];
   albums: Album[];
   ep_singles: Album[];
   appears_on: Album[];
