@@ -2,14 +2,21 @@ import { useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Loader2, Music, Search as SearchIcon } from "lucide-react";
 import { api } from "@/api/client";
-import type { SearchResponse, TopHit } from "@/api/types";
+import type {
+  Album,
+  Artist,
+  Playlist,
+  SearchResponse,
+  TopHit,
+} from "@/api/types";
 import type { OnDownload } from "@/api/download";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
-import { Grid, SectionHeader } from "@/components/Grid";
+import { Grid, SectionHeader, ViewMoreLink } from "@/components/Grid";
 import { MediaCard } from "@/components/MediaCard";
 import { TopHitCard } from "@/components/TopHitCard";
 import { TrackList } from "@/components/TrackList";
 import { EmptyState } from "@/components/EmptyState";
+import { useColumnCount } from "@/hooks/useColumnCount";
 import {
   FormatFilter,
   type AudioFormat,
@@ -18,29 +25,52 @@ import {
 } from "@/components/FormatFilter";
 
 type Filter = "all" | "tracks" | "albums" | "artists" | "playlists";
+const FILTERS: Filter[] = ["all", "tracks", "albums", "artists", "playlists"];
+
+function asFilter(v: string | null): Filter {
+  return FILTERS.includes(v as Filter) ? (v as Filter) : "all";
+}
+
+/** Build a /search URL preserving the current query and pinning the
+ *  given tab. "all" omits the tab param so the canonical landing URL
+ *  stays clean. */
+function tabUrl(q: string, tab: Filter): string {
+  const p = new URLSearchParams();
+  if (q) p.set("q", q);
+  if (tab !== "all") p.set("tab", tab);
+  const qs = p.toString();
+  return `/search${qs ? `?${qs}` : ""}`;
+}
 
 /**
  * Search page layout
  * ------------------
  * On the "All" tab we render a Spotify-style hero row at the top:
  * Top Result (Tidal-nominated best match) on the left, Songs column on
- * the right. Below the hero we keep the existing per-type rows in
- * order Artists → Albums → Playlists. The hero hides when the user
+ * the right. Below the hero, Artists / Albums / Playlists each show
+ * one row of cards (clipped to whatever fits the viewport) with a
+ * "View more" link that flips the tab. The hero hides when the user
  * picks a specific tab — that view is meant to be a single dense list
  * of one kind, not a curated landing.
+ *
+ * The tab itself lives in the URL (`?tab=…`) so clicking "View more"
+ * is a real navigation, the tab survives a refresh, and the back
+ * button works the way users expect.
  */
 
 export function Search({ onDownload }: { onDownload: OnDownload }) {
-  // The query lives in the URL so the NavBar's search input and this
-  // page stay in sync. Typing into either updates ?q=<value> and this
-  // page re-fetches whenever that value changes.
-  const [params] = useSearchParams();
+  // The query and tab both live in the URL so the NavBar's search
+  // input, the View-more links, and this page stay in sync. Typing
+  // into the NavBar updates ?q=<value>; clicking a tab or View-more
+  // updates ?tab=<filter>.
+  const [params, setParams] = useSearchParams();
   const q = params.get("q") ?? "";
+  const filter = asFilter(params.get("tab"));
   const [results, setResults] = useState<SearchResponse | null>(null);
   const [loading, setLoading] = useState(false);
-  const [filter, setFilter] = useState<Filter>("all");
   const [format, setFormat] = useState<AudioFormat>("all");
   const debounceRef = useRef<number | null>(null);
+  const cols = useColumnCount();
 
   useEffect(() => {
     if (debounceRef.current !== null) window.clearTimeout(debounceRef.current);
@@ -68,6 +98,15 @@ export function Search({ onDownload }: { onDownload: OnDownload }) {
         window.clearTimeout(debounceRef.current);
     };
   }, [q]);
+
+  const onTabChange = (next: Filter) => {
+    const p = new URLSearchParams(params);
+    if (next === "all") p.delete("tab");
+    else p.set("tab", next);
+    // Replace, not push — clicking through tabs shouldn't pollute
+    // history with one entry per tab the way an explicit nav would.
+    setParams(p, { replace: true });
+  };
 
   const filteredTracks =
     results && format !== "all"
@@ -100,16 +139,6 @@ export function Search({ onDownload }: { onDownload: OnDownload }) {
       topHit !== null);
 
   const showAll = filter === "all";
-  const showTracks =
-    results && (showAll || filter === "tracks") && filteredTracks.length > 0;
-  const showAlbums =
-    results && (showAll || filter === "albums") && filteredAlbums.length > 0;
-  const showArtists =
-    results && (showAll || filter === "artists") && results.artists.length > 0;
-  const showPlaylists =
-    results &&
-    (showAll || filter === "playlists") &&
-    results.playlists.length > 0;
   const showFormatFilter =
     !!results &&
     (showAll || filter === "tracks" || filter === "albums") &&
@@ -129,13 +158,6 @@ export function Search({ onDownload }: { onDownload: OnDownload }) {
   const heroTracks = tracksWithoutTopHit.slice(0, 4);
   const showHero = showAll && (topHit !== null || heroTracks.length > 0);
 
-  // Don't double-render tracks: when the hero takes the first 4 (after
-  // the top-hit dedupe), the Tracks row below starts from there. When
-  // the hero is hidden, the row starts from 0 like before.
-  const tracksBelowHero = showHero
-    ? tracksWithoutTopHit.slice(heroTracks.length)
-    : filteredTracks;
-
   return (
     <div>
       {loading && (
@@ -146,7 +168,7 @@ export function Search({ onDownload }: { onDownload: OnDownload }) {
 
       {results && hasAny && (
         <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
-          <Tabs value={filter} onValueChange={(v) => setFilter(v as Filter)}>
+          <Tabs value={filter} onValueChange={(v) => onTabChange(v as Filter)}>
             <TabsList>
               <TabsTrigger value="all">All</TabsTrigger>
               <TabsTrigger value="tracks">Tracks</TabsTrigger>
@@ -192,35 +214,60 @@ export function Search({ onDownload }: { onDownload: OnDownload }) {
           )}
           {heroTracks.length > 0 && (
             <div>
-              <SectionHeader title="Songs" />
+              <div className="mb-4 mt-8 flex items-baseline justify-between gap-4">
+                <h2 className="text-2xl font-bold tracking-tight">Songs</h2>
+                {tracksWithoutTopHit.length > heroTracks.length && (
+                  <ViewMoreLink to={tabUrl(q, "tracks")} />
+                )}
+              </div>
               <TrackList tracks={heroTracks} onDownload={onDownload} />
             </div>
           )}
         </div>
       )}
 
-      {showTracks && tracksBelowHero.length > 0 && (
+      {/* Dedicated Tracks tab — full TrackList. (On the "All" tab the
+          tracks live inside the hero's Songs column instead.) */}
+      {filter === "tracks" && filteredTracks.length > 0 && (
         <>
-          <SectionHeader
-            title={showHero && showAll ? "More tracks" : "Tracks"}
-          />
-          <TrackList
-            tracks={tracksBelowHero.slice(0, filter === "tracks" ? 999 : 6)}
-            onDownload={onDownload}
-          />
+          <SectionHeader title="Tracks" />
+          <TrackList tracks={filteredTracks} onDownload={onDownload} />
         </>
       )}
-      {showArtists && (
+
+      {/* Per-type rows. On the "All" tab each section is one viewport
+          row + a "View more" link. On a dedicated tab the same data
+          renders as a full grid with no link (the user is already
+          drilled in). */}
+      {results && results.artists.length > 0 && showAll && (
+        <MediaRow
+          title="Artists"
+          items={results.artists}
+          cols={cols}
+          viewMoreTo={tabUrl(q, "artists")}
+        />
+      )}
+      {filter === "artists" && results && results.artists.length > 0 && (
         <>
           <SectionHeader title="Artists" />
           <Grid>
-            {results!.artists.map((a) => (
+            {results.artists.map((a) => (
               <MediaCard key={a.id} item={a} />
             ))}
           </Grid>
         </>
       )}
-      {showAlbums && (
+
+      {filteredAlbums.length > 0 && showAll && (
+        <MediaRow
+          title="Albums"
+          items={filteredAlbums}
+          cols={cols}
+          viewMoreTo={tabUrl(q, "albums")}
+          onDownload={onDownload}
+        />
+      )}
+      {filter === "albums" && filteredAlbums.length > 0 && (
         <>
           <SectionHeader title="Albums" />
           <Grid>
@@ -230,16 +277,62 @@ export function Search({ onDownload }: { onDownload: OnDownload }) {
           </Grid>
         </>
       )}
-      {showPlaylists && (
+
+      {results && results.playlists.length > 0 && showAll && (
+        <MediaRow
+          title="Playlists"
+          items={results.playlists}
+          cols={cols}
+          viewMoreTo={tabUrl(q, "playlists")}
+          onDownload={onDownload}
+        />
+      )}
+      {filter === "playlists" && results && results.playlists.length > 0 && (
         <>
           <SectionHeader title="Playlists" />
           <Grid>
-            {results!.playlists.map((p) => (
+            {results.playlists.map((p) => (
               <MediaCard key={p.id} item={p} onDownload={onDownload} />
             ))}
           </Grid>
         </>
       )}
+    </div>
+  );
+}
+
+/**
+ * One row of MediaCards clipped to the current breakpoint's column
+ * count, with a "View more" link in the header that drills into the
+ * dedicated tab. Mirrors the convention used on Home, Album,
+ * ArtistDetail, and Stats.
+ */
+function MediaRow<T extends Album | Artist | Playlist>({
+  title,
+  items,
+  cols,
+  viewMoreTo,
+  onDownload,
+}: {
+  title: string;
+  items: T[];
+  cols: number;
+  viewMoreTo: string;
+  onDownload?: OnDownload;
+}) {
+  const visible = items.slice(0, cols);
+  const hasMore = items.length > cols;
+  return (
+    <div>
+      <div className="mb-4 mt-8 flex items-baseline justify-between gap-4">
+        <h2 className="text-2xl font-bold tracking-tight">{title}</h2>
+        {hasMore && <ViewMoreLink to={viewMoreTo} />}
+      </div>
+      <Grid>
+        {visible.map((item) => (
+          <MediaCard key={item.id} item={item} onDownload={onDownload} />
+        ))}
+      </Grid>
     </div>
   );
 }
