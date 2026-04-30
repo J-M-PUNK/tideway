@@ -1279,12 +1279,22 @@ def main(argv: Optional[list[str]] = None) -> int:
         if sys.platform == "win32":
             try:
                 from app import window_chrome as _window_chrome
+                from app import window_controls as _window_controls_mod
 
                 def _on_shown_tint() -> None:
                     try:
                         hwnd = _window_chrome.find_pywebview_hwnd(window)
-                        if hwnd:
-                            _window_chrome.register_windows_hwnd(hwnd)
+                        if not hwnd:
+                            return
+                        _window_chrome.register_windows_hwnd(hwnd)
+                        # When the launcher created the window
+                        # frameless (Windows VS-Code-style chrome), the
+                        # OS no longer hands us drag or resize. Hook
+                        # WM_NCHITTEST + WM_NCCALCSIZE so the React
+                        # titlebar zone behaves like a native caption
+                        # row and the window edges accept resize.
+                        if use_frameless:
+                            _window_controls_mod.install_native_hit_test(hwnd)
                     except Exception:
                         # Anything in the lookup or DWM call going wrong
                         # leaves the OS-default titlebar — visible but
