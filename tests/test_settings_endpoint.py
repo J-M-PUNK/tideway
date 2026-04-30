@@ -163,3 +163,101 @@ def test_put_multiple_fields_in_one_request(client):
     assert body["exclusive_mode"] is True
     assert body["force_volume"] is True
     assert body["notify_on_track_change"] is True
+
+
+# ---------------------------------------------------------------------------
+# Settings <-> SettingsPayload sync guard
+#
+# When a new field lands on the `Settings` dataclass it has to land
+# on `SettingsPayload` too (or be explicitly excluded below) — Pydantic
+# drops unknown fields from PUT bodies, so a missing mirror means
+# values silently never reach the dataclass-construction step. The
+# allowlist-stripping bug at the top of this file came from exactly
+# this gap. The three tests below catch the regression at field-add
+# time so it can't reach a release.
+# ---------------------------------------------------------------------------
+
+
+# Fields on `Settings` that are *intentionally* not on
+# `SettingsPayload` because they're managed by their own dedicated
+# endpoints. Add to this set when you add a Settings field with
+# its own endpoint; remove when you wire a field through
+# PUT /api/settings. Each entry lists which endpoint owns the field.
+_FIELDS_MANAGED_ELSEWHERE: dict[str, str] = {
+    # Equalizer state — set via POST /api/player/eq + the preset
+    # endpoint. The general settings PUT can't go through the
+    # PCMPlayer's coefficient-rebuild path, so it stays out.
+    "eq_enabled": "/api/player/eq",
+    "eq_bands": "/api/player/eq",
+    "eq_preamp": "/api/player/eq",
+    # Output device — set via POST /api/player/output-device,
+    # which has to coordinate with stream replacement.
+    "audio_output_device": "/api/player/output-device",
+    # Spotify client_id — set via the Spotify importer page's
+    # own setup flow.
+    "spotify_client_id": "/api/spotify/client-id",
+}
+
+
+def test_every_settings_field_is_in_payload_or_explicitly_excluded():
+    """Every field on the `Settings` dataclass must either:
+      - exist on `SettingsPayload` (so PUT /api/settings accepts it), or
+      - appear in `_FIELDS_MANAGED_ELSEWHERE` (so it's intentionally
+        excluded because it has its own endpoint).
+
+    A field that's on neither is the foot-gun: PUTs silently drop
+    it and the toggle never works.
+    """
+    import dataclasses
+    from app.settings import Settings
+    from server import SettingsPayload
+
+    settings_fields = {f.name for f in dataclasses.fields(Settings)}
+    payload_fields = set(SettingsPayload.model_fields.keys())
+    excluded = set(_FIELDS_MANAGED_ELSEWHERE.keys())
+
+    missing = settings_fields - payload_fields - excluded
+    assert not missing, (
+        f"Settings fields not in SettingsPayload and not excluded: "
+        f"{sorted(missing)}. Either add them to SettingsPayload in "
+        f"server.py or list them in _FIELDS_MANAGED_ELSEWHERE here "
+        f"with the dedicated endpoint that owns them."
+    )
+
+
+def test_no_payload_fields_unknown_to_settings():
+    """Reverse direction: every `SettingsPayload` field must exist on
+    `Settings`. A typo in SettingsPayload would otherwise be silently
+    accepted by the PUT — the user would see a "200 OK" but the
+    field would never persist because the dataclass wouldn't know
+    about it."""
+    import dataclasses
+    from app.settings import Settings
+    from server import SettingsPayload
+
+    settings_fields = {f.name for f in dataclasses.fields(Settings)}
+    payload_fields = set(SettingsPayload.model_fields.keys())
+
+    stale = payload_fields - settings_fields
+    assert not stale, (
+        f"SettingsPayload has fields that don't exist on Settings: "
+        f"{sorted(stale)}. Either rename them to match Settings or "
+        f"remove them from SettingsPayload."
+    )
+
+
+def test_excluded_fields_are_actually_on_settings():
+    """Sanity check on `_FIELDS_MANAGED_ELSEWHERE` itself — if a
+    field gets renamed on Settings and we forget to update this
+    list, we'd be granting an exclusion to a field that no longer
+    exists, masking a real sync gap. Catch that here."""
+    import dataclasses
+    from app.settings import Settings
+
+    settings_fields = {f.name for f in dataclasses.fields(Settings)}
+    stale = set(_FIELDS_MANAGED_ELSEWHERE.keys()) - settings_fields
+    assert not stale, (
+        f"_FIELDS_MANAGED_ELSEWHERE references fields that don't "
+        f"exist on Settings: {sorted(stale)}. Update the exclusion "
+        f"list to match the dataclass."
+    )
