@@ -157,6 +157,59 @@ export const api = {
     req<{ ok: boolean; reason?: string }>("/api/_internal/mini_player", {
       method: "POST",
     }),
+  /** Integrated window chrome — drives the React-rendered titlebar on
+   *  Windows where the native min/max/close buttons are suppressed.
+   *  `info` is fetched once on mount; the action endpoints reach the
+   *  pywebview window via callbacks registered by desktop.py. */
+  window: {
+    info: () =>
+      req<{
+        ok: boolean;
+        platform?: "win32" | "darwin" | "linux" | string;
+        frameless?: boolean;
+        maximized?: boolean;
+        launcher?: boolean;
+        reason?: string;
+      }>("/api/_internal/window/info").catch(() => ({ ok: false as const })),
+    minimize: () =>
+      req<{ ok: boolean }>("/api/_internal/window/minimize", {
+        method: "POST",
+      }),
+    maximize: () =>
+      req<{ ok: boolean; maximized?: boolean }>(
+        "/api/_internal/window/maximize",
+        { method: "POST" },
+      ),
+    close: () =>
+      req<{ ok: boolean }>("/api/_internal/window/close", { method: "POST" }),
+    /** Start a native drag from the cursor's current position. The
+     *  React titlebar calls this on mousedown — WebView2 ignores
+     *  `app-region: drag`, so we route through Win32's move loop
+     *  via PostMessage(WM_NCLBUTTONDOWN, HTCAPTION) on the backend. */
+    startDrag: () =>
+      req<{ ok: boolean }>("/api/_internal/window/start_drag", {
+        method: "POST",
+      }),
+    /** Start a native resize loop in the given direction. Invisible
+     *  edge / corner hit strips on the React shell fire this on
+     *  mousedown — WS_THICKFRAME alone isn't enough because the
+     *  WebView2 child covers the NC resize zones. */
+    startResize: (
+      direction:
+        | "left"
+        | "right"
+        | "top"
+        | "bottom"
+        | "topleft"
+        | "topright"
+        | "bottomleft"
+        | "bottomright",
+    ) =>
+      req<{ ok: boolean }>("/api/_internal/window/start_resize", {
+        method: "POST",
+        body: JSON.stringify({ direction }),
+      }),
+  },
   /** Fire an OS-native notification. The frontend owns the decision
    *  of when to call this (only when window unfocused + pref enabled)
    *  because it has the full context. */

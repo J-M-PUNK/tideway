@@ -12,7 +12,7 @@ export function Login({ onLoggedIn }: { onLoggedIn: () => void }) {
   const [mode, setMode] = useState<Mode>("pkce");
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-background p-6">
+    <div className="flex min-h-full flex-1 items-center justify-center bg-background p-6">
       <div className="flex w-full max-w-md flex-col items-center gap-6 rounded-xl border border-border bg-card p-10 shadow-2xl">
         <img src="/app-icon.svg" alt="Tideway" className="h-16 w-16" />
         <div className="text-center">
