@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { PlayerSnapshot, StreamInfo, Track } from "@/api/types";
 import { api } from "@/api/client";
+import { useSleepTimer } from "./useSleepTimer";
 import { useUiPreferences, type StreamingQuality } from "./useUiPreferences";
 
 /**
@@ -1148,53 +1149,11 @@ export function usePlayer() {
     };
   }, []);
 
-  const sleepTimeoutRef = useRef<number | null>(null);
-  const sleepTickRef = useRef<number | null>(null);
-  const [sleepRemaining, setSleepRemaining] = useState<number | null>(null);
-
-  const clearSleepTimer = useCallback(() => {
-    if (sleepTimeoutRef.current !== null) {
-      window.clearTimeout(sleepTimeoutRef.current);
-      sleepTimeoutRef.current = null;
-    }
-    if (sleepTickRef.current !== null) {
-      window.clearTimeout(sleepTickRef.current);
-      sleepTickRef.current = null;
-    }
-    endOfTrackPendingRef.current = false;
-    setSleepRemaining(null);
-  }, []);
-
-  useEffect(() => clearSleepTimer, [clearSleepTimer]);
-
-  const setSleepTimer = useCallback(
-    (minutes: number | "end-of-track" | null) => {
-      clearSleepTimer();
-      if (minutes === null) return;
-      if (minutes === "end-of-track") {
-        endOfTrackPendingRef.current = true;
-        setSleepRemaining(-1);
-        return;
-      }
-      const ms = minutes * 60 * 1000;
-      const fireAt = Date.now() + ms;
-      setSleepRemaining(ms);
-      sleepTimeoutRef.current = window.setTimeout(() => {
-        void api.player.pause().catch(() => {});
-        clearSleepTimer();
-      }, ms);
-      const tick = () => {
-        const left = fireAt - Date.now();
-        if (left <= 0) {
-          sleepTickRef.current = null;
-          return;
-        }
-        setSleepRemaining(left);
-        sleepTickRef.current = window.setTimeout(tick, 1000);
-      };
-      sleepTickRef.current = window.setTimeout(tick, 1000);
-    },
-    [clearSleepTimer],
+  // Sleep-timer state machine. Owned by useSleepTimer; we hand it
+  // the endOfTrackPendingRef so the "stop at end of track" mode
+  // can flip the flag advanceRef checks.
+  const { sleepRemaining, setSleepTimer, clearSleepTimer } = useSleepTimer(
+    endOfTrackPendingRef,
   );
 
   // Append to the end of the queue. Always appends — duplicates pass
