@@ -9,6 +9,8 @@ import {
 import { Loader2 } from "lucide-react";
 import { Sidebar } from "@/components/Sidebar";
 import { NavBar } from "@/components/NavBar";
+import { WindowTitlebar } from "@/components/WindowTitlebar";
+import { WindowResizeEdges } from "@/components/WindowResizeEdges";
 import { OfflineBanner } from "@/components/OfflineBanner";
 import { TidalBackoffBanner } from "@/components/TidalBackoffBanner";
 import { UpdateBanner } from "@/components/UpdateBanner";
@@ -158,6 +160,13 @@ export default function App() {
   // its initial render). ToastProvider sits above it so the fallback
   // doesn't try to emit a toast into nothing if some rarely-hit
   // cleanup path throws.
+  //
+  // The outermost flex column reserves the top row for the
+  // integrated window chrome (custom min/max/close on Windows; an
+  // empty 28px spacer on macOS where the native traffic lights live;
+  // nothing in plain-browser dev mode). Everything below that runs
+  // in `flex-1 min-h-0` so the existing layouts can keep using
+  // `h-full` to fill their slot.
   return (
     <ToastProvider>
       <ErrorBoundary fullScreen>
@@ -170,7 +179,13 @@ export default function App() {
                     <MyPlaylistsProvider>
                       <RecentsProvider>
                         <VideoDownloadsProvider>
-                          <AppInner />
+                          <div className="flex h-screen flex-col bg-background">
+                            <WindowTitlebar />
+                            <div className="flex min-h-0 flex-1 flex-col">
+                              <AppInner />
+                            </div>
+                            <WindowResizeEdges />
+                          </div>
                         </VideoDownloadsProvider>
                       </RecentsProvider>
                     </MyPlaylistsProvider>
@@ -194,7 +209,7 @@ function AppInner() {
   // straight in offline mode.
   if (auth.loading || offline === null) {
     return (
-      <div className="flex h-screen items-center justify-center text-muted-foreground">
+      <div className="flex flex-1 items-center justify-center text-muted-foreground">
         <Loader2 className="h-5 w-5 animate-spin" />
       </div>
     );
@@ -453,7 +468,7 @@ function Shell({
   );
 
   return (
-    <div className="flex h-screen flex-col bg-background">
+    <div className="flex h-full flex-col bg-background">
       <div className="flex min-h-0 flex-1 gap-2 p-2 pb-0">
         <Sidebar
           // Active count = music + video jobs currently downloading.
