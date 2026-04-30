@@ -723,9 +723,11 @@ app.add_middleware(
 # moved. New extractions add their `include_router` call here.
 from app.routers.autostart import router as autostart_router
 from app.routers.hotkey import router as hotkey_router
+from app.routers.notify import router as notify_router
 
 app.include_router(autostart_router)
 app.include_router(hotkey_router)
+app.include_router(notify_router)
 
 
 # ---------------------------------------------------------------------------
@@ -2118,12 +2120,6 @@ def window_start_resize(req: _WindowResizeRequest, request: Request) -> dict:
         return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
 
 
-class _NotifyRequest(BaseModel):
-    title: str
-    body: str
-    subtitle: Optional[str] = None
-
-
 
 class _VideoDownloadRequest(BaseModel):
     quality: Optional[str] = None  # "HIGH" | "MEDIUM" | "LOW"
@@ -2225,26 +2221,7 @@ def video_downloads_list() -> list[dict]:
 # module + `app/routers/__init__.py` for the splitting playbook.
 
 
-@app.post("/api/notify", include_in_schema=False)
-def fire_notification(req: _NotifyRequest, request: Request) -> dict:
-    """Fire an OS-level notification. Loopback-only.
-
-    The frontend owns the "should I notify?" decision because it has
-    the context the backend doesn't — track title/artist, whether the
-    window is focused, which user preference is set. The server is
-    just a thin shim that exposes the platform-specific notification
-    shell so this can run from inside a sandbox where the browser
-    Notification API isn't available (pywebview's WKWebView doesn't
-    surface it as system-level).
-    """
-    client = request.client
-    host = client.host if client else ""
-    if host not in ("127.0.0.1", "::1", "localhost"):
-        raise HTTPException(status_code=403)
-    from app.notify import notify as _notify
-    _notify(req.title, req.body, req.subtitle)
-    return {"ok": True}
-
+# /api/notify route moved to `app/routers/notify.py`.
 
 @app.get("/api/auth/status")
 def auth_status() -> dict:
