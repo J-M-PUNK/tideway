@@ -4963,7 +4963,7 @@ async def player_events(request: Request):
 def search(q: str, limit: int = 25) -> dict:
     _require_auth()
     if not q.strip():
-        return {"tracks": [], "albums": [], "artists": [], "playlists": []}
+        return {"top_hit": None, "tracks": [], "albums": [], "artists": [], "playlists": []}
     limit = max(1, min(limit, 100))
     try:
         results = tidal.search(q, limit=limit)
@@ -4974,11 +4974,33 @@ def search(q: str, limit: int = 25) -> dict:
     albums = filter_explicit_dupes(results.get("albums", []), pref, kind="album")
     artists = _rerank_artists(q, list(results.get("artists", [])))
     return {
+        "top_hit": _top_hit_to_dict(results.get("top_hit")),
         "tracks": [track_to_dict(t) for t in tracks],
         "albums": [album_to_dict(a) for a in albums],
         "artists": [artist_to_dict(a) for a in artists],
         "playlists": [playlist_to_dict(p) for p in results.get("playlists", [])],
     }
+
+
+def _top_hit_to_dict(top_hit) -> Optional[dict]:
+    """Serialize Tidal's `top_hit` — the single most-relevant result it
+    nominates — to one of the standard *_to_dict shapes. Returns None
+    when Tidal didn't pick one (uncommon for popular queries, common
+    for typos) or when the hit is a type we don't render (Video).
+
+    We deliberately don't dedupe against the per-type sections: the
+    Spotify-style hero card and its row representation co-exist."""
+    if top_hit is None:
+        return None
+    if isinstance(top_hit, tidalapi.Track):
+        return track_to_dict(top_hit)
+    if isinstance(top_hit, tidalapi.Album):
+        return album_to_dict(top_hit)
+    if isinstance(top_hit, tidalapi.Artist):
+        return artist_to_dict(top_hit)
+    if isinstance(top_hit, tidalapi.Playlist):
+        return playlist_to_dict(top_hit)
+    return None
 
 
 def _rerank_artists(query: str, artists: list) -> list:

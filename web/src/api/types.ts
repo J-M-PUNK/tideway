@@ -142,7 +142,14 @@ export interface PlayerSnapshot {
   force_volume?: boolean;
 }
 
+/** Tidal-nominated single most-relevant result. Discriminated by the
+ *  `kind` field already present on every entity. Null when Tidal
+ *  didn't pick one (uncommon for popular queries, common for typos)
+ *  or when the hit is a type we don't surface (Video). */
+export type TopHit = Track | Album | Artist | Playlist;
+
 export interface SearchResponse {
+  top_hit: TopHit | null;
   tracks: Track[];
   albums: Album[];
   artists: Artist[];
