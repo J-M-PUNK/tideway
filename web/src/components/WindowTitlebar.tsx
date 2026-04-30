@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api } from "@/api/client";
 
 /**
@@ -59,6 +59,16 @@ export function WindowTitlebar() {
     ...DEFAULT_INFO,
     platform: inferPlatformFromUA(),
   }));
+  // Last-mousedown tracker for manual double-click detection — see
+  // `onTitlebarMouseDown` below for why we can't use React's
+  // built-in onDoubleClick. Lives at the top of the component so
+  // it's called unconditionally on every render, regardless of
+  // which platform branch returns early further down.
+  const lastMouseDownRef = useRef<{ t: number; x: number; y: number }>({
+    t: 0,
+    x: 0,
+    y: 0,
+  });
 
   useEffect(() => {
     let cancelled = false;
@@ -145,31 +155,42 @@ export function WindowTitlebar() {
   // Drag handler. WebView2 silently ignores `-webkit-app-region: drag`
   // (it's a Chromium-Apps feature, not stock Chromium), so on
   // mousedown we hand off to a backend endpoint that runs Win32's
-  // move loop directly. Skip when the click target is inside a
-  // button — those nest in the titlebar div but should fire their
-  // onClick instead of starting a drag — and skip non-primary
-  // buttons so right-click / middle-click can still bubble for
-  // future system-menu wiring.
+  // move loop directly. Once the OS enters that loop it swallows
+  // the matching mouseup before the browser sees it, which means
+  // React's onDoubleClick never fires — the second mousedown looks
+  // like a brand-new first click. Detect double-click manually by
+  // tracking the last mousedown timestamp + position; on the second
+  // mousedown within ~500 ms and within a few pixels, route to
+  // maximize instead of drag. Same threshold the OS uses for its
+  // own caption double-click.
+  const DOUBLE_CLICK_MS = 500;
+  const DOUBLE_CLICK_PX = 4;
   const onTitlebarMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
     if (e.button !== 0) return;
     const target = e.target as HTMLElement;
     if (target.closest("button")) return;
     e.preventDefault();
+    const now = performance.now();
+    const last = lastMouseDownRef.current;
+    const isDoubleClick =
+      now - last.t < DOUBLE_CLICK_MS &&
+      Math.abs(e.clientX - last.x) <= DOUBLE_CLICK_PX &&
+      Math.abs(e.clientY - last.y) <= DOUBLE_CLICK_PX;
+    lastMouseDownRef.current = { t: now, x: e.clientX, y: e.clientY };
+    if (isDoubleClick) {
+      // Reset so a third quick click doesn't double-toggle.
+      lastMouseDownRef.current = { t: 0, x: 0, y: 0 };
+      api.window
+        .maximize()
+        .then((res) => {
+          if (typeof res.maximized === "boolean") {
+            setInfo((prev) => ({ ...prev, maximized: res.maximized! }));
+          }
+        })
+        .catch(() => {});
+      return;
+    }
     api.window.startDrag().catch(() => {});
-  };
-  // Double-click toggles maximize, matching the OS-drawn title bar's
-  // behavior. Same target filter as drag.
-  const onTitlebarDoubleClick = (e: React.MouseEvent<HTMLDivElement>) => {
-    const target = e.target as HTMLElement;
-    if (target.closest("button")) return;
-    api.window
-      .maximize()
-      .then((res) => {
-        if (typeof res.maximized === "boolean") {
-          setInfo((prev) => ({ ...prev, maximized: res.maximized! }));
-        }
-      })
-      .catch(() => {});
   };
 
   return (
@@ -177,7 +198,6 @@ export function WindowTitlebar() {
       className="flex select-none items-center bg-background text-foreground"
       style={{ height: 32 }}
       onMouseDown={onTitlebarMouseDown}
-      onDoubleClick={onTitlebarDoubleClick}
     >
       <div className="flex items-center gap-2 pl-3 text-xs font-medium opacity-70">
         Tideway

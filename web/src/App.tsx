@@ -10,6 +10,7 @@ import { Loader2 } from "lucide-react";
 import { Sidebar } from "@/components/Sidebar";
 import { NavBar } from "@/components/NavBar";
 import { WindowTitlebar } from "@/components/WindowTitlebar";
+import { WindowResizeEdges } from "@/components/WindowResizeEdges";
 import { OfflineBanner } from "@/components/OfflineBanner";
 import { TidalBackoffBanner } from "@/components/TidalBackoffBanner";
 import { UpdateBanner } from "@/components/UpdateBanner";
@@ -183,6 +184,7 @@ export default function App() {
                             <div className="flex min-h-0 flex-1 flex-col">
                               <AppInner />
                             </div>
+                            <WindowResizeEdges />
                           </div>
                         </VideoDownloadsProvider>
                       </RecentsProvider>
