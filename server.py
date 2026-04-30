@@ -2053,6 +2053,24 @@ def window_close(request: Request) -> dict:
         return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
 
 
+@app.post("/api/_internal/window/start_drag", include_in_schema=False)
+def window_start_drag(request: Request) -> dict:
+    """Hand the window over to the OS's native move loop. The React
+    titlebar fires this on mousedown so the user can drag the window
+    by its custom-drawn caption row — WebView2 doesn't honor
+    `-webkit-app-region: drag` and the WebView2 child window
+    swallows the mousedown that would otherwise reach a parent-
+    window WM_NCHITTEST handler, so we route through this endpoint
+    and let Win32 take over."""
+    _ensure_loopback(request)
+    try:
+        from app import window_controls
+        ok = window_controls.start_window_drag()
+        return {"ok": ok}
+    except Exception as exc:
+        return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+
+
 class _NotifyRequest(BaseModel):
     title: str
     body: str

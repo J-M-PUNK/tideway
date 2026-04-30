@@ -176,41 +176,34 @@ def close() -> bool:
 # ---------------------------------------------------------------------------
 # Native drag + resize for the frameless Windows shell.
 #
-# The React titlebar's `app-region: drag` doesn't work in WebView2 —
-# that CSS rule is a Chromium-Apps feature, not stock Chromium, and
-# WebView2 silently ignores it. And `frameless=True` strips the
-# resize border entirely. Together that means a frameless pywebview
-# window on Windows is, by default, neither draggable nor resizable.
+# Two real problems blocking drag and resize on a frameless pywebview
+# window. They each need a different fix because the WebView2 child
+# window owns mouse events for the entire client area:
 #
-# The fix is to handle this at the Win32 level: subclass the
-# WindowProc, add WS_THICKFRAME back so the OS recognises the window
-# as resizable, override WM_NCHITTEST to declare which screen
-# rectangles are caption (drag) vs resize-edge vs client, and
-# override WM_NCCALCSIZE so the OS doesn't paint the standard thick
-# frame on top of our content. This is the same pattern Electron,
-# VS Code, and Discord use for their frameless title bars.
+#   Resize: pywebview's `frameless=True` strips both WS_CAPTION and
+#     WS_THICKFRAME. Without WS_THICKFRAME the OS doesn't think the
+#     window is resizable at all — there's no edge zone for the
+#     cursor to grab. Restoring WS_THICKFRAME via SetWindowLong gets
+#     us the OS's native resize border back. Visible cost: a thin
+#     gray edge (~6 px) around the window. Functional gain: the
+#     resize cursor + drag-to-resize work on every edge, plus
+#     drag-to-edge snap and Aero Shake re-engage because the OS
+#     sees a normal resizable top-level window again.
 #
-# All numeric zones (titlebar height, button area width, resize
-# border) are scaled to the window's DPI so they stay correct on
-# high-DPI displays.
+#   Drag: WebView2 silently ignores `-webkit-app-region: drag`
+#     (it's a Chromium-Apps feature, not stock Chromium), and the
+#     WebView2 child window covers the entire client area, so
+#     subclassing the parent's WndProc to return HTCAPTION from
+#     WM_NCHITTEST never fires for cursor positions inside the React
+#     titlebar — those events all go to the child. The standard
+#     escape hatch is the ReleaseCapture + SendMessage(WM_SYSCOMMAND,
+#     SC_MOVE | HTCAPTION) trick: JS calls a Python endpoint on
+#     mousedown, Python tells the OS "treat this as a caption click
+#     starting a move," and the OS runs the move loop directly off
+#     the cursor's current position. This is what Tauri ships for
+#     its custom titlebars.
 # ---------------------------------------------------------------------------
 
-# Hit-test response codes (winuser.h).
-_HTCLIENT = 1
-_HTCAPTION = 2
-_HTLEFT = 10
-_HTRIGHT = 11
-_HTTOP = 12
-_HTTOPLEFT = 13
-_HTTOPRIGHT = 14
-_HTBOTTOM = 15
-_HTBOTTOMLEFT = 16
-_HTBOTTOMRIGHT = 17
-
-_WM_NCCALCSIZE = 0x0083
-_WM_NCHITTEST = 0x0084
-
-_GWLP_WNDPROC = -4
 _GWL_STYLE = -16
 _WS_THICKFRAME = 0x00040000
 
@@ -219,38 +212,22 @@ _SWP_NOSIZE = 0x0001
 _SWP_NOZORDER = 0x0004
 _SWP_FRAMECHANGED = 0x0020
 
-# Zones expressed in CSS pixels (96 DPI). Scaled at hit-test time
-# against the window's actual DPI. The titlebar height MUST stay in
-# sync with WindowTitlebar.tsx — that React component reserves the
-# top 32 px for the drag bar and the right 138 px (3 buttons × 46 px)
-# for min/max/close. If those numbers move, update the constants
-# below or the buttons stop accepting clicks.
-_CAPTION_HEIGHT_CSS_PX = 32
-_BUTTON_ZONE_WIDTH_CSS_PX = 138
-_RESIZE_BORDER_CSS_PX = 6
-
-# Module-level state for the hook. We hold the WNDPROC callable so
-# Python's GC doesn't free it while Windows still has its function
-# pointer, and we hold the previous WndProc address so our handler
-# can forward unhandled messages.
-_subclass_wndproc = None
-_prev_wndproc: int = 0
-_subclassed_hwnd: int = 0
+_WM_SYSCOMMAND = 0x0112
+_HTCAPTION = 2
+_SC_MOVE = 0xF010
 
 
-def install_native_hit_test(hwnd: int) -> bool:
-    """Make a frameless pywebview window draggable and resizable
-    using native Win32 hit testing.
+def enable_native_resize(hwnd: int) -> bool:
+    """Add WS_THICKFRAME to a frameless pywebview window so the OS
+    redraws the resize border and accepts drag-to-resize on every
+    edge.
 
-    Returns True when the hook is installed, False on non-Windows or
-    if the HWND can't be subclassed. Idempotent — calling twice on
-    the same HWND no-ops.
+    Idempotent — adding the style when it's already present is a
+    no-op. Returns False on non-Windows or if the style mutation
+    fails (extremely unlikely with a valid HWND).
     """
-    global _subclass_wndproc, _prev_wndproc, _subclassed_hwnd
     if sys.platform != "win32" or not hwnd:
         return False
-    if _subclassed_hwnd == hwnd and _subclass_wndproc is not None:
-        return True
     try:
         import ctypes
         from ctypes import wintypes
@@ -258,13 +235,6 @@ def install_native_hit_test(hwnd: int) -> bool:
         return False
 
     user32 = ctypes.windll.user32
-
-    # Restore WS_THICKFRAME. pywebview's frameless mode strips it
-    # along with WS_CAPTION; without it Windows doesn't recognise the
-    # window as resizable even when WM_NCHITTEST returns HTLEFT/etc.
-    # We don't add WS_CAPTION back — the React titlebar is the title
-    # bar — and WM_NCCALCSIZE below collapses the thick-frame visual
-    # so the user never sees a stray border.
     try:
         get_long = user32.GetWindowLongW
         get_long.argtypes = [wintypes.HWND, ctypes.c_int]
@@ -272,129 +242,16 @@ def install_native_hit_test(hwnd: int) -> bool:
         set_long = user32.SetWindowLongW
         set_long.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_long]
         set_long.restype = ctypes.c_long
-        cur_style = get_long(hwnd, _GWL_STYLE)
-        set_long(hwnd, _GWL_STYLE, cur_style | _WS_THICKFRAME)
+        cur = get_long(hwnd, _GWL_STYLE)
+        if cur & _WS_THICKFRAME:
+            return True
+        set_long(hwnd, _GWL_STYLE, cur | _WS_THICKFRAME)
     except Exception:
         return False
 
-    # Window-proc callable signature: LRESULT(HWND, UINT, WPARAM, LPARAM).
-    WNDPROC = ctypes.WINFUNCTYPE(
-        ctypes.c_long,
-        wintypes.HWND,
-        wintypes.UINT,
-        wintypes.WPARAM,
-        wintypes.LPARAM,
-    )
-
-    def _scale(hwnd_arg: int) -> float:
-        # GetDpiForWindow exists from Windows 10 1607+. Older versions
-        # fall back to 96 (no scaling) — those builds are out of
-        # support so the degraded behaviour is acceptable.
-        try:
-            get_dpi = user32.GetDpiForWindow
-            get_dpi.argtypes = [wintypes.HWND]
-            get_dpi.restype = wintypes.UINT
-            dpi = int(get_dpi(hwnd_arg))
-            return (dpi / 96.0) if dpi > 0 else 1.0
-        except Exception:
-            return 1.0
-
-    def _hit_test(hwnd_arg: int, screen_x: int, screen_y: int) -> int:
-        rect = wintypes.RECT()
-        if not user32.GetWindowRect(hwnd_arg, ctypes.byref(rect)):
-            return _HTCLIENT
-        rel_x = screen_x - rect.left
-        rel_y = screen_y - rect.top
-        width = rect.right - rect.left
-        height = rect.bottom - rect.top
-        scale = _scale(hwnd_arg)
-        border = max(1, int(round(_RESIZE_BORDER_CSS_PX * scale)))
-        cap_h = max(1, int(round(_CAPTION_HEIGHT_CSS_PX * scale)))
-        btn_w = max(1, int(round(_BUTTON_ZONE_WIDTH_CSS_PX * scale)))
-
-        # Resize edges only when the window isn't maximised — a
-        # maximised window shouldn't accept resize-from-edge.
-        is_max = bool(user32.IsZoomed(hwnd_arg))
-        if not is_max:
-            on_left = rel_x < border
-            on_right = rel_x >= width - border
-            on_top = rel_y < border
-            on_bottom = rel_y >= height - border
-            if on_top and on_left:
-                return _HTTOPLEFT
-            if on_top and on_right:
-                return _HTTOPRIGHT
-            if on_bottom and on_left:
-                return _HTBOTTOMLEFT
-            if on_bottom and on_right:
-                return _HTBOTTOMRIGHT
-            if on_left:
-                return _HTLEFT
-            if on_right:
-                return _HTRIGHT
-            if on_top:
-                return _HTTOP
-            if on_bottom:
-                return _HTBOTTOM
-
-        # Caption (drag) zone: top of the client area, minus the
-        # button strip on the right. Returning HTCLIENT for the button
-        # strip lets WebView2 receive the click and fire the React
-        # button's onClick.
-        if rel_y < cap_h and rel_x < width - btn_w:
-            return _HTCAPTION
-
-        return _HTCLIENT
-
-    def _wnd_proc(hwnd_arg, msg, wparam, lparam):
-        if msg == _WM_NCCALCSIZE and wparam:
-            # Returning 0 with the rgrc[0] rect unchanged tells
-            # Windows the client area equals the whole window rect,
-            # which collapses the WS_THICKFRAME visual to zero. The
-            # frame still exists for hit testing, so resize edges
-            # work — the user just doesn't see a stray border.
-            return 0
-        if msg == _WM_NCHITTEST:
-            # lParam packs the cursor's screen coords as (y << 16) | x,
-            # interpreted as 16-bit signed. Use ctypes.c_short to
-            # decode the sign bit on multi-monitor setups where
-            # secondary monitors can have negative coords.
-            x = ctypes.c_short(lparam & 0xFFFF).value
-            y = ctypes.c_short((lparam >> 16) & 0xFFFF).value
-            return _hit_test(hwnd_arg, x, y)
-        # Forward everything else to the original WndProc so
-        # WebView2's input handling, focus, paint, etc. all keep
-        # working.
-        return user32.CallWindowProcW(
-            _prev_wndproc, hwnd_arg, msg, wparam, lparam
-        )
-
-    # SetWindowLongPtrW is the 64-bit-safe version of SetWindowLongW
-    # for setting a WndProc. On 32-bit Python (rare on modern
-    # Windows) the symbol may be absent — fall through to the 32-bit
-    # variant in that case.
-    try:
-        set_ptr = user32.SetWindowLongPtrW
-        set_ptr.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_void_p]
-        set_ptr.restype = ctypes.c_void_p
-    except AttributeError:
-        set_ptr = user32.SetWindowLongW
-        set_ptr.argtypes = [wintypes.HWND, ctypes.c_int, ctypes.c_long]
-        set_ptr.restype = ctypes.c_long
-
-    new_wndproc = WNDPROC(_wnd_proc)
-    proc_addr = ctypes.cast(new_wndproc, ctypes.c_void_p).value
-    prev = set_ptr(hwnd, _GWLP_WNDPROC, proc_addr)
-    if not prev:
-        return False
-    _subclass_wndproc = new_wndproc  # keep alive across GC
-    _prev_wndproc = int(prev)
-    _subclassed_hwnd = int(hwnd)
-
-    # Tell the OS the frame changed so WM_NCCALCSIZE fires once and
-    # the client rect adopts the new "client = window" geometry. No
-    # SetWindowPos = the visual border lingers until the first manual
-    # resize, which looks janky.
+    # Tell the OS the frame changed so it relays out the non-client
+    # area immediately. Without SetWindowPos the resize border
+    # doesn't appear until the user manually triggers a redraw.
     try:
         user32.SetWindowPos(
             hwnd,
@@ -407,5 +264,41 @@ def install_native_hit_test(hwnd: int) -> bool:
         )
     except Exception:
         pass
-
     return True
+
+
+def start_window_drag() -> bool:
+    """Start a native window drag from the cursor's current position.
+
+    The React titlebar fires this on mousedown (left button only,
+    not on a button child). We send WM_SYSCOMMAND with SC_MOVE so
+    Windows runs the move loop using the cursor's current screen
+    position as the drag anchor — drag-to-edge snap, Aero Shake,
+    and double-click-to-maximize all work on the same gesture.
+
+    Must be called from the GUI thread. Returns False when there's
+    no HWND registered (plain-browser dev) or off-Windows.
+    """
+    if sys.platform != "win32":
+        return False
+    if _hwnd_provider is None:
+        return False
+    try:
+        hwnd = _hwnd_provider()
+    except Exception:
+        return False
+    if not isinstance(hwnd, int) or not hwnd:
+        return False
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        # ReleaseCapture is required because the WebView2 child window
+        # owns the mouse capture from its mousedown — without
+        # releasing it first, the SendMessage that follows is dropped
+        # and the drag never starts.
+        user32.ReleaseCapture()
+        user32.SendMessageW(hwnd, _WM_SYSCOMMAND, _SC_MOVE | _HTCAPTION, 0)
+        return True
+    except Exception:
+        return False
+

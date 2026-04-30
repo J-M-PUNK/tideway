@@ -142,22 +142,48 @@ export function WindowTitlebar() {
     return null;
   }
 
+  // Drag handler. WebView2 silently ignores `-webkit-app-region: drag`
+  // (it's a Chromium-Apps feature, not stock Chromium), so on
+  // mousedown we hand off to a backend endpoint that runs Win32's
+  // move loop directly. Skip when the click target is inside a
+  // button — those nest in the titlebar div but should fire their
+  // onClick instead of starting a drag — and skip non-primary
+  // buttons so right-click / middle-click can still bubble for
+  // future system-menu wiring.
+  const onTitlebarMouseDown = (e: React.MouseEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return;
+    const target = e.target as HTMLElement;
+    if (target.closest("button")) return;
+    e.preventDefault();
+    api.window.startDrag().catch(() => {});
+  };
+  // Double-click toggles maximize, matching the OS-drawn title bar's
+  // behavior. Same target filter as drag.
+  const onTitlebarDoubleClick = (e: React.MouseEvent<HTMLDivElement>) => {
+    const target = e.target as HTMLElement;
+    if (target.closest("button")) return;
+    api.window
+      .maximize()
+      .then((res) => {
+        if (typeof res.maximized === "boolean") {
+          setInfo((prev) => ({ ...prev, maximized: res.maximized! }));
+        }
+      })
+      .catch(() => {});
+  };
+
   return (
     <div
       className="flex select-none items-center bg-background text-foreground"
-      style={{
-        height: 32,
-        // app-region is honored by WebView2 (Chromium). Anything
-        // inside this drag region behaves like a native caption row —
-        // including double-click to maximize and drag-to-edge for snap.
-        WebkitAppRegion: "drag",
-      }}
+      style={{ height: 32 }}
+      onMouseDown={onTitlebarMouseDown}
+      onDoubleClick={onTitlebarDoubleClick}
     >
       <div className="flex items-center gap-2 pl-3 text-xs font-medium opacity-70">
         Tideway
       </div>
       <div className="flex-1" />
-      <div className="flex h-full" style={{ WebkitAppRegion: "no-drag" }}>
+      <div className="flex h-full">
         <TitlebarButton
           ariaLabel="Minimize"
           onClick={() => {
