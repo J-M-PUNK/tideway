@@ -5722,9 +5722,40 @@ def artist_detail(artist_id: int) -> dict:
     ep_singles_objs = filter_explicit_dupes(ep_singles_objs, pref, kind="album")
     appears_on_objs = filter_explicit_dupes(appears_on_objs, pref, kind="album")
 
+    # Spotify-style "Popular" row: mixed-format (albums + EPs + singles)
+    # ranked by popularity with a recency boost so freshly-dropped
+    # records get visibility before they accumulate plays. Skip
+    # appears_on since those are someone else's records. Cap at 12 —
+    # more than any frontend breakpoint will render in a single row.
+    now_utc = datetime.now(timezone.utc)
+
+    def _popular_score(a) -> float:
+        pop = float(getattr(a, "popularity", 0) or 0)
+        rd = getattr(a, "release_date", None) or getattr(
+            a, "available_release_date", None
+        )
+        months = 0.0
+        if rd is not None:
+            try:
+                if rd.tzinfo is None:
+                    rd = rd.replace(tzinfo=timezone.utc)
+                months = max(0.0, (now_utc - rd).days / 30.44)
+            except Exception:
+                months = 0.0
+        # Tidal's popularity field is sometimes 0 / missing on older
+        # catalogue items — don't sink them to the bottom; let recency
+        # alone score them with a tiny base.
+        base = pop if pop > 0 else 1.0
+        return base / (1.0 + months / 12.0)
+
+    popular_objs = sorted(
+        [*albums_objs, *ep_singles_objs], key=_popular_score, reverse=True
+    )[:12]
+
     result = {
         **artist_to_dict(artist),
         "top_tracks": top_tracks,
+        "popular_releases": [album_to_dict(a) for a in popular_objs],
         "albums": [album_to_dict(a) for a in albums_objs],
         "ep_singles": [album_to_dict(a) for a in ep_singles_objs],
         "appears_on": [album_to_dict(a) for a in appears_on_objs],
