@@ -2141,22 +2141,10 @@ class PCMPlayer:
 
         # Adopt the preload's pipeline. Callback is free to read
         # from the new queue the instant after these assignments.
-        self._decoder = pre.decoder
-        self._pcm_queue = pre.queue
-        self._decoder_thread = pre.thread
-        self._stop_flag = pre.stop_flag
-        self._decoder_done = pre.done
-        self._current_track_id = pre.track_id
-        self._current_duration_ms = pre.duration_ms
-        self._current_stream_info = pre.stream_info
-        self._source_urls = pre.source_urls
-        self._source_path = pre.source_path
-        if not rate_matches:
-            self._stream_sample_rate = pre.sample_rate
-            self._stream_sd_dtype = pre.sd_dtype
-            self._stream_channels = pre.channels
-        self._samples_emitted = 0
-        self._callback_carry = None
+        # `_swap_pipeline_to` writes rate/dtype/channels
+        # unconditionally; that's a no-op in the same-rate case
+        # because the values already match the active stream.
+        self._swap_pipeline_to(pre)
         self._preload = None
         self._state = "playing"
         self._last_error = None
@@ -2267,18 +2255,7 @@ class PCMPlayer:
         self._emit()
         # Phase 2: actual swap. Old decoder + thread have already
         # finished (done event is set), we just replace refs.
-        self._decoder = pre.decoder
-        self._pcm_queue = pre.queue
-        self._decoder_thread = pre.thread
-        self._stop_flag = pre.stop_flag
-        self._decoder_done = pre.done
-        self._current_track_id = pre.track_id
-        self._current_duration_ms = pre.duration_ms
-        self._current_stream_info = pre.stream_info
-        self._source_urls = pre.source_urls
-        self._source_path = pre.source_path
-        self._samples_emitted = 0
-        self._callback_carry = None
+        self._swap_pipeline_to(pre)
         self._state = "playing"
         self._seq += 1
         self._emit()
@@ -2582,21 +2559,7 @@ class PCMPlayer:
                 # stream so a racing preload() call (unlikely this
                 # early) can't re-stomp it.
                 self._preload = None
-                self._decoder = pre.decoder
-                self._pcm_queue = pre.queue
-                self._decoder_thread = pre.thread
-                self._stop_flag = pre.stop_flag
-                self._decoder_done = pre.done
-                self._current_track_id = pre.track_id
-                self._current_duration_ms = pre.duration_ms
-                self._current_stream_info = pre.stream_info
-                self._source_urls = pre.source_urls
-                self._source_path = pre.source_path
-                self._stream_sample_rate = pre.sample_rate
-                self._stream_sd_dtype = pre.sd_dtype
-                self._stream_channels = pre.channels
-                self._samples_emitted = 0
-                self._callback_carry = None
+                self._swap_pipeline_to(pre)
                 self._open_output_stream(
                     pre.sample_rate, pre.channels, pre.sd_dtype
                 )
@@ -2634,6 +2597,50 @@ class PCMPlayer:
                 listener(snap)
             except Exception:
                 log.exception("listener raised")
+
+    def _swap_pipeline_to(self, pre: "_Preload") -> None:
+        """Replace the active pipeline refs with those from `pre`.
+
+        Single source of truth for the field copies that drive a
+        track swap. Same shape was hand-rolled in three places
+        (_try_gapless_swap, _bridge_to_preload, _adopt_preload_locked)
+        and inevitably drifted — the cross-rate gapless bug we just
+        shipped a fix for came from one of those copies forgetting a
+        partner emit. Centralising it here means a new field on
+        `_Preload` only has to be wired up once.
+
+        Atomicity: each assignment is one bytecode op under the GIL,
+        but the *sequence* of swaps is not atomic. Callers must
+        ensure the audio callback can't observe a half-swapped
+        state. The three current callers each handle this:
+
+          - `_try_gapless_swap` runs IN the callback; the callback
+            is the sole modifier at the track-boundary moment.
+          - `_bridge_to_preload` runs after `finished_callback`
+            fired, so the callback isn't running on the old stream.
+          - `_adopt_preload_locked` holds `_lock` and (for
+            cross-rate) closes the old stream before calling.
+
+        Always copies the rate / dtype / channels triple along with
+        the rest. Same-rate swaps no-op those (the values match the
+        active stream); the alternative — conditional copies — was
+        the contract drift this helper exists to prevent.
+        """
+        self._decoder = pre.decoder
+        self._pcm_queue = pre.queue
+        self._decoder_thread = pre.thread
+        self._stop_flag = pre.stop_flag
+        self._decoder_done = pre.done
+        self._current_track_id = pre.track_id
+        self._current_duration_ms = pre.duration_ms
+        self._current_stream_info = pre.stream_info
+        self._source_urls = pre.source_urls
+        self._source_path = pre.source_path
+        self._stream_sample_rate = pre.sample_rate
+        self._stream_sd_dtype = pre.sd_dtype
+        self._stream_channels = pre.channels
+        self._samples_emitted = 0
+        self._callback_carry = None
 
 
 # ---------------------------------------------------------------------------
