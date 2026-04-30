@@ -295,11 +295,22 @@ def _apply_windows(hwnd: int, theme: str) -> None:
 
 
 def find_pywebview_hwnd(window: object) -> Optional[int]:
-    """Best-effort HWND lookup against a pywebview window object. The
-    attribute path differs across pywebview versions / GUIs; try a
-    few likely candidates rather than pin to one. Returns None if
-    we can't resolve it — caller should bail silently rather than
-    error out, since tinting a non-existent handle isn't fatal.
+    """Best-effort HWND lookup against a pywebview window object.
+
+    Two strategies, in order:
+
+      1. Walk a list of attribute paths the various pywebview backends
+         expose. Cheap, version-tolerant for the common cases.
+      2. Fall back to EnumWindows looking for a top-level window owned
+         by our process whose title matches the pywebview window's
+         title. Works regardless of how pywebview internally tracks
+         the handle — we just ask the OS which top-level window it
+         created on our behalf. Required for pywebview ≥ 5.4 where
+         the EdgeChromium backend stopped exposing the HWND on the
+         BrowserView and the attribute walk above all returns None.
+
+    Returns None when neither resolves (e.g. before the window is
+    actually shown — `shown` event hasn't fired yet — or off-Windows).
     """
     if sys.platform != "win32" or window is None:
         return None
@@ -319,4 +330,74 @@ def find_pywebview_hwnd(window: object) -> Optional[int]:
                 return obj
         except Exception:
             continue
+
+    # Fallback: enumerate top-level windows with our PID and title.
+    try:
+        import ctypes
+        import os
+        from ctypes import wintypes
+    except Exception:
+        return None
+    try:
+        user32 = ctypes.windll.user32
+        target_title = ""
+        try:
+            target_title = str(getattr(window, "title", "") or "")
+        except Exception:
+            target_title = ""
+
+        EnumWindowsProc = ctypes.WINFUNCTYPE(
+            ctypes.c_bool, wintypes.HWND, wintypes.LPARAM
+        )
+        get_thread_proc_id = user32.GetWindowThreadProcessId
+        get_thread_proc_id.argtypes = [
+            wintypes.HWND, ctypes.POINTER(wintypes.DWORD)
+        ]
+        get_thread_proc_id.restype = wintypes.DWORD
+
+        get_text_len = user32.GetWindowTextLengthW
+        get_text_len.argtypes = [wintypes.HWND]
+        get_text_len.restype = ctypes.c_int
+
+        get_text = user32.GetWindowTextW
+        get_text.argtypes = [
+            wintypes.HWND, wintypes.LPWSTR, ctypes.c_int
+        ]
+        get_text.restype = ctypes.c_int
+
+        is_visible = user32.IsWindowVisible
+        is_visible.argtypes = [wintypes.HWND]
+        is_visible.restype = wintypes.BOOL
+
+        our_pid = os.getpid()
+        found = [0]
+
+        def _enum(hwnd, _lparam):
+            if not is_visible(hwnd):
+                return True
+            pid = wintypes.DWORD(0)
+            get_thread_proc_id(hwnd, ctypes.byref(pid))
+            if pid.value != our_pid:
+                return True
+            # Match by title when we have one — there can be multiple
+            # top-level windows per process (tray helper, mini player,
+            # WebView2 host children that escape parenting). When no
+            # title hint, pick the first visible top-level we own and
+            # hope it's the main one.
+            if target_title:
+                length = get_text_len(hwnd)
+                if length <= 0:
+                    return True
+                buf = ctypes.create_unicode_buffer(length + 1)
+                get_text(hwnd, buf, length + 1)
+                if buf.value != target_title:
+                    return True
+            found[0] = int(hwnd)
+            return False  # stop enumeration
+
+        user32.EnumWindows(EnumWindowsProc(_enum), 0)
+        if found[0]:
+            return found[0]
+    except Exception:
+        return None
     return None

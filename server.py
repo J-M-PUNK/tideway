@@ -2071,6 +2071,30 @@ def window_start_drag(request: Request) -> dict:
         return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
 
 
+class _WindowResizeRequest(BaseModel):
+    direction: str  # left | right | top | bottom | topleft | topright | bottomleft | bottomright
+
+
+@app.post("/api/_internal/window/start_resize", include_in_schema=False)
+def window_start_resize(req: _WindowResizeRequest, request: Request) -> dict:
+    """Hand the window over to the OS's native resize loop in the
+    given direction. The React shell adds invisible 6px-wide hit
+    strips along each edge and a corner — mousedown on one of those
+    fires this with the matching direction string, and Win32's
+    DefWindowProc runs SC_SIZE from the cursor position the same
+    way it would for a real OS-drawn resize border. WS_THICKFRAME
+    is restored on the top-level window so the OS recognises us as
+    resizable, but we still drive the start-of-drag from JS because
+    the WebView2 child covers the would-be NC resize zones."""
+    _ensure_loopback(request)
+    try:
+        from app import window_controls
+        ok = window_controls.start_window_resize(req.direction)
+        return {"ok": ok}
+    except Exception as exc:
+        return {"ok": False, "reason": f"{type(exc).__name__}: {exc}"}
+
+
 class _NotifyRequest(BaseModel):
     title: str
     body: str

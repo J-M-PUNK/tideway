@@ -1289,12 +1289,16 @@ def main(argv: Optional[list[str]] = None) -> int:
                         _window_chrome.register_windows_hwnd(hwnd)
                         # When the launcher created the window
                         # frameless (Windows VS-Code-style chrome),
-                        # add WS_THICKFRAME back so the OS can run
-                        # native edge resize. Drag is handled by the
-                        # React titlebar calling /start_drag —
-                        # see window_controls.start_window_drag.
+                        # add WS_THICKFRAME back so the OS runs
+                        # native edge resize, and subclass the
+                        # WindowProc on the GUI thread so later
+                        # drag/resize triggers from worker threads
+                        # land on the right thread for ReleaseCapture
+                        # to actually release the WebView2 child's
+                        # mouse capture.
                         if use_frameless:
                             _window_controls_mod.enable_native_resize(hwnd)
+                            _window_controls_mod.ensure_wndproc_subclass(hwnd)
                     except Exception:
                         # Anything in the lookup or DWM call going wrong
                         # leaves the OS-default titlebar — visible but
