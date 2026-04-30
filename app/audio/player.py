@@ -1625,43 +1625,66 @@ class PCMPlayer:
             except queue.Full:
                 pass
 
+    def _log_callback_status(self, status) -> None:
+        """Rate-limited diagnostic for PortAudio over/underruns
+        signalled via the callback's `status` arg. One message + a
+        running count per second; without rate limiting a sustained
+        glitch at 86 Hz callback cadence would saturate stderr.
+        Critical diagnostic on Windows where stutter complaints
+        typically trace back to this path."""
+        now = time.monotonic()
+        self._cb_status_count += 1
+        if now - self._cb_status_last_print >= 1.0:
+            count = self._cb_status_count
+            self._cb_status_count = 0
+            self._cb_status_last_print = now
+            print(
+                f"[audio] callback status={status} "
+                f"(count_since_last={count})",
+                file=sys.stderr,
+                flush=True,
+            )
+
+    def _log_callback_heartbeat(self) -> None:
+        """DEBUG-only per-100-callback heartbeat. Confirms the
+        callback is running + advancing samples and shows the
+        queue depth so a "decoder is filling but callback isn't
+        draining" condition is visible at a glance."""
+        self._callback_counter += 1
+        if self._callback_counter % 100 == 0:
+            qsize = self._pcm_queue.qsize()
+            print(
+                f"[pcm] callback tick #{self._callback_counter} "
+                f"samples_emitted={self._samples_emitted} "
+                f"queue={qsize}/{_PCM_QUEUE_MAX} "
+                f"state={self._state} "
+                f"track={self._current_track_id}",
+                file=sys.stderr, flush=True,
+            )
+
+    def _log_callback_starvation(self) -> None:
+        """Rate-limited diagnostic for our-side underruns — the
+        decoder didn't push a chunk in time. Distinct from
+        `_log_callback_status` because it pinpoints the cause as
+        ours (slow disk / network / CPU) rather than driver-side."""
+        now = time.monotonic()
+        self._cb_starve_count += 1
+        if now - self._cb_starve_last_print >= 1.0:
+            count = self._cb_starve_count
+            self._cb_starve_count = 0
+            self._cb_starve_last_print = now
+            print(
+                f"[audio] queue starvation: decoder behind "
+                f"the callback (count_since_last={count})",
+                file=sys.stderr,
+                flush=True,
+            )
+
     def _audio_callback(self, outdata, frames, time_info, status) -> None:
         if status:
-            # Under/overruns surface here. Rate-limit to once per
-            # second so a sustained underrun (audio glitching every
-            # callback at 44.1k/512 = 86 Hz) doesn't spam stderr at
-            # full speed. The first message + heartbeat is what the
-            # user / dev needs; the count is what tells us how bad
-            # it got. Critical diagnostic on Windows where stutter
-            # complaints typically trace back here.
-            now = time.monotonic()
-            self._cb_status_count += 1
-            if now - self._cb_status_last_print >= 1.0:
-                count = self._cb_status_count
-                self._cb_status_count = 0
-                self._cb_status_last_print = now
-                print(
-                    f"[audio] callback status={status} "
-                    f"(count_since_last={count})",
-                    file=sys.stderr,
-                    flush=True,
-                )
-
-        # Rate-limited heartbeat so we can see the callback is
-        # actually running + advancing. Logs once per second at
-        # typical 44.1k/512-frame cadence.
+            self._log_callback_status(status)
         if PCMPlayer._DEBUG:
-            self._callback_counter += 1
-            if self._callback_counter % 100 == 0:
-                qsize = self._pcm_queue.qsize()
-                print(
-                    f"[pcm] callback tick #{self._callback_counter} "
-                    f"samples_emitted={self._samples_emitted} "
-                    f"queue={qsize}/{_PCM_QUEUE_MAX} "
-                    f"state={self._state} "
-                    f"track={self._current_track_id}",
-                    file=sys.stderr, flush=True,
-                )
+            self._log_callback_heartbeat()
 
         # Paused → output silence, don't drain queue, don't advance
         # position. Zero-latency resume: on unpause the next call
@@ -1704,25 +1727,7 @@ class PCMPlayer:
                     # keeps moving through the underrun window —
                     # otherwise position would freeze on every
                     # hiccup.
-                    #
-                    # Rate-limited diagnostic: distinct from the
-                    # PortAudio status-flag log because it tells us
-                    # WHY the underrun happened — our decoder thread
-                    # didn't push a chunk in time. Useful for
-                    # isolating "slow disk", "slow network", and
-                    # "slow CPU" cases when a user reports stutter.
-                    now = time.monotonic()
-                    self._cb_starve_count += 1
-                    if now - self._cb_starve_last_print >= 1.0:
-                        count = self._cb_starve_count
-                        self._cb_starve_count = 0
-                        self._cb_starve_last_print = now
-                        print(
-                            f"[audio] queue starvation: decoder behind "
-                            f"the callback (count_since_last={count})",
-                            file=sys.stderr,
-                            flush=True,
-                        )
+                    self._log_callback_starvation()
                     outdata[written:] = 0
                     self._samples_emitted += frames
                     return
