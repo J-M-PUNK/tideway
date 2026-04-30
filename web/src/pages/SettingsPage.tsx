@@ -28,6 +28,10 @@ import {
 } from "lucide-react";
 import { api } from "@/api/client";
 import type { QualityOption, Settings } from "@/api/types";
+import {
+  TEMPLATE_TOKENS,
+  previewFilenameTemplateAsString,
+} from "@/lib/filenameTemplate";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -327,10 +331,11 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
               <Field
                 label="Filename template"
                 hint={
-                  <>
-                    Tokens: <code>{"{artist}"}</code> <code>{"{title}"}</code>{" "}
-                    <code>{"{album}"}</code> <code>{"{track_num}"}</code>
-                  </>
+                  <FilenameTemplateHint
+                    template={settings.filename_template}
+                    outputDir={settings.output_dir}
+                    createAlbumFolders={settings.create_album_folders}
+                  />
                 }
               >
                 <Input
@@ -344,6 +349,7 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
                 checked={settings.create_album_folders}
                 onChange={(v) => patch({ create_album_folders: v })}
                 label="Create a subfolder per album"
+                hint="Only takes effect when the filename template doesn't already contain a folder separator (/). With a multi-segment template the template itself defines the folder structure."
               />
               <Toggle
                 checked={settings.skip_existing}
@@ -584,6 +590,44 @@ function Section({
       </div>
       {children}
     </section>
+  );
+}
+
+function FilenameTemplateHint({
+  template,
+  outputDir,
+  createAlbumFolders,
+}: {
+  template: string;
+  outputDir: string;
+  createAlbumFolders: boolean;
+}) {
+  // Live preview against a stable sample track so the user sees
+  // what their template will produce regardless of what they're
+  // currently browsing. `/` in the template creates folders.
+  const preview = previewFilenameTemplateAsString(
+    template,
+    outputDir,
+    createAlbumFolders,
+  );
+  return (
+    <div className="flex flex-col gap-2">
+      <div>
+        Use <code>/</code> to nest folders. Available tokens:
+      </div>
+      <ul className="grid grid-cols-1 gap-x-4 gap-y-0.5 sm:grid-cols-2">
+        {TEMPLATE_TOKENS.map(({ token, description }) => (
+          <li key={token} className="leading-snug">
+            <code>{token}</code>{" "}
+            <span className="text-muted-foreground/80">— {description}</span>
+          </li>
+        ))}
+      </ul>
+      <div className="mt-1">
+        <span className="text-muted-foreground/80">Preview:</span>{" "}
+        <code className="break-all">{preview}</code>
+      </div>
+    </div>
   );
 }
 
