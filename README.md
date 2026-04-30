@@ -126,6 +126,8 @@ development, you can [buy me a coffee on Ko-fi](https://ko-fi.com/jmpunk).
 Tideway is free and will stay that way; donations are appreciated
 but never expected.
 
+[![Support on Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](https://ko-fi.com/jmpunk)
+
 ## Install a released build
 
 Grab the latest from the Releases page for whichever fork of this
