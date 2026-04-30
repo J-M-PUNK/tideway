@@ -1292,11 +1292,12 @@ def _match_release_asset(release_data: dict) -> Optional[str]:
     a GitHub /releases/latest response, or None if the release ships
     no matching asset.
 
-    Naming convention (matches scripts/build_dmg.sh and the Inno Setup
-    script):
+    Naming convention (matches scripts/build_dmg.sh, the Inno Setup
+    script, and scripts/build_appimage.sh):
       - macOS:           Tideway-<version>.dmg
       - Windows x64:     Tideway-setup-<version>.exe
       - Windows ARM64:   Tideway-setup-<version>-arm64.exe
+      - Linux x86_64:    Tideway-<version>-x86_64.AppImage
 
     On Windows we pick the asset matching the host CPU rather than the
     process arch. platform.machine() reflects the underlying CPU even
@@ -1305,8 +1306,11 @@ def _match_release_asset(release_data: dict) -> Optional[str]:
     accidentally installed the x64 build will still be offered the
     correct ARM64 installer on the next update.
 
-    Linux falls through to None because we don't package a Linux
-    installer today.
+    Linux is currently x86_64-only — ARM Linux (Raspberry Pi etc.)
+    isn't built and falls through to None until someone asks. Old
+    releases that predate the AppImage job (≤v1.1.0) won't carry one
+    either, so a Linux user pinned to a pre-AppImage release simply
+    sees "no installer available" until a newer release lands.
     """
     want_arm64 = False
     if sys.platform == "darwin":
@@ -1314,6 +1318,15 @@ def _match_release_asset(release_data: dict) -> Optional[str]:
     elif sys.platform.startswith("win"):
         suffix = ".exe"
         want_arm64 = platform.machine().lower() in ("arm64", "aarch64")
+    elif sys.platform.startswith("linux"):
+        # Only x86_64 ships today. An aarch64 Linux host gets None
+        # rather than a wrong-arch download — same defensive shape as
+        # the Windows fallback below, just lacking a graceful
+        # "any matching ext" branch because there's nothing to fall
+        # back to (no aarch64 AppImage exists yet).
+        if platform.machine().lower() not in ("x86_64", "amd64"):
+            return None
+        suffix = ".appimage"
     else:
         return None
 

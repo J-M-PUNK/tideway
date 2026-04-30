@@ -104,7 +104,63 @@ def test_no_matching_asset_returns_none(force_windows, monkeypatch):
     assert server._match_release_asset(rel) is None
 
 
-def test_unsupported_platform_returns_none(monkeypatch):
+# --- Linux ---------------------------------------------------------------
+
+
+@pytest.fixture
+def force_linux(monkeypatch):
     monkeypatch.setattr(server.sys, "platform", "linux")
-    rel = _release("Tideway-setup-1.0.0.exe", "Tideway-setup-1.0.0-arm64.exe")
+
+
+def test_linux_x86_64_picks_appimage(force_linux, monkeypatch):
+    _set_machine(monkeypatch, "x86_64")
+    rel = _release(
+        "Tideway-1.2.0-x86_64.AppImage",
+        "Tideway-1.2.0.dmg",
+        "Tideway-setup-1.2.0.exe",
+    )
+    assert (
+        server._match_release_asset(rel)
+        == "https://example/Tideway-1.2.0-x86_64.AppImage"
+    )
+
+
+def test_linux_aarch64_returns_none_pending_arm_build(force_linux, monkeypatch):
+    """No aarch64 AppImage is built today. Defensive: we hand back
+    None rather than the wrong-arch x86_64 file so the auto-updater
+    surfaces 'no installer' instead of silently downloading
+    something that won't run."""
+    _set_machine(monkeypatch, "aarch64")
+    rel = _release("Tideway-1.2.0-x86_64.AppImage")
+    assert server._match_release_asset(rel) is None
+
+
+def test_linux_no_appimage_in_release_returns_none(force_linux, monkeypatch):
+    """Releases predating the AppImage build job (≤v1.1.0) don't
+    ship one. Match returns None; the UI's update banner falls back
+    to "open the releases page" for those users."""
+    _set_machine(monkeypatch, "x86_64")
+    rel = _release("Tideway-1.0.0.dmg", "Tideway-setup-1.0.0.exe")
+    assert server._match_release_asset(rel) is None
+
+
+def test_linux_match_is_case_insensitive_on_extension(force_linux, monkeypatch):
+    """Asset names in GitHub responses preserve the upload casing.
+    appimagetool emits .AppImage (mixed case); the matcher
+    lowercases before comparing so Tideway-1.2.0-x86_64.AppImage
+    still matches the .appimage suffix in the matcher."""
+    _set_machine(monkeypatch, "x86_64")
+    rel = _release("Tideway-1.2.0-x86_64.AppImage")
+    assert (
+        server._match_release_asset(rel)
+        == "https://example/Tideway-1.2.0-x86_64.AppImage"
+    )
+
+
+def test_unknown_platform_returns_none(monkeypatch):
+    """Any platform that isn't darwin / win / linux falls through.
+    Catches future BSDs / unknowns rather than silently picking the
+    wrong installer."""
+    monkeypatch.setattr(server.sys, "platform", "freebsd")
+    rel = _release("Tideway-setup-1.0.0.exe", "Tideway-1.0.0-x86_64.AppImage")
     assert server._match_release_asset(rel) is None
