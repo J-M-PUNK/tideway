@@ -2532,6 +2532,24 @@ class PCMPlayer:
                         pass
                     return
 
+            # Mirror `_try_gapless_swap`'s pattern: emit `ended` for
+            # the OUTGOING track BEFORE swapping. The frontend's
+            # advance logic keys off this snapshot to wire its
+            # `expectedTrackIdRef` up to the new track id; without
+            # the emit, every subsequent snapshot for the new track
+            # fails the late-echo guard and the now-playing bar gets
+            # stuck on the previous track even though audio has
+            # moved on. Same-rate transitions don't hit this path
+            # (they go through `_try_gapless_swap` which already
+            # emits `ended`), so the bug only surfaced on cross-rate
+            # transitions — typically album → Artist Radio where
+            # the radio tracks have a different sample rate than
+            # the album that just finished.
+            with self._lock:
+                self._state = "ended"
+                self._seq += 1
+            self._emit()
+
             log.info(
                 "gapless bridge (cross-rate) -> track=%s rate %d->%dHz dtype %s->%s",
                 pre.track_id,
