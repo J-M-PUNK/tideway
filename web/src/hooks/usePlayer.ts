@@ -155,10 +155,7 @@ export function pickNextIndex(
  */
 async function fetchRadioTakeover(
   cur: PlayerState,
-): Promise<
-  | { newQueue: Track[]; index: number; source: PlaySource }
-  | null
-> {
+): Promise<{ newQueue: Track[]; index: number; source: PlaySource } | null> {
   if (cur.queue.length === 0) return null;
   const lastTrack = cur.queue[cur.queueIndex];
   const artistId = lastTrack?.artists?.[0]?.id;
@@ -1025,9 +1022,8 @@ export function usePlayer() {
   // Sleep-timer state machine. Owned by useSleepTimer; we hand it
   // the endOfTrackPendingRef so the "stop at end of track" mode
   // can flip the flag advanceRef checks.
-  const { sleepRemaining, setSleepTimer, clearSleepTimer } = useSleepTimer(
-    endOfTrackPendingRef,
-  );
+  const { sleepRemaining, setSleepTimer, clearSleepTimer } =
+    useSleepTimer(endOfTrackPendingRef);
 
   // Append to the end of the queue. Always appends — duplicates pass
   // through so a user who queues the same track twice gets two

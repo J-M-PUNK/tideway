@@ -1,4 +1,10 @@
-import { useCallback, useEffect, useRef, useState, type MutableRefObject } from "react";
+import {
+  useCallback,
+  useEffect,
+  useRef,
+  useState,
+  type MutableRefObject,
+} from "react";
 import { api } from "@/api/client";
 
 /**
@@ -36,9 +42,7 @@ import { api } from "@/api/client";
  * subscription bus from this hook back into the player effect, and
  * a single shared ref is simpler than the wiring.
  */
-export function useSleepTimer(
-  endOfTrackPendingRef: MutableRefObject<boolean>,
-) {
+export function useSleepTimer(endOfTrackPendingRef: MutableRefObject<boolean>) {
   const sleepTimeoutRef = useRef<number | null>(null);
   const sleepTickRef = useRef<number | null>(null);
   const [sleepRemaining, setSleepRemaining] = useState<number | null>(null);
