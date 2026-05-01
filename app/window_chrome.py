@@ -124,12 +124,9 @@ def _apply_macos(nswindow: object, theme: str) -> None:
         # the traffic lights — that's the visual blend Spotify /
         # Notion / Linear use. It also creates a problem: WKWebView
         # absorbs mouseDown events in that band, so native window
-        # drag and double-click-to-zoom break. We solve that with a
-        # transparent NSView overlay (see _install_drag_overlay
-        # below) that returns mouseDownCanMoveWindow=YES, making
-        # AppKit treat clicks in the titlebar zone as native drags
-        # before they ever reach WKWebView's JS layer. Best of both:
-        # blend AND native interactions.
+        # drag and double-click-to-zoom break. We solve that with
+        # an NSEvent local monitor (see _install_drag_monitor
+        # below) that intercepts those events at the system level.
         try:
             mask = nswindow.styleMask()
             nswindow.setStyleMask_(
@@ -139,6 +136,34 @@ def _apply_macos(nswindow: object, theme: str) -> None:
             # Pre-10.10 doesn't have this constant — fall through,
             # the band stays OS-tinted and visually distinct.
             pass
+        # WKWebView was added to the contentView BEFORE FullSize
+        # was enabled, so its frame stops at y=28 (just below where
+        # the OS titlebar used to be). Now that the contentView
+        # extends through the titlebar zone, the WebView needs to
+        # grow to fill it — otherwise the top 28pt shows the
+        # NSWindow's chrome material instead of the page body's
+        # bg-background, which is exactly what 'still gray' means
+        # in user reports. Find the WKWebView in the contentView's
+        # subviews and stretch it to the new bounds.
+        try:
+            content_view = nswindow.contentView()
+            if content_view is not None:
+                bounds = content_view.bounds()
+                for sub in content_view.subviews() or []:
+                    cls_name = type(sub).__name__
+                    if "WebView" in cls_name or "BrowserView" in cls_name:
+                        sub.setFrame_(bounds)
+                        try:
+                            sub.setAutoresizingMask_(
+                                AppKit.NSViewWidthSizable
+                                | AppKit.NSViewHeightSizable
+                            )
+                        except Exception:
+                            pass
+        except Exception:
+            log.exception(
+                "window_chrome: WebView resize-to-fill failed"
+            )
         # titlebarAppearsTransparent kills the gradient so the
         # window's backgroundColor shows through. This and
         # setBackgroundColor together paint the title-bar zone our
@@ -273,15 +298,15 @@ def _install_drag_monitor(nswindow) -> None:
         except Exception:
             pass
 
-    # The traffic-light buttons live in the top-left corner.
-    # AppKit's chrome layer handles their clicks BEFORE our event
-    # monitor sees them (chrome is above the window's event-
-    # dispatch path), so we don't need to special-case them — but
-    # if AppKit's order ever changed, we'd want to skip the
-    # leftmost ~78pt × 28pt rect to leave them functional.
-    # _LIGHTS_RIGHT_EDGE_PT is left here as documentation; the
-    # current implementation doesn't need it.
-    _LIGHTS_RIGHT_EDGE_PT = 78  # noqa: F841 — see comment
+    # Width of the corner zones we leave for the OS resize cursor.
+    # Clicks within this many points of the left or right window
+    # edge fall through to the OS (which then engages its top-left
+    # / top-right corner resize). Without this, our drag monitor
+    # would steal clicks meant for resize. ~10pt matches what
+    # AppKit treats as the corner hit-zone for standard windows;
+    # a tighter value misses near-corner clicks, a looser value
+    # eats too much real drag space.
+    _CORNER_RESIZE_ZONE_PT = 10
 
     def _handler(event):
         try:
@@ -290,21 +315,25 @@ def _install_drag_monitor(nswindow) -> None:
             event_window = event.window()
             if event_window is None or event_window != nswindow:
                 return event
-            # Click count > 1 means this is the second click of a
-            # double-click. performWindowDragWithEvent_ handles
-            # that itself, but only on the FIRST click (it tracks
-            # subsequent mouseUp / movement to decide drag vs
-            # zoom). We pass through clickCount > 1 events so the
-            # native double-click handler in NSWindow can see them
-            # if it's already engaged.
             location = event.locationInWindow()
-            window_height = nswindow.frame().size.height
+            window_frame = nswindow.frame()
+            window_width = window_frame.size.width
+            window_height = window_frame.size.height
             # locationInWindow uses bottom-left origin, so the top
             # of the window is at y = window_height. The titlebar
             # band is y in [window_height - 28, window_height].
             if location.y < (window_height - float(_TITLEBAR_HEIGHT_PT)):
                 return event
             if location.y > window_height:
+                return event
+            # Skip the corner zones so the OS can engage its
+            # top-left / top-right resize cursor. Without this,
+            # the very top corners of the window are stuck as drag
+            # surface even though the OS would otherwise show a
+            # diagonal-resize cursor and let the user resize.
+            if location.x < float(_CORNER_RESIZE_ZONE_PT):
+                return event
+            if location.x > (window_width - float(_CORNER_RESIZE_ZONE_PT)):
                 return event
             # In the titlebar zone — start a native window drag.
             # The OS's drag loop tracks mouseUp on its own and
