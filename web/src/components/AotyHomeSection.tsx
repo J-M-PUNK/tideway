@@ -3,8 +3,9 @@ import { Link } from "react-router-dom";
 import { Music, Star } from "lucide-react";
 import type { AotyAlbum, Album } from "@/api/types";
 import { useApi } from "@/hooks/useApi";
+import { useColumnCount } from "@/hooks/useColumnCount";
 import { api } from "@/api/client";
-import { Grid, SectionHeader } from "@/components/Grid";
+import { Grid, ViewMoreLink } from "@/components/Grid";
 import { GridSkeleton } from "@/components/Skeletons";
 import { PlayMediaButton } from "@/components/PlayMediaButton";
 import { imageProxy } from "@/lib/utils";
@@ -16,23 +17,30 @@ import { imageProxy } from "@/lib/utils";
  * empty-or-errored rows render nothing at all (the section is purely
  * additive — Home stays usable if AOTY is down).
  *
+ * Each row caps to one row of cards at the current viewport width (via
+ * useColumnCount) and links to a drill-down page (/aoty/top-of-year,
+ * /aoty/new-releases) for the full grid. Same pattern the rest of the
+ * app uses for "Albums" / "EPs & Singles" / "Appears on" rows on the
+ * artist page.
+ *
  * Entries without a resolved Tidal album are filtered out: the goal is
  * a discovery surface the user can play from, not a chart for its own
  * sake.
  */
 export function AotyHomeSection() {
-  // Memoised so the title doesn't recompute on every render. Won't
-  // tick over at midnight on Jan 1 without a remount, but the cost
-  // of that edge case is "wrong year in the title until next visit"
-  // which is fine.
   const year = useMemo(() => new Date().getFullYear(), []);
   return (
     <div>
       <AotyRow
         title={`Top albums of ${year}`}
         fetch={() => api.aoty.topOfYear({ limit: 30 })}
+        viewMoreTo="/aoty/top-of-year"
       />
-      <AotyRow title="New releases" fetch={() => api.aoty.recentReleases(24)} />
+      <AotyRow
+        title="New releases"
+        fetch={() => api.aoty.recentReleases(24)}
+        viewMoreTo="/aoty/new-releases"
+      />
     </div>
   );
 }
@@ -40,10 +48,13 @@ export function AotyHomeSection() {
 function AotyRow({
   title,
   fetch,
+  viewMoreTo,
 }: {
   title: string;
   fetch: () => Promise<AotyAlbum[]>;
+  viewMoreTo: string;
 }) {
+  const cols = useColumnCount();
   const { data, loading, error } = useApi(fetch, []);
 
   // Silent failure mode — Home stays usable. The user sees an empty
@@ -51,9 +62,9 @@ function AotyRow({
   if (error) return null;
   if (loading) {
     return (
-      <div className="mb-2">
-        <SectionHeader title={title} />
-        <GridSkeleton count={6} />
+      <div>
+        <SectionHeader title={title} viewMoreTo={null} />
+        <GridSkeleton count={cols} />
       </div>
     );
   }
@@ -63,14 +74,39 @@ function AotyRow({
   );
   if (playable.length === 0) return null;
 
+  const visible = playable.slice(0, cols);
+  const hasMore = playable.length > cols;
+
   return (
-    <div className="mb-2">
-      <SectionHeader title={title} />
+    <div>
+      <SectionHeader title={title} viewMoreTo={hasMore ? viewMoreTo : null} />
       <Grid>
-        {playable.map((entry) => (
+        {visible.map((entry) => (
           <AotyCard key={entry.tidal_album.id} entry={entry} />
         ))}
       </Grid>
+    </div>
+  );
+}
+
+/**
+ * Section header that mirrors the rest of the app's row headers
+ * (artist page Albums / EPs / Appears on). h2 + optional view-more
+ * link on the right. Inlined here rather than reusing the Grid
+ * package's SectionHeader because the latter wraps content and we
+ * need just the header strip — same visual, cleaner composition.
+ */
+function SectionHeader({
+  title,
+  viewMoreTo,
+}: {
+  title: string;
+  viewMoreTo: string | null;
+}) {
+  return (
+    <div className="mb-4 mt-8 flex items-baseline justify-between gap-4">
+      <h2 className="text-2xl font-bold tracking-tight">{title}</h2>
+      {viewMoreTo && <ViewMoreLink to={viewMoreTo} />}
     </div>
   );
 }
@@ -80,8 +116,15 @@ function AotyRow({
  * title, artist — with two small overlays: the AOTY score (top-left)
  * when present, and a "must hear" star (top-right) when AOTY has
  * tagged the album that way.
+ *
+ * Exported because the drill-down page reuses the same card layout
+ * for the full grid view.
  */
-function AotyCard({ entry }: { entry: AotyAlbum & { tidal_album: Album } }) {
+export function AotyCard({
+  entry,
+}: {
+  entry: AotyAlbum & { tidal_album: Album };
+}) {
   const album = entry.tidal_album;
   const cover = imageProxy(album.cover);
   const artist = album.artists.map((a) => a.name).join(", ");
