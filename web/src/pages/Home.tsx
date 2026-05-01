@@ -49,6 +49,19 @@ const HIDDEN_HOME_ROW_TITLES = [
   // suggestions, just rebranded. The row reads as filler on the home
   // page, so drop it like the "Because you liked X" rows below.
   "user playlists you'll love",
+  // Tidal's "Suggested new" rows (albums + songs) duplicate what the
+  // AOTY-backed Top albums / New releases sections give us, with
+  // less editorial value (Tidal-algorithm picks vs human-rated AOTY
+  // entries). Hiding both keeps the home page focused on the AOTY
+  // discovery surfaces and the user's own listening history.
+  "suggested new albums for you",
+  "suggested new songs for you",
+  // Source rows for the formerly-merged "Suggested new songs" row.
+  // Hiding them at source means the merge logic below produces
+  // nothing, even though the merge code still exists (left in place
+  // in case we later re-enable a curated merged version).
+  "recommended new tracks",
+  "uploads for you",
   // "Because you liked X" / "Because you listened to X" rows are a
   // long tail of duplicates of the items that sit right above them.
   // The user can still find the same recommendations inside the full
