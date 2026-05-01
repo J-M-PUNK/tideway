@@ -13,9 +13,11 @@ Two platform paths:
           `titlebarAppearsTransparent` via PyObjC. Applied at window
           creation through pywebview's BrowserView constructor patch
           (see desktop.py) and re-applied on theme change. The
-          full-size-content style mask lets the WKWebView draw under
-          the titlebar so any color we set there matches what the
-          page renders behind it.
+          titlebar stays as its own OS-managed region above the
+          WebView (we intentionally don't use FullSizeContentView,
+          since that would make WKWebView absorb mouseDown events
+          in the titlebar zone and break native window drag plus
+          double-click-to-zoom).
 
   Windows — `DwmSetWindowAttribute(hwnd, DWMWA_CAPTION_COLOR, ...)`
           via ctypes. Requires Windows 11 build 22000+; older builds
@@ -117,27 +119,18 @@ def _apply_macos(nswindow: object, theme: str) -> None:
         log.exception("window_chrome: NSColor build failed")
         return
     try:
-        # Extend the contentView under the titlebar. Without
-        # NSWindowStyleMaskFullSizeContentView, the titlebar is its
-        # own opaque region drawn above the contentView and the OS
-        # picks its background — `titlebarAppearsTransparent` +
-        # `setBackgroundColor` alone don't punch through that, which
-        # is why the chrome stays system-gray on a default window. With
-        # the mask set, WKWebView renders the page body all the way to
-        # the window's top edge, so wherever we paint #050505 in the
-        # page that's what shows behind the traffic lights. The
-        # buttons themselves stay visible because AppKit draws them
-        # on a higher layer than the contentView.
-        try:
-            mask = nswindow.styleMask()
-            nswindow.setStyleMask_(
-                mask | AppKit.NSWindowStyleMaskFullSizeContentView
-            )
-        except Exception:
-            # Pre-10.10 doesn't have the mask constant. Fall through
-            # — the rest of the tint still applies, just with a
-            # visibly-distinct titlebar zone.
-            pass
+        # We INTENTIONALLY do NOT set NSWindowStyleMaskFullSizeContentView
+        # on macOS. With FullSize on, WKWebView extends under the
+        # titlebar and absorbs every mouseDown in that 28px band — the
+        # OS never sees the events, so window drag and double-click-
+        # zoom stop working. Instead we keep the titlebar as its own
+        # OS-managed region above the WebView, and tint it to match
+        # the page body via `titlebarAppearsTransparent +
+        # setBackgroundColor + setTitlebarSeparatorStyle:none`. The
+        # band reads as part of the app while the OS retains all
+        # native interactions (drag, double-click to zoom / fullscreen,
+        # window-snap on left/right edges).
+        #
         # titlebarAppearsTransparent kills the gradient so the
         # window's backgroundColor shows through. This and
         # setBackgroundColor together paint the title-bar zone our
