@@ -37,8 +37,8 @@ export function AotyHomeSection() {
         viewMoreTo="/aoty/top-of-year"
       />
       <AotyRow
-        title="New releases"
-        fetch={() => api.aoty.recentReleases(24)}
+        title="New album releases"
+        fetch={() => api.aoty.recentReleases(60)}
         viewMoreTo="/aoty/new-releases"
       />
     </div>
