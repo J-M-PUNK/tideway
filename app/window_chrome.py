@@ -228,37 +228,57 @@ def _apply_macos(nswindow: object, theme: str) -> None:
         # at all OR has a class name that doesn't match. Logging
         # every class name will tell us which.
         try:
+            _diag(f"nswindow class={_objc_class_name(nswindow)}")
             content_view = nswindow.contentView()
             if content_view is not None:
+                cv_class = _objc_class_name(content_view)
                 window_frame = nswindow.frame()
                 window_w = float(window_frame.size.width)
                 window_h = float(window_frame.size.height)
-                # Resize contentView to span the full window
-                # (including the titlebar zone). This is what
-                # makes the WebView's bg-background actually paint
-                # under the traffic lights.
-                full_rect = AppKit.NSMakeRect(0.0, 0.0, window_w, window_h)
-                try:
-                    content_view.setFrame_(full_rect)
-                except Exception as exc:
-                    _diag(f"contentView setFrame failed: {exc!r}")
                 bounds = content_view.bounds()
                 _diag(
-                    f"contentView class={type(content_view).__name__} "
-                    f"bounds=({bounds.size.width}x{bounds.size.height}) "
-                    f"window=({window_w}x{window_h})"
+                    f"contentView ObjC class={cv_class} "
+                    f"bounds=({bounds.size.width:.0f}x{bounds.size.height:.0f}) "
+                    f"window frame=({window_w:.0f}x{window_h:.0f})"
                 )
-                _dump_subview_tree(content_view)
-                resized = _resize_webviews_to_fill(content_view, bounds)
-                _diag(f"WebView frames resized: {resized}")
+                # If the contentView IS the WebView (some apps do
+                # nswindow.setContentView_(webview) directly), we
+                # don't need to find or resize anything — it
+                # already fills the window by virtue of being the
+                # content view. Just confirm and bail.
+                if (
+                    "WebView" in cv_class
+                    or "WebKit" in cv_class
+                    or content_view.respondsToSelector_(b"loadHTMLString:baseURL:")
+                ):
+                    _diag(
+                        "contentView IS a WebView — already fills window, "
+                        "no separate resize needed"
+                    )
+                else:
+                    _dump_subview_tree(content_view)
+                    resized = _resize_webviews_to_fill(content_view, bounds)
+                    _diag(f"WebView frames resized: {resized}")
         except Exception as exc:
-            _diag(f"WebView resize failed: {exc!r}")
-        # titlebarAppearsTransparent kills the gradient so the
-        # window's backgroundColor shows through. This and
-        # setBackgroundColor together paint the title-bar zone our
-        # chosen tone.
-        nswindow.setTitlebarAppearsTransparent_(True)
-        nswindow.setBackgroundColor_(color)
+            _diag(f"WebView discovery / resize failed: {exc!r}")
+        # titlebarAppearsTransparent kills the OS chrome's vibrancy
+        # material so whatever the contentView paints in the
+        # titlebar zone shows through. setBackgroundColor sets the
+        # window's solid background color (visible in regions the
+        # contentView/WebView don't cover).
+        try:
+            nswindow.setTitlebarAppearsTransparent_(True)
+            try:
+                got = nswindow.titlebarAppearsTransparent()
+                _diag(f"titlebarAppearsTransparent set + read back = {got}")
+            except Exception:
+                _diag("titlebarAppearsTransparent set (no readback)")
+        except Exception as exc:
+            _diag(f"titlebarAppearsTransparent set failed: {exc!r}")
+        try:
+            nswindow.setBackgroundColor_(color)
+        except Exception as exc:
+            _diag(f"setBackgroundColor failed: {exc!r}")
         # Hide the title text so "Tideway" doesn't print in the
         # middle of the (now color-matched) title bar — letting the
         # space read as part of the app body rather than as an OS
@@ -327,28 +347,45 @@ def _apply_macos(nswindow: object, theme: str) -> None:
         log.exception("window_chrome: NSWindow tint failed")
 
 
+def _objc_class_name(obj) -> str:
+    """Return the ObjC class name for a PyObjC object. Falls back
+    to the Python type's name. PyObjC's bridged types sometimes
+    report their generic Python name ("NSView") via type().__name__
+    even when the underlying ObjC class is something more specific
+    (like "WKWebView"). `className()` is the source of truth."""
+    try:
+        return str(obj.className())
+    except Exception:
+        try:
+            return type(obj).__name__
+        except Exception:
+            return "<unknown>"
+
+
 def _dump_subview_tree(view, depth=0) -> None:
-    """Diagnostic: walk the NSView tree under `view` and log every
-    descendant's class name. Helps figure out what pywebview's
-    WebView is actually called in this version's hierarchy so we
-    can match it correctly. Bounded depth against runaway loops."""
+    """Walk the NSView tree under `view` and log every descendant's
+    ObjC class name + frame. Bounded depth against runaway loops."""
     if depth > 6:
         return
     try:
         subs = view.subviews() or []
-    except Exception:
+    except Exception as exc:
+        _diag(f"  subviews() at depth {depth} raised: {exc!r}")
         return
+    if depth == 0 and len(subs) == 0:
+        _diag(f"  contentView has NO subviews — WebView is elsewhere")
     for sub in subs:
-        cls_name = type(sub).__name__
+        cls_name = _objc_class_name(sub)
         try:
             frame = sub.frame()
             geom = (
-                f"x={frame.origin.x} y={frame.origin.y} "
-                f"w={frame.size.width} h={frame.size.height}"
+                f"x={frame.origin.x:.0f} y={frame.origin.y:.0f} "
+                f"w={frame.size.width:.0f} h={frame.size.height:.0f}"
             )
         except Exception:
             geom = "frame=?"
-        _diag(f"  subview[{depth}] {cls_name} {geom}")
+        indent = "  " * (depth + 1)
+        _diag(f"{indent}subview {cls_name} {geom}")
         _dump_subview_tree(sub, depth + 1)
 
 
