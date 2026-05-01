@@ -10,21 +10,22 @@ import { api } from "@/api/client";
  * HTML and routes their clicks through `/api/_internal/window/*` back
  * to the pywebview window.
  *
- * On macOS we keep the native traffic-light buttons (Mac users have
- * strong muscle memory for their position and behavior, and the
- * existing transparent-titlebar tinting in app/window_chrome.py
- * already blends them into the app body). This component still
- * renders, but only as a 28-pixel spacer that reserves room for the
- * traffic lights and provides empty drag space — the underlying
- * NSWindow titlebar zone handles dragging natively.
+ * On macOS we keep the native traffic-light buttons + the OS-drawn
+ * titlebar band as its own region above the WebView. We intentionally
+ * do NOT render a React spacer for macOS — when we tried that, the
+ * spacer's div absorbed mouseDown events that should have reached the
+ * native NSWindow titlebar handler, breaking window drag and double-
+ * click-to-zoom. Letting the OS titlebar live above the WebView (no
+ * FullSizeContentView in app/window_chrome.py) means the OS sees
+ * every titlebar mouse event natively. Visual blend still works
+ * because the chrome code tints the titlebar band the same color as
+ * the page body.
  *
  * Plain browser dev mode and Linux render nothing.
  *
- * Drag region: WebView2 (Windows) honors CSS `app-region: drag`.
- * WKWebView (macOS) does NOT, but doesn't need to — the native
- * NSWindow titlebar covers the same screen rectangle and is
- * draggable on its own. So `app-region: drag` is conditionally set
- * for Windows only.
+ * Drag region (Windows only): WebView2 silently ignores CSS
+ * `app-region: drag`, so on mousedown we hand off to a backend
+ * endpoint that runs Win32's move loop directly.
  */
 
 type Platform = "win32" | "darwin" | "linux" | "browser";
@@ -113,24 +114,17 @@ export function WindowTitlebar() {
     return () => window.removeEventListener("resize", check);
   }, [info.platform, info.frameless]);
 
-  // Hide entirely on Linux (no integrated chrome there) and in plain
-  // browser dev mode — the OS / browser already provides everything.
-  if (info.platform === "linux" || info.platform === "browser") {
+  // Hide entirely on Linux (no integrated chrome there), in plain
+  // browser dev mode (browser provides everything), AND on macOS
+  // (the OS titlebar lives above the WebView as its own region —
+  // no spacer needed, and rendering one would absorb mouseDown
+  // events that need to reach the OS titlebar handler).
+  if (
+    info.platform === "linux" ||
+    info.platform === "browser" ||
+    info.platform === "darwin"
+  ) {
     return null;
-  }
-
-  // macOS: empty spacer reserving the traffic-light zone. 28px is the
-  // standard Cocoa titlebar height; the buttons sit ~7px from the
-  // left edge and span ~70px in total. We leave the row blank — the
-  // NSWindow titlebar underneath handles dragging on its own.
-  if (info.platform === "darwin") {
-    return (
-      <div
-        className="select-none bg-background"
-        style={{ height: 28 }}
-        aria-hidden="true"
-      />
-    );
   }
 
   // The mini-player window is created with frameless=False (it's a
