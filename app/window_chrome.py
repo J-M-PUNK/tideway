@@ -245,16 +245,18 @@ def _apply_macos(nswindow: object, theme: str) -> None:
                 # nswindow.setContentView_(webview) directly), we
                 # don't need to find or resize anything — it
                 # already fills the window by virtue of being the
-                # content view. Just confirm and bail.
-                if (
+                # content view. We DO need to defeat WKWebView's
+                # default opaque chrome / vibrancy fallback so the
+                # page's bg-background actually shows in the
+                # titlebar band.
+                is_webview = (
                     "WebView" in cv_class
                     or "WebKit" in cv_class
                     or content_view.respondsToSelector_(b"loadHTMLString:baseURL:")
-                ):
-                    _diag(
-                        "contentView IS a WebView — already fills window, "
-                        "no separate resize needed"
-                    )
+                )
+                if is_webview:
+                    _diag("contentView IS a WebView — defeating opaque bg")
+                    _make_webview_transparent(content_view, color)
                 else:
                     _dump_subview_tree(content_view)
                     resized = _resize_webviews_to_fill(content_view, bounds)
@@ -345,6 +347,70 @@ def _apply_macos(nswindow: object, theme: str) -> None:
         )
     except Exception:
         log.exception("window_chrome: NSWindow tint failed")
+
+
+def _make_webview_transparent(webview, color) -> None:
+    """Make WKWebView's chrome/underpage areas paint our theme color
+    instead of the system-default light gray vibrancy.
+
+    Even with FullSizeContentView + titlebarAppearsTransparent, the
+    titlebar zone shows whatever is in the WebView's BACKING (layer
+    backgroundColor + the underPageBackgroundColor it composites
+    when not painting page content). WKWebView defaults are opaque
+    light-gray on macOS — that's the gray the user keeps seeing.
+
+    Try every API in sequence; each one targets a different layer
+    of the rendering stack. Logging records which paths worked so
+    we can prune the unsuccessful ones in a follow-up.
+    """
+    import AppKit  # type: ignore
+
+    # 1. underPageBackgroundColor — public API on macOS 12+. This
+    #    is the documented way to color the area "behind" the page,
+    #    including the titlebar zone with FullSize. Setting to our
+    #    theme color makes the OS chrome composite with our color
+    #    instead of the system default.
+    try:
+        if webview.respondsToSelector_(b"setUnderPageBackgroundColor:"):
+            webview.setUnderPageBackgroundColor_(color)
+            _diag("setUnderPageBackgroundColor OK")
+        else:
+            _diag("setUnderPageBackgroundColor not available")
+    except Exception as exc:
+        _diag(f"setUnderPageBackgroundColor failed: {exc!r}")
+
+    # 2. setOpaque(NO) — makes the WebView itself non-opaque so
+    #    layers underneath show through. Combined with NSWindow's
+    #    backgroundColor, this lets our dark color paint in any
+    #    region the page hasn't covered.
+    try:
+        if webview.respondsToSelector_(b"setOpaque:"):
+            webview.setOpaque_(False)
+            _diag("setOpaque(False) OK")
+    except Exception as exc:
+        _diag(f"setOpaque(False) failed: {exc!r}")
+
+    # 3. Layer backgroundColor — when WKWebView is layer-backed
+    #    (always, on modern macOS), the layer's bg color is what
+    #    composites under the rendered page. Setting to clear lets
+    #    the NSWindow's backgroundColor show through.
+    try:
+        layer = webview.layer()
+        if layer is not None:
+            clear = AppKit.NSColor.clearColor()
+            layer.setBackgroundColor_(clear.CGColor())
+            _diag("layer backgroundColor set to clear")
+    except Exception as exc:
+        _diag(f"layer backgroundColor failed: {exc!r}")
+
+    # 4. Private legacy API: drawsBackground via KVC. This worked
+    #    in WebView (pre-WKWebView) and still works on some
+    #    macOS / WKWebView combinations as a last-resort knob.
+    try:
+        webview.setValue_forKey_(False, "drawsBackground")
+        _diag("KVC drawsBackground=False OK")
+    except Exception as exc:
+        _diag(f"KVC drawsBackground failed: {exc!r}")
 
 
 def _objc_class_name(obj) -> str:
