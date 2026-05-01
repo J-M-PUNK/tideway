@@ -48,6 +48,8 @@ from app.audio.eq import (
     PRESETS as EQ_PRESETS,
     preset_bands as eq_preset_bands,
 )
+from app.audio.manifest_cache import ManifestCache
+from app.audio.output_devices import list_output_devices
 from app.audio.segment_reader import SegmentReader
 
 log = logging.getLogger(__name__)
@@ -221,36 +223,12 @@ class PCMPlayer:
         # callback at end-of-track.
         self._preload: Optional[_Preload] = None
 
-        # Stream-manifest cache. Keyed by (track_id, quality_or_None);
-        # value is (urls, duration_s, stream_info, cached_at_monotonic,
-        # bytes_map). The bytes_map holds optional pre-downloaded
-        # segment bytes (idx -> bytes) so byte-level prefetch can
-        # skip the network entirely when the user clicks play on a
-        # warmed track. Empty dict = URLs-only warm (manifest only,
-        # no pre-fetched bytes).
-        #
-        # Kept short (3 min) because Tidal's signed CDN URLs expire
-        # inside that window. Frontend hover / album-mount prefetch
-        # writes here so the first real click is free of the
-        # playbackinfo round-trip and, if bytes are warmed, of the
-        # init + first-media segment fetches too.
-        self._manifest_cache: dict[
-            tuple[str, Optional[str]],
-            tuple[list[str], Optional[float], StreamInfo, float, dict[int, bytes]],
-        ] = {}
-        self._manifest_cache_lock = threading.Lock()
-        self._manifest_cache_ttl = 180.0
-        # Hit / miss counters for the cache, surfaced by
-        # /api/player/cache-stats so you can watch them while testing.
-        self._manifest_cache_hits = 0
-        self._manifest_cache_misses = 0
-        # Rolling byte-level memory cap. Each cached bytes_map can
-        # run ~1 MB at max quality (init + first media segment).
-        # FIFO-evict entries when we exceed the cap so a long
-        # playlist doesn't blow memory. 30 MB fits ~30 max-quality
-        # tracks or hundreds at low quality.
-        self._manifest_cache_bytes = 0
-        self._manifest_cache_bytes_cap = 30 * 1024 * 1024
+        # Stream-manifest cache. Keyed by (track_id, quality_or_None).
+        # Frontend hover / album-mount prefetch writes here so the
+        # first real click is free of the playbackinfo round-trip
+        # and, if bytes are warmed, of the init + first-media
+        # segment fetches too. See app/audio/manifest_cache.py.
+        self._manifest_cache = ManifestCache()
 
         # 10-band biquad EQ applied in the audio callback. One
         # instance owned for the lifetime of the player; when the
@@ -261,6 +239,30 @@ class PCMPlayer:
         self._eq: Optional[Equalizer] = None
         self._eq_bands: list[float] = []
         self._eq_preamp: Optional[float] = None
+
+        # Audio-callback diagnostics. Each pair is (count, last-print
+        # time) for a different rate-limited stderr message:
+        #   _cb_status: PortAudio over/underrun flags from the
+        #     callback's `status` arg (driver-level glitch).
+        #   _cb_starve: our decoder didn't push a chunk in time
+        #     (our-side fault — slow disk / network / CPU).
+        # Initialised here rather than lazy-init via getattr in the
+        # callback so the attribute names live in one place and a
+        # typo at the use site is a fail-fast AttributeError, not a
+        # silently-zeroed counter.
+        self._cb_status_count = 0
+        self._cb_status_last_print = 0.0
+        self._cb_starve_count = 0
+        self._cb_starve_last_print = 0.0
+        # Heartbeat tick counter, only incremented when _DEBUG is on.
+        # 1-per-callback log every 100 ticks confirms the callback
+        # is actually running + advancing.
+        self._callback_counter = 0
+        # Seq-bump counter for the audio callback's position-tick
+        # nudges. Bumped every callback; emits a fresh seq every
+        # 20 callbacks (~4-5 Hz at typical 86 Hz callback rate) so
+        # the SSE position-update path lets the snapshot through.
+        self._seq_bump_counter = 0
 
         # macOS audio-route listener. Subscribes to TWO CoreAudio
         # events:
@@ -980,144 +982,19 @@ class PCMPlayer:
     # --- Device selection -------------------------------------------
 
     def list_output_devices(self) -> list[dict]:
-        """Enumerate output-capable audio devices via sounddevice and
-        filter to the same set macOS System Settings → Sound → Output
-        shows.
+        """Enumerate output-capable audio devices for the picker UI.
 
-        Returns `[{"id": "<int-as-str>", "name": "<human>"}]`, with
-        an empty-id "System default" entry first.
+        Thin wrapper around `output_devices.list_output_devices`:
+        captures `stream_active` under the lock so the listing
+        function knows whether it's safe to re-init PortAudio
+        (which would tear down a live stream).
 
-        Refresh: PortAudio caches its CoreAudio device list at the
-        time of initialization. We terminate + re-initialize when
-        no stream is open so devices that connected after launch
-        (USB DACs, Bluetooth headphones) appear in the picker.
-        While a stream IS open, the macOS audio-route listener
-        (see `_on_audio_route_changed`) drives the refresh: any
-        device list change fires recovery, which terminates +
-        re-initializes PortAudio as part of reopening the stream.
-        So by the time the user opens the picker, PortAudio's
-        cache is already fresh — no in-place re-init needed here.
-
-        Each platform has its own filter, both grounded in the OS's
-        own visibility API rather than substring-name guesswork:
-
-        macOS — `app.audio.macos_audio_devices.visible_output_device_names`
-        asks CoreAudio for the OUTPUT-scope visibility property
-        macOS itself uses to build System Settings. Microsoft Teams
-        Audio, ZoomAudioDevice, BlackHole, microphones with no
-        output streams, and aggregate devices the user hasn't
-        enabled all return False on
-        `kAudioDevicePropertyDeviceCanBeDefaultDevice` and get
-        filtered. Real hardware (speakers, AirPods, USB DACs, HDMI,
-        AirPlay endpoints) returns True and passes.
-
-        Windows — PortAudio exposes the same physical device through
-        multiple host APIs (MME, DirectSound, WASAPI, WDM-KS) so
-        without filtering every speaker / DAC shows up four times,
-        and the MME / DirectSound entries also include devices the
-        user has DISABLED in Windows Sound settings (those backends
-        ignore device state). `_wasapi_host_api_index()` finds the
-        WASAPI host-api index and we skip every other host-api on
-        the way out, which both deduplicates and respects WASAPI's
-        IMMDevice DEVICE_STATE_ACTIVE filter.
-
-        Linux — only ALSA host API exists in the typical PortAudio
-        build, so the duplicate-host problem doesn't apply. No
-        filter is run; the picker shows whatever PortAudio
-        enumerates.
-
-        Logs the full enumeration via `[audio]` print lines so
-        users debugging "my headphones aren't showing up" can see
-        what PortAudio reports AND which entries each filter
-        accepted vs. rejected.
+        See `app/audio/output_devices.py` for per-platform filter
+        rationale and the picker payload shape.
         """
-        out: list[dict] = [{"id": "", "name": "System default"}]
         with self._lock:
             stream_active = self._stream is not None
-        if not stream_active:
-            try:
-                sd._terminate()
-            except Exception:
-                pass
-            try:
-                sd._initialize()
-            except Exception:
-                log.exception("sd._initialize after refresh failed")
-        try:
-            devices = sd.query_devices()
-        except Exception:
-            log.exception("sd.query_devices failed")
-            print(
-                "[audio] device enumeration failed — see traceback above",
-                flush=True,
-            )
-            return out
-
-        # macOS visibility set (None on non-darwin / on query failure
-        # — in which case we skip the macOS filter and let the
-        # platform-agnostic + Windows-WASAPI checks below decide).
-        visible = _macos_visible_output_names()
-        if visible is not None:
-            print(
-                f"[audio] CoreAudio reports {len(visible)} visible output "
-                f"device(s): {sorted(visible)!r}",
-                flush=True,
-            )
-
-        # Windows WASAPI host-api index (None on non-Windows / on
-        # query failure — we then fall through to "show every
-        # output-capable device", which is the right behavior on
-        # macOS/Linux anyway).
-        wasapi_idx = _wasapi_host_api_index()
-        if wasapi_idx is not None:
-            print(
-                f"[audio] WASAPI host-api index = {wasapi_idx}; "
-                "Windows picker will hide non-WASAPI entries",
-                flush=True,
-            )
-
-        print(
-            f"[audio] PortAudio enumerated {len(devices)} device(s) "
-            f"(stream_active={stream_active}):",
-            flush=True,
-        )
-        for i, d in enumerate(devices):
-            ch_in = int(d.get("max_input_channels", 0) or 0)
-            ch_out = int(d.get("max_output_channels", 0) or 0)
-            try:
-                ha_name = sd.query_hostapis(d["hostapi"])["name"]
-            except Exception:
-                ha_name = f"hostapi={d.get('hostapi')}"
-            name = d.get("name") or f"Device {i}"
-            kind = "OUT" if ch_out > 0 else ("IN " if ch_in > 0 else "?  ")
-
-            if ch_out > 0:
-                # Two filters, OR'd into a single accept decision.
-                # On macOS the visibility set is the only signal;
-                # on Windows the WASAPI host-api index is. On Linux
-                # both are None and every output-capable device
-                # passes.
-                accepted = True
-                if visible is not None and name not in visible:
-                    accepted = False
-                if (
-                    wasapi_idx is not None
-                    and d.get("hostapi") != wasapi_idx
-                ):
-                    accepted = False
-                tag = "OUT " if accepted else "HIDE"
-            else:
-                accepted = False
-                tag = kind
-
-            print(
-                f"[audio]   [{i:2d}] {tag} ch={ch_out}/{ch_in} "
-                f"hostapi={ha_name!r} name={name!r}",
-                flush=True,
-            )
-            if accepted:
-                out.append({"id": str(i), "name": name})
-        return out
+        return list_output_devices(stream_active)
 
     def set_output_device(self, device_id: str) -> None:
         """Remember the device-id selection and, if a stream is
@@ -1396,7 +1273,7 @@ class PCMPlayer:
         # TTL stays well inside Tidal's signed-URL expiry window.
         cache_key = (track_id, quality)
         t0 = time.monotonic()
-        cached_urls_info = self._cache_lookup(cache_key)
+        cached_urls_info = self._manifest_cache.lookup(cache_key)
         if cached_urls_info is not None:
             urls, duration, info, bytes_map = cached_urls_info
             print(
@@ -1445,11 +1322,11 @@ class PCMPlayer:
                 audio_mode=getattr(stream, "audio_mode", None),
             )
             duration_s = float(duration) if duration else None
-            self._cache_store(cache_key, list(urls), duration_s, info)
-            # After _cache_store, any previously-warmed bytes are
-            # preserved — pick them back up so a MISS on manifest
-            # that still has bytes cached returns the bytes too.
-            cached = self._cache_lookup(cache_key)
+            self._manifest_cache.store(cache_key, list(urls), duration_s, info)
+            # After store, any previously-warmed bytes are preserved
+            # — pick them back up so a MISS on manifest that still
+            # has bytes cached returns the bytes too.
+            cached = self._manifest_cache.lookup(cache_key)
             bytes_map = cached[3] if cached is not None else {}
             print(
                 f"[perf] resolve track={track_id} quality={quality} cache=MISS "
@@ -1466,126 +1343,11 @@ class PCMPlayer:
             if override is not None:
                 session.config.quality = original
 
-    def _cache_lookup(
-        self, key: tuple[str, Optional[str]]
-    ) -> Optional[tuple[list[str], Optional[float], StreamInfo, dict[int, bytes]]]:
-        now = time.monotonic()
-        with self._manifest_cache_lock:
-            entry = self._manifest_cache.get(key)
-            if entry is None:
-                self._manifest_cache_misses += 1
-                return None
-            urls, duration, info, cached_at, bytes_map = entry
-            if now - cached_at > self._manifest_cache_ttl:
-                self._manifest_cache_bytes -= sum(len(v) for v in bytes_map.values())
-                self._manifest_cache.pop(key, None)
-                self._manifest_cache_misses += 1
-                return None
-            self._manifest_cache_hits += 1
-            return list(urls), duration, info, dict(bytes_map)
-
-    def _cache_update_bytes(
-        self, key: tuple[str, Optional[str]], new_bytes: dict[int, bytes]
-    ) -> None:
-        """Merge pre-fetched segment bytes into an existing cache
-        entry. Only stores bytes for entries we already have URLs
-        for (no-op if the URLs got evicted mid-prefetch). Runs the
-        FIFO eviction pass afterwards so a long prefetch queue
-        can't blow past the memory cap."""
-        if not new_bytes:
-            return
-        with self._manifest_cache_lock:
-            entry = self._manifest_cache.get(key)
-            if entry is None:
-                return
-            urls, duration, info, cached_at, bytes_map = entry
-            merged = dict(bytes_map)
-            added = 0
-            for idx, data in new_bytes.items():
-                if idx in merged:
-                    continue
-                merged[idx] = data
-                added += len(data)
-            self._manifest_cache[key] = (urls, duration, info, cached_at, merged)
-            self._manifest_cache_bytes += added
-            self._evict_bytes_over_cap_locked()
-
-    def _evict_bytes_over_cap_locked(self) -> None:
-        """FIFO-evict byte-level entries until we're under the cap.
-        Drops bytes only, preserves the URL/manifest metadata so
-        subsequent plays still skip the Tidal round-trips. Caller
-        holds the cache lock."""
-        if self._manifest_cache_bytes <= self._manifest_cache_bytes_cap:
-            return
-        # Python 3.7+ dict preserves insertion order — pop in insertion
-        # order until we're back under the cap.
-        for key in list(self._manifest_cache.keys()):
-            urls, duration, info, cached_at, bytes_map = self._manifest_cache[key]
-            if not bytes_map:
-                continue
-            freed = sum(len(v) for v in bytes_map.values())
-            self._manifest_cache[key] = (urls, duration, info, cached_at, {})
-            self._manifest_cache_bytes -= freed
-            if self._manifest_cache_bytes <= self._manifest_cache_bytes_cap:
-                break
-
     def cache_stats(self) -> dict:
         """Snapshot of the manifest cache for the /api/player/cache-stats
         endpoint. Read while testing the prefetch path to confirm
         hovers / album-mount prefetches are landing."""
-        with self._manifest_cache_lock:
-            now = time.monotonic()
-            entries = [
-                {
-                    "track_id": tid,
-                    "quality": q,
-                    "age_ms": int((now - cached_at) * 1000.0),
-                    "segments": len(urls),
-                    "prefetched_segments": len(bytes_map),
-                    "prefetched_bytes": sum(len(v) for v in bytes_map.values()),
-                }
-                for (tid, q), (urls, _dur, _info, cached_at, bytes_map) in list(
-                    self._manifest_cache.items()
-                )
-            ]
-            return {
-                "hits": self._manifest_cache_hits,
-                "misses": self._manifest_cache_misses,
-                "ttl_seconds": int(self._manifest_cache_ttl),
-                "size": len(self._manifest_cache),
-                "bytes_cached": self._manifest_cache_bytes,
-                "bytes_cap": self._manifest_cache_bytes_cap,
-                "entries": entries,
-            }
-
-    def _cache_store(
-        self,
-        key: tuple[str, Optional[str]],
-        urls: list[str],
-        duration: Optional[float],
-        info: StreamInfo,
-    ) -> None:
-        with self._manifest_cache_lock:
-            # Preserve any pre-fetched bytes from a prior prefetch
-            # for the same key so re-resolving doesn't wipe the
-            # warmed segments. Caller will merge bytes in later via
-            # _cache_update_bytes if a fresh prefetch is running.
-            existing = self._manifest_cache.get(key)
-            existing_bytes = existing[4] if existing is not None else {}
-            self._manifest_cache[key] = (
-                urls, duration, info, time.monotonic(), existing_bytes,
-            )
-            # Evict expired siblings while we have the lock; keeps
-            # memory bounded without a background janitor thread.
-            if len(self._manifest_cache) > 128:
-                cutoff = time.monotonic() - self._manifest_cache_ttl
-                stale = [k for k, v in self._manifest_cache.items() if v[3] < cutoff]
-                for k in stale:
-                    dropped = self._manifest_cache.pop(k, None)
-                    if dropped is not None:
-                        self._manifest_cache_bytes -= sum(
-                            len(v) for v in dropped[4].values()
-                        )
+        return self._manifest_cache.stats()
 
     def prefetch(
         self, track_id: str, quality: Optional[str] = None, *, warm_bytes: bool = True
@@ -1621,7 +1383,7 @@ class PCMPlayer:
         hover events don't re-download. Fire-and-forget: any failure
         leaves the cache at URL-only and the eventual play path
         falls through to the normal SegmentReader fetch."""
-        cached = self._cache_lookup(key)
+        cached = self._manifest_cache.lookup(key)
         have = cached[3] if cached is not None else {}
         targets = [i for i in (0, 1) if i < len(urls) and i not in have]
         if not targets:
@@ -1647,7 +1409,7 @@ class PCMPlayer:
                     fetched[idx] = content
         if fetched:
             total = sum(len(v) for v in fetched.values())
-            self._cache_update_bytes(key, fetched)
+            self._manifest_cache.update_bytes(key, fetched)
             print(
                 f"[perf] prefetch bytes track={key[0]} quality={key[1]} "
                 f"segments={sorted(fetched.keys())} "
@@ -1863,44 +1625,66 @@ class PCMPlayer:
             except queue.Full:
                 pass
 
+    def _log_callback_status(self, status) -> None:
+        """Rate-limited diagnostic for PortAudio over/underruns
+        signalled via the callback's `status` arg. One message + a
+        running count per second; without rate limiting a sustained
+        glitch at 86 Hz callback cadence would saturate stderr.
+        Critical diagnostic on Windows where stutter complaints
+        typically trace back to this path."""
+        now = time.monotonic()
+        self._cb_status_count += 1
+        if now - self._cb_status_last_print >= 1.0:
+            count = self._cb_status_count
+            self._cb_status_count = 0
+            self._cb_status_last_print = now
+            print(
+                f"[audio] callback status={status} "
+                f"(count_since_last={count})",
+                file=sys.stderr,
+                flush=True,
+            )
+
+    def _log_callback_heartbeat(self) -> None:
+        """DEBUG-only per-100-callback heartbeat. Confirms the
+        callback is running + advancing samples and shows the
+        queue depth so a "decoder is filling but callback isn't
+        draining" condition is visible at a glance."""
+        self._callback_counter += 1
+        if self._callback_counter % 100 == 0:
+            qsize = self._pcm_queue.qsize()
+            print(
+                f"[pcm] callback tick #{self._callback_counter} "
+                f"samples_emitted={self._samples_emitted} "
+                f"queue={qsize}/{_PCM_QUEUE_MAX} "
+                f"state={self._state} "
+                f"track={self._current_track_id}",
+                file=sys.stderr, flush=True,
+            )
+
+    def _log_callback_starvation(self) -> None:
+        """Rate-limited diagnostic for our-side underruns — the
+        decoder didn't push a chunk in time. Distinct from
+        `_log_callback_status` because it pinpoints the cause as
+        ours (slow disk / network / CPU) rather than driver-side."""
+        now = time.monotonic()
+        self._cb_starve_count += 1
+        if now - self._cb_starve_last_print >= 1.0:
+            count = self._cb_starve_count
+            self._cb_starve_count = 0
+            self._cb_starve_last_print = now
+            print(
+                f"[audio] queue starvation: decoder behind "
+                f"the callback (count_since_last={count})",
+                file=sys.stderr,
+                flush=True,
+            )
+
     def _audio_callback(self, outdata, frames, time_info, status) -> None:
         if status:
-            # Under/overruns surface here. Rate-limit to once per
-            # second so a sustained underrun (audio glitching every
-            # callback at 44.1k/512 = 86 Hz) doesn't spam stderr at
-            # full speed. The first message + heartbeat is what the
-            # user / dev needs; the count is what tells us how bad
-            # it got. Critical diagnostic on Windows where stutter
-            # complaints typically trace back here.
-            now = time.monotonic()
-            self._cb_status_count = getattr(self, "_cb_status_count", 0) + 1
-            last = getattr(self, "_cb_status_last_print", 0.0)
-            if now - last >= 1.0:
-                count = self._cb_status_count
-                self._cb_status_count = 0
-                self._cb_status_last_print = now
-                print(
-                    f"[audio] callback status={status} "
-                    f"(count_since_last={count})",
-                    file=sys.stderr,
-                    flush=True,
-                )
-
-        # Rate-limited heartbeat so we can see the callback is
-        # actually running + advancing. Logs once per second at
-        # typical 44.1k/512-frame cadence.
+            self._log_callback_status(status)
         if PCMPlayer._DEBUG:
-            self._callback_counter = getattr(self, "_callback_counter", 0) + 1
-            if self._callback_counter % 100 == 0:
-                qsize = self._pcm_queue.qsize()
-                print(
-                    f"[pcm] callback tick #{self._callback_counter} "
-                    f"samples_emitted={self._samples_emitted} "
-                    f"queue={qsize}/{_PCM_QUEUE_MAX} "
-                    f"state={self._state} "
-                    f"track={self._current_track_id}",
-                    file=sys.stderr, flush=True,
-                )
+            self._log_callback_heartbeat()
 
         # Paused → output silence, don't drain queue, don't advance
         # position. Zero-latency resume: on unpause the next call
@@ -1943,28 +1727,7 @@ class PCMPlayer:
                     # keeps moving through the underrun window —
                     # otherwise position would freeze on every
                     # hiccup.
-                    #
-                    # Rate-limited diagnostic: distinct from the
-                    # PortAudio status-flag log because it tells us
-                    # WHY the underrun happened — our decoder thread
-                    # didn't push a chunk in time. Useful for
-                    # isolating "slow disk", "slow network", and
-                    # "slow CPU" cases when a user reports stutter.
-                    now = time.monotonic()
-                    self._cb_starve_count = (
-                        getattr(self, "_cb_starve_count", 0) + 1
-                    )
-                    last = getattr(self, "_cb_starve_last_print", 0.0)
-                    if now - last >= 1.0:
-                        count = self._cb_starve_count
-                        self._cb_starve_count = 0
-                        self._cb_starve_last_print = now
-                        print(
-                            f"[audio] queue starvation: decoder behind "
-                            f"the callback (count_since_last={count})",
-                            file=sys.stderr,
-                            flush=True,
-                        )
+                    self._log_callback_starvation()
                     outdata[written:] = 0
                     self._samples_emitted += frames
                     return
@@ -2054,11 +1817,10 @@ class PCMPlayer:
             # Bump seq so the frontend's position scrubber still
             # advances even though local is silent — playback is
             # still happening, just on the remote.
-            _cb_counter = getattr(self, "_seq_bump_counter", 0) + 1
-            if _cb_counter >= 20:
+            self._seq_bump_counter += 1
+            if self._seq_bump_counter >= 20:
                 self._seq += 1
-                _cb_counter = 0
-            self._seq_bump_counter = _cb_counter
+                self._seq_bump_counter = 0
             return
 
         # EQ (10-band biquad). Active only when the user has a
@@ -2108,11 +1870,10 @@ class PCMPlayer:
         # position update. The callback fires ~90Hz at 44.1k /512
         # frames, so ~every 20th call keeps us close to 4-5Hz —
         # smooth for a scrubber, cheap on CPU.
-        _cb_counter = getattr(self, "_seq_bump_counter", 0) + 1
-        if _cb_counter >= 20:
+        self._seq_bump_counter += 1
+        if self._seq_bump_counter >= 20:
             self._seq += 1
-            _cb_counter = 0
-        self._seq_bump_counter = _cb_counter
+            self._seq_bump_counter = 0
 
     def _adopt_preload_locked(self, pre: _Preload) -> PlayerSnapshot:
         """Synchronous version of the callback's gapless swap,
@@ -2141,22 +1902,10 @@ class PCMPlayer:
 
         # Adopt the preload's pipeline. Callback is free to read
         # from the new queue the instant after these assignments.
-        self._decoder = pre.decoder
-        self._pcm_queue = pre.queue
-        self._decoder_thread = pre.thread
-        self._stop_flag = pre.stop_flag
-        self._decoder_done = pre.done
-        self._current_track_id = pre.track_id
-        self._current_duration_ms = pre.duration_ms
-        self._current_stream_info = pre.stream_info
-        self._source_urls = pre.source_urls
-        self._source_path = pre.source_path
-        if not rate_matches:
-            self._stream_sample_rate = pre.sample_rate
-            self._stream_sd_dtype = pre.sd_dtype
-            self._stream_channels = pre.channels
-        self._samples_emitted = 0
-        self._callback_carry = None
+        # `_swap_pipeline_to` writes rate/dtype/channels
+        # unconditionally; that's a no-op in the same-rate case
+        # because the values already match the active stream.
+        self._swap_pipeline_to(pre)
         self._preload = None
         self._state = "playing"
         self._last_error = None
@@ -2267,18 +2016,7 @@ class PCMPlayer:
         self._emit()
         # Phase 2: actual swap. Old decoder + thread have already
         # finished (done event is set), we just replace refs.
-        self._decoder = pre.decoder
-        self._pcm_queue = pre.queue
-        self._decoder_thread = pre.thread
-        self._stop_flag = pre.stop_flag
-        self._decoder_done = pre.done
-        self._current_track_id = pre.track_id
-        self._current_duration_ms = pre.duration_ms
-        self._current_stream_info = pre.stream_info
-        self._source_urls = pre.source_urls
-        self._source_path = pre.source_path
-        self._samples_emitted = 0
-        self._callback_carry = None
+        self._swap_pipeline_to(pre)
         self._state = "playing"
         self._seq += 1
         self._emit()
@@ -2582,21 +2320,7 @@ class PCMPlayer:
                 # stream so a racing preload() call (unlikely this
                 # early) can't re-stomp it.
                 self._preload = None
-                self._decoder = pre.decoder
-                self._pcm_queue = pre.queue
-                self._decoder_thread = pre.thread
-                self._stop_flag = pre.stop_flag
-                self._decoder_done = pre.done
-                self._current_track_id = pre.track_id
-                self._current_duration_ms = pre.duration_ms
-                self._current_stream_info = pre.stream_info
-                self._source_urls = pre.source_urls
-                self._source_path = pre.source_path
-                self._stream_sample_rate = pre.sample_rate
-                self._stream_sd_dtype = pre.sd_dtype
-                self._stream_channels = pre.channels
-                self._samples_emitted = 0
-                self._callback_carry = None
+                self._swap_pipeline_to(pre)
                 self._open_output_stream(
                     pre.sample_rate, pre.channels, pre.sd_dtype
                 )
@@ -2635,6 +2359,50 @@ class PCMPlayer:
             except Exception:
                 log.exception("listener raised")
 
+    def _swap_pipeline_to(self, pre: "_Preload") -> None:
+        """Replace the active pipeline refs with those from `pre`.
+
+        Single source of truth for the field copies that drive a
+        track swap. Same shape was hand-rolled in three places
+        (_try_gapless_swap, _bridge_to_preload, _adopt_preload_locked)
+        and inevitably drifted — the cross-rate gapless bug we just
+        shipped a fix for came from one of those copies forgetting a
+        partner emit. Centralising it here means a new field on
+        `_Preload` only has to be wired up once.
+
+        Atomicity: each assignment is one bytecode op under the GIL,
+        but the *sequence* of swaps is not atomic. Callers must
+        ensure the audio callback can't observe a half-swapped
+        state. The three current callers each handle this:
+
+          - `_try_gapless_swap` runs IN the callback; the callback
+            is the sole modifier at the track-boundary moment.
+          - `_bridge_to_preload` runs after `finished_callback`
+            fired, so the callback isn't running on the old stream.
+          - `_adopt_preload_locked` holds `_lock` and (for
+            cross-rate) closes the old stream before calling.
+
+        Always copies the rate / dtype / channels triple along with
+        the rest. Same-rate swaps no-op those (the values match the
+        active stream); the alternative — conditional copies — was
+        the contract drift this helper exists to prevent.
+        """
+        self._decoder = pre.decoder
+        self._pcm_queue = pre.queue
+        self._decoder_thread = pre.thread
+        self._stop_flag = pre.stop_flag
+        self._decoder_done = pre.done
+        self._current_track_id = pre.track_id
+        self._current_duration_ms = pre.duration_ms
+        self._current_stream_info = pre.stream_info
+        self._source_urls = pre.source_urls
+        self._source_path = pre.source_path
+        self._stream_sample_rate = pre.sample_rate
+        self._stream_sd_dtype = pre.sd_dtype
+        self._stream_channels = pre.channels
+        self._samples_emitted = 0
+        self._callback_carry = None
+
 
 # ---------------------------------------------------------------------------
 # Stream-info helpers (mutagen probe for local files)
@@ -2648,50 +2416,6 @@ def _safe_int(v: object) -> Optional[int]:
         return int(v)
     except (TypeError, ValueError):
         return None
-
-
-def _macos_visible_output_names() -> Optional[set[str]]:
-    """Thin wrapper around the CoreAudio query so this module
-    doesn't pay an import cost on non-darwin and so a missing
-    framework dlopen is logged once rather than on every picker
-    open. Returns None on failure / non-darwin."""
-    if sys.platform != "darwin":
-        return None
-    try:
-        from app.audio.macos_audio_devices import (
-            visible_output_device_names,
-        )
-    except Exception:
-        log.exception("macos_audio_devices import failed; falling back")
-        return None
-    try:
-        return visible_output_device_names()
-    except Exception:
-        log.exception("visible_output_device_names raised; falling back")
-        return None
-
-
-def _wasapi_host_api_index() -> Optional[int]:
-    """Return the PortAudio host-api index for WASAPI on Windows, or
-    None on every other platform / when WASAPI isn't built into this
-    PortAudio.
-
-    Used by `list_output_devices()` to filter out the duplicate
-    listings PortAudio creates when the same physical device is
-    exposed via MME, DirectSound, WASAPI, and WDM-KS — and to skip
-    devices the user has disabled in Windows Sound settings, which
-    the older host APIs still enumerate but WASAPI doesn't.
-    """
-    if sys.platform != "win32":
-        return None
-    try:
-        for idx, ha in enumerate(sd.query_hostapis()):
-            name = (ha.get("name") or "").lower()
-            if name == "windows wasapi" or "wasapi" in name:
-                return idx
-    except Exception:
-        log.exception("query_hostapis failed; falling back to all-host-API listing")
-    return None
 
 
 def _normalize_codec(raw: object) -> Optional[str]:
