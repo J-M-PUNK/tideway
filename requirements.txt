@@ -14,7 +14,7 @@ curl-cffi>=0.7.0
 pillow>=10.0.0
 fastapi>=0.110.0
 uvicorn[standard]>=0.27.0
-sse-starlette>=2.0.0
+sse-starlette>=3.4.1
 # Packaged desktop app — pywebview wraps the web UI in a native window.
 # On Windows it requires WebView2 (preinstalled on Win11, auto-installs
 # on Win10 via the Evergreen bootstrapper). On macOS it uses WKWebView,
