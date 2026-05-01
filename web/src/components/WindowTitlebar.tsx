@@ -10,16 +10,20 @@ import { api } from "@/api/client";
  * HTML and routes their clicks through `/api/_internal/window/*` back
  * to the pywebview window.
  *
- * On macOS we keep the native traffic-light buttons + the OS-drawn
- * titlebar band as its own region above the WebView. We intentionally
- * do NOT render a React spacer for macOS — when we tried that, the
- * spacer's div absorbed mouseDown events that should have reached the
- * native NSWindow titlebar handler, breaking window drag and double-
- * click-to-zoom. Letting the OS titlebar live above the WebView (no
- * FullSizeContentView in app/window_chrome.py) means the OS sees
- * every titlebar mouse event natively. Visual blend still works
- * because the chrome code tints the titlebar band the same color as
- * the page body.
+ * On macOS we use FullSizeContentView in app/window_chrome.py so
+ * WKWebView paints the page body under the OS titlebar — the
+ * traffic-light area gets the same near-black as the rest of the
+ * app, no gray system band. We render a 28px React spacer here so
+ * page content (the NavBar, scroll regions, etc.) doesn't sit
+ * directly under the traffic lights.
+ *
+ * Native window drag and double-click-to-zoom in that 28px band
+ * are restored via a transparent NSView overlay (also installed by
+ * window_chrome.py) whose `mouseDownCanMoveWindow` returns YES.
+ * AppKit's hit-test finds the overlay first, sees the YES, and
+ * routes the click to the native drag/zoom handler before it ever
+ * reaches WKWebView's JS layer. The React spacer is just visual
+ * spacing — it never sees the mouse events.
  *
  * Plain browser dev mode and Linux render nothing.
  *
@@ -114,17 +118,29 @@ export function WindowTitlebar() {
     return () => window.removeEventListener("resize", check);
   }, [info.platform, info.frameless]);
 
-  // Hide entirely on Linux (no integrated chrome there), in plain
-  // browser dev mode (browser provides everything), AND on macOS
-  // (the OS titlebar lives above the WebView as its own region —
-  // no spacer needed, and rendering one would absorb mouseDown
-  // events that need to reach the OS titlebar handler).
-  if (
-    info.platform === "linux" ||
-    info.platform === "browser" ||
-    info.platform === "darwin"
-  ) {
+  // Hide entirely on Linux (no integrated chrome) and in plain
+  // browser dev mode (browser provides everything).
+  if (info.platform === "linux" || info.platform === "browser") {
     return null;
+  }
+
+  // macOS: 28px spacer reserving the traffic-light zone. The
+  // FullSizeContentView style mask in app/window_chrome.py extends
+  // WKWebView under the OS titlebar so the spacer's bg-background
+  // shows behind the traffic lights — visual blend with the rest
+  // of the app. Mouse events here are caught by the transparent
+  // NSView overlay installed by window_chrome.py before they
+  // reach this React component, so the spacer doesn't need (and
+  // shouldn't have) any mouse handlers — drag and double-click
+  // happen at the native AppKit layer.
+  if (info.platform === "darwin") {
+    return (
+      <div
+        className="select-none bg-background"
+        style={{ height: 28 }}
+        aria-hidden="true"
+      />
+    );
   }
 
   // The mini-player window is created with frameless=False (it's a
