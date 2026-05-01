@@ -1,0 +1,66 @@
+# Dependabot keeps the project's dependencies fresh by opening
+# weekly PRs against `main` when a newer version is available. PRs
+# come in at the configured cadence rather than per-commit so the
+# review queue stays manageable. Major-version bumps land in their
+# own PRs (the `groups:` block batches patch + minor only).
+
+version: 2
+updates:
+  # Frontend npm packages.
+  - package-ecosystem: npm
+    directory: /web
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: America/Los_Angeles
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - frontend
+    commit-message:
+      prefix: "deps(web)"
+    groups:
+      # Group patch + minor bumps so a slow week doesn't spawn 12
+      # near-identical PRs. Major bumps stay separate so they get a
+      # proper review.
+      web-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  # Python backend.
+  - package-ecosystem: pip
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: America/Los_Angeles
+    open-pull-requests-limit: 5
+    labels:
+      - dependencies
+      - backend
+    commit-message:
+      prefix: "deps(py)"
+    groups:
+      py-minor-and-patch:
+        update-types:
+          - minor
+          - patch
+
+  # GitHub Actions versions in workflow files. Catches actions/checkout,
+  # setup-python, setup-node, softprops/action-gh-release etc.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      time: "09:00"
+      timezone: America/Los_Angeles
+    open-pull-requests-limit: 3
+    labels:
+      - dependencies
+      - ci
+    commit-message:
+      prefix: "deps(ci)"

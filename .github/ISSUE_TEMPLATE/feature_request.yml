@@ -1,0 +1,58 @@
+name: Feature request
+description: Suggest a new capability or an improvement to an existing one.
+title: "[Feature]: "
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for the suggestion. Before filing, please skim the
+        [Known limits](https://github.com/J-M-PUNK/tideway#known-limits)
+        section of the README. Some asks (Atmos playback, Tidal
+        Connect output) are intentional non-goals and won't be picked
+        up.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve
+      description: |
+        Describe the user-facing problem, not a proposed solution.
+        "I can't do X" is more useful than "add a button that does Y".
+      placeholder: When I'm doing X, I run into Y...
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposed-solution
+    attributes:
+      label: Proposed solution
+      description: How you imagine the feature working in the app.
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: |
+        Other ways you thought about solving the same problem and
+        why they don't quite fit.
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: |
+        Screenshots, links to how other apps handle this, anything
+        else that would help frame the request.
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Pre-flight
+      options:
+        - label: I have searched existing issues and this is not a duplicate
+          required: true
+        - label: I have read the Known limits section of the README
+          required: true
