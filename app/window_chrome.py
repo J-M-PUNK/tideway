@@ -182,21 +182,23 @@ def _apply_macos(nswindow: object, theme: str) -> None:
             # Older macOS releases have a different selector name —
             # fall through, the backgroundColor change still takes.
             pass
-        # Drag overlay. With FullSizeContentView on, WKWebView
+        # Drag handler. With FullSizeContentView on, WKWebView
         # captures every mouseDown in the titlebar band — including
         # the ones that should start a window drag or trigger a
-        # double-click zoom. We can't fix this from the JS side
-        # (WKWebView ignores -webkit-app-region: drag), so we put
-        # a transparent NSView on top of WKWebView in that band
-        # whose mouseDownCanMoveWindow returns YES. AppKit's hit-
-        # test finds the overlay first, sees the YES, kicks off the
-        # native drag/double-click flow before the click ever
-        # reaches WKWebView. See `_install_drag_overlay`.
+        # double-click zoom. We can't fix this with a sibling NSView
+        # overlay because WKWebView is layer-backed and AppKit puts
+        # layer-backed views on top regardless of subview order. The
+        # robust pattern is an NSEvent local monitor that intercepts
+        # leftMouseDown events BEFORE NSWindow.sendEvent_ dispatches
+        # them anywhere — when the click is in the titlebar zone, we
+        # call performWindowDragWithEvent_ on the NSWindow (which
+        # handles drag AND double-click-to-zoom natively per its
+        # docs) and consume the event. See `_install_drag_monitor`.
         try:
-            _install_drag_overlay(nswindow)
+            _install_drag_monitor(nswindow)
         except Exception:
             log.exception(
-                "window_chrome: drag overlay install failed"
+                "window_chrome: drag monitor install failed"
             )
         # Diagnostic — confirms the tint path actually ran. Cheap
         # (one print per window construction) and answers the most
@@ -211,122 +213,128 @@ def _apply_macos(nswindow: object, theme: str) -> None:
         log.exception("window_chrome: NSWindow tint failed")
 
 
-# Standard Cocoa titlebar height. The exact value doesn't matter
-# for visual correctness (the WebView paints under it either way);
-# it's the height the drag overlay covers so clicks in the titlebar
-# band route to AppKit's drag handler. 28pt matches what AppKit
-# uses for normal windows; 22pt or 38pt would also work and AppKit
-# wouldn't care.
+# Height of the titlebar drag zone in points. Standard macOS
+# titlebar height is 28pt — that's the band where the traffic
+# lights live and where users expect window drag / double-click
+# zoom to work. AppKit doesn't expose the exact value via API
+# (NSWindow.frame() includes the chrome but doesn't break it
+# down), so 28pt is hard-coded; matches what every well-behaved
+# native macOS app uses.
 _TITLEBAR_HEIGHT_PT = 28
 
 
-# Cached subclass of NSView with mouseDownCanMoveWindow overridden.
-# Built once on first install — re-creating the class each time
-# would crash the Objective-C runtime (you can't redeclare a class
-# name). Held at module scope so the GC doesn't free it.
-_DragOverlayClass = None
+# Module-level keepalive for the NSEvent monitor handle. PyObjC
+# returns an opaque token from addLocalMonitorForEventsMatchingMask
+# that has to stay alive for the monitor to keep firing — losing
+# the reference (or letting Python GC it) deregisters the monitor.
+# Held in a list keyed by NSWindow id so multiple windows (main +
+# mini-player) don't share / clobber.
+_drag_monitors: dict[int, object] = {}
 
 
-def _build_drag_overlay_class():
-    """Lazily build a NSView subclass whose mouseDownCanMoveWindow
-    returns YES. Only constructs the class on the first call; later
-    calls return the cached one. Done inside a function (rather than
-    at module load) so the AppKit import stays optional — machines
-    that fail to import pyobjc still get a working module."""
-    global _DragOverlayClass
-    if _DragOverlayClass is not None:
-        return _DragOverlayClass
-    import AppKit  # type: ignore
-    import objc  # type: ignore
+def _install_drag_monitor(nswindow) -> None:
+    """Install an NSEvent local monitor that intercepts leftMouseDown
+    events in the titlebar zone and routes them to the OS's native
+    window-drag handler.
 
-    class _TidewayDragOverlay(AppKit.NSView):
-        def mouseDownCanMoveWindow(self):  # noqa: N802 — AppKit name
-            # Returning True is what makes AppKit treat clicks on
-            # this view as window drags / double-click zooms,
-            # without the click ever reaching WKWebView. Standard
-            # macOS pattern for "make this region of my window
-            # draggable like a titlebar."
-            return True
+    Why this and not an NSView overlay: WKWebView is layer-backed.
+    When mixed with non-layer-backed sibling NSViews, AppKit puts
+    layer-backed views on top in the visual stack regardless of
+    addSubview order, which means a transparent overlay below
+    WKWebView in the layer tree never sees the click. An NSEvent
+    local monitor sits BEFORE NSWindow.sendEvent_ in the event
+    pipeline — events come to us before they reach any view, and
+    we can either consume them (return None) or forward them
+    (return the event).
 
-        def acceptsFirstMouse_(self, _event):  # noqa: N802
-            # Accept drags even when the window isn't currently
-            # focused — clicking the titlebar to drag an unfocused
-            # window is the expected macOS behaviour.
-            return True
+    The monitor checks the click location. If it's in the top 28pt
+    of the window's content area AND the click isn't on a traffic
+    light (which AppKit handles in its own chrome layer above the
+    contentView), we call performWindowDragWithEvent_ on the
+    NSWindow. That method's documented behaviour is to handle BOTH
+    a drag (mouse moves while held) and a double-click (no move
+    within the threshold) — the latter triggering zoom or
+    fullscreen per System Settings.
 
-        def hitTest_(self, point):  # noqa: N802
-            # Standard hit-test. We deliberately return self for
-            # any point inside our bounds (AppKit's default does
-            # this for opaque views; we're transparent so we have
-            # to be explicit, otherwise the hit falls through to
-            # WKWebView and we lose the drag handling).
-            if AppKit.NSPointInRect(
-                self.convertPoint_fromView_(point, None),
-                self.bounds(),
-            ):
-                return self
-            return objc.super(_TidewayDragOverlay, self).hitTest_(point)
-
-    _DragOverlayClass = _TidewayDragOverlay
-    return _TidewayDragOverlay
-
-
-def _install_drag_overlay(nswindow) -> None:
-    """Add a transparent draggable NSView at the top of the window's
-    contentView, spanning the full width and 28pt tall. AppKit's
-    hit-test on a click in that band finds this view first, sees
-    mouseDownCanMoveWindow=YES, and starts a native window drag —
-    bypassing WKWebView's event capture which would otherwise eat
-    the mouseDown.
-
-    Idempotent. Tagged via setIdentifier_ so we can find and skip
-    re-installing on subsequent _apply_macos calls (e.g. on theme
-    flip). Without that, every theme change would stack another
-    overlay and they'd accumulate.
+    Idempotent per-window. Re-calling for the same NSWindow
+    deregisters and replaces the existing monitor so a theme flip
+    doesn't stack duplicates.
     """
     import AppKit  # type: ignore
 
-    content_view = nswindow.contentView()
-    if content_view is None:
-        return
-
-    # Skip if we already installed one.
-    OVERLAY_IDENTIFIER = "tideway-titlebar-drag-overlay"
-    for sub in content_view.subviews() or []:
+    window_id = id(nswindow)
+    # Drop any previous monitor for this window — re-registering
+    # without removing the old one means BOTH fire for every
+    # event, and we'd consume the same click twice.
+    existing = _drag_monitors.pop(window_id, None)
+    if existing is not None:
         try:
-            if sub.identifier() == OVERLAY_IDENTIFIER:
-                return
+            AppKit.NSEvent.removeMonitor_(existing)
         except Exception:
-            continue
+            pass
 
-    overlay_class = _build_drag_overlay_class()
-    frame = content_view.bounds()
-    width = float(frame.size.width)
-    height = float(frame.size.height)
-    # NSView coords: y=0 at bottom. We want the overlay at the TOP
-    # of the contentView, so y = height - 28.
-    overlay_frame = AppKit.NSMakeRect(
-        0.0,
-        height - float(_TITLEBAR_HEIGHT_PT),
-        width,
-        float(_TITLEBAR_HEIGHT_PT),
+    # The traffic-light buttons live in the top-left corner.
+    # AppKit's chrome layer handles their clicks BEFORE our event
+    # monitor sees them (chrome is above the window's event-
+    # dispatch path), so we don't need to special-case them — but
+    # if AppKit's order ever changed, we'd want to skip the
+    # leftmost ~78pt × 28pt rect to leave them functional.
+    # _LIGHTS_RIGHT_EDGE_PT is left here as documentation; the
+    # current implementation doesn't need it.
+    _LIGHTS_RIGHT_EDGE_PT = 78  # noqa: F841 — see comment
+
+    def _handler(event):
+        try:
+            # event.window() is None for events not addressed to
+            # any window (e.g. menu bar interactions). Skip those.
+            event_window = event.window()
+            if event_window is None or event_window != nswindow:
+                return event
+            # Click count > 1 means this is the second click of a
+            # double-click. performWindowDragWithEvent_ handles
+            # that itself, but only on the FIRST click (it tracks
+            # subsequent mouseUp / movement to decide drag vs
+            # zoom). We pass through clickCount > 1 events so the
+            # native double-click handler in NSWindow can see them
+            # if it's already engaged.
+            location = event.locationInWindow()
+            window_height = nswindow.frame().size.height
+            # locationInWindow uses bottom-left origin, so the top
+            # of the window is at y = window_height. The titlebar
+            # band is y in [window_height - 28, window_height].
+            if location.y < (window_height - float(_TITLEBAR_HEIGHT_PT)):
+                return event
+            if location.y > window_height:
+                return event
+            # In the titlebar zone — start a native window drag.
+            # The OS's drag loop tracks mouseUp on its own and
+            # decides drag vs double-click-zoom based on movement
+            # within its threshold.
+            try:
+                nswindow.performWindowDragWithEvent_(event)
+            except Exception:
+                # If performWindowDrag isn't available (very old
+                # macOS) or something else goes wrong, fall
+                # through and let the event reach WKWebView.
+                # Worse UX than a working drag, better than a
+                # crash.
+                return event
+            # Consume the event so WKWebView doesn't ALSO see it.
+            # NSWindow.performWindowDragWithEvent_ handles the
+            # entire interaction internally.
+            return None
+        except Exception:
+            log.exception(
+                "window_chrome: drag monitor handler raised"
+            )
+            return event
+
+    monitor = AppKit.NSEvent.addLocalMonitorForEventsMatchingMask_handler_(
+        AppKit.NSEventMaskLeftMouseDown,
+        _handler,
     )
-    overlay = overlay_class.alloc().initWithFrame_(overlay_frame)
-    # Pin to top edge with flexible width so the overlay tracks
-    # window resize — without this it'd stay at its initial frame
-    # while the window grew, leaving uncovered drag area on the
-    # right side of a resized window.
-    overlay.setAutoresizingMask_(
-        AppKit.NSViewWidthSizable | AppKit.NSViewMinYMargin
-    )
-    try:
-        overlay.setIdentifier_(OVERLAY_IDENTIFIER)
-    except Exception:
-        pass
-    # addSubview puts the overlay AT THE END of the subviews array
-    # which means it's drawn on top — exactly what we want for hit-
-    # testing to find it first.
-    content_view.addSubview_(overlay)
+    if monitor is not None:
+        _drag_monitors[window_id] = monitor
 
 
 # ---------------------------------------------------------------------------
