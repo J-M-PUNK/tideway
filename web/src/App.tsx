@@ -108,6 +108,11 @@ const BrowsePage = lazy(() =>
 const ChartsPage = lazy(() =>
   import("@/pages/ChartsPage").then((m) => ({ default: m.ChartsPage })),
 );
+const AotyDrilldownPage = lazy(() =>
+  import("@/pages/AotyDrilldownPage").then((m) => ({
+    default: m.AotyDrilldownPage,
+  })),
+);
 const FeedPage = lazy(() =>
   import("@/pages/FeedPage").then((m) => ({ default: m.FeedPage })),
 );
@@ -563,6 +568,10 @@ function Shell({
                       <Route
                         path="/charts/:chart"
                         element={<ChartsPage onDownload={enqueue} />}
+                      />
+                      <Route
+                        path="/aoty/:section"
+                        element={<AotyDrilldownPage />}
                       />
                       <Route
                         path="/browse/:path"
