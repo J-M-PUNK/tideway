@@ -9,6 +9,7 @@ import { ViewMoreLink } from "@/components/Grid";
 import { PageView } from "@/components/PageView";
 import { ErrorView } from "@/components/ErrorView";
 import { GridSkeleton } from "@/components/Skeletons";
+import { AotyHomeSection } from "@/components/AotyHomeSection";
 import { LastfmConnectNudge } from "@/components/LastfmConnectNudge";
 import { CreditsDialog } from "@/components/CreditsDialog";
 import { DROPDOWN_MENU_PARTS, TrackMenuItems } from "@/components/TrackMenu";
@@ -652,6 +653,7 @@ export function Home({ onDownload }: { onDownload: OnDownload }) {
           onDownload={onDownload}
         />
       )}
+      <AotyHomeSection />
       {hoistedAlbums && (
         <PageView
           page={{ ...data, categories: [hoistedAlbums] }}
