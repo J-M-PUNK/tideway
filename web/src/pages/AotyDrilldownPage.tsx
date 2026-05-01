@@ -20,7 +20,7 @@ import { AotyCard } from "@/components/AotyHomeSection";
 export function AotyDrilldownPage() {
   const { section = "top-of-year" } = useParams();
   const config = useMemo(
-    () => SECTIONS[section as keyof typeof SECTIONS] ?? SECTIONS["top-of-year"],
+    () => SECTIONS[section] ?? SECTIONS["top-of-year"],
     [section],
   );
 
@@ -38,9 +38,16 @@ export function AotyDrilldownPage() {
   }
   if (error) return <ErrorView error={error} />;
 
-  const playable = (data ?? []).filter(
+  const filtered = (data ?? []).filter(
     (e): e is AotyAlbum & { tidal_album: Album } => e.tidal_album !== null,
   );
+  // Sort by AOTY score (highest first) when the section is
+  // configured for it. Entries without a score fall to the end.
+  // Done in-place at render time rather than baked into the API
+  // response so the same endpoint can serve both ordered views.
+  const playable = config.sortByScore
+    ? [...filtered].sort((a, b) => (b.score ?? -1) - (a.score ?? -1))
+    : filtered;
   if (playable.length === 0) {
     return (
       <div>
@@ -68,13 +75,21 @@ export function AotyDrilldownPage() {
 
 // Per-section configuration. Adding a new AOTY drill-down is one
 // entry here plus a route in App.tsx.
-const SECTIONS = {
+type SectionConfig = {
+  title: string;
+  fetch: () => Promise<AotyAlbum[]>;
+  sortByScore: boolean;
+};
+
+const SECTIONS: Record<string, SectionConfig> = {
   "top-of-year": {
     title: `Top albums of ${new Date().getFullYear()}`,
     fetch: () => api.aoty.topOfYear({ limit: 100 }),
+    sortByScore: false,
   },
   "new-releases": {
-    title: "New releases",
-    fetch: () => api.aoty.recentReleases(60),
+    title: "New album releases",
+    fetch: () => api.aoty.recentReleases(100),
+    sortByScore: false,
   },
-} as const;
+};
