@@ -1,9 +1,9 @@
-"""Tidal Connect — controller-side scaffolding.
+"""Tidal Connect — controller-side, untested against real hardware.
 
-Eventual goal: from Tideway, pick a Tidal Connect device on the LAN
-and have THAT device fetch the Tidal stream directly using its own
-paired Tidal session. Tideway is just a remote control; no audio
-encoding or HTTP serving (unlike the Cast sender).
+From Tideway, pick a Tidal Connect device on the LAN and have THAT
+device fetch the Tidal stream directly using its own paired Tidal
+session. Tideway is just a remote control; no audio encoding or HTTP
+serving (unlike the Cast sender).
 
 This is fundamentally different from `app/audio/cast.py`:
 
@@ -16,34 +16,47 @@ This is fundamentally different from `app/audio/cast.py`:
                   credentials and plays it. Tideway is just the
                   controller; the audio engine is dormant.
 
-What this file actually contains right now is **Phase 1 + 2-discovery-
-only** from `docs/cast-and-connect-scope.md`. Specifically:
+## Validation status — important
 
-  - SSDP-based discovery of OpenHome-capable MediaRenderer devices
-    on the LAN. OpenHome (urn:av-openhome-org:service:*) is the
-    strongest "this device probably does Tidal Connect" signal we
-    can detect without partner documentation. False positives are
-    possible — Linn / Naim / Bluesound speakers all advertise
-    OpenHome and most (but not all) are Tidal-Connect-paired.
-  - The thread-safe device cache + status payload that backs the
-    /api/tidal-connect/devices endpoint and the picker UI.
-  - Connect / disconnect stubs that return a clear 'protocol work
-    not yet implemented' marker so users testing the picker get a
-    deterministic message instead of a silent failure.
+The code below is fully implemented: SSDP discovery, OpenHome
+description fetch, Playlist/Volume/Time/Info service controllers,
+DIDL-Lite metadata building, track-URL handoff, state polling, and
+the public `connect / disconnect / load_track / play / pause / seek
+/ set_volume / set_mute` surface. ~50 unit tests exercise each path
+against mocked OpenHome services and all pass.
 
-What this file does NOT yet contain (gated on Phase 1 protocol
-scoping with packet capture against the official Tidal desktop app
-+ a real Tidal Connect device):
+What hasn't happened yet:
 
-  - The OpenHome SOAP command set the Tidal app actually sends.
-  - The pairing handshake. May be hypothesis A (signed stream URL,
-    Tideway's tidalapi session covers everything) or hypothesis B
-    (device-cert-signed pairing, hard stop). The capture answers
-    which.
-  - Track-handoff flow: how the device gets the right stream URL
-    with the right metadata.
-  - State subscription: how 'paused on the device' or 'skipped via
-    device buttons' surface back to the controller.
+  - **End-to-end test against a real Tidal Connect device.** No
+    Bluesound / Linn / KEF / Naim hardware has been on the LAN with
+    this code in front of it. The original scope doc
+    (`docs/cast-and-connect-scope.md`) called for a Bluesound Node
+    at the start of Phase 2 to validate `Hypothesis A` (signed
+    stream URL works) versus `Hypothesis B` (device rejects our URL
+    without partner credentials). That validation was skipped.
+  - **Packet capture against the official Tidal desktop app.** The
+    SOAP command set we issue is inferred from OpenHome's public
+    spec, not captured from what the Tidal app actually sends. A
+    real device may accept our commands; it may reject them as
+    malformed or unauthorised.
+
+Recent investigation into Tidal Connect's receiver-side auth (see
+`docs/tidal-connect-receiver-scope.md`) turned up evidence that
+every shipping non-Tidal **receiver** uses a per-vendor signed
+certificate to identify to Tidal's backend. We don't know whether
+the **controller** side has an analogous gate — i.e. whether a
+real device will accept stream URLs from a non-Tidal client. That
+question is answerable in 30 minutes with hardware we don't have.
+
+Practical implication: the experimental toggle in the UI is
+genuinely experimental. The code might just work, or it might fail
+at the first SOAP exchange against a real device. Until somebody
+runs it, we don't know.
+
+If you have a Tidal Connect device on hand and run this: please
+file an issue with the device model, the failure mode (or a
+"works fine" report), and the relevant log lines from
+`logger=app.audio.tidal_connect`. That's how we close the gap.
 
 Module degrades gracefully when async-upnp-client is missing — the
 manager still constructs but discovery is a no-op.

@@ -470,10 +470,15 @@ export function OutputDevicePicker() {
  * Modal that surfaces the experimental nature of Tidal Connect
  * before actually connecting. Tideway's Tidal Connect controller
  * was built blind — no hardware was available to verify against
- * during development. We expect the protocol path to work
- * (hypothesis A from the scoping doc) but it isn't proven. Users
- * who confirm the dialog are explicitly opting in to testing,
- * with a clear ask to report results.
+ * during development. Subsequent research into Tidal Connect's
+ * auth model (see docs/tidal-connect-receiver-scope.md) turned
+ * up that every shipping non-Tidal *receiver* identifies to
+ * Tidal's backend with a per-vendor signed cert. We don't know
+ * whether the controller direction has an analogous gate; if it
+ * does, our SOAP commands may be rejected when an actual device
+ * tries to fetch the stream we hand it. Users who confirm the
+ * dialog are explicitly opting in to testing, with a clear ask
+ * to report results either way.
  */
 function TidalConnectExperimentalDialog({
   device,
@@ -502,14 +507,15 @@ function TidalConnectExperimentalDialog({
           <p>
             Tidal Connect support in Tideway is built against the published
             OpenHome / UPnP-AV spec but hasn't been verified against real
-            hardware yet. Connecting may work end-to-end, or it may fail at the
-            audio-handoff step depending on how your specific device implements
-            the Tidal-side protocol.
+            hardware. We don't know yet whether a real Tidal Connect device
+            will accept stream URLs from a non-Tidal client — recent research
+            into Tidal's auth model suggests it might not.
           </p>
           <p className="text-muted-foreground">
             If audio doesn't play after you select a track, please disconnect
             and report what you see (device model + the error in the toast).
-            That feedback is what unblocks a non-experimental release.
+            That feedback tells us whether shipping this as a real feature is
+            even possible.
           </p>
         </div>
         <div className="flex justify-end gap-2 pt-3">
