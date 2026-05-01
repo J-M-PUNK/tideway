@@ -1,4 +1,4 @@
-tidalapi>=0.7.0
+tidalapi>=0.8.11
 mutagen>=1.47.0
 requests>=2.31.0
 # TLS-impersonation HTTP client. We patch tidalapi's request_session to
