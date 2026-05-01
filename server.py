@@ -649,6 +649,47 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     except Exception as exc:
         print(f"[tidal-connect] startup wiring failed: {exc}", flush=True)
 
+    # Cold-start prefetch: warm the manifest cache for whatever was
+    # playing when the user last quit, BEFORE the React shell even
+    # mounts. By the time the frontend's restore-on-launch effect
+    # fires `api.player.load(persisted_track)`, the cache hit skips
+    # the three Tidal API roundtrips (track / stream / manifest) +
+    # the init + first-media segment fetches — taking ~500-1500 ms
+    # off the click-to-audio time on the user's first play after
+    # launching the app.
+    #
+    # Fires in a daemon thread so a slow (or failing) Tidal session
+    # doesn't block lifespan startup. Failures inside `prefetch()`
+    # are already swallowed; if Tidal auth hasn't been refreshed
+    # yet at this moment, the prefetch is a silent no-op and the
+    # user pays the same cold-start cost they pay today.
+    def _prefetch_persisted_now_playing() -> None:
+        try:
+            persisted = now_playing_state.read_state()
+        except Exception:
+            return
+        if not isinstance(persisted, dict):
+            return
+        track_id = persisted.get("trackId")
+        if not isinstance(track_id, str) or not track_id:
+            return
+        try:
+            player = _native_player()
+        except Exception:
+            return
+        try:
+            player.prefetch(str(track_id), warm_bytes=True)
+        except Exception:
+            # prefetch() should already swallow internally, but
+            # belt-and-braces — startup must not raise.
+            pass
+
+    threading.Thread(
+        target=_prefetch_persisted_now_playing,
+        name="cold-start-prefetch",
+        daemon=True,
+    ).start()
+
     try:
         yield
     finally:
