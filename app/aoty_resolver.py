@@ -78,7 +78,8 @@ def resolve_listing(listing: list[dict]) -> list[dict]:
         tidal_jitter_sleep()
         try:
             results = tidal.search(f"{artist} {title}", limit=5)
-        except Exception:
+        except Exception as exc:
+            log.warning("aoty resolve search %r/%r failed: %s", artist, title, exc)
             return {**entry, "tidal_album": None}
         albums = filter_explicit_dupes(
             results.get("albums", []), pref, kind="album"
@@ -102,7 +103,8 @@ def resolve_listing(listing: list[dict]) -> list[dict]:
         )
         try:
             resolved = album_to_dict(exact or albums[0])
-        except Exception:
+        except Exception as exc:
+            log.warning("aoty resolve serialize %r/%r failed: %s", artist, title, exc)
             return {**entry, "tidal_album": None}
 
         # Only persist successes — caching None for 30 days would
@@ -110,8 +112,8 @@ def resolve_listing(listing: list[dict]) -> list[dict]:
         # Tidal hiccup.
         try:
             lastfm_disk_cache.set(cache_key, resolved)
-        except Exception:
-            pass
+        except Exception as exc:
+            log.debug("aoty resolve cache write failed (%s); continuing", exc)
         return {**entry, "tidal_album": resolved}
 
     # 3 workers matches the rate-limit posture used by the
