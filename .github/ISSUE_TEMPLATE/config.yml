@@ -1,0 +1,12 @@
+# Disables the "Open a blank issue" link at the bottom of the
+# template chooser. New issues have to go through one of the
+# structured templates above, which keeps the tracker scannable.
+blank_issues_enabled: false
+
+contact_links:
+  - name: Security vulnerability
+    url: https://github.com/J-M-PUNK/tideway/security/advisories/new
+    about: Please report security issues privately via GitHub Security Advisories, not as a public issue.
+  - name: Support the project
+    url: https://ko-fi.com/jmpunk
+    about: Tideway is free and stays that way. If it is useful to you, a tip on Ko-fi is appreciated.

@@ -1,0 +1,93 @@
+name: Bug report
+description: Something is broken or behaving unexpectedly.
+title: "[Bug]: "
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report. The more
+        detail you include, the faster the fix lands. Please confirm
+        you are running the latest release before opening this issue.
+
+  - type: input
+    id: tideway-version
+    attributes:
+      label: Tideway version
+      description: Open Settings, scroll to the bottom, copy the version string.
+      placeholder: "e.g. 1.3.0"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: os
+    attributes:
+      label: Operating system
+      options:
+        - macOS (Apple Silicon)
+        - macOS (Intel)
+        - Windows 11 (x64)
+        - Windows 11 (ARM64)
+        - Windows 10
+        - Linux (specify distro below)
+        - Other
+    validations:
+      required: true
+
+  - type: input
+    id: os-detail
+    attributes:
+      label: OS version / distro detail
+      description: Output of `sw_vers` on macOS, "About Windows" on Windows, or distro name and version on Linux.
+      placeholder: "e.g. macOS 14.4, Windows 11 23H2, Ubuntu 24.04"
+
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened
+      description: A clear description of the problem.
+      placeholder: When I do X, Y happens.
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      description: What did you think would happen instead?
+    validations:
+      required: true
+
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Numbered steps a maintainer can follow on a fresh install.
+      placeholder: |
+        1. Open Tideway
+        2. Click ...
+        3. Observe ...
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs (optional)
+      description: |
+        Anything from the dev console, the terminal if you launched
+        from source, or `~/Library/Application Support/Tideway/`
+        (macOS) / `%APPDATA%\Tideway\` (Windows) /
+        `~/.local/share/Tideway/` (Linux). Redact your Tidal session
+        token if it appears.
+      render: shell
+
+  - type: checkboxes
+    id: confirm
+    attributes:
+      label: Pre-flight
+      options:
+        - label: I am running the latest released version of Tideway
+          required: true
+        - label: I have searched existing issues and this is not a duplicate
+          required: true

@@ -1,144 +1,81 @@
 # Contributing to Tideway
 
-## Release workflow
+Thanks for considering a contribution. This document covers how to
+report bugs, suggest features, and open pull requests against
+Tideway.
 
-Tideway batches unrelated bug fixes and small features into a single
-deploy with a sequence of focused PRs and an integration branch.
+By participating in this project you agree to abide by the
+[Code of Conduct](CODE_OF_CONDUCT.md). For security vulnerabilities,
+please follow [SECURITY.md](SECURITY.md) instead of opening a
+public issue.
 
-### One branch per fix
+## Contents
 
-Branch off `main`. Naming:
+- [Reporting bugs](#reporting-bugs)
+- [Suggesting features](#suggesting-features)
+- [Setting up a dev environment](#setting-up-a-dev-environment)
+- [Pre-PR checks](#pre-pr-checks)
+- [Branch naming](#branch-naming)
+- [Commits](#commits)
+- [Code style](#code-style)
+- [Settings additions (foot-gun)](#settings-additions-foot-gun)
+- [Logging](#logging)
+- [Maintainer release workflow](#maintainer-release-workflow)
 
-- `fix/<slug>` for bug fixes
-- `feature/<slug>` for new capability
-- `chore/<slug>` for refactors and tooling
+## Reporting bugs
 
-One concern per branch. If the work touches two unrelated subsystems,
-split it.
+Open a [bug report issue](https://github.com/J-M-PUNK/tideway/issues/new?template=bug_report.yml).
+The template asks for the version, OS, repro steps, and any
+relevant logs. Filling those in up front saves a back-and-forth.
 
-### One PR per branch
+Before filing:
 
-Each branch opens its own PR against `main`. Title is what the work
-does, not a position in a queue. Body has:
+- Update to the [latest release](https://github.com/J-M-PUNK/tideway/releases)
+  and confirm the issue still reproduces.
+- Search existing issues. There is a good chance someone hit the
+  same thing.
+- If it is a security issue, do not open a public issue. See
+  [SECURITY.md](SECURITY.md).
 
-- **Summary**: 1 to 3 bullets describing the change.
-- **Test plan**: a checklist of how to verify the fix.
+## Suggesting features
 
-### Hold approved PRs
+Open a [feature request issue](https://github.com/J-M-PUNK/tideway/issues/new?template=feature_request.yml).
+Lead with the user-facing problem, not a proposed implementation.
 
-PRs are reviewed and approved as they come in, but **not merged on
-their own**. Approval means "this fix is ready" — shipping happens
-on a release schedule, not per-PR.
+Skim the [Known limits](README.md#known-limits) section first.
+Some asks (Atmos playback, Tidal Connect output, account
+impersonation flows) are intentional non-goals and won't be picked
+up. The README explains why.
 
-### Integrate on a deploy branch
-
-When the batch is ready to ship:
-
-```bash
-git checkout main
-git pull
-git checkout -b deploy/v0.X.Y
-
-# Merge each approved branch with --no-ff so integration history
-# is preserved.
-git merge --no-ff fix/branch-one
-git merge --no-ff fix/branch-two
-git merge --no-ff feature/branch-three
-# ...
-
-# Resolve any conflicts here, in the integration branch.
-# The individual PR branches stay clean.
-
-# Bump the VERSION file and write the release notes commit. The
-# notes go into the commit message body — the release workflow
-# pulls them out of `git log -1 --format=%b` and uses them as the
-# GitHub release body, so anything you'd want a user to read on
-# the Releases page goes here. Subject line stays a one-liner.
-git commit -m "Release 0.X.Y: <one-line summary>
-
-## <Section heading>
-
-### <What changed, user-facing>
-
-Paragraph explaining the change in plain language — same shape
-as the v0.4.10 / v0.4.11 release notes.
-
-## <Another section>
-..."
-
-# Test the integrated branch BEFORE tagging.
-./scripts/preflight.sh
-# Plus a manual smoke pass: launch the app from this branch and
-# exercise each fix's user-visible path. Fixes that look fine in
-# isolation can still interact badly once merged together — the
-# deploy branch is the only place to catch that. If you find a
-# regression, revert the offending merge commit and keep shipping
-# the rest. Do NOT tag until the deploy branch is green and
-# manually verified.
-
-# Tag the release commit.
-git tag v0.X.Y
-
-# Push the branch and tag.
-git push -u origin deploy/v0.X.Y
-git push origin v0.X.Y
-```
-
-### Publish the draft release
-
-GitHub Actions picks up the tag and runs the Release workflow,
-which builds the three platform installers (mac DMG + Windows
-x64 EXE + Windows ARM64 EXE) and creates a **draft** release on
-the Releases page with:
-
-- Title and tag binding set to `v0.X.Y`
-- Body populated from your release commit's message body
-- All three installers attached as assets
-
-The draft sits there for a final human review:
-
-1. Open https://github.com/J-M-PUNK/tideway/releases — there will
-   be a "Draft" badge on `v0.X.Y` at the top of the list.
-2. Skim the auto-populated body. Edit on the GitHub UI if you
-   want to tweak wording, reorder sections, etc. (Permanent
-   improvements should also land back in the release commit so
-   `git log` and the Releases page stay in sync.)
-3. Click **Publish release**.
-
-Publishing is what actually ships. The auto-updater on user
-installs hits `GET /repos/.../releases/latest`, which excludes
-drafts — so a release in draft state is invisible to users and
-the auto-update notification never fires. If you tag, walk away,
-and forget to publish, no one gets the update.
-
-### Catch main back up
-
-After the release is built and verified:
+## Setting up a dev environment
 
 ```bash
-git checkout main
-git merge --ff-only deploy/v0.X.Y
-git push
+git clone https://github.com/J-M-PUNK/tideway.git
+cd tideway
+python3 -m venv .venv
+.venv/bin/pip install -r requirements.txt
+.venv/bin/pip install pytest httpx        # dev-only test deps
+(cd web && npm install)
 ```
 
-Then delete the merged PR branches locally and on GitHub.
+Day-to-day frontend work, with hot module reload:
 
-### Why an integration branch
+```bash
+./run.sh
+```
 
-- **Main stays releasable.** If a PR turns out to break something at
-  integration time, drop it from the deploy branch before tagging.
-  No revert dance on `main`.
-- **The release diff is one branch.** `git diff main..deploy/v0.X.Y`
-  IS the release diff.
-- **Conflicts land in one place.** Better than resolving the same
-  conflict across three PRs.
+To exercise the desktop pywebview window (chrome, drag, traffic
+lights, global media keys, tray icon), build the frontend then
+launch the desktop entry point:
 
-### When NOT to use this workflow
+```bash
+(cd web && npm run build)
+.venv/bin/python desktop.py
+```
 
-- A single isolated bugfix that needs to ship immediately. Merge the
-  PR to main, tag, release.
-- Hotfixes off a release tag. Branch off the tag, fix, PR, tag a
-  patch release.
+`desktop.py` serves whatever is in `web/dist/`, so rebuild the
+frontend any time you change React code or the desktop window will
+show stale UI.
 
 ## Pre-PR checks
 
@@ -153,20 +90,57 @@ npm run lint:all                    # eslint + stylelint + htmlhint + prettier
 npm test                            # vitest
 ```
 
-The 50 pre-existing eslint warnings on `react-hooks/rules-of-hooks`
-and `@typescript-eslint/no-explicit-any` are acceptable. New errors
-are not.
+Or just run all of them in sequence:
+
+```bash
+./scripts/preflight.sh
+```
+
+The 50-or-so pre-existing eslint warnings on
+`react-hooks/rules-of-hooks` and `@typescript-eslint/no-explicit-any`
+are acceptable. New errors are not.
+
+## Branch naming
+
+One concern per branch. If your work touches two unrelated
+subsystems, split it into two branches and two PRs.
+
+- `fix/<slug>` for bug fixes
+- `feature/<slug>` for new capability
+- `chore/<slug>` for refactors, docs, tests, tooling
+
+Examples: `fix/skip-stale-queue-race`, `feature/aoty-charts`,
+`chore/server-split`.
 
 ## Commits
 
-- Imperative present-tense subject under 70 chars.
-- Body explains why, not what.
+- Imperative present-tense subject under 70 chars
+  ("Fix queue advance on track end", not "Fixed queue advance" or
+  "This commit fixes the queue advance bug")
+- Body explains *why*, not *what*. The diff already tells you what.
 - One logical change per commit. A branch may have several commits
   if the work has natural stages, but each commit should pass tests
   on its own.
-- No `Co-Authored-By` lines, no AI-tool attribution.
+- No `Co-Authored-By` lines, no AI-tool attribution. Commits should
+  read as if you wrote them.
 
-## Settings additions
+## Code style
+
+- **Python**: PEP 8 spacing, type hints where they help readability.
+  Aim for clear over clever. The codebase favors small focused
+  modules over deep class hierarchies.
+- **TypeScript / React**: prettier handles formatting, eslint catches
+  the rest. Run `npm run format` to auto-fix style violations
+  before committing.
+- **No bandaids.** If you find yourself writing a "for now" comment
+  or wrapping `try / except` to silence a real error, stop and find
+  the actual fix. The project has a strict no-bandaids policy
+  documented in [CLAUDE.md](CLAUDE.md) under "No bandaids", and the
+  same standard applies to human-authored code.
+- **Comments** explain *why* a piece of code is the way it is, not
+  *what* it does. The code already says what.
+
+## Settings additions (foot-gun)
 
 Adding a new field to the `Settings` dataclass in `app/settings.py`
 requires touching **three** other places or the field will silently
@@ -180,15 +154,17 @@ no-op:
    `web/src/api/types.ts`.
 3. Side-effect handling in the `PUT /api/settings` handler if the
    field needs to do something on change (flip a player flag,
-   restart a listener, etc).
+   restart a listener, etc.).
 
 `load_settings()` already filters unknown keys from existing
 `settings.json` files, so removing a field doesn't break existing
-installs.
+installs. There is also a sync test (`tests/test_settings_sync.py`)
+that fails the build if the dataclass and the Pydantic model drift
+out of alignment, so CI will catch the foot-gun for you.
 
 ## Logging
 
-The Python `logging` module isn't configured to emit in the dev
+The Python `logging` module is not configured to emit in the dev
 console. For things developers or users should see during
 `./run.sh`, the convention is:
 
@@ -198,3 +174,9 @@ print(f"[component] message", flush=True)
 
 For debug detail that only ever reads off a captured log file, use
 the standard `logging.getLogger(__name__).debug()`.
+
+## Maintainer release workflow
+
+If you are cutting a release, see
+[docs/release-workflow.md](docs/release-workflow.md). Contributors
+do not need to read it.
