@@ -261,6 +261,13 @@ def _apply_macos(nswindow: object, theme: str) -> None:
                     _dump_subview_tree(content_view)
                     resized = _resize_webviews_to_fill(content_view, bounds)
                     _diag(f"WebView frames resized: {resized}")
+                # Neutralize NSVisualEffectView in the chrome zone.
+                # AppKit draws a vibrancy view in the titlebar
+                # container that titlebarAppearsTransparent doesn't
+                # actually suppress on macOS Sequoia+; this is
+                # what's drawing the system-gray band the user
+                # sees. Walk up to themeFrame and hide it.
+                _neutralize_chrome_vibrancy(nswindow, color)
         except Exception as exc:
             _diag(f"WebView discovery / resize failed: {exc!r}")
         # titlebarAppearsTransparent kills the OS chrome's vibrancy
@@ -347,6 +354,112 @@ def _apply_macos(nswindow: object, theme: str) -> None:
         )
     except Exception:
         log.exception("window_chrome: NSWindow tint failed")
+
+
+def _neutralize_chrome_vibrancy(nswindow, color) -> None:
+    """Walk up from contentView to the themeFrame (window root view)
+    and disable any NSVisualEffectView found in the chrome zone.
+
+    Even with titlebarAppearsTransparent=YES, AppKit draws a
+    titlebar container with an NSVisualEffectView whose vibrancy
+    material composites system gray on top of whatever the
+    contentView paints. That's the gray the user keeps seeing.
+
+    Standard pattern (Chrome / Edge / Spotify all do this): walk
+    the themeFrame's subviews, find NSVisualEffectView instances,
+    and either remove them from their superview or override their
+    layer.backgroundColor to clear so the page color shows.
+
+    Private-API territory but well-trodden — every Electron-based
+    Mac app reaches into the themeFrame for the same purpose.
+    """
+    import AppKit  # type: ignore
+
+    content_view = nswindow.contentView()
+    if content_view is None:
+        return
+
+    # Walk up to find the themeFrame. contentView.superview() is
+    # typically _NSThemeFrame; that's the root NSView of the window
+    # and contains both the contentView AND the chrome subviews.
+    theme_frame = None
+    try:
+        theme_frame = content_view.superview()
+    except Exception:
+        pass
+    if theme_frame is None:
+        _diag("themeFrame: contentView has no superview, skipping")
+        return
+
+    _diag(f"themeFrame class={_objc_class_name(theme_frame)}")
+
+    # Walk every descendant of themeFrame and neutralize anything
+    # that's an NSVisualEffectView in the top portion (chrome zone).
+    # We could be more surgical with frame checks, but emptying ALL
+    # vibrancy views in the window is safe — we're not using
+    # NSVisualEffectView for anything ourselves, so any we find are
+    # AppKit chrome that we want to blank out.
+    neutralized = _walk_and_blank_vibrancy(theme_frame, color)
+    _diag(f"NSVisualEffectViews neutralized: {neutralized}")
+
+
+def _walk_and_blank_vibrancy(view, color, depth=0) -> int:
+    """Recursive helper. For every NSVisualEffectView in the tree,
+    set its background color and material to render as our theme
+    color instead of system vibrancy gray."""
+    import AppKit  # type: ignore
+
+    if depth > 8:
+        return 0
+    count = 0
+    try:
+        subs = view.subviews() or []
+    except Exception:
+        subs = []
+
+    cls_name = _objc_class_name(view)
+    if "VisualEffect" in cls_name:
+        # Hit a vibrancy view. Blank its layer's bg so it composites
+        # transparent, OR set its material to the deepest one
+        # available so it's effectively the dark window background.
+        try:
+            # Removing it from the superview is the cleanest fix
+            # but risky — AppKit may rely on it being there for
+            # event routing. Safer: hide it.
+            view.setHidden_(True)
+            count += 1
+            _diag(f"  hid NSVisualEffectView at depth {depth}")
+        except Exception as exc:
+            _diag(
+                f"  setHidden on NSVisualEffectView failed: {exc!r}"
+            )
+        # Belt: also try to layer-clear it in case hiding doesn't
+        # take.
+        try:
+            layer = view.layer()
+            if layer is not None:
+                layer.setBackgroundColor_(
+                    AppKit.NSColor.clearColor().CGColor()
+                )
+        except Exception:
+            pass
+
+    # Some titlebar containers are NSView subclasses that draw their
+    # own chrome via the layer's backgroundColor (no NSVisualEffectView
+    # at all on Sequoia+). Neutralize their layer too — this is
+    # additive with the vibrancy fix and shouldn't make anything
+    # else worse.
+    if "Titlebar" in cls_name or "TitleBar" in cls_name:
+        try:
+            view.setHidden_(True)
+            _diag(f"  hid {cls_name} at depth {depth}")
+            count += 1
+        except Exception:
+            pass
+
+    for sub in subs:
+        count += _walk_and_blank_vibrancy(sub, color, depth + 1)
+    return count
 
 
 def _make_webview_transparent(webview, color) -> None:
