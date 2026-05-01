@@ -211,31 +211,44 @@ def _apply_macos(nswindow: object, theme: str) -> None:
             )
         except Exception as exc:
             _diag(f"styleMask set failed: {exc!r}")
-        # WKWebView was added to the contentView BEFORE FullSize
-        # was enabled, so its frame stops at y=28 (just below where
-        # the OS titlebar used to be). Now that the contentView
-        # extends through the titlebar zone, the WebView needs to
-        # grow to fill it — otherwise the top 28pt shows the
-        # NSWindow's chrome material instead of the page body's
-        # bg-background, which is what 'still gray' means in user
-        # reports.
+        # FullSize on the styleMask doesn't automatically resize the
+        # contentView (empirically: previous build's log showed the
+        # contentView still at window-height-minus-28 even with the
+        # FullSize bit set). Apple's docs imply otherwise but the
+        # observed behaviour is what wins. So we forcibly set the
+        # contentView's frame to fill the entire window, which DOES
+        # propagate to its subviews via their autoresizingMasks.
         #
-        # Walk the entire view hierarchy and resize every NSView
-        # with WKWebView in its class name. Recursive because the
-        # WebView might be nested inside a wrapper (pywebview's
-        # BrowserView IS the contentView in some setups, but in
-        # others it wraps a child WebView). Aggressive but safe:
-        # we only touch views whose class name explicitly contains
-        # "WebView", so unrelated subviews (overlays, layer views,
-        # etc) are left alone.
+        # Then we walk the subview tree and dump every class name
+        # to the diagnostic log — that gives us hard data on what
+        # the WebView is actually called in the hierarchy, so we
+        # can match it correctly. The previous build's log showed
+        # "WebView frames resized: 0" with our "WebView in name"
+        # check, meaning the WebView either isn't in the contentView
+        # at all OR has a class name that doesn't match. Logging
+        # every class name will tell us which.
         try:
             content_view = nswindow.contentView()
             if content_view is not None:
+                window_frame = nswindow.frame()
+                window_w = float(window_frame.size.width)
+                window_h = float(window_frame.size.height)
+                # Resize contentView to span the full window
+                # (including the titlebar zone). This is what
+                # makes the WebView's bg-background actually paint
+                # under the traffic lights.
+                full_rect = AppKit.NSMakeRect(0.0, 0.0, window_w, window_h)
+                try:
+                    content_view.setFrame_(full_rect)
+                except Exception as exc:
+                    _diag(f"contentView setFrame failed: {exc!r}")
                 bounds = content_view.bounds()
                 _diag(
                     f"contentView class={type(content_view).__name__} "
-                    f"bounds=({bounds.size.width}x{bounds.size.height})"
+                    f"bounds=({bounds.size.width}x{bounds.size.height}) "
+                    f"window=({window_w}x{window_h})"
                 )
+                _dump_subview_tree(content_view)
                 resized = _resize_webviews_to_fill(content_view, bounds)
                 _diag(f"WebView frames resized: {resized}")
         except Exception as exc:
@@ -314,6 +327,31 @@ def _apply_macos(nswindow: object, theme: str) -> None:
         log.exception("window_chrome: NSWindow tint failed")
 
 
+def _dump_subview_tree(view, depth=0) -> None:
+    """Diagnostic: walk the NSView tree under `view` and log every
+    descendant's class name. Helps figure out what pywebview's
+    WebView is actually called in this version's hierarchy so we
+    can match it correctly. Bounded depth against runaway loops."""
+    if depth > 6:
+        return
+    try:
+        subs = view.subviews() or []
+    except Exception:
+        return
+    for sub in subs:
+        cls_name = type(sub).__name__
+        try:
+            frame = sub.frame()
+            geom = (
+                f"x={frame.origin.x} y={frame.origin.y} "
+                f"w={frame.size.width} h={frame.size.height}"
+            )
+        except Exception:
+            geom = "frame=?"
+        _diag(f"  subview[{depth}] {cls_name} {geom}")
+        _dump_subview_tree(sub, depth + 1)
+
+
 def _resize_webviews_to_fill(view, bounds, depth=0) -> int:
     """Walk view's subview tree recursively. For each NSView whose
     class name contains 'WebView', set its frame to `bounds` (i.e.
@@ -334,15 +372,29 @@ def _resize_webviews_to_fill(view, bounds, depth=0) -> int:
         return 0
     for sub in subs:
         cls_name = type(sub).__name__
-        if "WebView" in cls_name:
+        # Match WebView OR direct children of contentView at depth 0.
+        # The latter is a hammer for the case where pywebview's
+        # WebView class doesn't have "WebView" in its Python name —
+        # at the top level under contentView, anything that's not
+        # the traffic-light overlay is the WebView, so resizing it
+        # to fill is the right move regardless of what it's called.
+        is_web_view = "WebView" in cls_name or "WebKit" in cls_name
+        is_top_level_candidate = depth == 0 and "Window" not in cls_name
+        if is_web_view or is_top_level_candidate:
             try:
+                old_frame = sub.frame()
                 sub.setFrame_(bounds)
                 sub.setAutoresizingMask_(
                     AppKit.NSViewWidthSizable | AppKit.NSViewHeightSizable
                 )
+                _diag(
+                    f"resized {cls_name} from "
+                    f"({old_frame.size.width}x{old_frame.size.height}) "
+                    f"to ({bounds.size.width}x{bounds.size.height})"
+                )
                 count += 1
-            except Exception:
-                pass
+            except Exception as exc:
+                _diag(f"resize {cls_name} failed: {exc!r}")
         count += _resize_webviews_to_fill(sub, bounds, depth + 1)
     return count
 
