@@ -507,9 +507,9 @@ function TidalConnectExperimentalDialog({
           <p>
             Tidal Connect support in Tideway is built against the published
             OpenHome / UPnP-AV spec but hasn't been verified against real
-            hardware. We don't know yet whether a real Tidal Connect device
-            will accept stream URLs from a non-Tidal client — recent research
-            into Tidal's auth model suggests it might not.
+            hardware. We don't know yet whether a real Tidal Connect device will
+            accept stream URLs from a non-Tidal client — recent research into
+            Tidal's auth model suggests it might not.
           </p>
           <p className="text-muted-foreground">
             If audio doesn't play after you select a track, please disconnect

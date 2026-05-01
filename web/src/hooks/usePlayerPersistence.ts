@@ -153,9 +153,7 @@ export function usePlayerPersistence(
       }
       // Backend backstop. Fire-and-forget; the api method's own
       // .catch swallows the failure.
-      api.nowPlayingState.put(
-        snapshot as unknown as Record<string, unknown>,
-      );
+      api.nowPlayingState.put(snapshot as unknown as Record<string, unknown>);
     };
     const onVisibilityChange = () => {
       if (document.visibilityState === "hidden") flush();
