@@ -97,7 +97,7 @@ jobs:
         # Tideway-<version>.dmg.
         run: bash scripts/build_dmg.sh
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: Tideway-macOS
           path: dist/Tideway-*.dmg
@@ -189,7 +189,7 @@ jobs:
         run: |
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" scripts\Tideway.iss
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: Tideway-Windows
           path: dist/Tideway-setup-*.exe
@@ -283,7 +283,7 @@ jobs:
         run: |
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /DBuildArch=arm64 scripts\Tideway.iss
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: Tideway-Windows-arm64
           path: dist/Tideway-setup-*-arm64.exe
@@ -364,7 +364,7 @@ jobs:
           APPIMAGE_EXTRACT_AND_RUN: "1"
         run: bash scripts/build_appimage.sh
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: Tideway-Linux
           path: dist/Tideway-*-x86_64.AppImage
