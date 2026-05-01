@@ -19,7 +19,7 @@ sse-starlette>=2.0.0
 # On Windows it requires WebView2 (preinstalled on Win11, auto-installs
 # on Win10 via the Evergreen bootstrapper). On macOS it uses WKWebView,
 # shipped with the OS.
-pywebview>=5.0
+pywebview>=6.2.1
 # Native audio engine — PyAV (libav/ffmpeg) for demuxing + decoding
 # and sounddevice (PortAudio) for the output stream. Pre-decoded PCM
 # is spliced at the sample boundary for true gapless transitions,
