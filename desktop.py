@@ -1270,15 +1270,18 @@ def main(argv: Optional[list[str]] = None) -> int:
         # Windows (minimize handles it natively via the taskbar).
         _wire_macos_dock_reopen(window)
 
-        # macOS: re-apply chrome on the `shown` event. The
-        # BrowserView constructor patch already runs chrome once
-        # at window creation, but pywebview can do later setup
-        # (frame adjustments, WKWebView config) that overwrites
-        # our styleMask / WebView frame changes. Reapplying after
-        # `shown` is the belt-and-suspenders that makes chrome
-        # actually stick — without this, FullSizeContentView was
-        # silently being undone and the OS-default titlebar stayed
-        # visible despite our setStyleMask_ call.
+        # macOS: re-apply chrome on multiple events because pywebview's
+        # cocoa backend installs the WebView as the NSWindow's
+        # contentView only AFTER the page finishes loading (line
+        # 386 of pywebview's cocoa.py: `setContentView_(webview)`
+        # inside webView_didFinishNavigation_). At BrowserView
+        # __init__ AND at the `shown` event, the contentView is
+        # still plain NSView and the WebView isn't reachable. Only
+        # after `loaded` fires is the contentView actually the
+        # WebView. We hook BOTH `shown` (for early styleMask /
+        # backgroundColor settings that affect the chrome layer)
+        # AND `loaded` (for the WebView-aware steps that actually
+        # make the band blend). Diagnostic log records both.
         if sys.platform == "darwin":
             try:
                 from app import window_chrome as _window_chrome
@@ -1289,7 +1292,18 @@ def main(argv: Optional[list[str]] = None) -> int:
                     except Exception:
                         pass
 
+                def _on_loaded_macos_chrome() -> None:
+                    # The contentView swap happens here — by now
+                    # nswindow.contentView() returns the WebView.
+                    # Reapplying lets our chrome code see the
+                    # right view and resize / configure it.
+                    try:
+                        _window_chrome.reapply_macos_chrome()
+                    except Exception:
+                        pass
+
                 window.events.shown += _on_shown_macos_chrome
+                window.events.loaded += _on_loaded_macos_chrome
             except Exception:
                 pass
 
