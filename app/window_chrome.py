@@ -419,13 +419,11 @@ def _walk_and_blank_vibrancy(view, color, depth=0) -> int:
 
     cls_name = _objc_class_name(view)
     if "VisualEffect" in cls_name:
-        # Hit a vibrancy view. Blank its layer's bg so it composites
-        # transparent, OR set its material to the deepest one
-        # available so it's effectively the dark window background.
+        # Hit the vibrancy view (the gray material). Hide it
+        # entirely — the contentView painting underneath shows
+        # through unchanged. NSVisualEffectView has no children
+        # we care about (just renders material) so hiding is safe.
         try:
-            # Removing it from the superview is the cleanest fix
-            # but risky — AppKit may rely on it being there for
-            # event routing. Safer: hide it.
             view.setHidden_(True)
             count += 1
             _diag(f"  hid NSVisualEffectView at depth {depth}")
@@ -433,8 +431,8 @@ def _walk_and_blank_vibrancy(view, color, depth=0) -> int:
             _diag(
                 f"  setHidden on NSVisualEffectView failed: {exc!r}"
             )
-        # Belt: also try to layer-clear it in case hiding doesn't
-        # take.
+        # Belt: also clear the layer background in case setHidden
+        # doesn't fully suppress on a future macOS revision.
         try:
             layer = view.layer()
             if layer is not None:
@@ -444,18 +442,28 @@ def _walk_and_blank_vibrancy(view, color, depth=0) -> int:
         except Exception:
             pass
 
-    # Some titlebar containers are NSView subclasses that draw their
-    # own chrome via the layer's backgroundColor (no NSVisualEffectView
-    # at all on Sequoia+). Neutralize their layer too — this is
-    # additive with the vibrancy fix and shouldn't make anything
-    # else worse.
+    # Titlebar containers (_NSTitlebarContainerView,
+    # _NSTitlebarView) host the traffic-light buttons among other
+    # things. Hiding them removes the buttons too — that's NOT
+    # what we want. Instead, clear their LAYER background so the
+    # container is visible (children render) but draws no chrome
+    # of its own. The traffic lights are NSButton subviews and
+    # have their own opaque rendering, so they stay visible on top
+    # of whatever the WebView paints underneath.
     if "Titlebar" in cls_name or "TitleBar" in cls_name:
         try:
-            view.setHidden_(True)
-            _diag(f"  hid {cls_name} at depth {depth}")
-            count += 1
-        except Exception:
-            pass
+            view.setWantsLayer_(True)
+            layer = view.layer()
+            if layer is not None:
+                layer.setBackgroundColor_(
+                    AppKit.NSColor.clearColor().CGColor()
+                )
+                _diag(
+                    f"  cleared layer bg on {cls_name} at depth {depth}"
+                )
+                count += 1
+        except Exception as exc:
+            _diag(f"  clear {cls_name} layer failed: {exc!r}")
 
     for sub in subs:
         count += _walk_and_blank_vibrancy(sub, color, depth + 1)
