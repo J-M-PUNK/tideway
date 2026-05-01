@@ -29,6 +29,28 @@ a single pywebview window.
 
 ![Home page](assets/screenshots/home.png)
 
+## Contents
+
+- [What's inside](#whats-inside)
+- [Support](#support)
+- [Install a released build](#install-a-released-build)
+  - [Why the OS warns you on first launch](#why-the-os-warns-you-on-first-launch)
+- [Stack](#stack)
+- [Run it from source](#run-it-from-source)
+  - [Dev mode (browser)](#dev-mode-browser)
+  - [Desktop window (packaged shell)](#desktop-window-packaged-shell)
+- [Layout](#layout)
+- [Notes](#notes)
+- [Known limits](#known-limits)
+- [Building a distributable](#building-a-distributable)
+  - [Icons (once)](#icons-once)
+  - [macOS](#macos)
+  - [Windows](#windows)
+  - [Linux](#linux)
+  - [Auto update](#auto-update)
+- [Contributing](#contributing)
+- [License](#license)
+
 ## What's inside
 
 **Playback.** Audio plays through a pipeline built on PyAV for
@@ -48,8 +70,12 @@ work even when the window is minimized. A tray icon keeps playback
 running when you close the window, and there is an opt-in desktop
 notification on every track change.
 
-**Browsing and library.** Search, Explore, Charts, and New
-Releases pages are all there. Album, artist, playlist, and mix
+**Browsing and library.** Search, a unified Charts page (Popular,
+Top, Rising, and New Releases as tabs), and dedicated album,
+artist, playlist, and mix pages are all there. The Home page also
+surfaces two AlbumOfTheYear-backed discovery rows (a top-of-year
+highlight reel and a new-releases row) so you can find music that
+isn't already in heavy rotation. Album, artist, playlist, and mix
 pages have Play, Shuffle, and a More menu. Albums also show a
 quality badge that reflects the best version Tidal has in its
 catalog. That includes Max, Lossless, Dolby Atmos, and 360
@@ -217,7 +243,9 @@ python3 -m venv .venv
 (cd web && npm install)
 ```
 
-Start both servers at once:
+### Dev mode (browser)
+
+For day-to-day frontend work, start FastAPI and Vite together:
 
 ```bash
 ./run.sh
@@ -225,7 +253,23 @@ Start both servers at once:
 
 The FastAPI server listens on <http://127.0.0.1:8000> and serves
 the JSON API and `/docs`. The Vite dev server is on
-<http://127.0.0.1:5173>.
+<http://127.0.0.1:5173>. Hot module reload picks up frontend
+changes instantly.
+
+### Desktop window (packaged shell)
+
+Anything that depends on the native pywebview window (macOS chrome,
+window drag, traffic lights, global media keys, tray icon) only
+exercises in the desktop shell. To launch it from source:
+
+```bash
+(cd web && npm run build)
+.venv/bin/python desktop.py
+```
+
+`desktop.py` serves whatever is in `web/dist/`, so rebuild the
+frontend any time you change React code or the desktop window will
+show stale UI.
 
 On first launch, click **Login with Tidal**. The login uses PKCE.
 Paste the redirect URL back into the app and Tideway exchanges it
@@ -233,25 +277,29 @@ for a session that's entitled for hi-res streaming. The session
 and every other piece of app data live in the per-user data
 directory. On macOS that's
 `~/Library/Application Support/Tideway`. On Windows it's
-`%APPDATA%\Tideway`.
+`%APPDATA%\Tideway`. On Linux it's `~/.local/share/Tideway`.
 
 ## Layout
 
 ```
-app/              shared Python logic: tidal client, downloader,
-                  metadata, play reporting, Spotify and Last.fm
-                  clients
-app/audio/        audio engine: decoder, segment reader, player,
-                  equalizer, gapless splicing, AirPlay output
-                  (coming soon)
-server.py         FastAPI entry point
-desktop.py        pywebview shell, which is the entry point for
-                  the packaged app
-web/              Vite and React frontend
-run.sh            one command dev launcher
-Tideway-mac.spec  PyInstaller spec for macOS
-Tideway-win.spec  PyInstaller spec for Windows
-scripts/          build helpers: icons, DMG, Inno Setup .iss
+app/                shared Python logic: tidal client, downloader,
+                    metadata, play reporting, Spotify and Last.fm
+                    clients
+app/audio/          audio engine: decoder, segment reader, player,
+                    equalizer, gapless splicing, AirPlay output
+                    (coming soon)
+server.py           FastAPI entry point
+desktop.py          pywebview shell, which is the entry point for
+                    the packaged app
+web/                Vite and React frontend
+run.sh              one command dev launcher
+Tideway-mac.spec    PyInstaller spec for macOS
+Tideway-win.spec    PyInstaller spec for Windows
+Tideway-linux.spec  PyInstaller spec for Linux
+scripts/            build helpers: icons, DMG, AppImage,
+                    Inno Setup .iss
+tests/              pytest suite
+.github/workflows/  CI (test.yml) and release pipeline (release.yml)
 ```
 
 ## Notes
@@ -359,7 +407,9 @@ scripts/build_dmg.sh
 ```
 
 The DMG lands at `dist/Tideway-<version>.dmg`. Users drag the
-`.app` into Applications and launch.
+`.app` into Applications and launch. The CI builds on macOS 14
+(Apple Silicon), so the DMG produced by the release workflow is
+arm64. Intel Mac builds aren't part of the release pipeline today.
 
 ### Windows
 
@@ -370,29 +420,55 @@ npm --prefix web run build
 ```
 
 The installer lands at `dist/Tideway-setup-<version>.exe`. Users
-run it and walk through Next, Next, Install.
+run it and walk through Next, Next, Install. The release pipeline
+builds both an x64 and an arm64 installer (Windows 11 ARM64
+runner), and the auto-updater picks the right one for the user's
+machine.
+
+### Linux
+
+```
+npm --prefix web run build
+.venv/bin/pyinstaller Tideway-linux.spec --noconfirm
+bash scripts/build_appimage.sh
+```
+
+The AppImage lands at `dist/Tideway-<version>-x86_64.AppImage`.
+The release pipeline builds on Ubuntu 22.04 (glibc 2.35) so the
+output runs on any glibc-based distro from Debian 12 / Ubuntu
+22.04 / Fedora 36 onward.
 
 ### Auto update
 
 The app hits the GitHub Releases API at `/api/update-check` once
 per launch and caches the result for an hour. When a newer tag is
 out a banner surfaces across the top of the UI. Clicking **Install
-now** downloads the correct asset for the user's OS from the
-latest release, opens it, and quits the app so the installer can
-replace the bundle.
+now** downloads the correct asset for the user's OS and architecture
+from the latest release, opens it, and quits the app so the installer
+can replace the bundle.
 
 The release asset names must match these patterns:
 
 ```
-Tideway-<version>.dmg
-Tideway-setup-<version>.exe
+Tideway-<version>.dmg                       (macOS, Apple Silicon)
+Tideway-setup-<version>.exe                 (Windows x64)
+Tideway-setup-<version>-arm64.exe           (Windows ARM64)
+Tideway-<version>-x86_64.AppImage           (Linux x86_64)
 ```
 
-The build scripts above already produce files in that format, so
-cutting a release is just:
+Cutting a release is a tag push, not a manual `gh release create`.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for the full release flow:
+deploy branch, preflight, tag, draft release review, publish.
 
-```
-gh release create vX.Y.Z \
-  dist/Tideway-X.Y.Z.dmg \
-  dist/Tideway-setup-X.Y.Z.exe
-```
+## Contributing
+
+PRs welcome. Read [CONTRIBUTING.md](CONTRIBUTING.md) before
+opening one. The short version: branch off `main` with a
+`fix/`, `feature/`, or `chore/` prefix, run the four pre-PR
+checks (`pytest`, `tsc`, `lint`, `vitest`) locally, open a PR
+against `main`. Bug reports and feature requests go in
+[GitHub Issues](https://github.com/J-M-PUNK/tideway/issues).
+
+## License
+
+[MIT](LICENSE).
