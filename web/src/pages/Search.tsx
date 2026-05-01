@@ -146,8 +146,10 @@ export function Search({ onDownload }: { onDownload: OnDownload }) {
 
   // Hero row only appears on the "All" tab. The Songs-column on the
   // right is a compact slice of the track results so the user can
-  // peek the top tracks without scrolling. Capped at 4 to keep the
-  // hero balanced against the top-hit card height.
+  // peek the top tracks without scrolling. Capped at 5 — the hero
+  // top-hit card is just tall enough to balance five compact track
+  // rows against, and five reads as a nicer "top results" set than
+  // the four it used to be.
   //
   // When the top hit is itself a track, drop it from the Songs column
   // so the same row doesn't render twice — the hero already shows it.
@@ -155,7 +157,7 @@ export function Search({ onDownload }: { onDownload: OnDownload }) {
   const tracksWithoutTopHit = topHitTrackId
     ? filteredTracks.filter((t) => t.id !== topHitTrackId)
     : filteredTracks;
-  const heroTracks = tracksWithoutTopHit.slice(0, 4);
+  const heroTracks = tracksWithoutTopHit.slice(0, 5);
   const showHero = showAll && (topHit !== null || heroTracks.length > 0);
 
   return (
