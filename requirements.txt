@@ -36,7 +36,7 @@ scipy>=1.11.0
 # Global media-key listener (play-pause / next / prev work when the
 # window is backgrounded). Has platform-specific backends; pynput picks
 # the right one at import time.
-pynput>=1.8.0
+pynput>=1.8.1
 # System-tray / menu-bar icon. Pairs with the close-to-tray behavior in
 # desktop.py so closing the window doesn't kill playback. Pillow is a
 # hard dep for icon rendering.
