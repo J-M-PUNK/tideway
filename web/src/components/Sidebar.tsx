@@ -11,7 +11,6 @@ import {
   Library,
   Link2,
   ListMusic,
-  Newspaper,
   Plus,
   Rss,
   TrendingUp,
@@ -24,19 +23,12 @@ import { useFeedUnreadCount } from "@/hooks/useFeedUnread";
 import { useUiPreferences } from "@/hooks/useUiPreferences";
 import { cn } from "@/lib/utils";
 
+// Charts (Popular, Top, Rising, New Releases) live behind a single
+// entry — the destination renders a tab strip so the sidebar doesn't
+// have to. Popular is the default since that's the first tab.
 const primary = [
   { to: "/", label: "Home", icon: Home, end: true },
   { to: "/feed", label: "Feed", icon: Rss },
-];
-
-// Charts (Popular, Top, Rising) live behind a single entry — the
-// destination renders a tab strip so the sidebar doesn't have to.
-// Popular is the default since that's the first tab on the page.
-// Genres/Moods are reachable from the Charts page's tab strip; keeping
-// them out of the sidebar avoids the same-icon-twice noise that the
-// retired Explore entry used to have.
-const discover = [
-  { to: "/charts/new", label: "New Releases", icon: Newspaper },
   { to: "/popular", label: "Charts", icon: TrendingUp },
 ];
 
@@ -147,26 +139,6 @@ export function Sidebar({
               </NavLink>
             );
           })}
-          {/* Visual break between the primary tabs and the editorial
-              charts — same text treatment, small uppercase label above
-              to establish the group. Using a heading instead of just a
-              border avoids the "three font sizes" feel the first pass
-              had. */}
-          <div className="mt-2 border-t border-border/50 pt-2">
-            <div className="px-3 pb-1 text-[10px] font-bold uppercase tracking-wider text-muted-foreground/70">
-              Discover
-            </div>
-            {discover.map(({ to, label, icon: Icon }) => (
-              <NavLink
-                key={to}
-                to={to}
-                className={({ isActive }) => navItemClass(isActive)}
-              >
-                <Icon className="h-5 w-5" />
-                {label}
-              </NavLink>
-            ))}
-          </div>
         </nav>
       )}
 
