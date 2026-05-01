@@ -1270,12 +1270,35 @@ def main(argv: Optional[list[str]] = None) -> int:
         # Windows (minimize handles it natively via the taskbar).
         _wire_macos_dock_reopen(window)
 
+        # macOS: re-apply chrome on the `shown` event. The
+        # BrowserView constructor patch already runs chrome once
+        # at window creation, but pywebview can do later setup
+        # (frame adjustments, WKWebView config) that overwrites
+        # our styleMask / WebView frame changes. Reapplying after
+        # `shown` is the belt-and-suspenders that makes chrome
+        # actually stick — without this, FullSizeContentView was
+        # silently being undone and the OS-default titlebar stayed
+        # visible despite our setStyleMask_ call.
+        if sys.platform == "darwin":
+            try:
+                from app import window_chrome as _window_chrome
+
+                def _on_shown_macos_chrome() -> None:
+                    try:
+                        _window_chrome.reapply_macos_chrome()
+                    except Exception:
+                        pass
+
+                window.events.shown += _on_shown_macos_chrome
+            except Exception:
+                pass
+
         # Windows: tint the title bar to match the app's background
         # color. The hwnd doesn't exist until after the window is
         # actually shown, so we hook the `shown` event rather than
         # registering at create time. macOS handles tinting in the
         # BrowserView constructor patch (see _enable_webview_media_prefs)
-        # because Cocoa's NSWindow is available immediately.
+        # AND on shown (above) so styleMask changes stick.
         if sys.platform == "win32":
             try:
                 from app import window_chrome as _window_chrome

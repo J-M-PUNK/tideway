@@ -67,6 +67,37 @@ _windows_hwnds: list[int] = []
 _current_theme: str = "dark"
 
 
+# Diagnostic log path. The packaged Mac app has no stdout (Finder
+# launches don't attach a Terminal), so chrome-tinting prints
+# disappear into the void and we can't tell what worked vs failed
+# from a shipped build. Writing to a known file under ~/Library
+# lets the user / a tester `cat` the file after launch and report
+# back what happened. Cheap (a few hundred bytes per launch).
+def _diag_log_path():
+    try:
+        from app.paths import user_data_dir
+        path = user_data_dir() / "window-chrome.log"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+    except Exception:
+        return None
+
+
+def _diag(line: str) -> None:
+    """Append a line to the chrome diagnostic log AND print to
+    stdout. Both paths so dev runs (./run.sh) see it on the
+    console and packaged-app launches see it in the log file."""
+    print(f"[window_chrome] {line}", flush=True)
+    path = _diag_log_path()
+    if path is None:
+        return
+    try:
+        with open(path, "a") as f:
+            f.write(f"{line}\n")
+    except Exception:
+        pass
+
+
 def set_theme(theme: str) -> None:
     """Switch the active chrome color. Called from the React shell
     via the /api/_internal/window-theme endpoint whenever the user
@@ -105,6 +136,27 @@ def register_macos_nswindow(nswindow: object) -> None:
     _apply_macos(nswindow, _current_theme)
 
 
+def reapply_macos_chrome() -> None:
+    """Re-run _apply_macos against every registered NSWindow.
+
+    Called from desktop.py on the pywebview `shown` event so the
+    chrome modifications land AFTER pywebview has finished its own
+    setup. Without this, anything pywebview does between our init
+    hook and the window actually appearing on screen could
+    overwrite our styleMask / frame changes — and on at least
+    some pywebview versions, that's exactly what was happening,
+    leaving the OS-default titlebar visible despite our calls.
+    Reapplying after `shown` is the belt-and-suspenders that makes
+    chrome stick reliably."""
+    if sys.platform != "darwin":
+        return
+    for nswindow in list(_macos_nswindows):
+        try:
+            _apply_macos(nswindow, _current_theme)
+        except Exception:
+            log.exception("window_chrome: reapply failed")
+
+
 def _apply_macos(nswindow: object, theme: str) -> None:
     try:
         import AppKit  # type: ignore
@@ -127,43 +179,67 @@ def _apply_macos(nswindow: object, theme: str) -> None:
         # drag and double-click-to-zoom break. We solve that with
         # an NSEvent local monitor (see _install_drag_monitor
         # below) that intercepts those events at the system level.
+        #
+        # The constant: NSWindowStyleMaskFullSizeContentView.
+        # PyObjC has shipped this under TWO names depending on
+        # version: NSWindowStyleMaskFullSizeContentView (modern,
+        # post-10.12 SDK) and NSFullSizeContentViewWindowMask
+        # (legacy, pre-10.12 name still exposed for compatibility).
+        # We try both, and fall back to the numeric value (1 << 15
+        # = 32768) which is the actual bit in the style mask. A
+        # constant-lookup failure is the most plausible reason
+        # FullSize wasn't taking effect on early test builds —
+        # numeric fallback eliminates that failure mode.
+        full_size_mask_bit = 0
+        for name in (
+            "NSWindowStyleMaskFullSizeContentView",
+            "NSFullSizeContentViewWindowMask",
+        ):
+            value = getattr(AppKit, name, None)
+            if isinstance(value, int) and value > 0:
+                full_size_mask_bit = value
+                break
+        if full_size_mask_bit == 0:
+            full_size_mask_bit = 1 << 15  # documented value
         try:
             mask = nswindow.styleMask()
-            nswindow.setStyleMask_(
-                mask | AppKit.NSWindowStyleMaskFullSizeContentView
+            nswindow.setStyleMask_(mask | full_size_mask_bit)
+            _diag(
+                f"styleMask: was=0x{int(mask):x} "
+                f"+ FullSize(0x{full_size_mask_bit:x}) "
+                f"-> 0x{int(nswindow.styleMask()):x}"
             )
-        except Exception:
-            # Pre-10.10 doesn't have this constant — fall through,
-            # the band stays OS-tinted and visually distinct.
-            pass
+        except Exception as exc:
+            _diag(f"styleMask set failed: {exc!r}")
         # WKWebView was added to the contentView BEFORE FullSize
         # was enabled, so its frame stops at y=28 (just below where
         # the OS titlebar used to be). Now that the contentView
         # extends through the titlebar zone, the WebView needs to
         # grow to fill it — otherwise the top 28pt shows the
         # NSWindow's chrome material instead of the page body's
-        # bg-background, which is exactly what 'still gray' means
-        # in user reports. Find the WKWebView in the contentView's
-        # subviews and stretch it to the new bounds.
+        # bg-background, which is what 'still gray' means in user
+        # reports.
+        #
+        # Walk the entire view hierarchy and resize every NSView
+        # with WKWebView in its class name. Recursive because the
+        # WebView might be nested inside a wrapper (pywebview's
+        # BrowserView IS the contentView in some setups, but in
+        # others it wraps a child WebView). Aggressive but safe:
+        # we only touch views whose class name explicitly contains
+        # "WebView", so unrelated subviews (overlays, layer views,
+        # etc) are left alone.
         try:
             content_view = nswindow.contentView()
             if content_view is not None:
                 bounds = content_view.bounds()
-                for sub in content_view.subviews() or []:
-                    cls_name = type(sub).__name__
-                    if "WebView" in cls_name or "BrowserView" in cls_name:
-                        sub.setFrame_(bounds)
-                        try:
-                            sub.setAutoresizingMask_(
-                                AppKit.NSViewWidthSizable
-                                | AppKit.NSViewHeightSizable
-                            )
-                        except Exception:
-                            pass
-        except Exception:
-            log.exception(
-                "window_chrome: WebView resize-to-fill failed"
-            )
+                _diag(
+                    f"contentView class={type(content_view).__name__} "
+                    f"bounds=({bounds.size.width}x{bounds.size.height})"
+                )
+                resized = _resize_webviews_to_fill(content_view, bounds)
+                _diag(f"WebView frames resized: {resized}")
+        except Exception as exc:
+            _diag(f"WebView resize failed: {exc!r}")
         # titlebarAppearsTransparent kills the gradient so the
         # window's backgroundColor shows through. This and
         # setBackgroundColor together paint the title-bar zone our
@@ -236,6 +312,39 @@ def _apply_macos(nswindow: object, theme: str) -> None:
         )
     except Exception:
         log.exception("window_chrome: NSWindow tint failed")
+
+
+def _resize_webviews_to_fill(view, bounds, depth=0) -> int:
+    """Walk view's subview tree recursively. For each NSView whose
+    class name contains 'WebView', set its frame to `bounds` (i.e.
+    fill the parent contentView) and assign a fully-flexible
+    autoresizingMask so future window resizes also propagate.
+
+    Returns the number of WebView-class views that were resized.
+    Bounded depth prevents pathological cycles (NSView graphs
+    aren't cyclic in practice but defensive).
+    """
+    import AppKit  # type: ignore
+    if depth > 8:
+        return 0
+    count = 0
+    try:
+        subs = view.subviews() or []
+    except Exception:
+        return 0
+    for sub in subs:
+        cls_name = type(sub).__name__
+        if "WebView" in cls_name:
+            try:
+                sub.setFrame_(bounds)
+                sub.setAutoresizingMask_(
+                    AppKit.NSViewWidthSizable | AppKit.NSViewHeightSizable
+                )
+                count += 1
+            except Exception:
+                pass
+        count += _resize_webviews_to_fill(sub, bounds, depth + 1)
+    return count
 
 
 # Height of the titlebar drag zone in points. Standard macOS
