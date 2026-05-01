@@ -1,7 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { PlayerSnapshot, StreamInfo, Track } from "@/api/types";
 import { api } from "@/api/client";
+import { useContinuePlayingPref } from "./useContinuePlayingPref";
+import { useSleepTimer } from "./useSleepTimer";
 import { useUiPreferences, type StreamingQuality } from "./useUiPreferences";
+import {
+  loadPersisted,
+  pickRestoreFromPersisted,
+  usePlayerPersistence,
+  type PersistedState,
+} from "./usePlayerPersistence";
 
 /**
  * Player hook. Remote-controls the backend PyAV + sounddevice
@@ -28,14 +36,6 @@ import { useUiPreferences, type StreamingQuality } from "./useUiPreferences";
  * at the sample boundary — true gapless for same-rate transitions,
  * ~50ms reopen blip for cross-rate.
  */
-
-const PERSIST_KEY = "tideway:player";
-// Tightened from 5s to 2s so the worst-case "you quit between two
-// ticks" loss window is smaller. Persist work is a single
-// JSON.stringify + setItem on a state we already have in memory; the
-// extra cost is negligible compared to the UX cost of forgetting what
-// the user was just listening to.
-const PERSIST_INTERVAL_MS = 2000;
 
 export type RepeatMode = "off" | "all" | "one";
 
@@ -82,83 +82,6 @@ export interface PlayerState {
    *  volume slider should render disabled and the backend rejects
    *  set_volume calls; the user attenuates via their DAC / OS. */
   forceVolume: boolean;
-}
-
-interface PersistedState {
-  queue: Track[];
-  queueIndex: number;
-  currentTime: number;
-  volume: number;
-  shuffle: boolean;
-  repeat: RepeatMode;
-  /** Id of the track that was loaded when the user closed the app.
-   *  Used as a sanity-check against the persisted queue so that on
-   *  boot we only restore "now playing" when queue[queueIndex] still
-   *  matches what was loaded (queue shape may have drifted between
-   *  versions). */
-  trackId: string | null;
-  /** The full Track object the user was listening to. Persisted
-   *  alongside `trackId` so single-track plays (where the queue
-   *  is empty and `queueIndex` is -1) can still restore on relaunch.
-   *  Without this field, tapping a search result and quitting would
-   *  lose the now-playing on reopen, since the queue-based restore
-   *  path requires queueIndex >= 0. */
-  track: Track | null;
-}
-
-function loadPersisted(): Partial<PersistedState> {
-  try {
-    const raw = localStorage.getItem(PERSIST_KEY);
-    if (!raw) return {};
-    const parsed = JSON.parse(raw);
-    if (!parsed || typeof parsed !== "object") return {};
-    return parsed;
-  } catch {
-    return {};
-  }
-}
-
-/** Decide what to seed `state.track`, `state.queueIndex`, and
- *  `state.currentTime` with based on a persisted snapshot — extracted
- *  so the backend backstop hydrate path (`api.nowPlayingState.get()`)
- *  can apply the same shape-validation as the localStorage path. */
-function pickRestoreFromPersisted(
-  persisted: Partial<PersistedState>,
-  queue: Track[],
-): {
-  restoreIndex: number;
-  restoreTrack: Track | null;
-  restoreCurrentTime: number;
-} {
-  let restoreIndex = -1;
-  let restoreTrack: Track | null = null;
-  let restoreCurrentTime = 0;
-  if (
-    typeof persisted.queueIndex === "number" &&
-    persisted.queueIndex >= 0 &&
-    persisted.queueIndex < queue.length &&
-    typeof persisted.trackId === "string" &&
-    queue[persisted.queueIndex] &&
-    queue[persisted.queueIndex].id === persisted.trackId
-  ) {
-    restoreIndex = persisted.queueIndex;
-    restoreTrack = queue[persisted.queueIndex];
-  } else if (
-    persisted.track &&
-    typeof persisted.track === "object" &&
-    typeof persisted.trackId === "string" &&
-    persisted.track.id === persisted.trackId
-  ) {
-    restoreTrack = persisted.track;
-  }
-  if (
-    restoreTrack &&
-    typeof persisted.currentTime === "number" &&
-    persisted.currentTime > 0
-  ) {
-    restoreCurrentTime = persisted.currentTime;
-  }
-  return { restoreIndex, restoreTrack, restoreCurrentTime };
 }
 
 const INITIAL: PlayerState = {
@@ -208,6 +131,52 @@ export function pickNextIndex(
   if (next < state.queue.length) return next;
   if (state.repeat === "all") return 0;
   return null;
+}
+
+/**
+ * Compute the queue + jump-target for an Artist Radio takeover at
+ * end-of-queue. Pure-ish (only side effect is the
+ * `api.artistRadio` HTTP call); returns `null` whenever a
+ * takeover can't fire so the caller can fall through to its
+ * stop / pause-on-track-0 path.
+ *
+ * Cases that return null:
+ *   - Empty queue (nothing to seed the takeover from).
+ *   - The just-played track has no artist (rare — search results
+ *     for raw uploads sometimes lack artist metadata).
+ *   - Tidal's artist radio endpoint failed or returned empty.
+ *
+ * Dedupes radio tracks against what's already in the queue so we
+ * don't immediately replay one of the tracks the user was just
+ * listening to. If the dedupe filters EVERYTHING out (the radio
+ * is entirely the album we just played), falls back to the
+ * unfiltered radio list — better to repeat a song than to stop
+ * playback.
+ */
+async function fetchRadioTakeover(
+  cur: PlayerState,
+): Promise<
+  | { newQueue: Track[]; index: number; source: PlaySource }
+  | null
+> {
+  if (cur.queue.length === 0) return null;
+  const lastTrack = cur.queue[cur.queueIndex];
+  const artistId = lastTrack?.artists?.[0]?.id;
+  if (!artistId) return null;
+  try {
+    const radio = await api.artistRadio(String(artistId));
+    if (!radio || radio.length === 0) return null;
+    const playedIds = new Set(cur.queue.map((t) => t.id));
+    const fresh = radio.filter((t) => !playedIds.has(t.id));
+    const radioTail = fresh.length > 0 ? fresh : radio;
+    return {
+      newQueue: [...cur.queue, ...radioTail],
+      index: cur.queueIndex + 1,
+      source: { type: "ARTIST", id: String(artistId) },
+    };
+  } catch {
+    return null;
+  }
 }
 
 export function pickPrevIndex(state: PlayerState): number | null {
@@ -336,70 +305,10 @@ export function usePlayer() {
     })();
   }, []);
 
-  // Persist queue + prefs so a relaunch picks up where the user left
-  // off. Skip writes when nothing's loaded so we don't clobber a real
-  // prior session.
-  //
-  // Three lifecycle hooks listen for "the user is leaving":
-  //   - `beforeunload`: classic page-close. Fires reliably on most
-  //     browser exits and on pywebview window-close.
-  //   - `pagehide`: fires in cases where `beforeunload` doesn't —
-  //     Safari mobile, BFCache navigations, and some embedded-webview
-  //     paths. Most reliable last-chance hook in the spec.
-  //   - `visibilitychange` to "hidden": fires when the app loses focus
-  //     or is sent to background. macOS Cmd-Q sometimes hides the
-  //     window before tearing it down without firing beforeunload, so
-  //     a flush here catches it.
-  // All three call the same `flush()` so a triple-hit on quit just
-  // writes the same JSON three times — cheap and idempotent.
-  useEffect(() => {
-    const flush = () => {
-      const s = stateRef.current;
-      // Skip writes when nothing's loaded — don't clobber a real prior
-      // session. We allow currentTime === 0 here because a paused-at-
-      // start track is still worth persisting (the user explicitly
-      // queued it).
-      if (s.queue.length === 0 && s.queueIndex === -1 && !s.track) {
-        return;
-      }
-      const snapshot: PersistedState = {
-        queue: s.queue,
-        queueIndex: s.queueIndex,
-        currentTime: s.currentTime,
-        volume: s.volume,
-        shuffle: s.shuffle,
-        repeat: s.repeat,
-        trackId: s.track?.id ?? null,
-        track: s.track,
-      };
-      try {
-        localStorage.setItem(PERSIST_KEY, JSON.stringify(snapshot));
-      } catch {
-        /* storage full or disabled */
-      }
-      // Backend backstop. Pywebview's WKWebView on macOS doesn't
-      // always preserve localStorage between launches — depending
-      // on the data-store mode the OS may discard the database on
-      // app quit. The server keeps the most-recently-pushed
-      // snapshot in user_data_dir/now_playing.json, so a quit that
-      // wipes localStorage still restores cleanly. Fire-and-forget;
-      // the .catch lives on the api method itself.
-      api.nowPlayingState.put(snapshot as unknown as Record<string, unknown>);
-    };
-    const onVisibilityChange = () => {
-      if (document.visibilityState === "hidden") flush();
-    };
-    const id = window.setInterval(flush, PERSIST_INTERVAL_MS);
-    window.addEventListener("beforeunload", flush);
-    window.addEventListener("pagehide", flush);
-    document.addEventListener("visibilitychange", onVisibilityChange);
-    return () => {
-      window.clearInterval(id);
-      window.removeEventListener("beforeunload", flush);
-      window.removeEventListener("pagehide", flush);
-      document.removeEventListener("visibilitychange", onVisibilityChange);
-    };
-  }, []);
+  // Persist queue + prefs so a relaunch picks up where the user
+  // left off. Owned by usePlayerPersistence — see that file's
+  // docstring for the lifecycle-hook trio + backend-backstop story.
+  usePlayerPersistence(stateRef);
 
   // SSE subscription — backend pushes state changes + position updates.
   // `seq` is our monotonic clock so we can ignore out-of-order frames.
@@ -429,94 +338,101 @@ export function usePlayer() {
     let cancelled = false;
     let retryTimer: number | null = null;
 
-    const applySnapshot = (snap: PlayerSnapshot) => {
-      // Ignore frames that don't match the track we think is current —
-      // a late echo from a track we already replaced.
-      if (
-        snap.track_id !== null &&
-        expectedTrackIdRef.current !== null &&
-        snap.track_id !== expectedTrackIdRef.current
-      ) {
-        return;
-      }
-      // Sync the now-playing bar to whatever the backend says is
-      // playing. Two sources, in priority order:
-      //
-      //   1. Queue-sourced (fast path): if the queue contains the
-      //      track_id, point state.track at it directly. This is
-      //      the source of truth for autoplay / radio takeover —
-      //      `playAtIndex` already pushed the full Track object into
-      //      the queue, we just hand it back to the bar. No HTTP.
-      //
-      //   2. API-sourced (cold-boot rehydrate): the backend is
-      //      playing something we don't have in the queue at all
-      //      — happens after a reload while the backend session is
-      //      still live. Fetch the Track dict and splice it in.
-      //
-      // Why path 1 exists: relying on `playAtIndex`'s optimistic
-      // setState alone has a race. The SSE "playing" snapshot can
-      // arrive before stateRef catches up (useEffect commits stateRef
-      // *after* the React render, so a snapshot processed during the
-      // render window sees stale stateRef.current.track), at which
-      // point the rehydrate API fetch returns the same track we just
-      // put in the queue — extra round trip for nothing, and during
-      // the in-flight window the bar shows the previous track.
+    // Late-echo guard: drop snapshots whose track_id doesn't match
+    // the track we last asked the backend to play. Happens during
+    // track changes when the previous track's "playing" tail still
+    // has frames in flight — without the guard, those would
+    // overwrite the new track's UI state.
+    const isLateEcho = (snap: PlayerSnapshot): boolean =>
+      snap.track_id !== null &&
+      expectedTrackIdRef.current !== null &&
+      snap.track_id !== expectedTrackIdRef.current;
+
+    // Sync the now-playing bar to whatever the backend says is
+    // playing. Two sources, in priority order:
+    //
+    //   1. Queue-sourced (fast path): if the queue contains the
+    //      track_id, point state.track at it directly. This is
+    //      the source of truth for autoplay / radio takeover —
+    //      `playAtIndex` already pushed the full Track object into
+    //      the queue, we just hand it back to the bar. No HTTP.
+    //
+    //   2. API-sourced (cold-boot rehydrate): the backend is
+    //      playing something we don't have in the queue at all
+    //      — happens after a reload while the backend session is
+    //      still live. Fetch the Track dict and splice it in.
+    //
+    // Why path 1 exists: relying on `playAtIndex`'s optimistic
+    // setState alone has a race. The SSE "playing" snapshot can
+    // arrive before stateRef catches up (useEffect commits stateRef
+    // *after* the React render, so a snapshot processed during the
+    // render window sees stale stateRef.current.track), at which
+    // point the rehydrate API fetch returns the same track we just
+    // put in the queue — extra round trip for nothing, and during
+    // the in-flight window the bar shows the previous track.
+    const syncTrackFromQueueOrApi = (snap: PlayerSnapshot) => {
       const cur = stateRef.current;
       const trackOutOfSync =
         snap.track_id !== null &&
         snap.state !== "idle" &&
         snap.state !== "ended" &&
         (!cur.track || cur.track.id !== snap.track_id);
-      if (trackOutOfSync && snap.track_id) {
-        const id = snap.track_id;
-        const queueIdx = cur.queue.findIndex((q) => q.id === id);
-        if (queueIdx >= 0) {
-          // Path 1: queue has it. Sync state.track from queue.
-          expectedTrackIdRef.current = id;
-          setState((s) => {
-            // Re-check inside the reducer: another setState may have
-            // already synced track (e.g. playAtIndex's optimistic
-            // update commits between the outer check and here).
-            if (s.track?.id === id) return s;
-            const idx = s.queue.findIndex((q) => q.id === id);
-            if (idx < 0) return s;
-            return { ...s, track: s.queue[idx], queueIndex: idx };
-          });
-        } else if (rehydratingTrackIdRef.current !== id) {
-          // Path 2: cold-boot rehydrate. Queue is empty / doesn't
-          // contain this track. Fetch from API.
-          rehydratingTrackIdRef.current = id;
-          expectedTrackIdRef.current = id;
-          api
-            .track(id)
-            .then((t) => {
-              setState((s) => {
-                // Race guard: if the backend has since moved on to
-                // a different track, drop this late response.
-                if (expectedTrackIdRef.current !== id) return s;
-                // If something else (e.g. playAtIndex on a manual
-                // queue change) put the track into the queue while
-                // our fetch was in flight, prefer the queue's index
-                // over a single-track replacement.
-                const existingIdx = s.queue.findIndex((q) => q.id === id);
-                if (existingIdx >= 0) {
-                  return { ...s, track: t, queueIndex: existingIdx };
-                }
-                return {
-                  ...s,
-                  track: t,
-                  queue: [t],
-                  queueIndex: 0,
-                };
-              });
-            })
-            .catch(() => {
-              // Leave the bar in its pre-rehydrate state if the
-              // fetch fails. Next snapshot retries via the same gate.
-              rehydratingTrackIdRef.current = null;
+      if (!trackOutOfSync || !snap.track_id) return;
+      const id = snap.track_id;
+      const queueIdx = cur.queue.findIndex((q) => q.id === id);
+      if (queueIdx >= 0) {
+        // Path 1: queue has it. Sync state.track from queue.
+        expectedTrackIdRef.current = id;
+        setState((s) => {
+          // Re-check inside the reducer: another setState may have
+          // already synced track (e.g. playAtIndex's optimistic
+          // update commits between the outer check and here).
+          if (s.track?.id === id) return s;
+          const idx = s.queue.findIndex((q) => q.id === id);
+          if (idx < 0) return s;
+          return { ...s, track: s.queue[idx], queueIndex: idx };
+        });
+      } else if (rehydratingTrackIdRef.current !== id) {
+        // Path 2: cold-boot rehydrate. Queue is empty / doesn't
+        // contain this track. Fetch from API.
+        rehydratingTrackIdRef.current = id;
+        expectedTrackIdRef.current = id;
+        api
+          .track(id)
+          .then((t) => {
+            setState((s) => {
+              // Race guard: if the backend has since moved on to
+              // a different track, drop this late response.
+              if (expectedTrackIdRef.current !== id) return s;
+              // If something else (e.g. playAtIndex on a manual
+              // queue change) put the track into the queue while
+              // our fetch was in flight, prefer the queue's index
+              // over a single-track replacement.
+              const existingIdx = s.queue.findIndex((q) => q.id === id);
+              if (existingIdx >= 0) {
+                return { ...s, track: t, queueIndex: existingIdx };
+              }
+              return {
+                ...s,
+                track: t,
+                queue: [t],
+                queueIndex: 0,
+              };
             });
-        }
+          })
+          .catch(() => {
+            // Leave the bar in its pre-rehydrate state if the
+            // fetch fails. Next snapshot retries via the same gate.
+            rehydratingTrackIdRef.current = null;
+          });
       }
+    };
+
+    // Apply the snapshot's transport-state fields to React state.
+    // Doesn't touch state.track — that's syncTrackFromQueueOrApi's
+    // job and stays separate so the optimistic-update / rehydrate
+    // race surface is contained to one place.
+    const applyTransportState = (snap: PlayerSnapshot) => {
       setState((s) => {
         const currentTime = snap.position_ms / 1000;
         const duration =
@@ -529,8 +445,8 @@ export function usePlayer() {
             playing: false,
             loading: false,
             currentTime: 0,
-            // Keep streamInfo so the quality badge doesn't flicker off
-            // in the brief window before the next track loads.
+            // Keep streamInfo so the quality badge doesn't flicker
+            // off in the brief window before the next track loads.
           };
         }
         return {
@@ -545,72 +461,76 @@ export function usePlayer() {
           forceVolume: !!snap.force_volume,
         };
       });
-      if (snap.state === "ended") advanceRef.current();
-      // Skip past tracks the backend can't play. Without this,
-      // autoplay halts the moment radio hands us a region-locked or
-      // otherwise unstreamable id — the user sees a "Playback failed"
-      // banner and the music stops mid-session. The expected-track
-      // guard above naturally dedupes repeat error frames for the
-      // same track, so we only advance once per failure.
-      if (snap.state === "error" && continuePlayingRef.current) {
-        advanceRef.current();
-      }
+    };
 
-      // Preload the next queue item about ten seconds into the
-      // current track. The old rule was fifteen seconds from the
-      // end. That was fine for natural gapless transitions but
-      // left mid track skips cold. If you hit Next forty five
-      // seconds into a four minute track the backend had to fetch
-      // the manifest and prime a decoder from scratch, which took
-      // three to five hundred milliseconds before any audio came
-      // out. Spotify and Apple Music both fire preload early for
-      // exactly this reason.
-      //
-      // This only runs when playback is actually in the playing
-      // state, when we haven't already preloaded for this track,
-      // when there is a next track in the queue, and when the
-      // next track isn't the same as the current one (which
-      // happens under repeat one and wouldn't be worth the work).
-      //
-      // The memory cost is one pre decoded PCM buffer held for
-      // the rest of the current track. A five minute FLAC at
-      // 96 kHz and 32 bit runs about 180 MB. Shorter or lower
-      // resolution tracks cost proportionally less. The buffer is
-      // freed as soon as the swap completes or the queue changes.
+    // Preload the next queue item about ten seconds into the
+    // current track. Earlier rule was fifteen seconds from the end;
+    // that was fine for natural gapless transitions but left mid-
+    // track skips cold. If you hit Next forty-five seconds into a
+    // four-minute track the backend had to fetch the manifest and
+    // prime a decoder from scratch — three to five hundred ms
+    // before any audio came out. Spotify and Apple Music both fire
+    // preload early for the same reason.
+    //
+    // Memory cost is one pre-decoded PCM buffer held for the rest
+    // of the current track (~180 MB at 96 kHz / 32-bit FLAC,
+    // proportionally less at lower quality / shorter tracks). The
+    // buffer is freed as soon as the swap completes or the queue
+    // changes.
+    const triggerPreloadIfNeeded = (snap: PlayerSnapshot) => {
       if (
-        snap.state === "playing" &&
-        snap.track_id !== null &&
-        preloadedForTrackIdRef.current !== snap.track_id
-      ) {
-        const currentTime = snap.position_ms / 1000;
-        if (currentTime >= 10) {
-          const s = stateRef.current;
-          const nextIdx = pickNextIndex(s, true);
-          if (nextIdx !== null && nextIdx !== s.queueIndex) {
-            const nextTrack = s.queue[nextIdx];
-            if (nextTrack && nextTrack.id !== snap.track_id) {
-              preloadedForTrackIdRef.current = snap.track_id;
-              api.player.preload(nextTrack.id, qualityRef.current).catch(() => {
-                /* fire-and-forget; failure falls back to the
-                     normal slow-path load on track-end. */
-              });
-            }
-          }
-        }
-      }
-      // Reset the preload guard when track_id changes so the next
-      // track's own preload fires at its own trigger point.
+        snap.state !== "playing" ||
+        snap.track_id === null ||
+        preloadedForTrackIdRef.current === snap.track_id
+      )
+        return;
+      const currentTime = snap.position_ms / 1000;
+      if (currentTime < 10) return;
+      const s = stateRef.current;
+      const nextIdx = pickNextIndex(s, true);
+      if (nextIdx === null || nextIdx === s.queueIndex) return;
+      const nextTrack = s.queue[nextIdx];
+      if (!nextTrack || nextTrack.id === snap.track_id) return;
+      preloadedForTrackIdRef.current = snap.track_id;
+      api.player.preload(nextTrack.id, qualityRef.current).catch(() => {
+        /* fire-and-forget; failure falls back to the slow-path
+           load on track-end. */
+      });
+    };
+
+    // Reset the preload guard when track_id changes so the next
+    // track's own preload fires at its own 10-second trigger
+    // point. Only resets when we've moved PAST the track we
+    // preloaded FOR — re-firing mid-track would re-preload the
+    // same next track repeatedly.
+    const resetPreloadGuardOnTrackChange = (snap: PlayerSnapshot) => {
       if (
         snap.track_id !== null &&
         preloadedForTrackIdRef.current !== null &&
         preloadedForTrackIdRef.current !== snap.track_id
       ) {
-        // Only reset when we've moved past the track we preloaded
-        // FOR — i.e. the current track_id is different from the one
-        // whose end triggered the preload. Avoids re-firing mid-
-        // track.
         preloadedForTrackIdRef.current = null;
       }
+    };
+
+    const applySnapshot = (snap: PlayerSnapshot) => {
+      if (isLateEcho(snap)) return;
+      syncTrackFromQueueOrApi(snap);
+      applyTransportState(snap);
+      // Advance triggers fire AFTER the state setState so any
+      // ended-branch UI ticks land before the next track's
+      // optimistic update overwrites them.
+      if (snap.state === "ended") advanceRef.current();
+      // Skip past tracks the backend can't play. Without this,
+      // autoplay halts the moment radio hands us a region-locked
+      // or otherwise unstreamable id. The expected-track guard
+      // (isLateEcho) naturally dedupes repeat error frames for the
+      // same track, so we only advance once per failure.
+      if (snap.state === "error" && continuePlayingRef.current) {
+        advanceRef.current();
+      }
+      triggerPreloadIfNeeded(snap);
+      resetPreloadGuardOnTrackChange(snap);
     };
 
     const connect = () => {
@@ -691,47 +611,10 @@ export function usePlayer() {
   }, [state.track]);
 
   // "Continue playing after queue ends" preference, mirrored from
-  // the backend Settings dataclass. Read on mount and refreshed
-  // whenever the SettingsPage dispatches the `tidal-settings-updated`
-  // event (it does this after a successful PUT). Held in a ref so
-  // the queue-end branch in advanceRef can read the latest value
-  // without taking it as a dep — the advance code path is set up
-  // once and would otherwise need to redefine on every settings
-  // change.
-  //
-  // Default true here mirrors the backend default. If the settings
-  // fetch fails (no auth, network), keep the default-on behavior so
-  // the user gets the same experience the backend ships.
-  const continuePlayingRef = useRef(true);
-  useEffect(() => {
-    let cancelled = false;
-    api.settings
-      .get()
-      .then((s) => {
-        if (!cancelled) {
-          continuePlayingRef.current = !!s.continue_playing_after_queue_ends;
-        }
-      })
-      .catch(() => {
-        /* default: true (set above) */
-      });
-    const handler = (event: Event) => {
-      const detail = (event as CustomEvent).detail as {
-        continue_playing_after_queue_ends?: boolean;
-      } | null;
-      if (
-        detail &&
-        typeof detail.continue_playing_after_queue_ends === "boolean"
-      ) {
-        continuePlayingRef.current = detail.continue_playing_after_queue_ends;
-      }
-    };
-    window.addEventListener("tidal-settings-updated", handler);
-    return () => {
-      cancelled = true;
-      window.removeEventListener("tidal-settings-updated", handler);
-    };
-  }, []);
+  // the backend Settings as a live-updating ref. See
+  // useContinuePlayingPref for the mount-fetch + custom-event
+  // update mechanism.
+  const continuePlayingRef = useContinuePlayingPref();
 
   // Restore the persisted "now playing" track on app launch. We seed
   // the track + queueIndex + currentTime synchronously in the state
@@ -976,35 +859,16 @@ export function usePlayer() {
         }
       };
 
-      if (continuePlayingRef.current && cur.queue.length > 0) {
-        const lastTrack = cur.queue[cur.queueIndex];
-        const artistId = lastTrack?.artists?.[0]?.id;
-        if (artistId) {
-          void (async () => {
-            try {
-              const radio = await api.artistRadio(String(artistId));
-              if (!radio || radio.length === 0) {
-                fallbackOff();
-                return;
-              }
-              // De-dupe against what just finished so we don't
-              // immediately replay one of the tracks the user was
-              // just listening to.
-              const playedIds = new Set(cur.queue.map((t) => t.id));
-              const fresh = radio.filter((t) => !playedIds.has(t.id));
-              const radioTail = fresh.length > 0 ? fresh : radio;
-              const newQueue = [...cur.queue, ...radioTail];
-              playAtIndex(cur.queueIndex + 1, newQueue, {
-                type: "ARTIST",
-                id: String(artistId),
-              });
-            } catch {
-              fallbackOff();
-            }
-          })();
-          return;
-        }
-        // No artist id on the last track — fall through.
+      if (continuePlayingRef.current) {
+        void (async () => {
+          const takeover = await fetchRadioTakeover(cur);
+          if (takeover) {
+            playAtIndex(takeover.index, takeover.newQueue, takeover.source);
+          } else {
+            fallbackOff();
+          }
+        })();
+        return;
       }
       fallbackOff();
     };
@@ -1137,53 +1001,11 @@ export function usePlayer() {
     };
   }, []);
 
-  const sleepTimeoutRef = useRef<number | null>(null);
-  const sleepTickRef = useRef<number | null>(null);
-  const [sleepRemaining, setSleepRemaining] = useState<number | null>(null);
-
-  const clearSleepTimer = useCallback(() => {
-    if (sleepTimeoutRef.current !== null) {
-      window.clearTimeout(sleepTimeoutRef.current);
-      sleepTimeoutRef.current = null;
-    }
-    if (sleepTickRef.current !== null) {
-      window.clearTimeout(sleepTickRef.current);
-      sleepTickRef.current = null;
-    }
-    endOfTrackPendingRef.current = false;
-    setSleepRemaining(null);
-  }, []);
-
-  useEffect(() => clearSleepTimer, [clearSleepTimer]);
-
-  const setSleepTimer = useCallback(
-    (minutes: number | "end-of-track" | null) => {
-      clearSleepTimer();
-      if (minutes === null) return;
-      if (minutes === "end-of-track") {
-        endOfTrackPendingRef.current = true;
-        setSleepRemaining(-1);
-        return;
-      }
-      const ms = minutes * 60 * 1000;
-      const fireAt = Date.now() + ms;
-      setSleepRemaining(ms);
-      sleepTimeoutRef.current = window.setTimeout(() => {
-        void api.player.pause().catch(() => {});
-        clearSleepTimer();
-      }, ms);
-      const tick = () => {
-        const left = fireAt - Date.now();
-        if (left <= 0) {
-          sleepTickRef.current = null;
-          return;
-        }
-        setSleepRemaining(left);
-        sleepTickRef.current = window.setTimeout(tick, 1000);
-      };
-      sleepTickRef.current = window.setTimeout(tick, 1000);
-    },
-    [clearSleepTimer],
+  // Sleep-timer state machine. Owned by useSleepTimer; we hand it
+  // the endOfTrackPendingRef so the "stop at end of track" mode
+  // can flip the flag advanceRef checks.
+  const { sleepRemaining, setSleepTimer, clearSleepTimer } = useSleepTimer(
+    endOfTrackPendingRef,
   );
 
   // Append to the end of the queue. Always appends — duplicates pass
