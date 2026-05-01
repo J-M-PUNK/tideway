@@ -389,6 +389,24 @@ export interface LastFmTopAlbum {
   image: string;
 }
 
+/** One row from an AlbumOfTheYear listing endpoint. The AOTY metadata
+ *  describes the album as AOTY presents it (rank, score, cover URL,
+ *  release date), and `tidal_album` is the resolved Tidal album dict
+ *  when AOTY's pick exists on Tidal — null when it doesn't, in which
+ *  case the row is shown but isn't directly playable. */
+export interface AotyAlbum {
+  title: string;
+  artist: string;
+  score: number | null;
+  rating_count: number | null;
+  cover_url: string | null;
+  release_date: string | null;
+  rank: number | null;
+  must_hear: boolean;
+  aoty_url: string | null;
+  tidal_album: Album | null;
+}
+
 export interface LastFmLovedTrack {
   name: string;
   artist: string;

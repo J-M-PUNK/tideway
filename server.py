@@ -41,6 +41,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
+from app import aoty as aoty_module
+from app import aoty_resolver
 from app import deezer_import
 from app import global_keys as global_keys_mod
 from app.audio.macos_now_playing import MacOSNowPlayingBridge
@@ -3395,6 +3397,41 @@ def lastfm_chart_top_tags(limit: int = 50) -> list[dict]:
         f"chart-top-tags:{limit}",
         lambda: lastfm.get_chart_top_tags(limit=limit),
     )
+
+
+# --- AlbumOfTheYear charts -------------------------------------------------
+#
+# Two surfaces, both backed by `app.aoty` (HTML scraper, in-memory
+# cached) + `app.aoty_resolver` (per-album Tidal resolution, disk
+# cached). The endpoint itself is thin glue: it doesn't add another
+# cache layer because the two underlying caches already handle cost
+# correctly — a chart-listing hit + N disk-cache hits is milliseconds,
+# and brand-new entries trigger one rate-limited Tidal search each.
+#
+# `year` defaults to the current year. Callers can pass a past year
+# explicitly to browse historical charts (the AOTY URL works for any
+# year).
+
+
+@app.get("/api/aoty/top-of-year")
+def aoty_top_of_year(year: int | None = None, limit: int = 50) -> list[dict]:
+    """AOTY's highest-user-rated albums for the given year, decorated
+    with Tidal album dicts under `tidal_album` (or None when Tidal
+    doesn't have a match)."""
+    _require_auth()
+    y = year if year is not None else datetime.now().year
+    listing = aoty_module.top_albums_of_year(y, limit=limit)
+    return aoty_resolver.resolve_listing(listing)
+
+
+@app.get("/api/aoty/recent-releases")
+def aoty_recent_releases(limit: int = 30) -> list[dict]:
+    """Recently-released albums from AOTY's /releases/ grid, decorated
+    with Tidal album dicts under `tidal_album` (or None when Tidal
+    doesn't have a match)."""
+    _require_auth()
+    listing = aoty_module.recent_releases(limit=limit)
+    return aoty_resolver.resolve_listing(listing)
 
 
 _weekly_scrobbles_cache: dict[str, tuple[float, list]] = {}

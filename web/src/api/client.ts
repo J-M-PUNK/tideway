@@ -22,6 +22,7 @@ import type {
   LastFmTopTrack,
   LastFmUserInfo,
   LastFmWeeklyScrobble,
+  AotyAlbum,
   LocalFile,
   LocalVideo,
   Lyrics,
@@ -325,6 +326,22 @@ export const api = {
           timestamp: track.timestamp ?? null,
         }),
       }),
+  },
+  aoty: {
+    /** Top-rated albums of the given year per AlbumOfTheYear, with
+     *  each entry decorated with a Tidal album dict when one exists.
+     *  Year defaults server-side to the current year. */
+    topOfYear: (opts?: { year?: number; limit?: number }) => {
+      const params = new URLSearchParams();
+      if (opts?.year !== undefined) params.set("year", String(opts.year));
+      if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
+      const qs = params.toString();
+      return req<AotyAlbum[]>(`/api/aoty/top-of-year${qs ? `?${qs}` : ""}`);
+    },
+    /** Recently-released albums per AOTY's /releases/ grid, with each
+     *  entry decorated with a Tidal album dict when one exists. */
+    recentReleases: (limit = 30) =>
+      req<AotyAlbum[]>(`/api/aoty/recent-releases?limit=${limit}`),
   },
   spotify: {
     /** Spotify's global play count for a recording identified by
