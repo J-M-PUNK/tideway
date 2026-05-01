@@ -1,10 +1,10 @@
+import { useMemo } from "react";
 import { Link } from "react-router-dom";
 import { Music, Star } from "lucide-react";
 import type { AotyAlbum, Album } from "@/api/types";
-import type { OnDownload } from "@/api/download";
 import { useApi } from "@/hooks/useApi";
 import { api } from "@/api/client";
-import { SectionHeader } from "@/components/Grid";
+import { Grid, SectionHeader } from "@/components/Grid";
 import { GridSkeleton } from "@/components/Skeletons";
 import { PlayMediaButton } from "@/components/PlayMediaButton";
 import { imageProxy } from "@/lib/utils";
@@ -18,23 +18,21 @@ import { imageProxy } from "@/lib/utils";
  *
  * Entries without a resolved Tidal album are filtered out: the goal is
  * a discovery surface the user can play from, not a chart for its own
- * sake. AOTY's own page is still one click away via the section
- * subtitle on each entry.
+ * sake.
  */
-export function AotyHomeSection({ onDownload }: { onDownload: OnDownload }) {
-  const year = new Date().getFullYear();
+export function AotyHomeSection() {
+  // Memoised so the title doesn't recompute on every render. Won't
+  // tick over at midnight on Jan 1 without a remount, but the cost
+  // of that edge case is "wrong year in the title until next visit"
+  // which is fine.
+  const year = useMemo(() => new Date().getFullYear(), []);
   return (
     <div>
       <AotyRow
         title={`Top albums of ${year}`}
         fetch={() => api.aoty.topOfYear({ limit: 30 })}
-        onDownload={onDownload}
       />
-      <AotyRow
-        title="New releases"
-        fetch={() => api.aoty.recentReleases(24)}
-        onDownload={onDownload}
-      />
+      <AotyRow title="New releases" fetch={() => api.aoty.recentReleases(24)} />
     </div>
   );
 }
@@ -42,11 +40,9 @@ export function AotyHomeSection({ onDownload }: { onDownload: OnDownload }) {
 function AotyRow({
   title,
   fetch,
-  onDownload,
 }: {
   title: string;
   fetch: () => Promise<AotyAlbum[]>;
-  onDownload: OnDownload;
 }) {
   const { data, loading, error } = useApi(fetch, []);
 
@@ -70,15 +66,11 @@ function AotyRow({
   return (
     <div className="mb-2">
       <SectionHeader title={title} />
-      <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6">
+      <Grid>
         {playable.map((entry) => (
-          <AotyCard
-            key={entry.tidal_album.id}
-            entry={entry}
-            onDownload={onDownload}
-          />
+          <AotyCard key={entry.tidal_album.id} entry={entry} />
         ))}
-      </div>
+      </Grid>
     </div>
   );
 }
@@ -89,13 +81,7 @@ function AotyRow({
  * when present, and a "must hear" star (top-right) when AOTY has
  * tagged the album that way.
  */
-function AotyCard({
-  entry,
-  onDownload: _onDownload,
-}: {
-  entry: AotyAlbum & { tidal_album: Album };
-  onDownload: OnDownload;
-}) {
+function AotyCard({ entry }: { entry: AotyAlbum & { tidal_album: Album } }) {
   const album = entry.tidal_album;
   const cover = imageProxy(album.cover);
   const artist = album.artists.map((a) => a.name).join(", ");
@@ -121,6 +107,7 @@ function AotyCard({
         {entry.score !== null && (
           <div
             className="absolute left-2 top-2 rounded bg-black/75 px-1.5 py-0.5 text-xs font-bold text-white shadow"
+            aria-label={`AOTY score: ${entry.score} out of 100`}
             title={`AOTY score: ${entry.score}/100`}
           >
             {entry.score}
@@ -129,6 +116,7 @@ function AotyCard({
         {entry.must_hear && (
           <div
             className="absolute right-2 top-2 flex h-6 w-6 items-center justify-center rounded-full bg-amber-500 text-white shadow"
+            aria-label="AOTY must hear"
             title="AOTY must hear"
           >
             <Star className="h-3.5 w-3.5 fill-current" />

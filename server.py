@@ -41,6 +41,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
+from app import aoty as aoty_module
+from app import aoty_resolver
 from app import deezer_import
 from app import global_keys as global_keys_mod
 from app.audio.macos_now_playing import MacOSNowPlayingBridge
@@ -3360,9 +3362,7 @@ def aoty_top_of_year(year: int | None = None, limit: int = 50) -> list[dict]:
     with Tidal album dicts under `tidal_album` (or None when Tidal
     doesn't have a match)."""
     _require_auth()
-    from app import aoty as aoty_module
-    from app import aoty_resolver
-    y = int(year) if year is not None else datetime.now().year
+    y = year if year is not None else datetime.now().year
     listing = aoty_module.top_albums_of_year(y, limit=limit)
     return aoty_resolver.resolve_listing(listing)
 
@@ -3373,8 +3373,6 @@ def aoty_recent_releases(limit: int = 30) -> list[dict]:
     with Tidal album dicts under `tidal_album` (or None when Tidal
     doesn't have a match)."""
     _require_auth()
-    from app import aoty as aoty_module
-    from app import aoty_resolver
     listing = aoty_module.recent_releases(limit=limit)
     return aoty_resolver.resolve_listing(listing)
 

@@ -653,7 +653,7 @@ export function Home({ onDownload }: { onDownload: OnDownload }) {
           onDownload={onDownload}
         />
       )}
-      <AotyHomeSection onDownload={onDownload} />
+      <AotyHomeSection />
       {hoistedAlbums && (
         <PageView
           page={{ ...data, categories: [hoistedAlbums] }}
