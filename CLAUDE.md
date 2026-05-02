@@ -86,14 +86,25 @@ single deploy, the workflow is:
 7. **Run the release pipeline.** GitHub Actions builds the three
    platform installers and creates a **draft** release on GitHub
    with the notes auto-populated from the tag commit body.
-8. **Publish the draft.** Open the Releases page, skim the
-   auto-populated notes, click Publish. Drafts are invisible to
+8. **Sign the installers.** Run `scripts/sign-release.sh v<X.Y.Z>`.
+   This downloads each installer from the draft release, signs each
+   one with the maintainer's local minisign key (you'll be prompted
+   for the passphrase per artifact), and uploads `.minisig` sidecars
+   back to the same draft. The auto-updater on existing installs
+   verifies these before launching anything; without them, the
+   "Install now" click on every installed copy returns an error
+   instead of running the unsigned binary. See
+   `docs/release-signing.md` for first-time key setup, key rotation,
+   and recovery scenarios.
+9. **Publish the draft.** Open the Releases page, confirm both
+   installers AND `.minisig` sidecars are listed under Assets, skim
+   the auto-populated notes, click Publish. Drafts are invisible to
    the auto-updater (`/releases/latest` excludes them), so a
    tagged-but-unpublished release ships nothing to users. If you
    tag and walk away, no one gets the update.
-9. **Catch main back up.** Fast-forward `main` to the deploy branch:
-   `git checkout main && git merge --ff-only deploy/v<X.Y.Z> && git push`.
-10. **Clean up.** Delete merged PR branches locally and on GitHub.
+10. **Catch main back up.** Fast-forward `main` to the deploy
+   branch: `git checkout main && git merge --ff-only deploy/v<X.Y.Z> && git push`.
+11. **Clean up.** Delete merged PR branches locally and on GitHub.
 
 The integration-branch step is what differentiates this from the
 "merge each PR straight to main" pattern. Reasons:

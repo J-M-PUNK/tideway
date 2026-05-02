@@ -115,17 +115,43 @@ the Releases page with:
 - Body populated from your release commit's message body
 - All installers attached as assets
 
-### 7. Publish the draft
+### 7. Sign the installers
+
+The auto-updater verifies a minisign signature on every installer
+it downloads. The signing key lives on your laptop, not in CI, so
+this step is local and manual.
+
+```bash
+scripts/sign-release.sh v0.X.Y
+```
+
+That downloads each installer from the draft release, signs it
+with `~/.tideway-release-key`, and uploads the `.minisig` sidecars
+back to the same draft. You'll be prompted for the key passphrase
+once per artifact (four times for a normal release).
+
+If you skip this step and publish a release without `.minisig`
+files, the auto-updater on existing installs will refuse to install
+the update — they'll show an error toast about the missing
+signature instead of silently running an unverified binary.
+
+First-time setup (key generation, cold-backup key, baking the
+public keys into the build) is in
+[release-signing.md](release-signing.md).
+
+### 8. Publish the draft
 
 The draft sits there for a final human review:
 
 1. Open <https://github.com/J-M-PUNK/tideway/releases>. There will be
    a "Draft" badge on `v0.X.Y` at the top of the list.
-2. Skim the auto-populated body. Edit on the GitHub UI if you want
+2. Confirm both installers AND `.minisig` sidecars are listed under
+   Assets. If you see only the installers, step 7 didn't run.
+3. Skim the auto-populated body. Edit on the GitHub UI if you want
    to tweak wording, reorder sections, etc. Permanent improvements
    should also land back in the release commit so `git log` and the
    Releases page stay in sync.
-3. Click **Publish release**.
+4. Click **Publish release**.
 
 Publishing is what actually ships. The auto-updater on user installs
 hits `GET /repos/.../releases/latest`, which excludes drafts, so a
@@ -133,7 +159,7 @@ release in draft state is invisible to users and the auto-update
 notification never fires. If you tag, walk away, and forget to
 publish, no one gets the update.
 
-### 8. Catch main back up
+### 9. Catch main back up
 
 After the release is built, verified, and published:
 

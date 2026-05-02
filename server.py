@@ -56,6 +56,8 @@ from app.local_index import LocalIndex
 from app import now_playing_state
 from app.paths import bundled_resource_dir
 from app.play_reporter import PlayReporter, PlaySession, recent_log as play_report_recent_log
+from app.release_keys import TRUSTED_RELEASE_PUBKEYS
+from app.release_verify import SignatureError, verify_artifact
 from app.settings import Settings, load_settings, save_settings
 from app.tidal_client import (
     TidalBackoffError,
@@ -1530,11 +1532,21 @@ def _update_asset_url() -> Optional[str]:
 
 @app.post("/api/update/install")
 def update_install() -> dict:
-    """Download the latest release's installer for the current OS and
-    open it so the user can run through the install prompt. Doesn't
-    quit the app — the frontend does that after this returns so the
-    old bundle is out of the way when the user drags / runs the new
-    one.
+    """Download the latest release's installer for the current OS,
+    verify its minisign signature against this build's trusted keys,
+    and open the installer so the user can run through the install
+    prompt. Doesn't quit the app — the frontend does that after this
+    returns so the old bundle is out of the way when the user drags
+    or runs the new one.
+
+    Signature check is mandatory and not bypassable. If the
+    `.minisig` is missing, malformed, or doesn't verify under any
+    of the keys in `app.release_keys.TRUSTED_RELEASE_PUBKEYS`, the
+    download is deleted and the call returns 502. This is what
+    protects users from a compromised GitHub publishing channel: an
+    attacker who can upload a malicious installer can't sign it
+    without the signing key, so verification refuses it before
+    anything runs.
 
     Returns the filesystem path we staged the download to so the UI
     can tell the user where to look if something goes sideways.
@@ -1557,6 +1569,7 @@ def update_install() -> dict:
         target_dir = Path(tempfile.mkdtemp(prefix="tdl-update-"))
     filename = url.rsplit("/", 1)[-1] or "Tideway-update"
     target = target_dir / filename
+    sig_target = target_dir / (filename + ".minisig")
     try:
         # Use requests so the download goes through certifi's CA
         # bundle — same reason as _fetch_latest_release. urllib's
@@ -1577,6 +1590,71 @@ def update_install() -> dict:
             status_code=502,
             detail=f"Couldn't download installer: {exc}",
         )
+
+    # Fetch the signature companion. The convention in our release
+    # workflow is `<asset>.minisig` next to the asset itself, uploaded
+    # as a sibling in the same GitHub release. A missing signature is
+    # not a soft fallback — without it we can't tell whether the
+    # binary on disk came from the publisher or from a compromised
+    # release upload, and the whole point of this code path is to
+    # refuse the latter.
+    sig_url = url + ".minisig"
+    try:
+        sig_resp = _requests.get(sig_url, timeout=15)
+        sig_resp.raise_for_status()
+        signature_text = sig_resp.text
+    except Exception as exc:
+        # Clean up the binary so a confused user doesn't see a
+        # half-downloaded installer in ~/Downloads and try to run it
+        # by hand. The error message names the missing piece so a
+        # support thread can land on "the publisher forgot to upload
+        # the .minisig" rather than chasing the GitHub asset.
+        target.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Update was downloaded but its signature file "
+                f"({sig_url}) is missing or unreadable: {exc}. Refusing "
+                "to install an unverified binary."
+            ),
+        )
+
+    # Verify the signature against the trusted-keys list baked into
+    # this build. On failure we delete BOTH the artifact and the sig
+    # so a curious user pulling files out of ~/Downloads after an
+    # error doesn't end up running an unverified installer manually.
+    try:
+        used_key = verify_artifact(
+            target, signature_text, TRUSTED_RELEASE_PUBKEYS
+        )
+        print(
+            f"[update] verified {filename} against trusted key "
+            f"{used_key.label or '(unlabelled)'}",
+            flush=True,
+        )
+    except SignatureError as exc:
+        target.unlink(missing_ok=True)
+        sig_target.unlink(missing_ok=True)
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                f"Downloaded installer failed signature verification: {exc}. "
+                "The download has been deleted. If this keeps happening, "
+                "reinstall Tideway from the official source rather than "
+                "trusting this update."
+            ),
+        )
+
+    # Persist the verified signature alongside the binary so the user
+    # (or a paranoid reviewer) can re-verify out of band with the
+    # `minisign` CLI if they want to. Best-effort — a failure to write
+    # the sig file isn't fatal because the in-process verification
+    # already succeeded.
+    try:
+        sig_target.write_text(signature_text)
+    except OSError:
+        pass
+
     # Open the installer in whatever way the OS expects. Detached so
     # the subprocess doesn't linger as a zombie when the app quits
     # next.
