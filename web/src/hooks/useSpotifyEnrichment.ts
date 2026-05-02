@@ -68,14 +68,24 @@ export function useSpotifyTrackPlaycount(
     if (!key || !spotifyEnabled) return;
     const off = subscribe(playcountSubs, key, () => force((n) => n + 1));
     if (!playcountCache.has(key) && !playcountInflight.has(key)) {
+      // Successful resolution: cache the result (including a server-
+      // authoritative null for "Spotify doesn't know this track").
+      // Failure (timeout / network blip / 5xx): do NOT cache. Caching
+      // a null sentinel from a transient failure poisons the entry
+      // for the rest of the session — every subsequent read sees it
+      // as "Spotify said null" and never retries. Letting the cache
+      // stay empty means the next render re-fires the request, which
+      // is the right cold-load recovery.
       const p = api.spotify
         .trackPlaycount(key)
-        .then((r) => r.playcount)
-        .catch(() => null)
-        .then((val) => {
-          playcountCache.set(key, val);
+        .then((r) => {
+          playcountCache.set(key, r.playcount);
           notify(playcountSubs, key);
-          return val;
+          return r.playcount;
+        })
+        .catch(() => {
+          notify(playcountSubs, key);
+          return null;
         })
         .finally(() => playcountInflight.delete(key));
       playcountInflight.set(key, p);
@@ -108,28 +118,34 @@ export function useSpotifyArtistStats(
       return;
     const off = subscribe(statsSubs, key, () => force((n) => n + 1));
     if (!statsCache.has(key) && !statsInflight.has(key)) {
+      // Cache only on success. A transient failure used to write
+      // {monthly_listeners: null, ...} into the cache, which then
+      // looked indistinguishable from "Spotify said null" on every
+      // subsequent read for the rest of the session — that was the
+      // root cause of the cold-load "monthly listeners missing"
+      // report. Leaving the cache empty on failure lets the next
+      // render re-fire the request.
       const p = api.spotify
         .artistStats(tidalArtistId, tidalArtistName || "", cleanedIsrcs)
-        .then(
-          (r): ArtistStats => ({
+        .then((r): ArtistStats => {
+          const val: ArtistStats = {
             monthly_listeners: r.monthly_listeners,
             followers: r.followers,
             world_rank: r.world_rank,
             top_cities: r.top_cities,
-          }),
-        )
-        .catch(
-          (): ArtistStats => ({
+          };
+          statsCache.set(key, val);
+          notify(statsSubs, key);
+          return val;
+        })
+        .catch((): ArtistStats => {
+          notify(statsSubs, key);
+          return {
             monthly_listeners: null,
             followers: null,
             world_rank: null,
             top_cities: [],
-          }),
-        )
-        .then((val) => {
-          statsCache.set(key, val);
-          notify(statsSubs, key);
-          return val;
+          };
         })
         .finally(() => statsInflight.delete(key));
       statsInflight.set(key, p);
@@ -172,13 +188,19 @@ export function useSpotifyAlbumTotalPlays(
     if (!key || !spotifyEnabled) return;
     const off = subscribe(albumPlaysSubs, key, () => force((n) => n + 1));
     if (!albumPlaysCache.has(key) && !albumPlaysInflight.has(key)) {
+      // Same failure-cache rule as the other Spotify enrichment
+      // hooks — only cache on success so a transient failure doesn't
+      // stick zeroes for the rest of the session.
       const p = api.spotify
         .albumTotalPlays(key.split(","))
-        .catch(() => ({ total_plays: 0, resolved: 0, total: 0 }))
         .then((val) => {
           albumPlaysCache.set(key, val);
           notify(albumPlaysSubs, key);
           return val;
+        })
+        .catch(() => {
+          notify(albumPlaysSubs, key);
+          return { total_plays: 0, resolved: 0, total: 0 };
         })
         .finally(() => albumPlaysInflight.delete(key));
       albumPlaysInflight.set(key, p);
