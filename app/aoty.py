@@ -3,14 +3,19 @@
 Two surfaces:
 
   - `top_albums_of_year(year, limit)` reads
-    `/ratings/user-highest-rated/{year}/{page}/` — the year's
-    highest-user-rated albums. Stable list that turns over slowly
+    `/ratings/6-highest-rated/{year}/{page}/` — AOTY's canonical
+    "Best of {year}" ranking (the headline list, aggregated /
+    critic-blended). NOT `/ratings/user-highest-rated/{year}/`,
+    which is a separate user-only ranking with materially
+    different ordering. Stable list that turns over slowly
     enough that an hour-level cache is comfortable.
 
-  - `recent_releases(limit)` reads `/releases/` — albums released
-    recently, ranked by AOTY's grid-card view. Refreshes more
-    quickly than the top-of-year list (a 30-minute cache feels
-    right).
+  - `recent_releases(limit)` reads `/releases/this-week/` — the
+    explicitly-this-week scope of AOTY's release grid. The
+    unsuffixed `/releases/` page shows a broader / different
+    set of cards and is NOT what we want for the "New Releases"
+    Home row. A 30-minute cache feels right since AOTY adds new
+    releases throughout the day.
 
 Both endpoints return a list of `AotyAlbum`. Resolving each entry
 to a Tidal album is the consumer's job (server.py / endpoint
@@ -104,11 +109,14 @@ def top_albums_of_year(year: int, limit: int = 50) -> list[dict]:
 
     out: list[AotyAlbum] = []
     page = 1
-    # AOTY's pagination: /ratings/user-highest-rated/{year}/{page}/.
-    # Each page renders ~25 rows. Walk pages until we hit `limit` or
-    # a page returns no rows.
+    # AOTY's pagination: /ratings/6-highest-rated/{year}/{page}/.
+    # `6-highest-rated` is AOTY's canonical aggregated ranking — the
+    # headline "Best of {year}" list users actually mean when they
+    # say "AOTY top albums." Distinct from `user-highest-rated`,
+    # which is the separate user-only score. Each page renders ~25
+    # rows. Walk pages until we hit `limit` or a page returns no rows.
     while len(out) < limit and page <= 6:
-        path = f"/ratings/user-highest-rated/{year}/{page}/"
+        path = f"/ratings/6-highest-rated/{year}/{page}/"
         html = _fetch(urljoin(_BASE_URL, path))
         if html is None:
             break
@@ -125,7 +133,7 @@ def top_albums_of_year(year: int, limit: int = 50) -> list[dict]:
 
 
 def recent_releases(limit: int = 30) -> list[dict]:
-    """Recently-released albums, AOTY's grid-card view at /releases/.
+    """Recently-released albums, AOTY's grid-card view at /releases/this-week/.
 
     Rows here use a different DOM shape than the top-of-year page —
     artist and title are in separate elements rather than combined
@@ -137,7 +145,10 @@ def recent_releases(limit: int = 30) -> list[dict]:
     if cached is not None:
         return cached
 
-    html = _fetch(urljoin(_BASE_URL, "/releases/"))
+    # `/releases/this-week/` — explicitly the current week's releases.
+    # The unsuffixed `/releases/` shows a different (broader) set of
+    # cards and is NOT what we want for the New Releases Home row.
+    html = _fetch(urljoin(_BASE_URL, "/releases/this-week/"))
     if html is None:
         _cache_set(cache_key, [])
         return []
