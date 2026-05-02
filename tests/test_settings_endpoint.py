@@ -137,14 +137,16 @@ def test_default_concurrent_downloads_is_one():
     assert Settings().concurrent_downloads == 1
 
 
-def test_default_download_rate_limit_is_20_mbps():
-    """20 MB/s is the new default — fast enough to feel instant on a
-    healthy connection, slow enough to look like steady streaming
-    rather than a bulk scrape. Pin the value because it's the kind
-    of setting that's tempting to "just bump" in a refactor."""
+def test_default_download_rate_limit_is_10_mbps():
+    """10 MB/s default — lowered from 20 to keep fresh-install
+    behavior visibly clear of the "saturate fiber" pattern that
+    20 MB/s could produce on fast connections, while still being
+    fast enough to feel near-instant for typical track downloads.
+    Pin the value because it's the kind of setting that's tempting
+    to "just bump" in a refactor."""
     from app.settings import Settings
 
-    assert Settings().download_rate_limit_mbps == 20
+    assert Settings().download_rate_limit_mbps == 10
 
 
 def test_put_multiple_fields_in_one_request(client):
