@@ -193,14 +193,19 @@ If you need a high-signal line (mint failure, takeover received,
 state change), use the print pattern. If you need debug detail
 (per-frame trace, periodic heartbeat), use the logger.
 
-## Cross-device pause specifics
+## Cross-device pause — not implemented
 
-The realtime listener (`app/tidal_realtime.py`) is **always on** and
-spawns at server boot. It's gated under pytest via `_under_pytest()`
-in `server.py` so the test suite doesn't open a live WS to Tidal. If
-new tests need to exercise the listener, mock it directly — don't
-rely on starting it through the boot path.
+This section previously claimed Tideway has an always-on realtime
+listener at `app/tidal_realtime.py` that pauses local playback when
+another device on the same Tidal account starts playing. **That was
+aspirational documentation; the module never existed.** No
+`tidal_realtime.py`, no `_under_pytest()` helper, no
+`/api/realtime/status` endpoint, no WebSocket client to Tidal's
+realtime bus.
 
-Diagnostics: `GET /api/realtime/status` returns the listener's runtime
-state (running / connected / last_error / counters). Use it before
-debugging by log-grep.
+Building it for real means: a WebSocket client to Tidal's realtime
+endpoint, auth via the existing tidalapi session, reverse-engineering
+of the state-change message format, and wiring "another device
+started" to `PCMPlayer.pause()`. Comparable in scope to the Tidal
+Connect receiver work — undocumented protocol, ongoing maintenance.
+Out of scope until explicitly planned.
