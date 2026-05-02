@@ -95,8 +95,15 @@ export function TopHitCard({
     </>
   );
 
+  // No `h-full` — the search hero is a 2-column grid where the right
+  // column (Songs list) is often much taller than the natural height
+  // of this card. Stretching the card to match leaves a big empty
+  // bottom region, especially on the artist branch where the subtitle
+  // line is intentionally suppressed. Letting the card size to its
+  // content matches the rhythm Spotify / Apple Music use, where the
+  // top-result and songs columns can have different heights.
   const cardClasses =
-    "group relative flex h-full flex-col gap-5 rounded-lg bg-card p-6 transition-colors duration-200 ease-out hover:bg-accent";
+    "group relative flex flex-col gap-5 rounded-lg bg-card p-6 transition-colors duration-200 ease-out hover:bg-accent";
 
   if (hit.kind === "track") {
     return (
