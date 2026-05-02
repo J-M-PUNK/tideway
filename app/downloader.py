@@ -898,6 +898,39 @@ class Downloader:
             self._clear_pending(item.item_id)
             try:
                 self._download(item)
+            except Exception as exc:
+                # _download has its own try/except for the body of the
+                # download, but a few setup steps (debug prints, lookups)
+                # run *before* that try block. An exception there used
+                # to escape this loop with no `except`, killing the
+                # worker thread and leaving every subsequent download
+                # stuck in PENDING forever. The triggering case in the
+                # field was a UnicodeEncodeError on a `print(... title=
+                # !r ...)` for a track with non-locale-codepage chars
+                # in the title (#7, #36, #70). Catch here so a single
+                # bad item fails cleanly without taking the worker down.
+                import sys as _sys
+                import traceback as _tb
+                try:
+                    print(
+                        f"[downloader] worker caught escaped exception "
+                        f"id={item.item_id[:8]}: {type(exc).__name__}",
+                        file=_sys.stderr,
+                        flush=True,
+                    )
+                    _tb.print_exc(file=_sys.stderr)
+                except Exception:
+                    # Logging itself can fail (the original exception
+                    # might *be* a print/encoding failure). Don't let
+                    # that re-kill the worker.
+                    pass
+                try:
+                    item.status = DownloadStatus.FAILED
+                    item.error = f"{type(exc).__name__}: {exc}"
+                    item.speed_bps = 0.0
+                    self._publish_update(item)
+                except Exception:
+                    pass
             finally:
                 self.gate.release()
 
