@@ -11,6 +11,22 @@ to anyone cloning the repo); its contents are not. The local
 [`.gitignore`](.gitignore) here ignores everything except itself
 and this README.
 
+## Suggested layout
+
+Once you have more than a handful of files, organise into
+subdirectories. The contents of `private/` are gitignored, so
+these exist only on your machine — recreate them as needed on
+fresh clones:
+
+- `features/` — bigger plans for new functionality
+- `bugs/` — bug investigations, repro notes, fix sketches
+- `improvements/` — smaller enhancements, refactors, polish
+- `research/` — research notes, competitor analysis, surveys
+- `archive/` — shipped or shelved plans, kept for reasoning history
+
+None of these directories are mandatory; pick what fits. A
+single flat directory is fine for fewer files.
+
 ## What goes here
 
 Good fits:
