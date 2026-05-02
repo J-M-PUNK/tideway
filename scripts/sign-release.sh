@@ -65,10 +65,21 @@ if ! command -v gh >/dev/null 2>&1; then
     exit 1
 fi
 
+# Determine the GitHub repo from the current working directory's git
+# context BEFORE we cd into the temp work dir for downloads. gh's
+# release subcommands fall back to git remote inference when --repo
+# isn't passed, so without this they'd fail with "not a git
+# repository" once we're inside the temp dir.
+REPO="$(gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null || true)"
+if [ -z "$REPO" ]; then
+    echo "Could not infer GitHub repo from $(pwd). Run this script from inside a Tideway checkout." >&2
+    exit 1
+fi
+
 WORK_DIR="$(mktemp -d -t tideway-sign-XXXXXX)"
 trap 'rm -rf "$WORK_DIR"' EXIT
 
-echo "Downloading $TAG artifacts to $WORK_DIR ..."
+echo "Downloading $TAG artifacts from $REPO to $WORK_DIR ..."
 cd "$WORK_DIR"
 
 # Pull every installer asset attached to the tag. The patterns match
@@ -76,6 +87,7 @@ cd "$WORK_DIR"
 # that don't match (so a tag missing one platform's build still
 # proceeds for the platforms it does have).
 gh release download "$TAG" \
+    --repo "$REPO" \
     --pattern 'Tideway-*.dmg' \
     --pattern 'Tideway-setup-*.exe' \
     --pattern 'Tideway-*-x86_64.AppImage'
@@ -111,9 +123,9 @@ done
 
 echo ""
 echo "Uploading .minisig sidecars back to release $TAG ..."
-gh release upload "$TAG" *.minisig --clobber
+gh release upload "$TAG" *.minisig --repo "$REPO" --clobber
 
 echo ""
 echo "Done. The release is still a draft."
-echo "Review at: https://github.com/$(gh repo view --json nameWithOwner -q .nameWithOwner)/releases"
+echo "Review at: https://github.com/$REPO/releases"
 echo "Click Publish when ready."
