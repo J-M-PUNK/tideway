@@ -4974,6 +4974,56 @@ def autoeq_update_status() -> dict:
     return updater.status()
 
 
+@app.get("/api/eq/headphones")
+def autoeq_headphones(q: str = "", limit: int = 20) -> dict:
+    """Group AutoEQ manifest entries by headphone name. Returns
+    one entry per unique headphone, with an inner list of every
+    measurement source that has it (each tagged on_disk +
+    is_active). The UI uses this to render a two-level browser:
+    type "HD 600", see one row, click to expand and pick which
+    lab's measurement to use.
+
+    The intent is to match the user's mental model — they own a
+    pair of HD 600s, not a measurement-source-of-HD-600 — and
+    push the "which source" decision into a secondary level
+    where the trade-offs are clearer.
+
+    Caller must hit `/api/eq/check-updates` first to populate the
+    manifest cache. Returns an empty list otherwise; the UI
+    surfaces this as a "Click Refresh catalog to load" prompt.
+    """
+    _require_local_access()
+    from app.audio.autoeq import updater
+    limit = max(1, min(int(limit), 50))
+    groups = updater.search_headphones(
+        q,
+        _autoeq_data_dir_path(),
+        settings.eq_active_profile_id,
+        limit=limit,
+    )
+    return {
+        "ok": True,
+        "manifest_cached": updater._STATE.manifest is not None,
+        "results": [
+            {
+                "headphone": g.headphone,
+                "installed_count": g.installed_count,
+                "total_count": g.total_count,
+                "sources": [
+                    {
+                        "profile_id": s.profile_id,
+                        "source": s.source,
+                        "on_disk": s.on_disk,
+                        "is_active": s.is_active,
+                    }
+                    for s in g.sources
+                ],
+            }
+            for g in groups
+        ],
+    }
+
+
 @app.get("/api/eq/catalog-search")
 def autoeq_catalog_search(q: str = "", limit: int = 20) -> dict:
     """Fuzzy-search the cached AutoEQ manifest by headphone name.

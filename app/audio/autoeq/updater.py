@@ -580,6 +580,152 @@ def search_manifest(
         return [c for _pos, c in ranked[:limit]]
 
 
+@dataclass
+class HeadphoneSource:
+    profile_id: str
+    source: str
+    on_disk: bool
+    is_active: bool
+
+
+@dataclass
+class HeadphoneGroup:
+    headphone: str
+    sources: list[HeadphoneSource]
+    installed_count: int
+    total_count: int
+
+
+# Lab names that are widely treated as the canonical AutoEQ source
+# for a given headphone. Pinned to the top of each group's source
+# list so the user's first instinct ("just give me the best one")
+# lands on the source most reviewers cite. The order here is
+# author-curated, not a quality judgement on the others.
+_PREFERRED_SOURCES = (
+    "oratory1990",
+    "Crinacle",
+    "Innerfidelity",
+    "Headphone.com Legacy",
+    "Rtings",
+)
+
+
+def _walk_on_disk(roots: list[Path]) -> set[str]:
+    """Walk each root for `*ParametricEQ.txt` files, return the set
+    of profile_ids that actually exist on disk. Profile_id format
+    matches what `_profile_id_from_path` produces from manifest
+    entries (`<source>/<headphone>`), so cross-reference against
+    the manifest is a set lookup."""
+    on_disk: set[str] = set()
+    for root in roots:
+        if not root.exists():
+            continue
+        for txt in root.rglob("*ParametricEQ.txt"):
+            try:
+                rel = txt.relative_to(root)
+                parts = rel.parts
+                if len(parts) >= 2:
+                    on_disk.add(f"{parts[0]}/{parts[1]}")
+            except ValueError:
+                continue
+    return on_disk
+
+
+def search_headphones(
+    query: str,
+    bundled_root: Path,
+    active_profile_id: str,
+    limit: int = 20,
+) -> list[HeadphoneGroup]:
+    """Group manifest entries by headphone name and return the top
+    `limit` groups matching `query`. Each group lists every source
+    that has measured this headphone, with on_disk and is_active
+    flags so the UI can render per-source actions (Use this /
+    Download / Active now) without an extra round trip.
+
+    Sources within a group are stable-sorted: preferred sources
+    (oratory1990, Crinacle, Innerfidelity, ...) first in their
+    canonical order, then everything else alphabetically.
+
+    The search is over headphone names only — source labels are
+    intentionally excluded because users search for "HD 600", not
+    for the lab that measured it.
+    """
+    with _STATE.lock:
+        manifest = _STATE.manifest
+
+    if manifest is None:
+        return []
+
+    on_disk = _walk_on_disk([bundled_root, cache_dir()])
+
+    # Group manifest entries by headphone name.
+    groups: dict[str, list[HeadphoneSource]] = {}
+    for path in manifest.profile_paths:
+        parsed = _brand_model_from_path(path)
+        if parsed is None:
+            continue
+        source, headphone, pid = parsed
+        groups.setdefault(headphone, []).append(
+            HeadphoneSource(
+                profile_id=pid,
+                source=source,
+                on_disk=pid in on_disk,
+                is_active=pid == active_profile_id,
+            )
+        )
+
+    # Stable-sort sources within each group: preferred-then-rest.
+    pref_index = {name: i for i, name in enumerate(_PREFERRED_SOURCES)}
+    for sources in groups.values():
+        sources.sort(
+            key=lambda s: (
+                pref_index.get(s.source, len(_PREFERRED_SOURCES)),
+                s.source.lower(),
+            )
+        )
+
+    # Build a flat list of HeadphoneGroup for ranking.
+    candidates = [
+        HeadphoneGroup(
+            headphone=name,
+            sources=sources,
+            installed_count=sum(1 for s in sources if s.on_disk),
+            total_count=len(sources),
+        )
+        for name, sources in groups.items()
+    ]
+
+    q = query.strip()
+    if not q:
+        # Empty query: prefer popular headphones (those with the most
+        # sources, since AutoEQ has more measurements for popular
+        # models) then alphabetical.
+        candidates.sort(
+            key=lambda g: (-g.total_count, g.headphone.lower())
+        )
+        return candidates[:limit]
+
+    try:
+        from rapidfuzz import fuzz, process  # type: ignore
+        scored = process.extract(
+            q,
+            [g.headphone for g in candidates],
+            scorer=fuzz.WRatio,
+            limit=limit,
+        )
+        return [candidates[idx] for _h, _score, idx in scored]
+    except ImportError:
+        lq = q.lower()
+        ranked = [
+            (g.headphone.lower().find(lq), g)
+            for g in candidates
+            if lq in g.headphone.lower()
+        ]
+        ranked.sort(key=lambda t: (t[0], t[1].headphone.lower()))
+        return [g for _pos, g in ranked[:limit]]
+
+
 def download_one(profile_id: str, *, include_csv: bool = True) -> DownloadResult:
     """Synchronous single-profile download. Used by the user-clicks-
     one-headphone flow; blocks for ~1-3 s while the PEQ + optional

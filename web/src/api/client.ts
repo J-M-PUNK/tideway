@@ -1048,6 +1048,28 @@ export const api = {
         failed: number;
         last_error: string;
       }>("/api/eq/update-status"),
+    /** Group manifest entries by headphone, return one row per
+     *  unique headphone with an inner list of every measurement
+     *  source that has it. The Settings UI uses this to render a
+     *  two-level browser — search shows headphones, clicking a
+     *  row expands the per-source picker. Pairs with
+     *  autoEqDownloadProfile for "Download & use" actions. */
+    autoEqHeadphones: (q: string, limit = 20) =>
+      req<{
+        ok: boolean;
+        manifest_cached: boolean;
+        results: {
+          headphone: string;
+          installed_count: number;
+          total_count: number;
+          sources: {
+            profile_id: string;
+            source: string;
+            on_disk: boolean;
+            is_active: boolean;
+          }[];
+        }[];
+      }>(`/api/eq/headphones?q=${encodeURIComponent(q)}&limit=${limit}`),
     /** Fuzzy-search the cached AutoEQ manifest by headphone name.
      *  Pairs with autoEqDownloadProfile for the user-clicks-one-
      *  headphone flow that avoids pulling the full ~5,000-profile
