@@ -3,12 +3,14 @@
 Two surfaces:
 
   - `top_albums_of_year(year, limit)` reads
-    `/ratings/6-highest-rated/{year}/{page}/` — AOTY's canonical
-    "Best of {year}" ranking (the headline list, aggregated /
-    critic-blended). NOT `/ratings/user-highest-rated/{year}/`,
-    which is a separate user-only ranking with materially
-    different ordering. Stable list that turns over slowly
-    enough that an hour-level cache is comfortable.
+    `/ratings/user-highest-rated/{year}/{page}/` — AOTY's
+    user-rating-ordered "best of {year}" ranking. We previously
+    tried `/ratings/6-highest-rated/{year}/` thinking that was
+    AOTY's canonical aggregated/critic ranking, but that path
+    404s for year-scoped requests (likely an all-time-only ID).
+    The user-rated list is the only public year-scoped chart
+    AOTY exposes at a stable URL, so we use it. Stable enough
+    that an hour-level cache is comfortable.
 
   - `recent_releases(limit)` reads `/releases/this-week/` — the
     explicitly-this-week scope of AOTY's release grid. The
@@ -109,14 +111,15 @@ def top_albums_of_year(year: int, limit: int = 50) -> list[dict]:
 
     out: list[AotyAlbum] = []
     page = 1
-    # AOTY's pagination: /ratings/6-highest-rated/{year}/{page}/.
-    # `6-highest-rated` is AOTY's canonical aggregated ranking — the
-    # headline "Best of {year}" list users actually mean when they
-    # say "AOTY top albums." Distinct from `user-highest-rated`,
-    # which is the separate user-only score. Each page renders ~25
-    # rows. Walk pages until we hit `limit` or a page returns no rows.
+    # AOTY's pagination: /ratings/user-highest-rated/{year}/{page}/.
+    # `6-highest-rated` was tried first based on the assumption that
+    # the all-time aggregated list ID extended to year-scoped URLs
+    # — it doesn't, that path 404s. `user-highest-rated` is the only
+    # year-scoped chart AOTY exposes at a stable URL. Each page
+    # renders ~25 rows. Walk pages until we hit `limit` or a page
+    # returns no rows.
     while len(out) < limit and page <= 6:
-        path = f"/ratings/6-highest-rated/{year}/{page}/"
+        path = f"/ratings/user-highest-rated/{year}/{page}/"
         html = _fetch(urljoin(_BASE_URL, path))
         if html is None:
             break
