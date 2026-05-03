@@ -9,6 +9,7 @@ import {
   Heart,
   Link as LinkIcon,
   ListPlus,
+  ListStart,
   Music,
   Play,
   Plus,
@@ -192,6 +193,9 @@ export function TrackMenuItems({
       <TrackHeader parts={parts} track={track} />
       <Item onSelect={() => actions.play(track, playQueue)}>
         <Play className="h-3.5 w-3.5" /> Play
+      </Item>
+      <Item onSelect={() => actions.playNext(track)}>
+        <ListStart className="h-3.5 w-3.5" /> Play next
       </Item>
       <Item onSelect={() => actions.addToQueue(track)}>
         <ListPlus className="h-3.5 w-3.5" /> Add to queue

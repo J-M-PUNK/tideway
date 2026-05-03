@@ -1,4 +1,10 @@
-import { Download, ListPlus, MoreHorizontal, Plus } from "lucide-react";
+import {
+  Download,
+  ListPlus,
+  ListStart,
+  MoreHorizontal,
+  Plus,
+} from "lucide-react";
 import { api } from "@/api/client";
 import type { ContentKind, Track } from "@/api/types";
 import { CreatePlaylistDialog } from "@/components/CreatePlaylistDialog";
@@ -22,6 +28,9 @@ import { useMyPlaylists } from "@/hooks/useMyPlaylists";
  * consistent across all collection types so users don't relearn the
  * menu per page.
  *
+ * - **Play next**: inserts every track immediately after the
+ *   currently-playing track, in natural order. No-op when the
+ *   collection is empty.
  * - **Add to queue**: appends every track to the end of the queue in
  *   their natural order. No-op when the collection is empty.
  * - **Add to playlist**: submenu listing the user's playlists; picking
@@ -59,6 +68,22 @@ export function CollectionOverflowMenu({
     toast.show({
       kind: "success",
       title: `Added ${tracks.length} ${tracks.length === 1 ? "track" : "tracks"} to queue`,
+    });
+  };
+
+  const playNext = () => {
+    if (tracks.length === 0) return;
+    // Reverse iteration on top of the LIFO playNext primitive yields
+    // natural order: queueing Z, Y, X in that order against an
+    // insert-at-queueIndex+1 implementation lands the queue as
+    // [..., current, X, Y, Z, ...] — which is what users expect when
+    // they say "play this album next."
+    for (let i = tracks.length - 1; i >= 0; i--) {
+      actions.playNext(tracks[i]);
+    }
+    toast.show({
+      kind: "success",
+      title: `Playing ${tracks.length} ${tracks.length === 1 ? "track" : "tracks"} next`,
     });
   };
 
@@ -122,6 +147,9 @@ export function CollectionOverflowMenu({
         </button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-56">
+        <DropdownMenuItem onSelect={playNext}>
+          <ListStart className="h-3.5 w-3.5" /> Play next
+        </DropdownMenuItem>
         <DropdownMenuItem onSelect={addToQueue}>
           <ListPlus className="h-3.5 w-3.5" /> Add to queue
         </DropdownMenuItem>
