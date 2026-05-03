@@ -681,7 +681,20 @@ export function Home({ onDownload }: { onDownload: OnDownload }) {
           onDownload={onDownload}
         />
       ))}
-      <PageView page={filteredPage} onDownload={onDownload} forceSingleRow />
+      {/* mt-8 gives the priority rows (Custom Mixes is first) a
+           consistent breathing room above their first SectionHeader.
+           Without this, when `remainingCompact` is empty the rows
+           sit too close to the hoistedAlbums grid above (PageView's
+           inner `gap-8` only spaces *between* its own children, not
+           above its first one). 32px matches the inter-row gap so
+           the visual rhythm is consistent. */}
+      <div className="mt-8">
+        <PageView
+          page={filteredPage}
+          onDownload={onDownload}
+          forceSingleRow
+        />
+      </div>
     </div>
   );
 }
