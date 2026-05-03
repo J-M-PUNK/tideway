@@ -38,6 +38,16 @@ jobs:
   #   come back arm64 anyway because pip resolves against the host
   #   arch, not the target. Native x64 runner = native x64 wheels.
   #
+  # FUTURE: GitHub retires macOS runner images on roughly a yearly
+  # cadence (macos-12 is already gone). When macos-13 follows, this
+  # workflow breaks until we have another way to produce native x64
+  # Python wheels. Options at that point: build x64 wheels on a
+  # self-hosted runner, switch to cross-arch builds with cibuildwheel
+  # if Python's universal2 story has improved, or accept arm64-only
+  # and document Rosetta 2 as the Intel Mac fallback (regresses the
+  # bit-perfect audio path on Intel — the original reason this whole
+  # workflow exists).
+  #
   # First-launch on the resulting universal DMG still shows
   # Gatekeeper's "cannot be verified" warning (build is unsigned /
   # unnotarized); README covers right-click → Open.
@@ -176,28 +186,68 @@ jobs:
             merged/Tideway.app
 
       - name: Verify merged .app is universal2
-        # Double-check the main executable now reports both arm64 and
-        # x86_64. If lipo merge silently dropped a slice, the binary
-        # would still launch on ONE arch and break on the other; this
-        # check fails the build before users get a half-working DMG.
+        # Confirm the merge actually produced fat binaries for the
+        # main executable AND for the runtime-loaded native libraries
+        # the app needs to function. Checking just the main exe isn't
+        # enough — the lipo merge script's fallback path (when a wheel
+        # is single-arch in only one matrix runner's bundle) is to
+        # keep the file as-is and emit a warning. Without this check
+        # a curl-cffi or sounddevice dylib could end up arm64-only in
+        # the merged bundle and the app would launch on Intel but
+        # crash on the first network request or first audio callback.
+        #
+        # Patterns must match Mach-O binaries that exist after the
+        # merge. Glob is anchored to Contents/ rather than the bundle
+        # root so PyInstaller's varying internal layout (Frameworks/
+        # vs Contents/Resources/ etc.) doesn't trip the check.
         run: |
           set -e
-          MAIN_EXE="merged/Tideway.app/Contents/MacOS/Tideway"
-          if [ ! -f "$MAIN_EXE" ]; then
-            echo "::error ::merged main executable missing at $MAIN_EXE"
-            exit 1
+          BUNDLE="merged/Tideway.app"
+
+          require_universal() {
+            local label="$1"; local file="$2"
+            if [ ! -f "$file" ]; then
+              echo "::error ::$label not found at $file"
+              return 1
+            fi
+            local archs
+            archs=$(lipo -archs "$file" 2>/dev/null || true)
+            echo "  $label: $archs"
+            if ! echo "$archs" | grep -q "arm64"; then
+              echo "::error ::$label is missing arm64 slice (got: $archs)"
+              return 1
+            fi
+            if ! echo "$archs" | grep -q "x86_64"; then
+              echo "::error ::$label is missing x86_64 slice (got: $archs)"
+              return 1
+            fi
+            return 0
+          }
+
+          require_universal "main exe" "$BUNDLE/Contents/MacOS/Tideway"
+
+          # Walk the runtime-loaded native libs we care about. Each
+          # pattern must produce at least one match; each match must
+          # be universal2. Patterns mirror the per-arch verify step
+          # above so a wheel bundle change shows up in BOTH places.
+          checked_any=0
+          for pat in \
+              "$BUNDLE/Contents/*/curl_cffi/_wrapper*.so" \
+              "$BUNDLE/Contents/*/sounddevice*.so" \
+              "$BUNDLE/Contents/*/_sounddevice_data/portaudio-binaries/libportaudio.dylib"
+          do
+            for f in $pat; do
+              [ -e "$f" ] || continue
+              checked_any=1
+              require_universal "$(basename "$f")" "$f"
+            done
+          done
+
+          if [ "$checked_any" -eq 0 ]; then
+            echo "::warning ::merged-bundle dylib check matched no files; the verify-step glob may be stale"
           fi
-          archs=$(lipo -archs "$MAIN_EXE")
-          echo "Main executable architectures: $archs"
-          if ! echo "$archs" | grep -q "arm64"; then
-            echo "::error ::merged main executable has no arm64 slice (got: $archs)"
-            exit 1
-          fi
-          if ! echo "$archs" | grep -q "x86_64"; then
-            echo "::error ::merged main executable has no x86_64 slice (got: $archs)"
-            exit 1
-          fi
-          echo "OK: main executable is universal2"
+
+          echo "OK: merged bundle is universal2"
 
       - name: Build DMG from merged .app
         run: bash scripts/build_dmg.sh merged/Tideway.app

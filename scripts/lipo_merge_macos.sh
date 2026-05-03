@@ -127,6 +127,20 @@ while IFS= read -r -d '' arm_file; do
         continue
     fi
 
+    # Fast path: both files already report the same set of archs
+    # (typical when a wheel ships a universal2 dylib that both
+    # matrix runners pulled identically). Re-running lipo on these
+    # would fail with "duplicate architecture", and the result we
+    # want is the arm64-copy that's already in place. Detect and
+    # short-circuit so the merged_count accounting and the warn
+    # line below stay accurate.
+    arm_archs="$(lipo -archs "$arm_file" 2>/dev/null || true)"
+    x64_archs="$(lipo -archs "$x64_file" 2>/dev/null || true)"
+    if [ -n "$arm_archs" ] && [ "$arm_archs" = "$x64_archs" ]; then
+        merged_count=$((merged_count + 1))
+        continue
+    fi
+
     # Extract each arch's slice. `lipo -thin` is a no-op for an
     # already-thin file of that arch, and extracts the slice from a
     # universal binary if the input is fat. If the slice doesn't
@@ -147,16 +161,11 @@ while IFS= read -r -d '' arm_file; do
     if lipo -create "$arm_thin" "$x64_thin" -output "$arm_file" 2>/dev/null; then
         merged_count=$((merged_count + 1))
     else
-        # Failed to combine. Most common cause: both inputs already
-        # universal with overlapping archs. Try lipo on the originals
-        # directly with -replace; if that also fails, keep the arm64
-        # copy and warn.
-        if ! lipo -create "$arm_file" "$x64_file" -output "$arm_file.merged" 2>/dev/null; then
-            echo "  WARN: lipo failed to merge $rel; keeping arm64 copy"
-        else
-            mv "$arm_file.merged" "$arm_file"
-            merged_count=$((merged_count + 1))
-        fi
+        # Lipo refused both inputs even after slicing. Real cause is
+        # almost always a malformed Mach-O on one side; keep the
+        # arm64 copy intact and surface a warning the verify step
+        # downstream can correlate against.
+        echo "  WARN: lipo failed to merge $rel (arm:$arm_archs x64:$x64_archs); keeping arm64 copy"
     fi
     rm -f "$arm_thin" "$x64_thin"
 done < <(find "$OUTPUT_APP" -type f -print0)
