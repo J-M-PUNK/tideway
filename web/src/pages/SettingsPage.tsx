@@ -1165,8 +1165,7 @@ function AutoEqProfileField() {
                     )}
                   >
                     <span className="truncate">
-                      <span className="font-semibold">{p.brand}</span>{" "}
-                      {p.model}
+                      <span className="font-semibold">{p.brand}</span> {p.model}
                     </span>
                     <span className="flex-shrink-0 text-muted-foreground">
                       {p.band_count} bands · {p.preamp_db.toFixed(1)} dB preamp
@@ -1268,12 +1267,7 @@ function AutoEqResponseGraph({
       }
     }, 80);
     return () => window.clearTimeout(handle);
-  }, [
-    activeProfileId,
-    tilt.preamp_offset_db,
-    tilt.bass_db,
-    tilt.treble_db,
-  ]);
+  }, [activeProfileId, tilt.preamp_offset_db, tilt.bass_db, tilt.treble_db]);
 
   if (data === null) return null;
 
@@ -1306,8 +1300,7 @@ function AutoEqResponseGraph({
 
   const px = (f: number) =>
     PAD_L + ((Math.log10(f) - xLogMin) / xLogRange) * innerW;
-  const py = (db: number) =>
-    PAD_T + (1 - (db - yMin) / (yMax - yMin)) * innerH;
+  const py = (db: number) => PAD_T + (1 - (db - yMin) / (yMax - yMin)) * innerH;
 
   const linePath = (values: number[]) =>
     values
@@ -1430,8 +1423,8 @@ function AutoEqResponseGraph({
       </svg>
       {!data.has_measurement && (
         <div className="mt-1 text-[10px] text-muted-foreground">
-          No measurement CSV bundled for this profile — showing EQ
-          response only.
+          No measurement CSV bundled for this profile — showing EQ response
+          only.
         </div>
       )}
     </div>
@@ -1549,8 +1542,8 @@ function AutoEqCatalogUpdater({
       {check === null && progress === null && (
         <div className="flex items-center justify-between gap-3">
           <div className="text-muted-foreground">
-            {catalogSize} headphone{catalogSize === 1 ? "" : "s"} bundled.
-            Check AutoEQ for the full ~5,000-profile catalog.
+            {catalogSize} headphone{catalogSize === 1 ? "" : "s"} bundled. Check
+            AutoEQ for the full ~5,000-profile catalog.
           </div>
           <button
             type="button"
@@ -1593,9 +1586,7 @@ function AutoEqCatalogUpdater({
                 : `Done: ${progress.succeeded} succeeded, ${progress.failed} failed`}
             </span>
             {progress.failed > 0 && (
-              <span className="text-amber-500">
-                {progress.failed} skipped
-              </span>
+              <span className="text-amber-500">{progress.failed} skipped</span>
             )}
           </div>
           <div className="h-1.5 overflow-hidden rounded-full bg-foreground/10">
@@ -1809,7 +1800,9 @@ function AutoEqDeviceMappingField() {
           current_fingerprint: d.current_fingerprint,
           fallback: d.fallback_when_unmapped,
         });
-        setProfiles(p.profiles.map((x) => ({ id: x.id, brand: x.brand, model: x.model })));
+        setProfiles(
+          p.profiles.map((x) => ({ id: x.id, brand: x.brand, model: x.model })),
+        );
       } catch {
         /* feature not available — keep section hidden */
       }
@@ -1878,7 +1871,7 @@ function AutoEqDeviceMappingField() {
           const isActive = d.fingerprint === data.current_fingerprint;
           const value = d.unmapped
             ? "__unmapped__"
-            : d.mapped_profile_id ?? "__none__";
+            : (d.mapped_profile_id ?? "__none__");
           return (
             <div
               key={d.fingerprint}
@@ -1905,10 +1898,7 @@ function AutoEqDeviceMappingField() {
                 onChange={(e) => {
                   const v = e.target.value;
                   if (v === "__unmapped__") return; // can't pick unmapped
-                  setMapping(
-                    d.fingerprint,
-                    v === "__none__" ? null : v,
-                  );
+                  setMapping(d.fingerprint, v === "__none__" ? null : v);
                 }}
                 className="h-8 rounded-md border border-input bg-background px-2"
               >

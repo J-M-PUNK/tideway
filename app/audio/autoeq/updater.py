@@ -49,12 +49,14 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 from app.paths import user_data_dir
+
+from .index import default_data_dir
 
 log = logging.getLogger(__name__)
 
@@ -249,6 +251,19 @@ def download_profiles(
     done_count = [0]
     total = len(profile_ids)
 
+    def _atomic_write(target: Path, data: bytes) -> None:
+        """Write `data` to `target` such that no other process /
+        future run can ever see a partially-written file. Crash
+        mid-write leaves the prior state (or no file) — never a
+        truncated one that subsequent `.exists()` checks treat as
+        a complete cached profile and that the parser would then
+        choke on later. Especially important for the bulk-catalog
+        path that writes thousands of files in a row.
+        """
+        tmp = target.with_suffix(target.suffix + ".part")
+        tmp.write_bytes(data)
+        tmp.replace(target)
+
     def _one(pid: str) -> DownloadResult:
         path = manifest_paths_by_id.get(pid)
         if path is None:
@@ -262,16 +277,16 @@ def download_profiles(
 
         if not peq_target.exists():
             try:
-                peq_target.write_bytes(_http_get(_peq_url_for_path(path)))
-            except Exception as exc:
+                _atomic_write(peq_target, _http_get(_peq_url_for_path(path)))
+            except (OSError, urllib.error.URLError) as exc:
                 return DownloadResult(
                     profile_id=pid, ok=False, reason=f"PEQ fetch failed: {exc}"
                 )
 
         if include_csv and not csv_target.exists():
             try:
-                csv_target.write_bytes(_http_get(_csv_url_for_path(path)))
-            except Exception as exc:
+                _atomic_write(csv_target, _http_get(_csv_url_for_path(path)))
+            except (OSError, urllib.error.URLError) as exc:
                 # Non-fatal — CSV missing means no FR graph for
                 # that profile, but the PEQ still works.
                 log.debug("autoeq CSV fetch failed for %s: %s", pid, exc)
@@ -279,8 +294,14 @@ def download_profiles(
         return DownloadResult(profile_id=pid, ok=True)
 
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        futures = [pool.submit(_one, pid) for pid in profile_ids]
-        for fut in futures:
+        # Submit all jobs, then iterate via as_completed so progress
+        # is reported in completion order — not submission order.
+        # Pre-fix, the user saw "0/N" frozen for as long as the
+        # first-submitted profile took, even when later workers had
+        # already finished, because the loop blocked on
+        # futures[0].result() before checking the others.
+        futures = {pool.submit(_one, pid): pid for pid in profile_ids}
+        for fut in as_completed(futures):
             res = fut.result()
             with results_lock:
                 results.append(res)
@@ -288,8 +309,13 @@ def download_profiles(
                 if progress_cb is not None:
                     try:
                         progress_cb(done_count[0], total, res)
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        # Caller's UI-update bug shouldn't kill the
+                        # download. Log so the bug is debuggable, but
+                        # keep working through the queue.
+                        log.warning(
+                            "autoeq progress callback raised: %s", exc
+                        )
     return results
 
 
@@ -358,7 +384,7 @@ def check_updates(bundled_root: Path) -> dict:
 
 
 def start_download(
-    on_complete: Optional[callable] = None,
+    on_complete: Optional[Callable[[], None]] = None,
 ) -> tuple[bool, str, int]:
     """Kick off a background download of every cached-as-missing
     profile. Returns (started, reason, missing_count). Idempotent
@@ -471,9 +497,15 @@ def fetch_csv_for_profile(profile_id: str) -> Optional[Path]:
 
     csv_target.parent.mkdir(parents=True, exist_ok=True)
     try:
-        csv_target.write_bytes(_http_get(_csv_url_for_path(target_path)))
+        # Atomic write — same reason as the bulk-download path. A
+        # half-written CSV that subsequent calls would treat as
+        # cached would render the FR graph as garbage instead of
+        # degrading to post-EQ-only.
+        tmp = csv_target.with_suffix(csv_target.suffix + ".part")
+        tmp.write_bytes(_http_get(_csv_url_for_path(target_path)))
+        tmp.replace(csv_target)
         return csv_target
-    except Exception as exc:
+    except (OSError, urllib.error.URLError) as exc:
         log.debug("autoeq lazy CSV fetch for %s failed: %s", profile_id, exc)
         return None
 
@@ -508,8 +540,6 @@ def _existing_csv_path(profile_id: str) -> Optional[Path]:
         return None
     source, headphone = parts
     csv_name = f"{headphone}.csv"
-    # Late import to avoid a circular dep with index.py at module load.
-    from .index import default_data_dir
     candidates = [
         default_data_dir() / source / headphone / csv_name,
         cache_dir() / source / headphone / csv_name,

@@ -960,9 +960,7 @@ export const api = {
           preamp_db: number;
           band_count: number;
         }[];
-      }>(
-        `/api/eq/profiles?q=${encodeURIComponent(q)}&limit=${limit}`,
-      ),
+      }>(`/api/eq/profiles?q=${encodeURIComponent(q)}&limit=${limit}`),
     autoEqState: () =>
       req<{
         mode: "off" | "manual" | "profile";

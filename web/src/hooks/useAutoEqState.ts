@@ -64,20 +64,17 @@ export function useAutoEqState(enabled: boolean): {
     void refresh();
   }, [refresh]);
 
-  const setBypass = useCallback(
-    async (bypass: boolean) => {
-      // Optimistic flip — the audio change is instant, no point
-      // making the UI wait for the round-trip.
-      setState((prev) => (prev ? { ...prev, bypass } : prev));
-      try {
-        await api.player.autoEqSetBypass(bypass);
-      } catch {
-        // Roll back on failure.
-        setState((prev) => (prev ? { ...prev, bypass: !bypass } : prev));
-      }
-    },
-    [],
-  );
+  const setBypass = useCallback(async (bypass: boolean) => {
+    // Optimistic flip — the audio change is instant, no point
+    // making the UI wait for the round-trip.
+    setState((prev) => (prev ? { ...prev, bypass } : prev));
+    try {
+      await api.player.autoEqSetBypass(bypass);
+    } catch {
+      // Roll back on failure.
+      setState((prev) => (prev ? { ...prev, bypass: !bypass } : prev));
+    }
+  }, []);
 
   return { state, refresh, setBypass };
 }
