@@ -967,6 +967,7 @@ export const api = {
       req<{
         mode: "off" | "manual" | "profile";
         enabled: boolean;
+        bypass: boolean;
         active_profile_id: string;
         active_profile: {
           id: string;
@@ -1007,6 +1008,13 @@ export const api = {
       req<{ ok: boolean; mode: string; enabled: boolean }>("/api/eq/mode", {
         method: "POST",
         body: JSON.stringify({ mode }),
+      }),
+    /** Phase 4 A/B bypass — momentary disable that preserves the
+     *  active profile / bands. Toggling back is instant. */
+    autoEqSetBypass: (bypass: boolean) =>
+      req<{ ok: boolean; bypass: boolean }>("/api/eq/bypass", {
+        method: "POST",
+        body: JSON.stringify({ bypass }),
       }),
     /** AutoEQ per-device profile mapping (Phase 3). Returns the
      *  list of seen output devices, each tagged with its mapped
