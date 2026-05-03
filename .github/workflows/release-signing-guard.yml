@@ -1,0 +1,107 @@
+name: Release Signing Guard
+
+# Fires the moment a GitHub release is published. Verifies that
+# every installer asset (.dmg, .exe, .AppImage) has a paired
+# `.minisig` sidecar. If any are missing, the release is auto-
+# rolled-back to draft and an issue is opened tagging the
+# missing artifacts.
+#
+# Why: every Tideway install >= v1.4.0 verifies a minisign
+# signature on the auto-update download before launching the
+# installer binary. Publishing a release without `.minisig`
+# files turns "Install now" into a hard error for every user.
+# `scripts/sign-release.sh` is the manual step that produces
+# the sidecars (CLAUDE.md step 8 of the release flow), and it
+# requires a signing key that lives offline — so the failure
+# mode is "human or AI driving the deploy forgets to run it,
+# clicks Publish anyway, every user's auto-update breaks".
+#
+# This workflow is the safety net. It runs on the GitHub side
+# the second a release flips from draft to published, so the
+# bad state lasts seconds, not "until the maintainer next
+# checks the release page".
+
+on:
+  release:
+    types: [published]
+
+permissions:
+  contents: write   # gh release edit --draft=true
+  issues: write     # gh issue create
+
+jobs:
+  verify-signatures:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: List release assets
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+        run: |
+          gh release view "$TAG" --json assets --jq '.assets[].name' > assets.txt
+          echo "Assets on $TAG:"
+          cat assets.txt
+
+      - name: Check for missing .minisig sidecars
+        id: check
+        run: |
+          set +e
+          python scripts/check_release_signatures.py assets.txt > missing.txt
+          rc=$?
+          set -e
+          echo "missing_count=$(wc -l < missing.txt)" >> "$GITHUB_OUTPUT"
+          echo "exit_code=$rc" >> "$GITHUB_OUTPUT"
+          if [ "$rc" -ne 0 ]; then
+            echo "Missing .minisig sidecars for:"
+            cat missing.txt
+          fi
+
+      - name: Roll back to draft if any sidecars are missing
+        if: steps.check.outputs.exit_code != '0'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.release.tag_name }}
+          RELEASE_URL: ${{ github.event.release.html_url }}
+        run: |
+          set -euo pipefail
+          gh release edit "$TAG" --draft=true
+          echo "Release $TAG flipped back to draft."
+
+          # Build the issue body. We list every missing artifact
+          # so the maintainer doesn't have to re-derive what
+          # `sign-release.sh` is supposed to produce.
+          {
+            echo "## Release \`$TAG\` was auto-rolled-back to draft"
+            echo
+            echo "The release was published without minisign signatures on:"
+            while IFS= read -r name; do
+              [ -z "$name" ] && continue
+              echo "- \`$name\`"
+            done < missing.txt
+            echo
+            echo "Every Tideway install >= v1.4.0 verifies a \`.minisig\` sidecar"
+            echo "before launching the installer the auto-updater downloaded."
+            echo "Publishing without them turns the \"Install now\" button into"
+            echo "an error for every user."
+            echo
+            echo "**To fix:**"
+            echo
+            echo "1. From the machine that holds the minisign signing key, run:"
+            echo "   \`\`\`"
+            echo "   scripts/sign-release.sh $TAG"
+            echo "   \`\`\`"
+            echo "2. Re-publish:"
+            echo "   \`\`\`"
+            echo "   gh release edit $TAG --draft=false"
+            echo "   \`\`\`"
+            echo
+            echo "See $RELEASE_URL."
+            echo
+            echo "_Filed automatically by \`.github/workflows/release-signing-guard.yml\`._"
+          } > issue-body.md
+
+          gh issue create \
+            --title "Release $TAG published without signatures — rolled back to draft" \
+            --body-file issue-body.md
