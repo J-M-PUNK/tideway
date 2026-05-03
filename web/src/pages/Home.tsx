@@ -689,11 +689,7 @@ export function Home({ onDownload }: { onDownload: OnDownload }) {
            above its first one). 32px matches the inter-row gap so
            the visual rhythm is consistent. */}
       <div className="mt-8">
-        <PageView
-          page={filteredPage}
-          onDownload={onDownload}
-          forceSingleRow
-        />
+        <PageView page={filteredPage} onDownload={onDownload} forceSingleRow />
       </div>
     </div>
   );
