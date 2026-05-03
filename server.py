@@ -4896,6 +4896,70 @@ def autoeq_state() -> dict:
     }
 
 
+@app.get("/api/eq/response")
+def autoeq_response(points: int = 512) -> dict:
+    """Frequency-response curves for the Phase 6 graph.
+
+    Returns four parallel arrays at log-spaced frequencies from
+    20 Hz to 20 kHz: raw measured, target curve, and post-EQ
+    predicted (raw + active cascade). The frontend overlays
+    these so the user can see what their EQ is doing — Roon-tier
+    visualisation.
+
+    `points` clamps to [64, 2048]; the default 512 is plenty for
+    smooth lines without being a payload-size concern.
+
+    Computed against the **player's current sample rate**, not a
+    hard-coded one — the cascade response near the high end
+    differs slightly between 44.1 kHz and 96 kHz playback. The
+    graph reflects the audio path the user is actually hearing.
+    """
+    _require_local_access()
+    points = max(64, min(int(points), 2048))
+
+    from app.audio.autoeq.apply import TiltConfig
+    from app.audio.autoeq.index import INDEX, default_data_dir
+    from app.audio.autoeq.response import compute_response
+
+    profile = (
+        INDEX.get(settings.eq_active_profile_id)
+        if settings.eq_active_profile_id
+        else None
+    )
+    tilt = TiltConfig(
+        preamp_offset_db=settings.eq_tilt_preamp_offset_db,
+        bass_db=settings.eq_tilt_bass_db,
+        treble_db=settings.eq_tilt_treble_db,
+    )
+    # Player's current rate, falling back to 48 kHz when nothing's
+    # loaded yet — cascade coefficients are mildly rate-dependent
+    # but the difference is sub-perceptual at the graph's resolution.
+    sample_rate = 48_000
+    try:
+        player = _native_player()
+        rate = getattr(player, "_stream_sample_rate", None)
+        if isinstance(rate, int) and rate > 0:
+            sample_rate = rate
+    except Exception:
+        pass
+
+    response = compute_response(
+        profile=profile,
+        tilt=tilt,
+        sample_rate=sample_rate,
+        data_root=default_data_dir(),
+        points=points,
+    )
+    return {
+        "frequencies_hz": response.frequencies_hz,
+        "raw_db": response.raw_db,
+        "target_db": response.target_db,
+        "post_eq_db": response.post_eq_db,
+        "sample_rate_hz": sample_rate,
+        "has_measurement": response.raw_db is not None,
+    }
+
+
 class _AutoEqTiltRequest(BaseModel):
     preamp_offset_db: Optional[float] = None
     bass_db: Optional[float] = None

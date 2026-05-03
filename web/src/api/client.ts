@@ -1021,6 +1021,20 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ bypass }),
       }),
+    /** Phase 6 frequency-response data for the FR graph. Returns
+     *  three parallel arrays — raw measured curve, target curve,
+     *  predicted post-EQ — at log-spaced frequencies. Raw + target
+     *  may be null when the headphone's measurement CSV isn't
+     *  bundled. Computed against the player's current sample rate. */
+    autoEqResponse: (points = 512) =>
+      req<{
+        frequencies_hz: number[];
+        raw_db: number[] | null;
+        target_db: number[] | null;
+        post_eq_db: number[];
+        sample_rate_hz: number;
+        has_measurement: boolean;
+      }>(`/api/eq/response?points=${points}`),
     /** Phase 5 user-tilt — bass / treble shelves + preamp offset
      *  stacked on top of the profile. Each field is optional;
      *  omitting one leaves it unchanged on the server. */
