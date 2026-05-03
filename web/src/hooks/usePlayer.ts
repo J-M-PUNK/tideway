@@ -808,35 +808,35 @@ export function usePlayer() {
     [],
   );
 
-  useEffect(() => {
-    advanceRef.current = () => {
-      if (endOfTrackPendingRef.current) {
-        endOfTrackPendingRef.current = false;
-        return;
-      }
-      const n = pickNextIndex(stateRef.current, true);
-      if (n !== null) {
-        playAtIndex(n);
-        return;
-      }
-      // Queue ended with no next index. Behavior tree:
-      //
-      //   "Continue playing" toggle ON (default):
-      //     - Append an Artist Radio mix seeded from the LAST played
-      //       track's primary artist and auto-play the first new
-      //       track. Source-agnostic — works for albums, playlists,
-      //       mixes, single-track plays, anything where the queue
-      //       can run out.
-      //     - On any failure (no artist on the last track, radio
-      //       fetch error, empty results) fall back to the toggle-
-      //       OFF branch so the user still gets a sensible end-state.
-      //
-      //   "Continue playing" toggle OFF:
-      //     - Album source: prime track 0 paused so one tap of Play
-      //       repeats the album. The Spotify / Apple Music "queue
-      //       finished but stay on the album" pattern.
-      //     - Everything else: stop and clear.
-      const cur = stateRef.current;
+  // Behavior tree for "queue is over, where do we go?". Shared by
+  // BOTH the natural-end auto-advance (track ended, pickNextIndex
+  // returned null) and the manual `next()` button on the last track.
+  // Pre-v1.4.2 the manual path just stopped and cleared, which felt
+  // like "the button does nothing" — clicking Next on the last track
+  // of an album produced the same end-state as the button being
+  // disabled. Routing both paths through the same logic means the
+  // user gets autoplay-style continuation in both cases.
+  //
+  //   "Continue playing" toggle ON (default):
+  //     - Append an Artist Radio mix seeded from the LAST played
+  //       track's primary artist and auto-play the first new track.
+  //       Source-agnostic — works for albums, playlists, mixes,
+  //       single-track plays, anything where the queue runs out.
+  //     - On any failure (no artist on the last track, radio fetch
+  //       error, empty results) fall back to the toggle-OFF branch.
+  //
+  //   "Continue playing" toggle OFF:
+  //     - Album source: prime track 0 paused so one tap of Play
+  //       repeats the album (Spotify / Apple Music pattern).
+  //     - Everything else: stop and clear.
+  //
+  // The `cur` argument is an explicit state snapshot, not pulled
+  // from `stateRef.current` here, because manual next() resolves
+  // a fresher queueIndex via `expectedTrackIdRef` than the
+  // post-commit stateRef can offer; passing cur in lets the caller
+  // control which "last track" seeds the takeover.
+  const endOfQueueAdvance = useCallback(
+    async (cur: PlayerState) => {
       const stopAndClear = () => {
         api.player.stop().catch(() => {});
         setState((s) => ({
@@ -857,19 +857,31 @@ export function usePlayer() {
       };
 
       if (continuePlayingRef.current) {
-        void (async () => {
-          const takeover = await fetchRadioTakeover(cur);
-          if (takeover) {
-            playAtIndex(takeover.index, takeover.newQueue, takeover.source);
-          } else {
-            fallbackOff();
-          }
-        })();
-        return;
+        const takeover = await fetchRadioTakeover(cur);
+        if (takeover) {
+          playAtIndex(takeover.index, takeover.newQueue, takeover.source);
+          return;
+        }
       }
       fallbackOff();
+    },
+    [playAtIndex, loadAtIndexPaused, continuePlayingRef],
+  );
+
+  useEffect(() => {
+    advanceRef.current = () => {
+      if (endOfTrackPendingRef.current) {
+        endOfTrackPendingRef.current = false;
+        return;
+      }
+      const n = pickNextIndex(stateRef.current, true);
+      if (n !== null) {
+        playAtIndex(n);
+        return;
+      }
+      void endOfQueueAdvance(stateRef.current);
     };
-  }, [playAtIndex, loadAtIndexPaused]);
+  }, [playAtIndex, endOfQueueAdvance]);
 
   const play = useCallback(
     (track: Track, contextTracks?: Track[], source?: PlaySource | null) => {
@@ -911,8 +923,24 @@ export function usePlayer() {
       : -1;
     const fromIdx = intendedIdx >= 0 ? intendedIdx : s.queueIndex;
     const n = pickNextIndex({ ...s, queueIndex: fromIdx });
-    if (n !== null) playAtIndex(n);
-  }, [playAtIndex]);
+    if (n !== null) {
+      playAtIndex(n);
+      return;
+    }
+    // End of queue with shuffle off + repeat off. Route through the
+    // same behavior tree the natural auto-advance uses — Artist
+    // Radio takeover when "continue playing" is on, fall back to
+    // re-priming track 0 (album source) or stop+clear (anything
+    // else). Clicking Next on the last track now yields the same
+    // continuation autoplay does, instead of stopping silently.
+    //
+    // Pass a snapshot with the corrected queueIndex so the radio
+    // takeover seeds from the track the user is actually on, not
+    // a stale stateRef reading.
+    if (s.queue.length > 0) {
+      void endOfQueueAdvance({ ...s, queueIndex: fromIdx });
+    }
+  }, [playAtIndex, endOfQueueAdvance]);
 
   const prev = useCallback(() => {
     // >3s in: restart the current track, matching Spotify/Apple Music.
@@ -1034,6 +1062,39 @@ export function usePlayer() {
     setState((s) => ({ ...s, queue: [...s.queue, track] }));
   }, []);
 
+  // Insert immediately after the current track. Standard "Play next"
+  // pattern from Spotify / Apple Music / official Tidal. Multiple
+  // calls in a row stack the inserted tracks in call order, so a
+  // user who clicks "Play next" on track A then track B hears A
+  // first, B second (matches Apple Music's queue-up semantics).
+  //
+  // When nothing is playing yet (`queueIndex < 0`), behave like
+  // `addToQueue` — there's no "current track" to insert after, so
+  // we just seed the queue. Hitting Play starts it.
+  const playNext = useCallback((track: Track) => {
+    setState((s) => {
+      if (s.queueIndex < 0) {
+        return { ...s, queue: [...s.queue, track] };
+      }
+      // Multiple consecutive playNext calls each insert at the slot
+      // *after* the previously-inserted track. Tracking the latest
+      // play-next slot in state would be over-engineered for this —
+      // instead we always insert at queueIndex+1, which means the
+      // most recently queued-as-next track plays *first* (LIFO
+      // ordering). That's a defensible alternative to Apple Music's
+      // FIFO; both are reasonable. Picking LIFO because it's a
+      // simpler invariant ("the thing I just clicked plays next")
+      // and matches the official Tidal client.
+      const insertAt = s.queueIndex + 1;
+      const nextQueue = [
+        ...s.queue.slice(0, insertAt),
+        track,
+        ...s.queue.slice(insertAt),
+      ];
+      return { ...s, queue: nextQueue };
+    });
+  }, []);
+
   const jumpTo = useCallback(
     (index: number) => {
       playAtIndex(index);
@@ -1076,6 +1137,7 @@ export function usePlayer() {
     setSleepTimer,
     clearSleepTimer,
     addToQueue,
+    playNext,
     jumpTo,
     removeFromQueue,
     clearQueue,

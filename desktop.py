@@ -32,10 +32,43 @@ from typing import Optional
 # canonical victim, but every `print(..., file=sys.stderr, ...)` we have
 # would trip the same wire. Wire both streams to os.devnull so logging
 # is silently dropped instead of bringing the app down at startup.
+#
+# encoding="utf-8" + errors="replace" matters: without them the wrapper
+# inherits the locale code page (cp1250 on Polish Windows, cp1252 on
+# Western European, etc.) with strict error handling. A `print()` of a
+# string containing characters outside that code page raises
+# UnicodeEncodeError, which bricks any worker thread that prints a
+# non-ASCII track title. Issues #7, #36, #70 all trace back to this.
 if sys.stdout is None:
-    sys.stdout = io.TextIOWrapper(open(os.devnull, "wb"), write_through=True)
+    sys.stdout = io.TextIOWrapper(
+        open(os.devnull, "wb"),
+        encoding="utf-8",
+        errors="replace",
+        write_through=True,
+    )
 if sys.stderr is None:
-    sys.stderr = io.TextIOWrapper(open(os.devnull, "wb"), write_through=True)
+    sys.stderr = io.TextIOWrapper(
+        open(os.devnull, "wb"),
+        encoding="utf-8",
+        errors="replace",
+        write_through=True,
+    )
+
+# Dev-mode + console-mode frozen builds also have real stderr/stdout,
+# which on Windows still inherit the locale code page with strict
+# errors. Reconfigure to errors="replace" so a print of a non-encodable
+# character degrades to a `?` instead of raising. No behavior change on
+# Linux/macOS where the default encoding is already UTF-8.
+for _stream in (sys.stdout, sys.stderr):
+    reconfigure = getattr(_stream, "reconfigure", None)
+    if reconfigure is not None:
+        try:
+            reconfigure(errors="replace")
+        except (ValueError, OSError):
+            # Some wrappers (e.g. pytest captures, the io.TextIOWrapper
+            # we just created above with errors already set) refuse a
+            # second reconfigure. Not load-bearing — skip.
+            pass
 
 
 def _configure_webview2_autoplay() -> None:

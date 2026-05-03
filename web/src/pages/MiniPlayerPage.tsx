@@ -24,7 +24,7 @@ import { cn } from "@/lib/utils";
  * back to the main window.
  */
 export function MiniPlayerPage() {
-  const { track, playing, hasNext, hasPrev, streamInfo } = usePlayerMeta();
+  const { track, playing, hasPrev, streamInfo } = usePlayerMeta();
   const { currentTime, duration } = usePlayerTime();
   const actions = usePlayerActions();
 
@@ -84,10 +84,9 @@ export function MiniPlayerPage() {
           </button>
           <button
             onClick={actions.next}
-            disabled={!hasNext}
             title="Next"
             aria-label="Next"
-            className="flex h-8 w-8 items-center justify-center rounded-full text-muted-foreground hover:text-foreground disabled:opacity-30"
+            className="flex h-8 w-8 items-center justify-center rounded-full text-muted-foreground hover:text-foreground"
           >
             <SkipForward className="h-3.5 w-3.5" />
           </button>
