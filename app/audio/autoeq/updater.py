@@ -293,21 +293,235 @@ def download_profiles(
     return results
 
 
-def fetch_csv_lazy(profile_id: str) -> Optional[Path]:
-    """Best-effort: if the named profile is in the catalog and
-    its CSV isn't already in cache, fetch it. Returns the path
-    if it lands; None on any failure. Callers (the FR graph
-    endpoint) use this when a profile is loaded but its CSV
-    isn't in either bundled data or cache yet.
+# ---------------------------------------------------------------------------
+# Module-level state singleton — manifest cache + active-download progress.
+#
+# Held as a single dataclass under one lock so the
+# /api/eq/check-updates → /api/eq/download-catalog →
+# /api/eq/update-status flow can't race the manifest cache with
+# the download counters. Code-review fix from the deploy PR.
+# ---------------------------------------------------------------------------
 
-    Idempotent: if the CSV is already on disk, returns its path
-    without making a network call.
+
+class _UpdaterState:
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        # Manifest cache (populated by check_updates).
+        self.manifest: Optional[CatalogManifest] = None
+        self.missing_ids: list[str] = []
+        self.already_ids: list[str] = []
+        # Download progress (populated by start_download).
+        self.running: bool = False
+        self.started_at: float = 0.0
+        self.total: int = 0
+        self.done: int = 0
+        self.succeeded: int = 0
+        self.failed: int = 0
+        self.last_error: str = ""
+
+    def snapshot_progress(self) -> dict:
+        with self.lock:
+            return {
+                "running": self.running,
+                "started_at": self.started_at,
+                "total": self.total,
+                "done": self.done,
+                "succeeded": self.succeeded,
+                "failed": self.failed,
+                "last_error": self.last_error,
+            }
+
+
+_STATE = _UpdaterState()
+
+
+def check_updates(bundled_root: Path) -> dict:
+    """Fetch the AutoEQ manifest, diff against bundled + cache,
+    and stash the result for the subsequent download call.
+
+    Surfaces network errors as exceptions — callers translate to
+    the right HTTP status. Diff results are also cached so the
+    download endpoint doesn't have to re-fetch."""
+    manifest = fetch_manifest()
+    already, missing = diff_manifest_against_disk(manifest, bundled_root)
+    with _STATE.lock:
+        _STATE.manifest = manifest
+        _STATE.missing_ids = missing
+        _STATE.already_ids = already
+    return {
+        "ok": True,
+        "total_in_catalog": len(manifest.profile_paths),
+        "already_on_disk": len(already),
+        "missing": len(missing),
+        "fetched_at": manifest.fetched_at,
+    }
+
+
+def start_download(
+    on_complete: Optional[callable] = None,
+) -> tuple[bool, str, int]:
+    """Kick off a background download of every cached-as-missing
+    profile. Returns (started, reason, missing_count). Idempotent
+    while a download is in progress (returns started=False).
+    `on_complete` runs after the worker finishes, on the worker
+    thread — used by server.py to reload the index."""
+    with _STATE.lock:
+        if _STATE.running:
+            return False, "already running", 0
+        if _STATE.manifest is None:
+            return False, "no manifest cached — call check_updates first", 0
+        manifest = _STATE.manifest
+        missing = list(_STATE.missing_ids)
+        if not missing:
+            return False, "everything already on disk", 0
+        _STATE.running = True
+        _STATE.started_at = time.time()
+        _STATE.total = len(missing)
+        _STATE.done = 0
+        _STATE.succeeded = 0
+        _STATE.failed = 0
+        _STATE.last_error = ""
+
+    paths_by_id: dict[str, str] = {}
+    for path in manifest.profile_paths:
+        pid = _profile_id_from_path(path)
+        paths_by_id.setdefault(pid, path)
+
+    def _progress(done: int, total: int, res: DownloadResult) -> None:
+        with _STATE.lock:
+            _STATE.done = done
+            if res.ok:
+                _STATE.succeeded += 1
+            else:
+                _STATE.failed += 1
+                _STATE.last_error = res.reason
+
+    def _run() -> None:
+        try:
+            download_profiles(
+                paths_by_id,
+                missing,
+                include_csv=False,  # see module docstring
+                max_workers=3,
+                progress_cb=_progress,
+            )
+        except Exception as exc:
+            log.exception("download_profiles failed: %s", exc)
+            with _STATE.lock:
+                _STATE.last_error = str(exc)
+        finally:
+            with _STATE.lock:
+                _STATE.running = False
+            if on_complete is not None:
+                try:
+                    on_complete()
+                except Exception:
+                    log.exception("autoeq updater on_complete callback failed")
+
+    threading.Thread(target=_run, daemon=True, name="autoeq-update").start()
+    return True, "", len(missing)
+
+
+def status() -> dict:
+    """Snapshot of progress state — safe to call frequently."""
+    return _STATE.snapshot_progress()
+
+
+def fetch_csv_for_profile(profile_id: str) -> Optional[Path]:
+    """Best-effort lazy CSV fetch. Used by the FR-graph endpoint
+    when a profile is loaded but its CSV isn't yet on disk —
+    typical for profiles downloaded via the bulk catalog updater
+    (which intentionally skips CSVs to keep the download size
+    sane).
+
+    Order of operations:
+      1. If the CSV is already on disk (bundled OR cache),
+         return its path without a network call.
+      2. If the manifest is in cache (user has clicked
+         "Check for updates" this session), use it to find the
+         CSV's repo path and download it. ~50 KB.
+      3. Otherwise return None — caller renders the graph in
+         post-EQ-only mode.
+
+    Idempotent: re-running on a cached CSV is a fast no-op.
     """
-    # Reconstruct the manifest path from the profile_id +
-    # AutoEQ's known layout. We don't have the kind tier (over-
-    # ear / in-ear) on hand, so we'd need a fresh manifest fetch
-    # to reverse this — too expensive for a per-pick lazy fetch.
-    # Skip for now. Caller still works (graph degrades to post-
-    # EQ only).
-    _ = profile_id
+    # Step 1: check if the CSV is already on disk anywhere.
+    on_disk = _existing_csv_path(profile_id)
+    if on_disk is not None:
+        return on_disk
+
+    # Step 2: need the manifest to know the source path.
+    with _STATE.lock:
+        manifest = _STATE.manifest
+    if manifest is None:
+        return None
+
+    target_path = None
+    for path in manifest.profile_paths:
+        if _profile_id_from_path(path) == profile_id:
+            target_path = path
+            break
+    if target_path is None:
+        return None
+
+    try:
+        _, csv_target = _cache_target_for_path(target_path)
+    except ValueError:
+        return None
+
+    csv_target.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        csv_target.write_bytes(_http_get(_csv_url_for_path(target_path)))
+        return csv_target
+    except Exception as exc:
+        log.debug("autoeq lazy CSV fetch for %s failed: %s", profile_id, exc)
+        return None
+
+
+def fetch_csv_for_profile_async(profile_id: str) -> None:
+    """Fire-and-forget version of `fetch_csv_for_profile`. Used
+    by the FR-graph endpoint so high-frequency response calls
+    aren't blocked on a network fetch — by the time the user's
+    next slider drag fires another response request, the CSV is
+    likely already on disk."""
+    if _existing_csv_path(profile_id) is not None:
+        return  # already on disk, no thread needed
+    with _STATE.lock:
+        if _STATE.manifest is None:
+            return  # nothing we can do without the manifest
+    threading.Thread(
+        target=fetch_csv_for_profile,
+        args=(profile_id,),
+        daemon=True,
+        name="autoeq-csv-lazy",
+    ).start()
+
+
+def _existing_csv_path(profile_id: str) -> Optional[Path]:
+    """Return the on-disk CSV path for `profile_id` if one exists
+    in either the bundled data dir or the cache dir, else None.
+
+    Walks both directories looking for `<source>/<headphone>/<headphone>.csv`
+    matching the profile_id's `<source>/<headphone>` shape."""
+    parts = profile_id.split("/")
+    if len(parts) != 2:
+        return None
+    source, headphone = parts
+    csv_name = f"{headphone}.csv"
+    # Late import to avoid a circular dep with index.py at module load.
+    from .index import default_data_dir
+    candidates = [
+        default_data_dir() / source / headphone / csv_name,
+        cache_dir() / source / headphone / csv_name,
+    ]
+    for cand in candidates:
+        if cand.exists():
+            return cand
     return None
+
+
+# Legacy alias kept for any external callers that imported the
+# v1 stub function name. Routes through the implemented version.
+def fetch_csv_lazy(profile_id: str) -> Optional[Path]:
+    """Backwards-compat alias for `fetch_csv_for_profile`."""
+    return fetch_csv_for_profile(profile_id)

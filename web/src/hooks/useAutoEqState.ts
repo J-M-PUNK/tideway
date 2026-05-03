@@ -14,28 +14,34 @@ import { api } from "@/api/client";
  * the user needs to see reflected in the now-playing UI live —
  * that's part of Phase 6 / 7.
  */
-export type AutoEqState = {
-  mode: "off" | "manual" | "profile";
+export type AutoEqMode = "off" | "manual" | "profile";
+
+export interface AutoEqProfileSummary {
+  id: string;
+  brand: string;
+  model: string;
+  source: string;
+  preamp_db: number;
+  band_count: number;
+}
+
+export interface AutoEqTilt {
+  preamp_offset_db: number;
+  bass_db: number;
+  treble_db: number;
+}
+
+export interface AutoEqState {
+  mode: AutoEqMode;
   enabled: boolean;
   bypass: boolean;
   active_profile_id: string;
-  active_profile: {
-    id: string;
-    brand: string;
-    model: string;
-    source: string;
-    preamp_db: number;
-    band_count: number;
-  } | null;
+  active_profile: AutoEqProfileSummary | null;
   manual_bands: number[];
   manual_preamp_db: number | null;
   profile_catalog_size: number;
-  tilt: {
-    preamp_offset_db: number;
-    bass_db: number;
-    treble_db: number;
-  };
-};
+  tilt: AutoEqTilt;
+}
 
 export function useAutoEqState(enabled: boolean): {
   state: AutoEqState | null;
