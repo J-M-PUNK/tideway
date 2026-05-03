@@ -250,6 +250,74 @@ def test_profile_to_sos_empty_for_no_band_profile():
     assert sos.shape == (0, 6)
 
 
+def test_cascade_with_flat_tilt_matches_profile_to_sos():
+    """A TiltConfig with all zeros should produce the same SOS as
+    `profile_to_sos`. Phase 5 guarantee: zero-tilt audio path is
+    identical to Phase 2-4 behavior, so users who never touch the
+    tilt sliders aren't running through extra biquads."""
+    from app.audio.autoeq.apply import TiltConfig, cascade_with_tilt
+
+    text = """
+    Preamp: -1 dB
+    Filter 1: ON LSC Fc 100 Hz Gain 4 dB Q 0.7
+    Filter 2: ON PK Fc 1000 Hz Gain 2 dB Q 1.0
+    """
+    profile = parse_profile_text(text)
+    sos_old = profile_to_sos(profile, SAMPLE_RATE)
+    sos_new, preamp = cascade_with_tilt(profile, SAMPLE_RATE, TiltConfig())
+    np.testing.assert_array_equal(sos_old, sos_new)
+    assert preamp == pytest.approx(profile.preamp_db)
+
+
+def test_cascade_with_tilt_appends_shelves_when_nonzero():
+    """A non-flat tilt adds extra biquads to the cascade. Shape
+    grows by 1 per nonzero shelf (preamp offset doesn't add a
+    biquad — it only adjusts the master preamp)."""
+    from app.audio.autoeq.apply import TiltConfig, cascade_with_tilt
+
+    text = """
+    Preamp: -1 dB
+    Filter 1: ON PK Fc 1000 Hz Gain 1 dB Q 1.0
+    """
+    profile = parse_profile_text(text)
+    # Bass only.
+    sos, preamp = cascade_with_tilt(
+        profile, SAMPLE_RATE, TiltConfig(bass_db=4.0)
+    )
+    assert sos.shape == (2, 6)
+    assert preamp == pytest.approx(profile.preamp_db)
+    # Bass + treble.
+    sos, _ = cascade_with_tilt(
+        profile, SAMPLE_RATE, TiltConfig(bass_db=4.0, treble_db=-3.0)
+    )
+    assert sos.shape == (3, 6)
+    # Preamp offset rolled into total — no shelf biquads added.
+    sos, preamp = cascade_with_tilt(
+        profile, SAMPLE_RATE, TiltConfig(preamp_offset_db=-2.0)
+    )
+    assert sos.shape == (1, 6)
+    assert preamp == pytest.approx(profile.preamp_db + (-2.0))
+
+
+def test_cascade_tilt_response_settles_to_expected_db():
+    """Apply a +6 dB bass tilt over a flat-ish profile and verify
+    the cascade's response below the shelf corner is ~+6 dB."""
+    from app.audio.autoeq.apply import TiltConfig, cascade_with_tilt
+
+    text = "Preamp: 0 dB\nFilter 1: ON PK Fc 1000 Hz Gain 0 dB Q 1.0"
+    profile = parse_profile_text(text)
+    sos, _ = cascade_with_tilt(
+        profile, SAMPLE_RATE, TiltConfig(bass_db=6.0)
+    )
+
+    def cascade_db(freq_hz: float) -> float:
+        _, h = sosfreqz(sos, worN=np.array([freq_hz]), fs=SAMPLE_RATE)
+        return 20.0 * math.log10(max(abs(h[0]), 1e-12))
+
+    # Well below the 80 Hz tilt corner — bass shelf dominates.
+    assert abs(cascade_db(20.0) - 6.0) < 0.5
+
+
 def test_profile_cascade_response_at_characteristic_frequencies():
     """Build a tiny profile (LSC + HSC) and verify the cascade's
     magnitude response settles to the expected dB values where

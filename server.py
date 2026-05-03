@@ -4266,6 +4266,26 @@ def _native_player() -> PCMPlayer:
             # the persisted bypass value gets re-applied on top.
             if settings.eq_bypass:
                 _pcm_player_singleton.set_equalizer_bypass(True)
+            # Restore Phase 5 tilt. Setting it after the profile
+            # restore means the cascade rebuild includes the tilt
+            # shelves on the very first stream — user doesn't
+            # have to nudge a slider to "wake it up."
+            if (
+                settings.eq_tilt_preamp_offset_db
+                or settings.eq_tilt_bass_db
+                or settings.eq_tilt_treble_db
+            ):
+                try:
+                    from app.audio.autoeq.apply import TiltConfig
+                    tilt = TiltConfig(
+                        preamp_offset_db=settings.eq_tilt_preamp_offset_db,
+                        bass_db=settings.eq_tilt_bass_db,
+                        treble_db=settings.eq_tilt_treble_db,
+                    )
+                    _pcm_player_singleton.apply_equalizer_tilt(tilt)
+                except Exception:
+                    log = logging.getLogger("autoeq.bootstrap")
+                    log.exception("autoeq tilt restore failed")
             if settings.audio_output_device:
                 _pcm_player_singleton.set_output_device(
                     settings.audio_output_device
@@ -4868,6 +4888,71 @@ def autoeq_state() -> dict:
         "manual_bands": list(settings.eq_bands),
         "manual_preamp_db": settings.eq_preamp,
         "profile_catalog_size": INDEX.count(),
+        "tilt": {
+            "preamp_offset_db": settings.eq_tilt_preamp_offset_db,
+            "bass_db": settings.eq_tilt_bass_db,
+            "treble_db": settings.eq_tilt_treble_db,
+        },
+    }
+
+
+class _AutoEqTiltRequest(BaseModel):
+    preamp_offset_db: Optional[float] = None
+    bass_db: Optional[float] = None
+    treble_db: Optional[float] = None
+
+
+_TILT_RANGE_DB = 12.0  # ±12 dB matches the slider in the UI.
+
+
+@app.post("/api/eq/tilt")
+def autoeq_set_tilt(req: _AutoEqTiltRequest) -> dict:
+    """Update one or more tilt parameters. Each is optional —
+    omitting a field leaves its current setting unchanged, so
+    the slider's onChange handler can ship a single field at a
+    time without round-tripping the others.
+
+    Values are clamped to ±12 dB. Tilt only audibly affects
+    playback when in profile mode with a profile loaded; in
+    manual / off mode the values still persist (so they're
+    there when the user switches back to profile mode) but the
+    audio path doesn't run them."""
+    _require_local_access()
+
+    def _clamp(v: float) -> float:
+        return max(-_TILT_RANGE_DB, min(_TILT_RANGE_DB, float(v)))
+
+    if req.preamp_offset_db is not None:
+        settings.eq_tilt_preamp_offset_db = _clamp(req.preamp_offset_db)
+    if req.bass_db is not None:
+        settings.eq_tilt_bass_db = _clamp(req.bass_db)
+    if req.treble_db is not None:
+        settings.eq_tilt_treble_db = _clamp(req.treble_db)
+    save_settings(settings)
+
+    # Rebuild the active cascade so the tilt change is audible
+    # immediately. No-op when not in profile mode (player does
+    # the gate internally).
+    try:
+        from app.audio.autoeq.apply import TiltConfig
+
+        tilt = TiltConfig(
+            preamp_offset_db=settings.eq_tilt_preamp_offset_db,
+            bass_db=settings.eq_tilt_bass_db,
+            treble_db=settings.eq_tilt_treble_db,
+        )
+        _native_player().apply_equalizer_tilt(tilt)
+    except Exception:
+        log = logging.getLogger("autoeq.tilt")
+        log.exception("apply_equalizer_tilt failed")
+
+    return {
+        "ok": True,
+        "tilt": {
+            "preamp_offset_db": settings.eq_tilt_preamp_offset_db,
+            "bass_db": settings.eq_tilt_bass_db,
+            "treble_db": settings.eq_tilt_treble_db,
+        },
     }
 
 
@@ -8183,6 +8268,9 @@ class SettingsPayload(BaseModel):
     eq_bypass: Optional[bool] = None
     eq_device_mappings: Optional[dict] = None
     eq_fallback_when_unmapped: Optional[str] = None
+    eq_tilt_preamp_offset_db: Optional[float] = None
+    eq_tilt_bass_db: Optional[float] = None
+    eq_tilt_treble_db: Optional[float] = None
 
 
 @app.get("/api/settings")

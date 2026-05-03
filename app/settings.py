@@ -121,6 +121,14 @@ class Settings:
     #     even on unmapped devices. Convenient for users who only
     #     ever listen on one pair.
     eq_fallback_when_unmapped: str = "bypass"
+    # Phase 5 user-tilt: shelves stacked after the profile bands +
+    # a master preamp offset. User-global (not per-device) — these
+    # are taste preferences that travel with the listener, not
+    # headphone-specific corrections. Range -12..+12 dB enforced
+    # at the API layer; raw floats persisted here.
+    eq_tilt_preamp_offset_db: float = 0.0
+    eq_tilt_bass_db: float = 0.0
+    eq_tilt_treble_db: float = 0.0
     # sounddevice output-device index (stringified, matches what
     # /api/player/output-devices returns). Empty string means "use
     # the system default". Persisted so USB DAC / Bluetooth

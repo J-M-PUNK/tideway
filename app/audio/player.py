@@ -252,6 +252,12 @@ class PCMPlayer:
         # same ~immediate effect as a coefficient-clear without
         # the cost of rebuilding when the user toggles back on.
         self._eq_bypass: bool = False
+        # Phase 5 user-tilt — bass / treble shelves + preamp
+        # offset stacked on top of the active profile. Held as a
+        # separate config so changing tilt without re-picking the
+        # profile is one rebuild. None = no tilt set yet (treat
+        # as flat); a TiltConfig with all-zero gains is also flat.
+        self._eq_tilt = None  # type: ignore[var-annotated]
 
         # Audio-callback diagnostics. Each pair is (count, last-print
         # time) for a different rate-limited stderr message:
@@ -1010,19 +1016,56 @@ class PCMPlayer:
         current sample rate; on a stream reopen the same profile
         is recompiled at the new rate (no loss across cross-rate
         bridges). Clears any manual-mode bands — the modes are
-        mutually exclusive."""
-        from app.audio.autoeq.apply import profile_to_sos
+        mutually exclusive.
+
+        Phase 5: if a user-tilt is active, the cascade includes
+        the tilt shelves + preamp offset. Picking a new profile
+        keeps the tilt setting (taste preference travels with
+        the user, not the headphone)."""
+        from app.audio.autoeq.apply import (
+            TiltConfig,
+            cascade_with_tilt,
+        )
 
         with self._lock:
             self._eq_bands = []
             self._eq_preamp = None
             self._eq_profile = profile
+            tilt = self._eq_tilt or TiltConfig()
             if self._eq is not None:
-                sos = profile_to_sos(profile, self._eq.sample_rate())
+                sos, preamp_db = cascade_with_tilt(
+                    profile, self._eq.sample_rate(), tilt
+                )
                 if sos.size == 0:
                     self._eq.clear()
                 else:
-                    self._eq.set_sos(sos, preamp_db=profile.preamp_db)
+                    self._eq.set_sos(sos, preamp_db=preamp_db)
+
+    def apply_equalizer_tilt(self, tilt) -> None:
+        """Update the user-tilt and rebuild the active cascade if
+        a profile is loaded. No-op when no profile is active —
+        tilt is a stack-on-top thing, not a standalone EQ.
+
+        `tilt` is `TiltConfig | None`; passing None clears tilt
+        back to flat. The profile + sample rate stay the same;
+        only the trailing tilt shelves + preamp offset change."""
+        from app.audio.autoeq.apply import (
+            TiltConfig,
+            cascade_with_tilt,
+        )
+
+        with self._lock:
+            self._eq_tilt = tilt
+            effective = tilt if tilt is not None else TiltConfig()
+            if self._eq_profile is None or self._eq is None:
+                return
+            sos, preamp_db = cascade_with_tilt(
+                self._eq_profile, self._eq.sample_rate(), effective
+            )
+            if sos.size == 0:
+                self._eq.clear()
+            else:
+                self._eq.set_sos(sos, preamp_db=preamp_db)
 
     def apply_equalizer_preset(self, preset_index: int) -> list[float]:
         """Apply a preset by index, push its curve to the live EQ,
@@ -1602,15 +1645,19 @@ class PCMPlayer:
         self._eq = Equalizer(sample_rate=sample_rate, channels=channels)
         if self._eq_profile is not None:
             try:
-                from app.audio.autoeq.apply import profile_to_sos
+                from app.audio.autoeq.apply import (
+                    TiltConfig,
+                    cascade_with_tilt,
+                )
 
-                sos = profile_to_sos(self._eq_profile, sample_rate)
+                tilt = self._eq_tilt or TiltConfig()
+                sos, preamp_db = cascade_with_tilt(
+                    self._eq_profile, sample_rate, tilt
+                )
                 if sos.size == 0:
                     self._eq.clear()
                 else:
-                    self._eq.set_sos(
-                        sos, preamp_db=self._eq_profile.preamp_db
-                    )
+                    self._eq.set_sos(sos, preamp_db=preamp_db)
             except Exception:
                 log.exception("autoeq profile coefficient build failed")
                 self._eq.clear()
