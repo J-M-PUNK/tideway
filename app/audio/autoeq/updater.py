@@ -46,13 +46,13 @@ import json
 import logging
 import threading
 import time
-import urllib.error
 import urllib.parse
-import urllib.request
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Optional
+
+import requests
 
 from app.paths import user_data_dir
 
@@ -103,9 +103,19 @@ def cache_dir() -> Path:
 
 
 def _http_get(url: str, timeout: float = 30.0) -> bytes:
-    req = urllib.request.Request(url, headers={"User-Agent": _USER_AGENT})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return resp.read()
+    """GET via `requests` so the call goes through certifi's CA
+    bundle. urllib's bundled-Python cert path fails SSL verification
+    on real installs (and on Homebrew Python on macOS) because the
+    OS-level cert store isn't always plumbed through to the embedded
+    interpreter. `requests` ships its own CA file via certifi and
+    works regardless. Same workaround `server._fetch_latest_release`
+    uses for the v1.4.x update-check call.
+    """
+    resp = requests.get(
+        url, headers={"User-Agent": _USER_AGENT}, timeout=timeout
+    )
+    resp.raise_for_status()
+    return resp.content
 
 
 def fetch_manifest() -> CatalogManifest:
@@ -278,7 +288,7 @@ def download_profiles(
         if not peq_target.exists():
             try:
                 _atomic_write(peq_target, _http_get(_peq_url_for_path(path)))
-            except (OSError, urllib.error.URLError) as exc:
+            except (OSError, requests.RequestException) as exc:
                 return DownloadResult(
                     profile_id=pid, ok=False, reason=f"PEQ fetch failed: {exc}"
                 )
@@ -286,7 +296,7 @@ def download_profiles(
         if include_csv and not csv_target.exists():
             try:
                 _atomic_write(csv_target, _http_get(_csv_url_for_path(path)))
-            except (OSError, urllib.error.URLError) as exc:
+            except (OSError, requests.RequestException) as exc:
                 # Non-fatal — CSV missing means no FR graph for
                 # that profile, but the PEQ still works.
                 log.debug("autoeq CSV fetch failed for %s: %s", pid, exc)
@@ -505,7 +515,7 @@ def fetch_csv_for_profile(profile_id: str) -> Optional[Path]:
         tmp.write_bytes(_http_get(_csv_url_for_path(target_path)))
         tmp.replace(csv_target)
         return csv_target
-    except (OSError, urllib.error.URLError) as exc:
+    except (OSError, requests.RequestException) as exc:
         log.debug("autoeq lazy CSV fetch for %s failed: %s", profile_id, exc)
         return None
 
