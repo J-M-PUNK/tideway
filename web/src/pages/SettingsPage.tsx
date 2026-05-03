@@ -1013,6 +1013,11 @@ interface AutoEqState {
   manual_bands: number[];
   manual_preamp_db: number | null;
   profile_catalog_size: number;
+  tilt: {
+    preamp_offset_db: number;
+    bass_db: number;
+    treble_db: number;
+  };
 }
 
 function AutoEqProfileField() {
@@ -1195,8 +1200,162 @@ function AutoEqProfileField() {
             </div>
           </div>
         )}
+
+        {state.mode === "profile" && state.active_profile && (
+          <AutoEqTiltSliders
+            initial={state.tilt}
+            onChange={(t) =>
+              setState((prev) => (prev ? { ...prev, tilt: t } : prev))
+            }
+          />
+        )}
       </div>
     </Field>
+  );
+}
+
+/**
+ * Tilt sliders below the active profile card. Three sliders
+ * (-12..+12 dB): preamp offset, bass, treble. Live local state
+ * for smooth dragging; commits to the server on slider release
+ * via api.player.autoEqSetTilt. A reset button zeros everything.
+ *
+ * Tilt is user-global, not per-device — taste preference travels
+ * with the listener. The backend persists in `eq_tilt_*` settings
+ * fields so a relaunch keeps the user's curve.
+ */
+function AutoEqTiltSliders({
+  initial,
+  onChange,
+}: {
+  initial: { preamp_offset_db: number; bass_db: number; treble_db: number };
+  onChange: (next: {
+    preamp_offset_db: number;
+    bass_db: number;
+    treble_db: number;
+  }) => void;
+}) {
+  const toast = useToast();
+  const [local, setLocal] = useState(initial);
+
+  // Re-sync from props when the parent state refreshes (e.g.
+  // after picking a different profile, the server still returns
+  // the same tilt values but the parent re-renders us).
+  useEffect(() => {
+    setLocal(initial);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initial.preamp_offset_db, initial.bass_db, initial.treble_db]);
+
+  const commit = async (
+    field: "preamp_offset_db" | "bass_db" | "treble_db",
+    value: number,
+  ) => {
+    const next = { ...local, [field]: value };
+    setLocal(next);
+    onChange(next);
+    try {
+      await api.player.autoEqSetTilt({ [field]: value });
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: "Couldn't update tilt",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+
+  const reset = async () => {
+    const zero = { preamp_offset_db: 0, bass_db: 0, treble_db: 0 };
+    setLocal(zero);
+    onChange(zero);
+    try {
+      await api.player.autoEqSetTilt(zero);
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: "Couldn't reset tilt",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+
+  return (
+    <div className="rounded-md border border-input bg-secondary/40 p-3">
+      <div className="mb-2 flex items-center justify-between">
+        <div className="text-xs uppercase tracking-wide text-muted-foreground">
+          Tilt
+        </div>
+        <button
+          type="button"
+          onClick={reset}
+          className="rounded-md border border-input px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-accent"
+        >
+          Reset
+        </button>
+      </div>
+      <div className="flex flex-col gap-2">
+        <TiltSlider
+          label="Preamp offset"
+          value={local.preamp_offset_db}
+          onChange={(v) =>
+            setLocal((prev) => ({ ...prev, preamp_offset_db: v }))
+          }
+          onCommit={(v) => commit("preamp_offset_db", v)}
+        />
+        <TiltSlider
+          label="Bass (80 Hz shelf)"
+          value={local.bass_db}
+          onChange={(v) => setLocal((prev) => ({ ...prev, bass_db: v }))}
+          onCommit={(v) => commit("bass_db", v)}
+        />
+        <TiltSlider
+          label="Treble (8 kHz shelf)"
+          value={local.treble_db}
+          onChange={(v) => setLocal((prev) => ({ ...prev, treble_db: v }))}
+          onCommit={(v) => commit("treble_db", v)}
+        />
+      </div>
+    </div>
+  );
+}
+
+function TiltSlider({
+  label,
+  value,
+  onChange,
+  onCommit,
+}: {
+  label: string;
+  value: number;
+  onChange: (v: number) => void;
+  onCommit: (v: number) => void;
+}) {
+  return (
+    <label className="flex items-center gap-3 text-xs">
+      <span className="w-32 flex-shrink-0 text-muted-foreground">{label}</span>
+      <input
+        type="range"
+        min={-12}
+        max={12}
+        step={0.5}
+        value={value}
+        onChange={(e) => onChange(parseFloat(e.target.value))}
+        onMouseUp={(e) =>
+          onCommit(parseFloat((e.target as HTMLInputElement).value))
+        }
+        onTouchEnd={(e) =>
+          onCommit(parseFloat((e.target as HTMLInputElement).value))
+        }
+        onKeyUp={(e) =>
+          onCommit(parseFloat((e.target as HTMLInputElement).value))
+        }
+        className="flex-1 cursor-pointer accent-primary"
+      />
+      <span className="w-12 flex-shrink-0 text-right tabular-nums">
+        {value > 0 ? "+" : ""}
+        {value.toFixed(1)} dB
+      </span>
+    </label>
   );
 }
 

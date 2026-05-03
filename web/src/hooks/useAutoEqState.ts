@@ -30,6 +30,11 @@ export type AutoEqState = {
   manual_bands: number[];
   manual_preamp_db: number | null;
   profile_catalog_size: number;
+  tilt: {
+    preamp_offset_db: number;
+    bass_db: number;
+    treble_db: number;
+  };
 };
 
 export function useAutoEqState(enabled: boolean): {

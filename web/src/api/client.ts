@@ -980,6 +980,11 @@ export const api = {
         manual_bands: number[];
         manual_preamp_db: number | null;
         profile_catalog_size: number;
+        tilt: {
+          preamp_offset_db: number;
+          bass_db: number;
+          treble_db: number;
+        };
       }>("/api/eq/state"),
     autoEqLoadProfile: (profileId: string) =>
       req<{
@@ -1015,6 +1020,25 @@ export const api = {
       req<{ ok: boolean; bypass: boolean }>("/api/eq/bypass", {
         method: "POST",
         body: JSON.stringify({ bypass }),
+      }),
+    /** Phase 5 user-tilt — bass / treble shelves + preamp offset
+     *  stacked on top of the profile. Each field is optional;
+     *  omitting one leaves it unchanged on the server. */
+    autoEqSetTilt: (tilt: {
+      preamp_offset_db?: number;
+      bass_db?: number;
+      treble_db?: number;
+    }) =>
+      req<{
+        ok: boolean;
+        tilt: {
+          preamp_offset_db: number;
+          bass_db: number;
+          treble_db: number;
+        };
+      }>("/api/eq/tilt", {
+        method: "POST",
+        body: JSON.stringify(tilt),
       }),
     /** AutoEQ per-device profile mapping (Phase 3). Returns the
      *  list of seen output devices, each tagged with its mapped
