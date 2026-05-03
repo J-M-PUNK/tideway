@@ -61,32 +61,48 @@ class AutoEqIndex:
         and skipped — they shouldn't kill startup just because
         AutoEQ shipped one bad file.
         """
-        if not root.exists():
-            log.warning("autoeq: data directory missing: %s", root)
-            return 0
+        return self.load_directories([root])
 
-        loaded = 0
+    def load_directories(self, roots: list[Path]) -> int:
+        """Walk every directory in `roots` and load every
+        `*ParametricEQ.txt` found. Later roots override earlier
+        ones for any duplicate profile id — Phase 7 uses this so
+        the user's downloaded `cache_dir` takes precedence over
+        the bundled snapshot when both contain the same profile.
+
+        Returns the count of successfully-loaded profiles after
+        the merge."""
         with self._lock:
             self._profiles.clear()
-            for txt_path in sorted(root.rglob("*ParametricEQ.txt")):
-                try:
-                    profile = self._load_one(txt_path, root)
-                except AutoEqParseError as exc:
-                    log.warning(
-                        "autoeq: skipping %s — %s", txt_path, exc
-                    )
+            total_seen = 0
+            for root in roots:
+                if not root.exists():
+                    log.debug("autoeq: data directory missing: %s", root)
                     continue
-                except Exception as exc:
-                    log.warning(
-                        "autoeq: unexpected error loading %s: %s",
-                        txt_path,
-                        exc,
-                    )
-                    continue
-                self._profiles[profile.profile_id] = profile
-                loaded += 1
-        log.info("autoeq: loaded %d profile(s) from %s", loaded, root)
-        return loaded
+                count = 0
+                for txt_path in sorted(root.rglob("*ParametricEQ.txt")):
+                    try:
+                        profile = self._load_one(txt_path, root)
+                    except AutoEqParseError as exc:
+                        log.warning("autoeq: skipping %s — %s", txt_path, exc)
+                        continue
+                    except Exception as exc:
+                        log.warning(
+                            "autoeq: unexpected error loading %s: %s",
+                            txt_path,
+                            exc,
+                        )
+                        continue
+                    # Later roots override earlier ones — `cache`
+                    # wins over `bundled` when both have the same
+                    # profile_id.
+                    self._profiles[profile.profile_id] = profile
+                    count += 1
+                total_seen += count
+                log.info(
+                    "autoeq: loaded %d profile(s) from %s", count, root
+                )
+        return len(self._profiles)
 
     def _load_one(self, path: Path, root: Path) -> AutoEqProfile:
         """Read one ParametricEQ.txt and tag it with metadata
