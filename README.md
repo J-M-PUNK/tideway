@@ -407,9 +407,17 @@ scripts/build_dmg.sh
 ```
 
 The DMG lands at `dist/Tideway-<version>.dmg`. Users drag the
-`.app` into Applications and launch. The CI builds on macOS 14
-(Apple Silicon), so the DMG produced by the release workflow is
-arm64. Intel Mac builds aren't part of the release pipeline today.
+`.app` into Applications and launch. A local build like this
+produces a single-architecture `.app` matching the host (arm64 on
+Apple Silicon, x86_64 on Intel) — fine for development.
+
+The release pipeline builds **both** architectures in parallel
+(`macos-14` runner for arm64, `macos-13` runner for x86_64), then
+lipo-merges them into one universal2 `.app` packaged as a single
+`Tideway-<version>.dmg`. The merge step is
+`scripts/lipo_merge_macos.sh`; it walks the bundle and fuses every
+Mach-O file into a fat binary so the same DMG runs natively on
+both Apple Silicon and Intel Macs.
 
 ### Windows
 
@@ -450,7 +458,7 @@ can replace the bundle.
 The release asset names must match these patterns:
 
 ```
-Tideway-<version>.dmg                       (macOS, Apple Silicon)
+Tideway-<version>.dmg                       (macOS, universal2: arm64 + x86_64)
 Tideway-setup-<version>.exe                 (Windows x64)
 Tideway-setup-<version>-arm64.exe           (Windows ARM64)
 Tideway-<version>-x86_64.AppImage           (Linux x86_64)

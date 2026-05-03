@@ -1,9 +1,19 @@
 #!/usr/bin/env bash
-# Build a distributable DMG from the PyInstaller .app output.
+# Build a distributable DMG from a pre-built .app bundle.
 #
 # Prereqs:
-#   - pyinstaller Tideway-mac.spec has produced dist/Tideway.app
-#   - hdiutil (ships with macOS)
+#   - The .app bundle exists at the path given as the first argument
+#     (defaults to dist/Tideway.app when called with no arguments —
+#     matches the local single-arch dev workflow).
+#   - hdiutil (ships with macOS).
+#
+# Usage:
+#   scripts/build_dmg.sh                       # uses dist/Tideway.app
+#   scripts/build_dmg.sh path/to/Tideway.app   # explicit path (used by
+#                                              # the universal-binary
+#                                              # merge job in CI, where
+#                                              # the merged .app lives
+#                                              # outside dist/)
 #
 # Output:
 #   dist/Tideway-<version>.dmg
@@ -17,12 +27,13 @@ REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$REPO_ROOT"
 
 APP_NAME="Tideway"
-APP_PATH="dist/${APP_NAME}.app"
+APP_PATH="${1:-dist/${APP_NAME}.app}"
 VERSION_FILE="VERSION"
 
 if [[ ! -d "$APP_PATH" ]]; then
-  echo "ERROR: $APP_PATH not found. Run pyinstaller first:" >&2
+  echo "ERROR: $APP_PATH not found. Either run pyinstaller first:" >&2
   echo "  .venv/bin/pyinstaller Tideway-mac.spec --noconfirm" >&2
+  echo "or pass a path to an existing .app bundle as the first argument." >&2
   exit 1
 fi
 
