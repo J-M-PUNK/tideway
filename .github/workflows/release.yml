@@ -22,13 +22,48 @@ env:
 
 jobs:
   # -------------------------------------------------------------------
-  # macOS .app bundle. Produces Tideway-macOS.zip containing
-  # the .app — users drag it to /Applications. Unsigned / unnotarized
-  # so first-launch shows Gatekeeper's "cannot be verified" warning;
-  # README tells them to right-click → Open.
+  # macOS .app bundle (per-arch). Matrix-builds an arm64 slice on
+  # macos-14 and an x86_64 slice on macos-13, in parallel. Each runner
+  # produces a single-arch .app; they're tarred (to preserve symlinks
+  # that GitHub's zip-based artifacts would otherwise dereference) and
+  # uploaded as intermediate artifacts. The downstream
+  # merge-macos-universal job lipo-fuses them into one universal2 .app
+  # which is what actually ships in the release.
+  #
+  # Why pinning macos-13 for the x64 build:
+  #
+  #   GitHub's macos-13 runner is the last x64-native macOS image
+  #   (macos-14 and macos-15 are arm64-only). Building x64 on an arm64
+  #   runner via Rosetta is technically possible but the Python wheels
+  #   come back arm64 anyway because pip resolves against the host
+  #   arch, not the target. Native x64 runner = native x64 wheels.
+  #
+  # FUTURE: GitHub retires macOS runner images on roughly a yearly
+  # cadence (macos-12 is already gone). When macos-13 follows, this
+  # workflow breaks until we have another way to produce native x64
+  # Python wheels. Options at that point: build x64 wheels on a
+  # self-hosted runner, switch to cross-arch builds with cibuildwheel
+  # if Python's universal2 story has improved, or accept arm64-only
+  # and document Rosetta 2 as the Intel Mac fallback (regresses the
+  # bit-perfect audio path on Intel — the original reason this whole
+  # workflow exists).
+  #
+  # First-launch on the resulting universal DMG still shows
+  # Gatekeeper's "cannot be verified" warning (build is unsigned /
+  # unnotarized); README covers right-click → Open.
   # -------------------------------------------------------------------
   build-macos:
-    runs-on: macos-14
+    strategy:
+      # fail-fast: false lets the other arch finish even if one fails
+      # — useful when investigating per-arch wheel issues.
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-14
+          - arch: x64
+            runner: macos-13
+    runs-on: ${{ matrix.runner }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -63,7 +98,9 @@ jobs:
         # regression. PyInstaller's static analysis routinely misses
         # native libs that get loaded via ctypes / CFFI at runtime,
         # and curl-cffi falling back to plain requests would silently
-        # drop our TLS-fingerprint match.
+        # drop our TLS-fingerprint match. Runs per-arch so a wheel
+        # missing on just one arch shows up here, before the lipo
+        # merge muddies the diagnostic.
         #
         # tls_client used to be checked here too — we deliberately
         # stopped bundling it in v0.4.11 because its Go-CGO DLL was
@@ -80,22 +117,140 @@ jobs:
           for pat in "${required_globs[@]}"; do
             count=$(find "$APP_DIR" -path "$pat" 2>/dev/null | wc -l | tr -d ' ')
             if [ "$count" -eq 0 ]; then
-              echo "::error ::Missing native library matching $pat in macOS bundle"
+              echo "::error ::Missing native library matching $pat in macOS bundle (${{ matrix.arch }})"
               echo "PyInstaller didn't pick up a runtime-loaded dylib."
               echo "Check the collect_all() list in Tideway-mac.spec."
               exit 1
             fi
-            echo "OK: found $count file(s) matching $pat"
+            echo "OK: found $count file(s) matching $pat (${{ matrix.arch }})"
           done
 
-      - name: Build DMG
-        # DMG is the canonical macOS install format — Finder mounts
-        # the image, shows the drag-to-Applications window, users
-        # eject when done. ZIP technically works but fails the
-        # Mac-native install expectation, so we ship only the DMG.
-        # Name matches the auto-updater's convention:
-        # Tideway-<version>.dmg.
-        run: bash scripts/build_dmg.sh
+      - name: Tar the .app for the merge job
+        # tar instead of upload-artifact-with-bare-directory, because
+        # GitHub Actions zips the artifact contents and zip dereferences
+        # symlinks. Mach-O bundles can have symlinks (Frameworks, dylib
+        # alias names) that would break if dereferenced, so we tar
+        # first and ship the tarball as the artifact's payload.
+        run: |
+          cd dist
+          tar -cf "Tideway-${{ matrix.arch }}.app.tar" Tideway.app
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Tideway-macOS-${{ matrix.arch }}-app
+          path: dist/Tideway-${{ matrix.arch }}.app.tar
+          if-no-files-found: error
+
+  # -------------------------------------------------------------------
+  # Lipo-merge the two arch-specific .app bundles into one universal2
+  # .app and package the result as the single Tideway-<version>.dmg
+  # release asset. Runs on macos-14 because lipo is macOS-only and
+  # the build is fast enough that runner choice doesn't matter.
+  #
+  # The result is a single DMG that runs natively on both Apple
+  # Silicon and Intel Macs — same model Discord, Slack, Zoom, and
+  # 1Password ship on the Mac, and it's how we get to "one download
+  # link per OS" without making the user know what CPU they have.
+  # -------------------------------------------------------------------
+  merge-macos-universal:
+    needs: build-macos
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: Tideway-macOS-arm64-app
+          path: in/arm64
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: Tideway-macOS-x64-app
+          path: in/x64
+
+      - name: Untar arch-specific .app bundles
+        run: |
+          set -euo pipefail
+          tar -xf in/arm64/Tideway-arm64.app.tar -C in/arm64
+          tar -xf in/x64/Tideway-x64.app.tar -C in/x64
+          ls -la in/arm64 in/x64
+
+      - name: Lipo-merge into universal2 .app
+        run: |
+          mkdir -p merged
+          bash scripts/lipo_merge_macos.sh \
+            in/arm64/Tideway.app \
+            in/x64/Tideway.app \
+            merged/Tideway.app
+
+      - name: Verify merged .app is universal2
+        # Confirm the merge actually produced fat binaries for the
+        # main executable AND for the runtime-loaded native libraries
+        # the app needs to function. Checking just the main exe isn't
+        # enough — the lipo merge script's fallback path (when a wheel
+        # is single-arch in only one matrix runner's bundle) is to
+        # keep the file as-is and emit a warning. Without this check
+        # a curl-cffi or sounddevice dylib could end up arm64-only in
+        # the merged bundle and the app would launch on Intel but
+        # crash on the first network request or first audio callback.
+        #
+        # Patterns must match Mach-O binaries that exist after the
+        # merge. Glob is anchored to Contents/ rather than the bundle
+        # root so PyInstaller's varying internal layout (Frameworks/
+        # vs Contents/Resources/ etc.) doesn't trip the check.
+        run: |
+          set -e
+          BUNDLE="merged/Tideway.app"
+
+          require_universal() {
+            local label="$1"; local file="$2"
+            if [ ! -f "$file" ]; then
+              echo "::error ::$label not found at $file"
+              return 1
+            fi
+            local archs
+            archs=$(lipo -archs "$file" 2>/dev/null || true)
+            echo "  $label: $archs"
+            if ! echo "$archs" | grep -q "arm64"; then
+              echo "::error ::$label is missing arm64 slice (got: $archs)"
+              return 1
+            fi
+            if ! echo "$archs" | grep -q "x86_64"; then
+              echo "::error ::$label is missing x86_64 slice (got: $archs)"
+              return 1
+            fi
+            return 0
+          }
+
+          require_universal "main exe" "$BUNDLE/Contents/MacOS/Tideway"
+
+          # Walk the runtime-loaded native libs we care about. Each
+          # pattern must produce at least one match; each match must
+          # be universal2. Patterns mirror the per-arch verify step
+          # above so a wheel bundle change shows up in BOTH places.
+          checked_any=0
+          for pat in \
+              "$BUNDLE/Contents/*/curl_cffi/_wrapper*.so" \
+              "$BUNDLE/Contents/*/sounddevice*.so" \
+              "$BUNDLE/Contents/*/_sounddevice_data/portaudio-binaries/libportaudio.dylib"
+          do
+            for f in $pat; do
+              [ -e "$f" ] || continue
+              checked_any=1
+              require_universal "$(basename "$f")" "$f"
+            done
+          done
+
+          if [ "$checked_any" -eq 0 ]; then
+            echo "::warning ::merged-bundle dylib check matched no files; the verify-step glob may be stale"
+          fi
+
+          echo "OK: merged bundle is universal2"
+
+      - name: Build DMG from merged .app
+        run: bash scripts/build_dmg.sh merged/Tideway.app
 
       - uses: actions/upload-artifact@v7
         with:
@@ -376,7 +531,7 @@ jobs:
   # artifacts but doesn't create a release.
   # -------------------------------------------------------------------
   publish:
-    needs: [build-macos, build-windows, build-windows-arm64, build-linux]
+    needs: [merge-macos-universal, build-windows, build-windows-arm64, build-linux]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
