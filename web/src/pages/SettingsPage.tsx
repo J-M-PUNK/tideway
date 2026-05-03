@@ -31,7 +31,6 @@ import type { QualityOption, Settings } from "@/api/types";
 import {
   useAutoEqState,
   type AutoEqMode,
-  type AutoEqProfileSummary,
   type AutoEqState,
 } from "@/hooks/useAutoEqState";
 import {
@@ -992,12 +991,9 @@ function EqSlider({
 function AutoEqProfileField() {
   const toast = useToast();
   const [state, setState] = useState<AutoEqState | null>(null);
-  const [query, setQuery] = useState("");
-  const [results, setResults] = useState<AutoEqProfileSummary[]>([]);
-  const [loadingResults, setLoadingResults] = useState(false);
 
   // Refetch the EQ state. Called once on mount + whenever a
-  // child surface (catalog updater, etc.) wants to re-pull
+  // child surface (HeadphonePicker, etc.) wants to re-pull
   // because something changed server-side.
   const refresh = async () => {
     try {
@@ -1012,24 +1008,6 @@ function AutoEqProfileField() {
     void refresh();
   }, []);
 
-  // Debounced search. Only fires when in profile mode (no point
-  // populating the dropdown when the user can't pick from it).
-  useEffect(() => {
-    if (state?.mode !== "profile") return;
-    const handle = window.setTimeout(async () => {
-      setLoadingResults(true);
-      try {
-        const r = await api.player.autoEqList(query, 50);
-        setResults(r.profiles);
-      } catch {
-        setResults([]);
-      } finally {
-        setLoadingResults(false);
-      }
-    }, 200);
-    return () => window.clearTimeout(handle);
-  }, [query, state?.mode]);
-
   if (state === null) return null;
 
   const switchMode = async (mode: AutoEqMode) => {
@@ -1042,32 +1020,6 @@ function AutoEqProfileField() {
       toast.show({
         kind: "error",
         title: "Couldn't switch EQ mode",
-        description: err instanceof Error ? err.message : String(err),
-      });
-    }
-  };
-
-  const pickProfile = async (id: string) => {
-    try {
-      const r = await api.player.autoEqLoadProfile(id);
-      setState({
-        ...state,
-        mode: "profile",
-        enabled: true,
-        active_profile_id: r.active_profile_id,
-        active_profile: {
-          id: r.active_profile.id,
-          brand: r.active_profile.brand,
-          model: r.active_profile.model,
-          source: r.active_profile.source,
-          preamp_db: r.active_profile.preamp_db,
-          band_count: r.active_profile.band_count,
-        },
-      });
-    } catch (err) {
-      toast.show({
-        kind: "error",
-        title: "Couldn't load profile",
         description: err instanceof Error ? err.message : String(err),
       });
     }
@@ -1095,9 +1047,7 @@ function AutoEqProfileField() {
       hint={
         state.profile_catalog_size === 0
           ? "No profiles bundled. Profile mode disabled."
-          : `${state.profile_catalog_size} profile${
-              state.profile_catalog_size === 1 ? "" : "s"
-            } available. Picking one applies AutoEQ correction live.`
+          : `Pick your headphones; AutoEQ correction applies live.`
       }
     >
       <div className="flex flex-col gap-3">
@@ -1108,74 +1058,16 @@ function AutoEqProfileField() {
         </div>
 
         {state.mode === "profile" && (
-          <AutoEqCatalogUpdater
-            catalogSize={state.profile_catalog_size}
-            onCatalogChanged={() => {
-              // Refetch state so the new catalog size + any
-              // newly-available profiles surface in the picker.
+          <HeadphonePicker
+            activeProfileId={state.active_profile_id}
+            activeProfile={state.active_profile}
+            onPicked={() => {
+              // Server already applied the new profile; refresh
+              // local state so the FR graph + tilt sliders bind
+              // to the correct active id.
               void refresh();
             }}
           />
-        )}
-
-        {state.mode === "profile" && state.profile_catalog_size > 0 && (
-          <div className="flex flex-col gap-2">
-            <input
-              type="text"
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search headphones — brand or model"
-              className="h-9 rounded-md border border-input bg-secondary px-3 text-sm"
-            />
-            <div className="max-h-48 overflow-y-auto rounded-md border border-input">
-              {loadingResults && results.length === 0 && (
-                <div className="px-3 py-2 text-xs text-muted-foreground">
-                  Searching…
-                </div>
-              )}
-              {!loadingResults && results.length === 0 && (
-                <div className="px-3 py-2 text-xs text-muted-foreground">
-                  No matches.
-                </div>
-              )}
-              {results.map((p) => {
-                const isActive = p.id === state.active_profile_id;
-                return (
-                  <button
-                    key={p.id}
-                    type="button"
-                    onClick={() => pickProfile(p.id)}
-                    className={cn(
-                      "flex w-full items-center justify-between gap-3 border-b border-input px-3 py-2 text-left text-xs last:border-b-0 hover:bg-accent",
-                      isActive && "bg-accent",
-                    )}
-                  >
-                    <span className="truncate">
-                      <span className="font-semibold">{p.brand}</span> {p.model}
-                    </span>
-                    <span className="flex-shrink-0 text-muted-foreground">
-                      {p.band_count} bands · {p.preamp_db.toFixed(1)} dB preamp
-                    </span>
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-        )}
-
-        {state.mode === "profile" && state.active_profile && (
-          <div className="rounded-md border border-input bg-secondary/40 p-3">
-            <div className="text-xs uppercase tracking-wide text-muted-foreground">
-              Active profile
-            </div>
-            <div className="mt-1 text-sm font-semibold">
-              {state.active_profile.brand} {state.active_profile.model}
-            </div>
-            <div className="text-xs text-muted-foreground">
-              {state.active_profile.source} · {state.active_profile.band_count}{" "}
-              bands · preamp {state.active_profile.preamp_db.toFixed(1)} dB
-            </div>
-          </div>
         )}
 
         {state.mode === "profile" && state.active_profile && (
@@ -1194,6 +1086,354 @@ function AutoEqProfileField() {
         )}
       </div>
     </Field>
+  );
+}
+
+/**
+ * Two-level catalog browser: search shows one row per unique
+ * headphone, click a row to expand the list of measurement
+ * sources that have it. Each source row has a clear next-action
+ * — "Active" if it's the currently-loaded profile, "Use" for
+ * already-installed sources, "Download" for ones that need to
+ * be fetched first (which then auto-load on success).
+ *
+ * Collapses the older two-search-input-with-overlapping-data
+ * mess. The user sees one search box; "your headphone" is the
+ * primary mental model and the source picker is the obvious
+ * next step once you've pointed at the right headphone.
+ *
+ * On first mount this fires `/api/eq/check-updates` to populate
+ * the manifest cache so the search returns the full ~5,000-
+ * profile catalog right away. The cache lives for the server
+ * session, so subsequent mounts are instant.
+ */
+type HeadphoneRow = {
+  headphone: string;
+  installed_count: number;
+  total_count: number;
+  sources: {
+    profile_id: string;
+    source: string;
+    on_disk: boolean;
+    is_active: boolean;
+  }[];
+};
+
+function HeadphonePicker({
+  activeProfileId,
+  activeProfile,
+  onPicked,
+}: {
+  activeProfileId: string;
+  activeProfile: AutoEqState["active_profile"];
+  onPicked: () => void;
+}) {
+  const toast = useToast();
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<HeadphoneRow[]>([]);
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const [searching, setSearching] = useState(false);
+  const [busy, setBusy] = useState<string | null>(null); // profile_id in-flight
+  const [manifestStatus, setManifestStatus] = useState<
+    "loading" | "ready" | "failed"
+  >("loading");
+
+  // Populate the manifest on first mount so the search has the
+  // full catalog to scan, not just bundled profiles. The fetch
+  // is ~3 MB JSON from GitHub so a brief loading state is honest.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        await api.player.autoEqCheckUpdates();
+        if (!cancelled) setManifestStatus("ready");
+      } catch {
+        if (!cancelled) setManifestStatus("failed");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Debounced search. Only fires once the manifest is in cache
+  // — searching before that would just return empty rows.
+  useEffect(() => {
+    if (manifestStatus !== "ready") return;
+    setSearching(true);
+    const handle = window.setTimeout(async () => {
+      try {
+        const r = await api.player.autoEqHeadphones(query, 25);
+        setResults(r.results);
+      } catch {
+        setResults([]);
+      } finally {
+        setSearching(false);
+      }
+    }, 200);
+    return () => window.clearTimeout(handle);
+  }, [query, manifestStatus]);
+
+  const refreshManifest = async () => {
+    setManifestStatus("loading");
+    try {
+      await api.player.autoEqCheckUpdates();
+      setManifestStatus("ready");
+    } catch (err) {
+      setManifestStatus("failed");
+      toast.show({
+        kind: "error",
+        title: "Couldn't refresh AutoEQ catalog",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+
+  const useProfile = async (profile_id: string) => {
+    setBusy(profile_id);
+    try {
+      await api.player.autoEqLoadProfile(profile_id);
+      onPicked();
+      // Mark this source as active in the local copy so the badge
+      // flips immediately without waiting for the next search round.
+      setResults((prev) =>
+        prev.map((row) => ({
+          ...row,
+          sources: row.sources.map((s) => ({
+            ...s,
+            is_active: s.profile_id === profile_id,
+          })),
+        })),
+      );
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: "Couldn't load profile",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const downloadAndUse = async (profile_id: string, headphone: string) => {
+    setBusy(profile_id);
+    try {
+      await api.player.autoEqDownloadProfile(profile_id);
+      await api.player.autoEqLoadProfile(profile_id);
+      onPicked();
+      toast.show({
+        kind: "success",
+        title: "Downloaded and applied",
+        description: headphone,
+      });
+      setResults((prev) =>
+        prev.map((row) => ({
+          ...row,
+          sources: row.sources.map((s) =>
+            s.profile_id === profile_id
+              ? { ...s, on_disk: true, is_active: true }
+              : { ...s, is_active: false },
+          ),
+          installed_count:
+            row.headphone === headphone
+              ? row.installed_count +
+                (row.sources.find((s) => s.profile_id === profile_id)?.on_disk
+                  ? 0
+                  : 1)
+              : row.installed_count,
+        })),
+      );
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: "Couldn't download",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-3">
+      {/* Active profile card stays at the top so the user always sees
+          which one is currently in effect, even after they scroll the
+          search results. */}
+      {activeProfile && (
+        <div className="flex items-center justify-between gap-3 rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-xs">
+          <div className="flex flex-col">
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-primary">
+              Active profile
+            </span>
+            <span className="text-sm font-semibold">
+              {activeProfile.brand} {activeProfile.model}
+            </span>
+            <span className="text-muted-foreground">
+              {activeProfile.source} · {activeProfile.band_count} bands · preamp{" "}
+              {activeProfile.preamp_db.toFixed(1)} dB
+            </span>
+          </div>
+        </div>
+      )}
+
+      <div className="flex items-center gap-2">
+        <input
+          type="text"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder={
+            manifestStatus === "loading"
+              ? "Loading AutoEQ catalog…"
+              : "Search by headphone (HD 600, AirPods Max, …)"
+          }
+          disabled={manifestStatus !== "ready"}
+          className="h-9 flex-1 rounded-md border border-input bg-background px-3 text-sm disabled:opacity-50"
+        />
+        <button
+          type="button"
+          onClick={refreshManifest}
+          disabled={manifestStatus === "loading"}
+          className="rounded-md border border-input px-2.5 py-1.5 text-[11px] font-semibold text-muted-foreground hover:bg-accent disabled:opacity-50"
+          title="Refetch the AutoEQ manifest from GitHub. Useful when AutoEQ has added new profiles since the app launched."
+        >
+          {manifestStatus === "loading" ? "…" : "Refresh"}
+        </button>
+      </div>
+
+      {manifestStatus === "failed" && (
+        <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+          Couldn't reach AutoEQ. Search is offline. Click Refresh to retry.
+        </div>
+      )}
+
+      {manifestStatus === "ready" && (
+        <div className="max-h-72 overflow-y-auto rounded-md border border-input">
+          {searching && results.length === 0 && (
+            <div className="px-3 py-2 text-xs text-muted-foreground">
+              Searching…
+            </div>
+          )}
+          {!searching && results.length === 0 && (
+            <div className="px-3 py-2 text-xs text-muted-foreground">
+              {query.trim()
+                ? "No matches in the AutoEQ catalog."
+                : "Start typing to find your headphones."}
+            </div>
+          )}
+          {results.map((row) => (
+            <HeadphoneRowView
+              key={row.headphone}
+              row={row}
+              expanded={expanded === row.headphone}
+              onExpand={() =>
+                setExpanded(expanded === row.headphone ? null : row.headphone)
+              }
+              busyProfileId={busy}
+              onUse={useProfile}
+              onDownloadAndUse={downloadAndUse}
+              currentActiveId={activeProfileId}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function HeadphoneRowView({
+  row,
+  expanded,
+  onExpand,
+  busyProfileId,
+  onUse,
+  onDownloadAndUse,
+  currentActiveId,
+}: {
+  row: HeadphoneRow;
+  expanded: boolean;
+  onExpand: () => void;
+  busyProfileId: string | null;
+  onUse: (profile_id: string) => void;
+  onDownloadAndUse: (profile_id: string, headphone: string) => void;
+  currentActiveId: string;
+}) {
+  const containsActive = row.sources.some(
+    (s) => s.profile_id === currentActiveId,
+  );
+  return (
+    <div className="border-b border-input/60 last:border-b-0">
+      <button
+        type="button"
+        onClick={onExpand}
+        className={cn(
+          "flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-xs hover:bg-accent",
+          containsActive && "bg-primary/5",
+        )}
+      >
+        <span className="truncate font-semibold">{row.headphone}</span>
+        <span className="flex flex-shrink-0 items-center gap-2 text-[11px] text-muted-foreground">
+          {containsActive && (
+            <span className="rounded bg-primary/20 px-1.5 py-0.5 text-[10px] font-semibold text-primary">
+              Active
+            </span>
+          )}
+          <span>
+            {row.installed_count}/{row.total_count} sources
+          </span>
+          <span aria-hidden className="text-muted-foreground/60">
+            {expanded ? "▾" : "▸"}
+          </span>
+        </span>
+      </button>
+      {expanded && (
+        <div className="bg-background/50">
+          {row.sources.map((s) => (
+            <div
+              key={s.profile_id}
+              className={cn(
+                "flex items-center justify-between gap-3 border-t border-input/40 px-6 py-1.5 text-xs",
+                s.is_active && "bg-primary/10",
+              )}
+            >
+              <span className="truncate">
+                {s.source}
+                {s.is_active && (
+                  <span className="ml-2 text-[10px] font-semibold uppercase tracking-wider text-primary">
+                    Active
+                  </span>
+                )}
+              </span>
+              {s.is_active ? (
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-emerald-500">
+                  In use
+                </span>
+              ) : s.on_disk ? (
+                <button
+                  type="button"
+                  onClick={() => onUse(s.profile_id)}
+                  disabled={busyProfileId === s.profile_id}
+                  className="rounded border border-primary bg-primary px-2 py-0.5 text-[10px] font-semibold text-primary-foreground hover:bg-primary/80 disabled:opacity-50"
+                >
+                  {busyProfileId === s.profile_id ? "…" : "Use"}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => onDownloadAndUse(s.profile_id, row.headphone)}
+                  disabled={busyProfileId === s.profile_id}
+                  className="rounded border border-input px-2 py-0.5 text-[10px] font-semibold text-muted-foreground hover:bg-accent disabled:opacity-50"
+                >
+                  {busyProfileId === s.profile_id
+                    ? "Downloading…"
+                    : "Download & use"}
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -1411,314 +1651,6 @@ function AutoEqResponseGraph({
         <div className="mt-1 text-[10px] text-muted-foreground">
           No measurement CSV bundled for this profile — showing EQ response
           only.
-        </div>
-      )}
-    </div>
-  );
-}
-
-/**
- * Phase 7 catalog updater. One small row under the mode toggle
- * with a "Check for new headphones" button. Two-step UX:
- *
- *   1. Click "Check" → GET /api/eq/check-updates (single GitHub
- *      API call, ~1-3s). Reveals "X new profiles available" +
- *      a "Download all" button.
- *   2. Click "Download all" → POST /api/eq/download-catalog,
- *      backend kicks off a background download. Frontend polls
- *      /api/eq/update-status at ~750 ms intervals to drive the
- *      progress bar.
- *
- * On completion, calls onCatalogChanged so the parent picker
- * re-fetches its state and the new profiles surface in the
- * search list.
- */
-function AutoEqCatalogUpdater({
-  catalogSize,
-  onCatalogChanged,
-}: {
-  catalogSize: number;
-  onCatalogChanged: () => void;
-}) {
-  const toast = useToast();
-  const [check, setCheck] = useState<{
-    total_in_catalog: number;
-    already_on_disk: number;
-    missing: number;
-  } | null>(null);
-  const [checking, setChecking] = useState(false);
-  const [progress, setProgress] = useState<{
-    total: number;
-    done: number;
-    succeeded: number;
-    failed: number;
-    running: boolean;
-  } | null>(null);
-
-  const onCheck = async () => {
-    setChecking(true);
-    try {
-      const r = await api.player.autoEqCheckUpdates();
-      setCheck({
-        total_in_catalog: r.total_in_catalog,
-        already_on_disk: r.already_on_disk,
-        missing: r.missing,
-      });
-    } catch (err) {
-      toast.show({
-        kind: "error",
-        title: "Couldn't reach AutoEQ",
-        description: err instanceof Error ? err.message : String(err),
-      });
-    } finally {
-      setChecking(false);
-    }
-  };
-
-  const onDownload = async () => {
-    try {
-      const r = await api.player.autoEqDownloadCatalog();
-      if (!r.started) {
-        toast.show({ kind: "info", title: r.reason || "Nothing to download" });
-        return;
-      }
-    } catch (err) {
-      toast.show({
-        kind: "error",
-        title: "Couldn't start download",
-        description: err instanceof Error ? err.message : String(err),
-      });
-      return;
-    }
-    // Poll. Cleared once status.running flips back to false.
-    const interval = window.setInterval(async () => {
-      try {
-        const s = await api.player.autoEqUpdateStatus();
-        setProgress({
-          total: s.total,
-          done: s.done,
-          succeeded: s.succeeded,
-          failed: s.failed,
-          running: s.running,
-        });
-        if (!s.running) {
-          window.clearInterval(interval);
-          // Re-check the diff so the "missing" number updates.
-          await onCheck();
-          onCatalogChanged();
-          toast.show({
-            kind: "success",
-            title: `Downloaded ${s.succeeded} profile${
-              s.succeeded === 1 ? "" : "s"
-            }`,
-            description:
-              s.failed > 0
-                ? `${s.failed} failed (transient network errors)`
-                : undefined,
-          });
-        }
-      } catch {
-        /* keep polling — server briefly unreachable is fine */
-      }
-    }, 750);
-  };
-
-  return (
-    <div className="rounded-md border border-input bg-secondary/40 p-3 text-xs">
-      {check === null && progress === null && (
-        <div className="flex items-center justify-between gap-3">
-          <div className="text-muted-foreground">
-            {catalogSize} headphone{catalogSize === 1 ? "" : "s"} bundled. Check
-            AutoEQ for the full ~5,000-profile catalog.
-          </div>
-          <button
-            type="button"
-            onClick={onCheck}
-            disabled={checking}
-            className="rounded-md border border-input px-2.5 py-1 text-[11px] font-semibold hover:bg-accent disabled:opacity-50"
-          >
-            {checking ? "Checking…" : "Check for updates"}
-          </button>
-        </div>
-      )}
-      {check !== null && progress === null && (
-        <div className="flex flex-col gap-3">
-          <div className="flex items-center justify-between gap-3">
-            <div className="text-muted-foreground">
-              {check.missing > 0
-                ? `${check.missing} new headphone profile${
-                    check.missing === 1 ? "" : "s"
-                  } available (${check.total_in_catalog} total in catalog).`
-                : `Already up to date — ${check.total_in_catalog} profile${
-                    check.total_in_catalog === 1 ? "" : "s"
-                  } cached.`}
-            </div>
-            {check.missing > 0 && (
-              <button
-                type="button"
-                onClick={onDownload}
-                className="rounded-md border border-input px-2.5 py-1 text-[11px] font-semibold text-muted-foreground hover:bg-accent"
-                title="Download every profile in the catalog (~5 MB total)"
-              >
-                Download all
-              </button>
-            )}
-          </div>
-          {check.missing > 0 && (
-            <AutoEqCatalogSearch onChanged={onCatalogChanged} />
-          )}
-        </div>
-      )}
-      {progress !== null && (
-        <div className="flex flex-col gap-2">
-          <div className="flex items-center justify-between text-muted-foreground">
-            <span>
-              {progress.running
-                ? `Downloading… ${progress.done}/${progress.total}`
-                : `Done: ${progress.succeeded} succeeded, ${progress.failed} failed`}
-            </span>
-            {progress.failed > 0 && (
-              <span className="text-amber-500">{progress.failed} skipped</span>
-            )}
-          </div>
-          <div className="h-1.5 overflow-hidden rounded-full bg-foreground/10">
-            <div
-              className="h-full bg-primary transition-[width] duration-150"
-              style={{
-                width: `${
-                  progress.total > 0
-                    ? (progress.done / progress.total) * 100
-                    : 0
-                }%`,
-              }}
-            />
-          </div>
-        </div>
-      )}
-    </div>
-  );
-}
-
-/**
- * Per-headphone download UI. After the catalog manifest is
- * cached, the user types their headphone name and gets a list
- * of fuzzy-matched candidates with a Download button each.
- * Pulls just the one profile (PEQ + measurement CSV, ~50 KB)
- * instead of committing to the full ~5,000-profile bulk pull.
- *
- * Debounce is 200 ms so the search input doesn't fire a request
- * on every keystroke — the backend would handle the load fine,
- * but the network round-trip plus rapidfuzz scan is wasted work
- * for half-typed words.
- */
-function AutoEqCatalogSearch({ onChanged }: { onChanged: () => void }) {
-  const toast = useToast();
-  const [query, setQuery] = useState("");
-  const [results, setResults] = useState<
-    {
-      profile_id: string;
-      source: string;
-      headphone: string;
-      on_disk: boolean;
-    }[]
-  >([]);
-  const [searching, setSearching] = useState(false);
-  const [downloading, setDownloading] = useState<string | null>(null);
-
-  // Debounced search. The `searching` state stays true between
-  // keystrokes so the UI doesn't flicker spinner / no-spinner
-  // every 50ms while the user types fast.
-  useEffect(() => {
-    setSearching(true);
-    const handle = window.setTimeout(async () => {
-      try {
-        const r = await api.player.autoEqCatalogSearch(query, 12);
-        setResults(r.results);
-      } catch {
-        setResults([]);
-      } finally {
-        setSearching(false);
-      }
-    }, 200);
-    return () => {
-      window.clearTimeout(handle);
-    };
-  }, [query]);
-
-  const downloadOne = async (profile_id: string, headphone: string) => {
-    setDownloading(profile_id);
-    try {
-      await api.player.autoEqDownloadProfile(profile_id);
-      toast.show({
-        kind: "success",
-        title: "Downloaded",
-        description: headphone,
-      });
-      // Mark the row as on-disk so the button flips to a checkmark.
-      setResults((prev) =>
-        prev.map((r) =>
-          r.profile_id === profile_id ? { ...r, on_disk: true } : r,
-        ),
-      );
-      onChanged();
-    } catch (err) {
-      toast.show({
-        kind: "error",
-        title: "Couldn't download",
-        description: err instanceof Error ? err.message : String(err),
-      });
-    } finally {
-      setDownloading(null);
-    }
-  };
-
-  return (
-    <div className="flex flex-col gap-2">
-      <input
-        type="text"
-        value={query}
-        onChange={(e) => setQuery(e.target.value)}
-        placeholder="Search by headphone (e.g. HD 600, AirPods Max)…"
-        className="h-8 rounded-md border border-input bg-background px-2 text-xs"
-      />
-      {results.length > 0 ? (
-        <div className="max-h-64 overflow-y-auto rounded-md border border-input bg-background/40">
-          {results.map((r) => (
-            <div
-              key={r.profile_id}
-              className="flex items-center justify-between gap-2 border-b border-input/40 px-2 py-1.5 last:border-0"
-            >
-              <div className="min-w-0 flex-1 truncate">
-                <span className="font-medium">{r.headphone}</span>
-                <span className="ml-2 text-muted-foreground">{r.source}</span>
-              </div>
-              {r.on_disk ? (
-                <span
-                  className="text-[10px] font-semibold uppercase text-emerald-500"
-                  title="Already on disk — pickable in the profile dropdown"
-                >
-                  Installed
-                </span>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => downloadOne(r.profile_id, r.headphone)}
-                  disabled={downloading === r.profile_id}
-                  className="rounded border border-primary bg-primary px-2 py-0.5 text-[10px] font-semibold text-primary-foreground hover:bg-primary/80 disabled:opacity-50"
-                >
-                  {downloading === r.profile_id ? "…" : "Download"}
-                </button>
-              )}
-            </div>
-          ))}
-        </div>
-      ) : (
-        <div className="text-muted-foreground">
-          {searching
-            ? "Searching…"
-            : query.trim()
-              ? "No matches in the AutoEQ catalog."
-              : "Start typing to search the full catalog."}
         </div>
       )}
     </div>
