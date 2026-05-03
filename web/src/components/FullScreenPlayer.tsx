@@ -53,7 +53,7 @@ export function FullScreenPlayer({
   onClose: () => void;
   onDownload: OnDownload;
 }) {
-  const { track, playing, loading, shuffle, repeat, hasNext, hasPrev } =
+  const { track, playing, loading, shuffle, repeat, hasPrev } =
     usePlayerMeta();
   const { currentTime, duration } = usePlayerTime();
   const actions = usePlayerActions();
@@ -261,7 +261,6 @@ export function FullScreenPlayer({
                 variant="ghost"
                 size="icon"
                 onClick={actions.next}
-                disabled={!hasNext && !shuffle && repeat === "off"}
                 className="h-10 w-10 hover:bg-white/10"
               >
                 <SkipForward className="h-5 w-5" fill="currentColor" />
