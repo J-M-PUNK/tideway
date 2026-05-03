@@ -463,6 +463,158 @@ def status() -> dict:
     return _STATE.snapshot_progress()
 
 
+@dataclass
+class CatalogSearchHit:
+    """One result from a manifest search. Frontend renders these as
+    a download-this-headphone list — `display` is what to show, the
+    rest is for the action handler.
+    """
+
+    profile_id: str
+    source: str
+    headphone: str  # what the user actually searches by — e.g. "Sennheiser HD 600"
+    on_disk: bool
+
+
+def _brand_model_from_path(path: str) -> Optional[tuple[str, str, str]]:
+    """Pull (source, headphone-name, profile_id) out of a manifest
+    path. Returns None for unexpected layouts. The headphone-name
+    matches what the index's `_brand_model` derivation produces, so
+    the search results align with the picker's display."""
+    parts = path.split("/")
+    if len(parts) < 5 or parts[0] != "results":
+        return None
+    source = parts[1]
+    headphone = parts[3]
+    return source, headphone, f"{source}/{headphone}"
+
+
+def search_manifest(
+    query: str, bundled_root: Path, limit: int = 20
+) -> list[CatalogSearchHit]:
+    """Fuzzy-match `query` against the cached manifest's headphone
+    names. Returns up to `limit` ranked hits, each tagged with whether
+    it's already on disk (so the UI can show "Already downloaded"
+    badges instead of redundant download buttons).
+
+    Empty query returns the first `limit` headphones alphabetically
+    so the picker has something to show before the user types.
+
+    Caller must have populated the manifest cache via `check_updates`
+    first; we don't auto-fetch here because manifest fetches are slow
+    enough (3 MB JSON from GitHub) that the search input shouldn't
+    silently blow up into a network call.
+    """
+    with _STATE.lock:
+        manifest = _STATE.manifest
+        already_set = set(_STATE.already_ids)
+
+    if manifest is None:
+        return []
+
+    cache_root = cache_dir()
+    on_disk_now: set[str] = set(already_set)
+    if cache_root.exists():
+        for txt in cache_root.rglob("*ParametricEQ.txt"):
+            try:
+                rel = txt.relative_to(cache_root)
+                rparts = rel.parts
+                if len(rparts) >= 2:
+                    on_disk_now.add(f"{rparts[0]}/{rparts[1]}")
+            except ValueError:
+                continue
+    if bundled_root.exists():
+        for txt in bundled_root.rglob("*ParametricEQ.txt"):
+            try:
+                rel = txt.relative_to(bundled_root)
+                rparts = rel.parts
+                if len(rparts) >= 2:
+                    on_disk_now.add(f"{rparts[0]}/{rparts[1]}")
+            except ValueError:
+                continue
+
+    candidates: list[CatalogSearchHit] = []
+    seen: set[str] = set()
+    for path in manifest.profile_paths:
+        parsed = _brand_model_from_path(path)
+        if parsed is None:
+            continue
+        source, headphone, pid = parsed
+        if pid in seen:
+            continue
+        seen.add(pid)
+        candidates.append(
+            CatalogSearchHit(
+                profile_id=pid,
+                source=source,
+                headphone=headphone,
+                on_disk=pid in on_disk_now,
+            )
+        )
+
+    q = query.strip()
+    if not q:
+        candidates.sort(key=lambda c: c.headphone.lower())
+        return candidates[:limit]
+
+    # Reuse the same rapidfuzz/substring split the bundled-index
+    # search uses so results match the user's expectations across
+    # the two pickers.
+    try:
+        from rapidfuzz import fuzz, process  # type: ignore
+        scored = process.extract(
+            q,
+            [c.headphone for c in candidates],
+            scorer=fuzz.WRatio,
+            limit=limit,
+        )
+        return [candidates[idx] for _h, _score, idx in scored]
+    except ImportError:
+        lq = q.lower()
+        ranked = [
+            (c.headphone.lower().find(lq), c)
+            for c in candidates
+            if lq in c.headphone.lower()
+        ]
+        ranked.sort(key=lambda t: (t[0], t[1].headphone.lower()))
+        return [c for _pos, c in ranked[:limit]]
+
+
+def download_one(profile_id: str, *, include_csv: bool = True) -> DownloadResult:
+    """Synchronous single-profile download. Used by the user-clicks-
+    one-headphone flow; blocks for ~1-3 s while the PEQ + optional
+    CSV come down. Caller is responsible for reloading the index
+    afterward so the profile shows up in the picker."""
+    with _STATE.lock:
+        manifest = _STATE.manifest
+    if manifest is None:
+        return DownloadResult(
+            profile_id=profile_id,
+            ok=False,
+            reason="no manifest cached — call check_updates first",
+        )
+
+    paths_by_id: dict[str, str] = {}
+    for path in manifest.profile_paths:
+        parsed = _brand_model_from_path(path)
+        if parsed is None:
+            continue
+        _src, _name, pid = parsed
+        paths_by_id.setdefault(pid, path)
+
+    if profile_id not in paths_by_id:
+        return DownloadResult(
+            profile_id=profile_id, ok=False, reason="profile id not in manifest"
+        )
+
+    results = download_profiles(
+        paths_by_id, [profile_id], include_csv=include_csv, max_workers=1
+    )
+    return results[0] if results else DownloadResult(
+        profile_id=profile_id, ok=False, reason="no result"
+    )
+
+
 def fetch_csv_for_profile(profile_id: str) -> Optional[Path]:
     """Best-effort lazy CSV fetch. Used by the FR-graph endpoint
     when a profile is loaded but its CSV isn't yet on disk —
