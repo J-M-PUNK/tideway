@@ -61,41 +61,68 @@ def log_frequency_grid(
 
 
 def _measurement_csv_path(profile: AutoEqProfile, data_root: Path) -> Optional[Path]:
-    """Look for the headphone's CSV next to its ParametricEQ.txt.
-    AutoEQ ships them as `<Brand> <Model>.csv`."""
+    """Look for the headphone's CSV next to its ParametricEQ.txt
+    in EITHER the bundled data dir or the cache dir (Phase 7's
+    download destination). AutoEQ ships CSVs as
+    `<Brand> <Model>.csv`.
+
+    Searching both roots — bundled first, cache as fallback —
+    means a profile downloaded via the catalog updater renders
+    its FR graph as soon as `fetch_csv_for_profile` lands the
+    sibling file."""
     if not profile.brand or not profile.model:
         return None
-    candidate = (
-        data_root
-        / profile.source
-        / f"{profile.brand} {profile.model}"
-        / f"{profile.brand} {profile.model}.csv"
-    )
-    return candidate if candidate.exists() else None
+    headphone_dir = f"{profile.brand} {profile.model}"
+    csv_name = f"{profile.brand} {profile.model}.csv"
+    # Lazy import to avoid a circular reference at module load.
+    from .updater import cache_dir
+    for root in (data_root, cache_dir()):
+        candidate = root / profile.source / headphone_dir / csv_name
+        if candidate.exists():
+            return candidate
+    return None
+
+
+_REQUIRED_CSV_COLUMNS = ("frequency", "raw", "target")
 
 
 def _read_measurement(
     path: Path,
 ) -> Optional[tuple[np.ndarray, np.ndarray, np.ndarray]]:
-    """Parse an AutoEQ measurement CSV. Columns we use are
-    `frequency`, `raw`, and `target` — the rest are ignored.
+    """Parse an AutoEQ measurement CSV. Required columns are
+    `frequency`, `raw`, and `target` — all three must be present
+    for the graph to render the three-curve overlay.
 
-    Returns `(frequencies, raw_db, target_db)` as numpy arrays.
-    Returns None on a malformed file rather than raising — the
-    graph degrades to "post-EQ only" and the rest of the app
-    keeps working."""
+    Strict on column presence (returns None when a column is
+    missing rather than silently producing zeros). Caller
+    handles None by degrading the graph to post-EQ only.
+
+    Strict-on-columns is a deploy-PR cleanup of the earlier
+    inconsistent behavior (frequency was strict, raw/target were
+    silent fallbacks); silent zero-fill for a missing column
+    rendered as a flat line that looked like a "real" measurement
+    and was actively misleading.
+    """
     try:
         with path.open(newline="", encoding="utf-8") as fh:
             reader = csv.DictReader(fh)
+            field_names = reader.fieldnames or []
+            for required in _REQUIRED_CSV_COLUMNS:
+                if required not in field_names:
+                    return None
             freqs: list[float] = []
             raws: list[float] = []
             targets: list[float] = []
             for row in reader:
                 try:
                     freqs.append(float(row["frequency"]))
-                    raws.append(float(row.get("raw", "0") or 0.0))
-                    targets.append(float(row.get("target", "0") or 0.0))
+                    raws.append(float(row["raw"]))
+                    targets.append(float(row["target"]))
                 except (ValueError, KeyError):
+                    # Skip a malformed row but keep parsing — a
+                    # missing column was caught by the header
+                    # check above; this path is for non-numeric
+                    # values inside an otherwise-valid row.
                     continue
         if not freqs:
             return None
@@ -144,6 +171,18 @@ def compute_response(
     # Raw + target — interpolate onto the same grid if available.
     csv_path = _measurement_csv_path(profile, data_root)
     if csv_path is None:
+        # CSV missing — kick off a best-effort lazy fetch in the
+        # background. If the user has run "Check for updates"
+        # this session, the manifest cache has the AutoEQ repo
+        # path and the fetcher can grab the CSV. By the time the
+        # graph debounces another response request (~80ms after
+        # the next tilt-slider drag), the CSV is on disk and the
+        # graph upgrades to the full three-curve view.
+        try:
+            from .updater import fetch_csv_for_profile_async
+            fetch_csv_for_profile_async(profile.profile_id)
+        except Exception:
+            pass
         raw_db_list: Optional[list[float]] = None
         target_db_list: Optional[list[float]] = None
         post_eq = cascade_db  # No raw to add to → post-EQ is just

@@ -28,6 +28,11 @@ import {
 } from "lucide-react";
 import { api } from "@/api/client";
 import type { QualityOption, Settings } from "@/api/types";
+import type {
+  AutoEqMode,
+  AutoEqProfileSummary,
+  AutoEqState,
+} from "@/hooks/useAutoEqState";
 import {
   TEMPLATE_TOKENS,
   previewFilenameTemplateAsString,
@@ -994,31 +999,9 @@ function EqSlider({
  * enough (~7 profiles in v1, ~5,000 once Phase 7 ships) that the
  * cost is negligible.
  */
-type AutoEqMode = "off" | "manual" | "profile";
-
-interface AutoEqProfileSummary {
-  id: string;
-  brand: string;
-  model: string;
-  source: string;
-  preamp_db: number;
-  band_count: number;
-}
-
-interface AutoEqState {
-  mode: AutoEqMode;
-  enabled: boolean;
-  active_profile_id: string;
-  active_profile: AutoEqProfileSummary | null;
-  manual_bands: number[];
-  manual_preamp_db: number | null;
-  profile_catalog_size: number;
-  tilt: {
-    preamp_offset_db: number;
-    bass_db: number;
-    treble_db: number;
-  };
-}
+// Types moved to @/hooks/useAutoEqState (single source of truth).
+// This block previously had a parallel definition that drifted —
+// it lacked the `bypass` field added in Phase 4, for instance.
 
 function AutoEqProfileField() {
   const toast = useToast();
