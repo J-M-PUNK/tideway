@@ -8,6 +8,7 @@ import tempfile
 import threading
 import time
 import uuid
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -898,6 +899,39 @@ class Downloader:
             self._clear_pending(item.item_id)
             try:
                 self._download(item)
+            except Exception as exc:
+                # _download has its own try/except for the body of the
+                # download, but a few setup steps (debug prints, lookups)
+                # run *before* that try block. An exception there used
+                # to escape this loop with no `except`, killing the
+                # worker thread and leaving every subsequent download
+                # stuck in PENDING forever. The triggering case in the
+                # field was a UnicodeEncodeError on a `print(... title=
+                # !r ...)` for a track with non-locale-codepage chars
+                # in the title (#7, #36, #70). Catch here so a single
+                # bad item fails cleanly without taking the worker down.
+                import sys as _sys
+                import traceback as _tb
+                try:
+                    print(
+                        f"[downloader] worker caught escaped exception "
+                        f"id={item.item_id[:8]}: {type(exc).__name__}",
+                        file=_sys.stderr,
+                        flush=True,
+                    )
+                    _tb.print_exc(file=_sys.stderr)
+                except Exception:
+                    # Logging itself can fail (the original exception
+                    # might *be* a print/encoding failure). Don't let
+                    # that re-kill the worker.
+                    pass
+                try:
+                    item.status = DownloadStatus.FAILED
+                    item.error = f"{type(exc).__name__}: {exc}"
+                    item.speed_bps = 0.0
+                    self._publish_update(item)
+                except Exception:
+                    pass
             finally:
                 self.gate.release()
 
@@ -1048,45 +1082,96 @@ class Downloader:
                 _apply_aggregate_rate(rate_mbps)
                 limiter = _RateLimiter(rate_mbps * 1_000_000) if rate_mbps > 0 else None
 
-                with open(tmp_path, "wb") as f:
-                    # Write the first URL we already opened.
-                    got = 0
-                    for chunk in first_resp.iter_content(chunk_size=65536):
-                        if not chunk:
-                            continue
-                        self._check_cancel(item.item_id)
-                        f.write(chunk)
-                        got += len(chunk)
-                        bytes_total += len(chunk)
-                        _AGGREGATE_LIMITER.consume(len(chunk))
-                        if limiter is not None:
-                            limiter.consume(len(chunk))
-                        inner = (got / first_len) if first_len else 0.5
-                        _bump(0, inner)
-                    first_resp_cm.__exit__(None, None, None)
-                    first_resp_cm = None
+                # Single-segment prefetch: while we stream segment K's
+                # body under the rate limiter, a worker thread runs the
+                # HTTP request for K+1 (handshake, request send, TTFB,
+                # response headers). When K finishes, K+1 is already
+                # connection-open and ready for body streaming — saves
+                # ~one RTT per segment of overlap. Worker only opens
+                # the connection; the body is still streamed in this
+                # thread under `_AGGREGATE_LIMITER` + per-track
+                # `limiter`, so the network throughput cap is unchanged
+                # (same bytes-per-second to the CDN).
+                #
+                # max_workers=1 because we only ever need one segment
+                # in flight beyond the current one. Multiple parallel
+                # in-flight requests per track would double the
+                # concurrent-stream signal and is intentionally avoided.
+                #
+                # `_open` here is just `SESSION.get(...)` returning a
+                # streaming Response; named for symmetry with the loop.
+                def _open(url: str):
+                    return SESSION.get(url, stream=True, timeout=60)
 
-                    # Then every remaining URL concatenated into the
-                    # same file — for DASH hi-res these are per-segment
-                    # binary chunks that form a valid FLAC once joined.
-                    for i, url in enumerate(urls[1:], start=1):
-                        self._check_cancel(item.item_id)
-                        with SESSION.get(url, stream=True, timeout=60) as resp:
-                            resp.raise_for_status()
-                            seg_len = int(resp.headers.get("Content-Length", 0))
-                            seg_got = 0
-                            for chunk in resp.iter_content(chunk_size=65536):
-                                if not chunk:
-                                    continue
-                                self._check_cancel(item.item_id)
-                                f.write(chunk)
-                                seg_got += len(chunk)
-                                bytes_total += len(chunk)
-                                _AGGREGATE_LIMITER.consume(len(chunk))
-                                if limiter is not None:
-                                    limiter.consume(len(chunk))
-                                inner = (seg_got / seg_len) if seg_len else 0.5
-                                _bump(i, inner)
+                next_resp_future: Optional[Future] = None
+                with ThreadPoolExecutor(
+                    max_workers=1,
+                    thread_name_prefix="dl-prefetch",
+                ) as prefetch_pool:
+                    # Kick off the prefetch for url[1] before we start
+                    # streaming url[0]. The first segment's stream and
+                    # the second segment's connection-open run in
+                    # parallel.
+                    if len(urls) > 1:
+                        next_resp_future = prefetch_pool.submit(_open, urls[1])
+
+                    with open(tmp_path, "wb") as f:
+                        # Write the first URL we already opened.
+                        got = 0
+                        for chunk in first_resp.iter_content(chunk_size=65536):
+                            if not chunk:
+                                continue
+                            self._check_cancel(item.item_id)
+                            f.write(chunk)
+                            got += len(chunk)
+                            bytes_total += len(chunk)
+                            _AGGREGATE_LIMITER.consume(len(chunk))
+                            if limiter is not None:
+                                limiter.consume(len(chunk))
+                            inner = (got / first_len) if first_len else 0.5
+                            _bump(0, inner)
+                        first_resp_cm.__exit__(None, None, None)
+                        first_resp_cm = None
+
+                        # Then every remaining URL concatenated into the
+                        # same file — for DASH hi-res these are per-segment
+                        # binary chunks that form a valid FLAC once joined.
+                        for i, url in enumerate(urls[1:], start=1):
+                            self._check_cancel(item.item_id)
+                            # Pre-fetched response for this segment was
+                            # opened by the worker. result() blocks until
+                            # the worker has the response object (request
+                            # sent + headers received). If the prefetch
+                            # raised, that exception propagates here and
+                            # fails the download cleanly via the outer
+                            # try/except.
+                            assert next_resp_future is not None
+                            resp = next_resp_future.result()
+                            # Kick off the next prefetch immediately so it
+                            # overlaps with this segment's body streaming.
+                            next_resp_future = (
+                                prefetch_pool.submit(_open, urls[i + 1])
+                                if i + 1 < len(urls)
+                                else None
+                            )
+                            try:
+                                resp.raise_for_status()
+                                seg_len = int(resp.headers.get("Content-Length", 0))
+                                seg_got = 0
+                                for chunk in resp.iter_content(chunk_size=65536):
+                                    if not chunk:
+                                        continue
+                                    self._check_cancel(item.item_id)
+                                    f.write(chunk)
+                                    seg_got += len(chunk)
+                                    bytes_total += len(chunk)
+                                    _AGGREGATE_LIMITER.consume(len(chunk))
+                                    if limiter is not None:
+                                        limiter.consume(len(chunk))
+                                    inner = (seg_got / seg_len) if seg_len else 0.5
+                                    _bump(i, inner)
+                            finally:
+                                resp.close()
             finally:
                 if first_resp_cm is not None:
                     try:

@@ -268,6 +268,64 @@ def test_build_path_falls_back_when_template_renders_empty(tmp_path):
 
 
 # ---------------------------------------------------------------------------
+# Non-ASCII titles — issues #7, #36, #70
+#
+# Polish / French / typographic characters in track titles must round-
+# trip through the template renderer untouched. The sanitizer only
+# strips Windows-illegal chars + control bytes; everything else must
+# pass through. Tidal track titles routinely contain accented Latin,
+# Cyrillic, CJK, em-dashes, smart quotes, etc.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "title",
+    [
+        # Polish (puhszkin's reports — #7, #36)
+        "Życie",
+        "Mała czarna sukienka",
+        "Spróbuj się odnaleźć",
+        # French / accented Latin (odyn1982's #70 — Indila / Edith Piaf)
+        "Tourner dans le vide",
+        "Non, je ne regrette rien",
+        "Padam, padam",
+        # Typographic punctuation often present in Tidal titles
+        "Track — feat. Artist",
+        "Don’t Stop",  # right single quote U+2019
+        # Cyrillic + CJK — additional coverage for the broader fix
+        "Подмосковные вечера",
+        "千本桜",
+    ],
+)
+def test_render_preserves_non_ascii_titles(title):
+    """The template renderer must not strip non-ASCII characters from
+    titles. Sanitization only removes Windows-illegal chars (`<>:"/\\|?*`)
+    and control bytes; everything else is part of the user's filename."""
+    item = _item(title=title)
+    out = _render_template("{artist} - {title}", item)
+    assert title in out, (
+        f"Title {title!r} was mangled to {out!r} — non-ASCII chars must "
+        f"survive the sanitizer."
+    )
+
+
+def test_build_path_handles_polish_path_segments(tmp_path):
+    """End-to-end through _build_path: the rendered path under
+    output_dir must contain the original Polish characters byte-for-byte
+    so the downloader can write to it on a case-insensitive Windows FS."""
+    item = _item(title="Życie", artist="Dawid Podsiadło", album="Małomiasteczkowy")
+    settings = _settings(
+        "{album_artist}/{album}/{title}",
+        output_dir=tmp_path,
+        create_album_folders=False,
+    )
+    out = _build_path(item, settings, ".flac")
+    parts = out.relative_to(tmp_path).parts
+    assert parts[-1].startswith("Życie"), parts
+    assert "Małomiasteczkowy" in parts
+
+
+# ---------------------------------------------------------------------------
 # _explicit_marker — small but worth pinning
 # ---------------------------------------------------------------------------
 
