@@ -4241,10 +4241,31 @@ def _native_player() -> PCMPlayer:
     if not _player_bootstrapped:
         _player_bootstrapped = True
         try:
-            if settings.eq_enabled and settings.eq_bands:
+            # Restore EQ — Phase 2 added profile mode, so prefer
+            # the profile path when one is selected; otherwise
+            # fall back to the manual bands path.
+            if (
+                settings.eq_enabled
+                and settings.eq_mode == "profile"
+                and settings.eq_active_profile_id
+            ):
+                try:
+                    from app.audio.autoeq.index import INDEX
+                    profile = INDEX.get(settings.eq_active_profile_id)
+                    if profile is not None:
+                        _pcm_player_singleton.apply_equalizer_profile(profile)
+                except Exception:
+                    log = logging.getLogger("autoeq.bootstrap")
+                    log.exception("autoeq profile restore failed")
+            elif settings.eq_enabled and settings.eq_bands:
                 _pcm_player_singleton.apply_equalizer(
                     settings.eq_bands, preamp=settings.eq_preamp
                 )
+            # Restore A/B bypass flag (Phase 4) — `apply_equalizer`
+            # / `apply_equalizer_profile` above don't touch it, so
+            # the persisted bypass value gets re-applied on top.
+            if settings.eq_bypass:
+                _pcm_player_singleton.set_equalizer_bypass(True)
             if settings.audio_output_device:
                 _pcm_player_singleton.set_output_device(
                     settings.audio_output_device
@@ -4841,12 +4862,35 @@ def autoeq_state() -> dict:
     return {
         "mode": settings.eq_mode,
         "enabled": settings.eq_enabled,
+        "bypass": settings.eq_bypass,
         "active_profile_id": settings.eq_active_profile_id,
         "active_profile": active_profile,
         "manual_bands": list(settings.eq_bands),
         "manual_preamp_db": settings.eq_preamp,
         "profile_catalog_size": INDEX.count(),
     }
+
+
+class _AutoEqBypassRequest(BaseModel):
+    bypass: bool
+
+
+@app.post("/api/eq/bypass")
+def autoeq_set_bypass(req: _AutoEqBypassRequest) -> dict:
+    """A/B bypass toggle. Disables the EQ stage without touching
+    the active configuration — toggling back is instant. The
+    state persists across restarts (so a user listening through
+    a baseline can leave it bypassed and have that survive a
+    relaunch)."""
+    _require_local_access()
+    settings.eq_bypass = bool(req.bypass)
+    save_settings(settings)
+    try:
+        _native_player().set_equalizer_bypass(settings.eq_bypass)
+    except Exception:
+        log = logging.getLogger("autoeq.bypass")
+        log.exception("set_equalizer_bypass failed")
+    return {"ok": True, "bypass": settings.eq_bypass}
 
 
 class _AutoEqLoadProfileRequest(BaseModel):
@@ -8136,6 +8180,7 @@ class SettingsPayload(BaseModel):
     download_rate_limit_mbps: Optional[int] = None
     eq_mode: Optional[str] = None
     eq_active_profile_id: Optional[str] = None
+    eq_bypass: Optional[bool] = None
     eq_device_mappings: Optional[dict] = None
     eq_fallback_when_unmapped: Optional[str] = None
 

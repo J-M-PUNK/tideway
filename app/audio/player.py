@@ -246,6 +246,12 @@ class PCMPlayer:
         # SOS) so the stream-reopen path can recompile coefficients
         # at the new sample rate.
         self._eq_profile = None  # type: ignore[var-annotated]
+        # Phase 4 A/B bypass — momentary disable that preserves
+        # the active SOS / bands so flipping back is instant. The
+        # audio callback reads this each frame; toggling has the
+        # same ~immediate effect as a coefficient-clear without
+        # the cost of rebuilding when the user toggles back on.
+        self._eq_bypass: bool = False
 
         # Audio-callback diagnostics. Each pair is (count, last-print
         # time) for a different rate-limited stderr message:
@@ -982,6 +988,21 @@ class PCMPlayer:
                     self._eq.set_bands(list(bands), preamp_db=preamp)
                 else:
                     self._eq.clear()
+
+    def set_equalizer_bypass(self, bypassed: bool) -> None:
+        """Toggle the A/B bypass flag without touching the active
+        EQ configuration. The audio callback reads this each
+        frame, so the effect is on the next callback (~10 ms).
+        Used by the Phase 4 player-UI button + keyboard shortcut
+        for blink-test comparison."""
+        with self._lock:
+            self._eq_bypass = bool(bypassed)
+
+    def equalizer_bypass(self) -> bool:
+        """Read the current bypass flag — server uses it to expose
+        the value via /api/eq/state."""
+        with self._lock:
+            return self._eq_bypass
 
     def apply_equalizer_profile(self, profile) -> None:
         """Switch to AutoEQ profile mode and apply `profile`. The
@@ -1875,7 +1896,11 @@ class PCMPlayer:
         # pass-through is preserved at flat EQ + full volume + not
         # muted. Filtering requires float32; we round-trip through
         # float32 when the output dtype is int16/int32.
-        if self._eq is not None and self._eq.is_active():
+        if (
+            self._eq is not None
+            and self._eq.is_active()
+            and not self._eq_bypass
+        ):
             if outdata.dtype == np.float32:
                 self._eq.apply(outdata)
             else:

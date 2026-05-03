@@ -101,6 +101,13 @@ class Settings:
     # eq_mode == "profile"; preserved across mode switches so
     # toggling profile/manual/profile keeps the user's pick.
     eq_active_profile_id: str = ""
+    # A/B bypass — momentarily disable the active EQ stage (manual
+    # OR profile) without losing the configuration. Phase 4 of the
+    # scope doc adds a player-UI button + keyboard shortcut for
+    # this so the user can compare correction-on vs correction-off
+    # without unsetting their pick. Persisted so the user can
+    # leave it bypassed and have that survive a relaunch.
+    eq_bypass: bool = False
     # Per-device AutoEQ profile mapping (Phase 3 of the scope doc).
     # Key = device fingerprint as `sounddevice` reports it; value =
     # profile_id, or None to explicitly skip mapping for that device
