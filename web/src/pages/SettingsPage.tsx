@@ -851,6 +851,7 @@ function AudioEngineFields() {
       </Field>
 
       <AutoEqProfileField />
+      <AutoEqDeviceMappingField />
 
       <Field
         label="Equalizer"
@@ -1194,6 +1195,182 @@ function AutoEqProfileField() {
             </div>
           </div>
         )}
+      </div>
+    </Field>
+  );
+}
+
+/**
+ * Per-device AutoEQ profile mapping — Phase 3 of the scope doc.
+ *
+ * For each output device the user has used, lets them pick the
+ * profile to apply. When a device's mapping changes (or the
+ * active device changes), the audio engine resolves the right
+ * profile and applies it live.
+ *
+ * Hidden when the catalog is empty (no profiles bundled) — there
+ * would be nothing to map. Otherwise renders even when no
+ * devices have been seen yet, with a hint about plugging
+ * something in.
+ */
+interface AutoEqDeviceRow {
+  fingerprint: string;
+  display_name: string;
+  kind: string;
+  first_seen: number;
+  last_seen: number;
+  mapped_profile_id: string | null;
+  unmapped?: boolean;
+}
+
+function AutoEqDeviceMappingField() {
+  const toast = useToast();
+  const [data, setData] = useState<{
+    devices: AutoEqDeviceRow[];
+    current_fingerprint: string;
+    fallback: "bypass" | "use_last_profile";
+  } | null>(null);
+  const [profiles, setProfiles] = useState<
+    { id: string; brand: string; model: string }[] | null
+  >(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [d, p] = await Promise.all([
+          api.player.autoEqDevices(),
+          api.player.autoEqList("", 200),
+        ]);
+        if (cancelled) return;
+        setData({
+          devices: d.devices,
+          current_fingerprint: d.current_fingerprint,
+          fallback: d.fallback_when_unmapped,
+        });
+        setProfiles(p.profiles.map((x) => ({ id: x.id, brand: x.brand, model: x.model })));
+      } catch {
+        /* feature not available — keep section hidden */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const setMapping = async (fingerprint: string, profileId: string | null) => {
+    if (!data) return;
+    const prev = data;
+    setData({
+      ...data,
+      devices: data.devices.map((d) =>
+        d.fingerprint === fingerprint
+          ? { ...d, mapped_profile_id: profileId, unmapped: false }
+          : d,
+      ),
+    });
+    try {
+      await api.player.autoEqSetDeviceMapping(fingerprint, profileId);
+    } catch (err) {
+      setData(prev);
+      toast.show({
+        kind: "error",
+        title: "Couldn't set device profile",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+
+  const forget = async (fingerprint: string) => {
+    if (!data) return;
+    const prev = data;
+    setData({
+      ...data,
+      devices: data.devices.filter((d) => d.fingerprint !== fingerprint),
+    });
+    try {
+      await api.player.autoEqForgetDevice(fingerprint);
+    } catch (err) {
+      setData(prev);
+      toast.show({
+        kind: "error",
+        title: "Couldn't forget device",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+
+  if (data === null || profiles === null) return null;
+  if (profiles.length === 0) return null;
+
+  return (
+    <Field
+      label="Output device profiles"
+      hint={
+        data.devices.length === 0
+          ? "Once you've used an output device, it'll show up here so you can map a profile to it."
+          : "Each output device can have its own AutoEQ profile. Tideway switches automatically when you change devices."
+      }
+    >
+      <div className="flex flex-col gap-2">
+        {data.devices.map((d) => {
+          const isActive = d.fingerprint === data.current_fingerprint;
+          const value = d.unmapped
+            ? "__unmapped__"
+            : d.mapped_profile_id ?? "__none__";
+          return (
+            <div
+              key={d.fingerprint}
+              className={cn(
+                "flex flex-wrap items-center gap-2 rounded-md border border-input bg-secondary/40 px-3 py-2 text-xs",
+                isActive && "border-primary bg-primary/10",
+              )}
+            >
+              <div className="flex min-w-0 flex-1 flex-col">
+                <span className="truncate font-semibold">
+                  {d.display_name}
+                  {isActive && (
+                    <span className="ml-2 rounded bg-primary px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-primary-foreground">
+                      Active
+                    </span>
+                  )}
+                </span>
+                <span className="text-muted-foreground">
+                  {d.kind === "unknown" ? "device" : d.kind}
+                </span>
+              </div>
+              <select
+                value={value}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  if (v === "__unmapped__") return; // can't pick unmapped
+                  setMapping(
+                    d.fingerprint,
+                    v === "__none__" ? null : v,
+                  );
+                }}
+                className="h-8 rounded-md border border-input bg-background px-2"
+              >
+                <option value="__unmapped__" disabled>
+                  Use fallback
+                </option>
+                <option value="__none__">No EQ for this device</option>
+                {profiles.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.brand} {p.model}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                onClick={() => forget(d.fingerprint)}
+                className="rounded-md border border-input px-2 py-1 text-[11px] text-muted-foreground hover:bg-accent"
+              >
+                Forget
+              </button>
+            </div>
+          );
+        })}
       </div>
     </Field>
   );

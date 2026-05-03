@@ -1008,6 +1008,38 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ mode }),
       }),
+    /** AutoEQ per-device profile mapping (Phase 3). Returns the
+     *  list of seen output devices, each tagged with its mapped
+     *  profile id (or null = "EQ off for this device", or
+     *  unmapped = "use the fallback rule"). */
+    autoEqDevices: () =>
+      req<{
+        devices: {
+          fingerprint: string;
+          display_name: string;
+          kind: string;
+          first_seen: number;
+          last_seen: number;
+          mapped_profile_id: string | null;
+          unmapped?: boolean;
+        }[];
+        current_fingerprint: string;
+        fallback_when_unmapped: "bypass" | "use_last_profile";
+      }>("/api/eq/devices"),
+    autoEqSetDeviceMapping: (fingerprint: string, profileId: string | null) =>
+      req<{
+        ok: boolean;
+        fingerprint: string;
+        profile_id: string | null;
+      }>("/api/eq/device-mappings", {
+        method: "POST",
+        body: JSON.stringify({ fingerprint, profile_id: profileId }),
+      }),
+    autoEqForgetDevice: (fingerprint: string) =>
+      req<{ ok: boolean; removed: boolean }>("/api/eq/forget-device", {
+        method: "POST",
+        body: JSON.stringify({ fingerprint }),
+      }),
     outputDevices: () =>
       req<{
         devices: { id: string; name: string }[];
