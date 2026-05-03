@@ -53,8 +53,7 @@ export function FullScreenPlayer({
   onClose: () => void;
   onDownload: OnDownload;
 }) {
-  const { track, playing, loading, shuffle, repeat, hasPrev } =
-    usePlayerMeta();
+  const { track, playing, loading, shuffle, repeat, hasPrev } = usePlayerMeta();
   const { currentTime, duration } = usePlayerTime();
   const actions = usePlayerActions();
 
