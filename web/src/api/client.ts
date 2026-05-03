@@ -1048,6 +1048,32 @@ export const api = {
         failed: number;
         last_error: string;
       }>("/api/eq/update-status"),
+    /** Fuzzy-search the cached AutoEQ manifest by headphone name.
+     *  Pairs with autoEqDownloadProfile for the user-clicks-one-
+     *  headphone flow that avoids pulling the full ~5,000-profile
+     *  catalog. Caller must have hit autoEqCheckUpdates first to
+     *  populate the manifest cache; results will be empty otherwise. */
+    autoEqCatalogSearch: (q: string, limit = 20) =>
+      req<{
+        ok: boolean;
+        manifest_cached: boolean;
+        results: {
+          profile_id: string;
+          source: string;
+          headphone: string;
+          on_disk: boolean;
+        }[];
+      }>(`/api/eq/catalog-search?q=${encodeURIComponent(q)}&limit=${limit}`),
+    /** Synchronous download of one specific profile by id. Blocks
+     *  ~1-3 s while the PEQ + measurement CSV come down, then
+     *  resolves once the profile is on disk and the in-memory index
+     *  has been reloaded. The picker should pick up the new entry
+     *  on the next refresh. */
+    autoEqDownloadProfile: (profile_id: string) =>
+      req<{ ok: boolean; profile_id: string }>("/api/eq/download-profile", {
+        method: "POST",
+        body: JSON.stringify({ profile_id }),
+      }),
     /** Phase 6 frequency-response data for the FR graph. Returns
      *  three parallel arrays — raw measured curve, target curve,
      *  predicted post-EQ — at log-spaced frequencies. Raw + target

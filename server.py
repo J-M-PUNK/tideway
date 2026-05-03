@@ -4974,6 +4974,76 @@ def autoeq_update_status() -> dict:
     return updater.status()
 
 
+@app.get("/api/eq/catalog-search")
+def autoeq_catalog_search(q: str = "", limit: int = 20) -> dict:
+    """Fuzzy-search the cached AutoEQ manifest by headphone name.
+    Used by the per-headphone download UI — user types their
+    headphone, picks one match, downloads just that profile,
+    instead of pulling the full ~5,000-profile catalog when they
+    only care about one. Empty query returns the first `limit`
+    alphabetically so the picker has something to render before
+    the user starts typing.
+
+    Caller must have hit `/api/eq/check-updates` first to populate
+    the manifest cache. Returns an empty list otherwise rather
+    than racing the network for a 3 MB tree response on every
+    keystroke.
+    """
+    _require_local_access()
+    from app.audio.autoeq import updater
+    limit = max(1, min(int(limit), 100))
+    hits = updater.search_manifest(q, _autoeq_data_dir_path(), limit=limit)
+    return {
+        "ok": True,
+        "manifest_cached": updater._STATE.manifest is not None,
+        "results": [
+            {
+                "profile_id": h.profile_id,
+                "source": h.source,
+                "headphone": h.headphone,
+                "on_disk": h.on_disk,
+            }
+            for h in hits
+        ],
+    }
+
+
+class _AutoEqDownloadOneRequest(BaseModel):
+    profile_id: str
+
+
+@app.post("/api/eq/download-profile")
+def autoeq_download_profile(req: _AutoEqDownloadOneRequest) -> dict:
+    """Download a single AutoEQ profile by id. Synchronous: blocks
+    for ~1-3 s while the PEQ + measurement CSV come down. Reloads
+    the index on success so the profile surfaces in the picker
+    without an app restart.
+
+    Pairs with `/api/eq/catalog-search`. Avoids the bulk-download
+    flow's 5-minute commitment for users who just want one specific
+    headphone.
+    """
+    _require_local_access()
+    from app.audio.autoeq import updater
+    from app.audio.autoeq.index import INDEX, default_data_dir
+
+    res = updater.download_one(req.profile_id, include_csv=True)
+    if not res.ok:
+        raise HTTPException(
+            status_code=502,
+            detail=f"failed to download {req.profile_id}: {res.reason}",
+        )
+
+    # Reload index so the new profile is selectable immediately.
+    try:
+        INDEX.load_directories([default_data_dir(), updater.cache_dir()])
+    except Exception:
+        log = logging.getLogger("autoeq.updater")
+        log.exception("post-single-download index reload failed")
+
+    return {"ok": True, "profile_id": req.profile_id}
+
+
 @app.get("/api/eq/response")
 def autoeq_response(points: int = 512) -> dict:
     """Frequency-response curves for the Phase 6 graph.

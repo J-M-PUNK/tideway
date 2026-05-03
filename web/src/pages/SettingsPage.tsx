@@ -1542,24 +1542,30 @@ function AutoEqCatalogUpdater({
         </div>
       )}
       {check !== null && progress === null && (
-        <div className="flex items-center justify-between gap-3">
-          <div className="text-muted-foreground">
-            {check.missing > 0
-              ? `${check.missing} new headphone profile${
-                  check.missing === 1 ? "" : "s"
-                } available (${check.total_in_catalog} total in catalog).`
-              : `Already up to date — ${check.total_in_catalog} profile${
-                  check.total_in_catalog === 1 ? "" : "s"
-                } cached.`}
+        <div className="flex flex-col gap-3">
+          <div className="flex items-center justify-between gap-3">
+            <div className="text-muted-foreground">
+              {check.missing > 0
+                ? `${check.missing} new headphone profile${
+                    check.missing === 1 ? "" : "s"
+                  } available (${check.total_in_catalog} total in catalog).`
+                : `Already up to date — ${check.total_in_catalog} profile${
+                    check.total_in_catalog === 1 ? "" : "s"
+                  } cached.`}
+            </div>
+            {check.missing > 0 && (
+              <button
+                type="button"
+                onClick={onDownload}
+                className="rounded-md border border-input px-2.5 py-1 text-[11px] font-semibold text-muted-foreground hover:bg-accent"
+                title="Download every profile in the catalog (~5 MB total)"
+              >
+                Download all
+              </button>
+            )}
           </div>
           {check.missing > 0 && (
-            <button
-              type="button"
-              onClick={onDownload}
-              className="rounded-md border border-primary bg-primary px-2.5 py-1 text-[11px] font-semibold text-primary-foreground hover:bg-primary/80"
-            >
-              Download all
-            </button>
+            <AutoEqCatalogSearch onChanged={onCatalogChanged} />
           )}
         </div>
       )}
@@ -1587,6 +1593,132 @@ function AutoEqCatalogUpdater({
               }}
             />
           </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Per-headphone download UI. After the catalog manifest is
+ * cached, the user types their headphone name and gets a list
+ * of fuzzy-matched candidates with a Download button each.
+ * Pulls just the one profile (PEQ + measurement CSV, ~50 KB)
+ * instead of committing to the full ~5,000-profile bulk pull.
+ *
+ * Debounce is 200 ms so the search input doesn't fire a request
+ * on every keystroke — the backend would handle the load fine,
+ * but the network round-trip plus rapidfuzz scan is wasted work
+ * for half-typed words.
+ */
+function AutoEqCatalogSearch({ onChanged }: { onChanged: () => void }) {
+  const toast = useToast();
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<
+    {
+      profile_id: string;
+      source: string;
+      headphone: string;
+      on_disk: boolean;
+    }[]
+  >([]);
+  const [searching, setSearching] = useState(false);
+  const [downloading, setDownloading] = useState<string | null>(null);
+
+  // Debounced search. The `searching` state stays true between
+  // keystrokes so the UI doesn't flicker spinner / no-spinner
+  // every 50ms while the user types fast.
+  useEffect(() => {
+    setSearching(true);
+    const handle = window.setTimeout(async () => {
+      try {
+        const r = await api.player.autoEqCatalogSearch(query, 12);
+        setResults(r.results);
+      } catch {
+        setResults([]);
+      } finally {
+        setSearching(false);
+      }
+    }, 200);
+    return () => {
+      window.clearTimeout(handle);
+    };
+  }, [query]);
+
+  const downloadOne = async (profile_id: string, headphone: string) => {
+    setDownloading(profile_id);
+    try {
+      await api.player.autoEqDownloadProfile(profile_id);
+      toast.show({
+        kind: "success",
+        title: "Downloaded",
+        description: headphone,
+      });
+      // Mark the row as on-disk so the button flips to a checkmark.
+      setResults((prev) =>
+        prev.map((r) =>
+          r.profile_id === profile_id ? { ...r, on_disk: true } : r,
+        ),
+      );
+      onChanged();
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: "Couldn't download",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setDownloading(null);
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-2">
+      <input
+        type="text"
+        value={query}
+        onChange={(e) => setQuery(e.target.value)}
+        placeholder="Search by headphone (e.g. HD 600, AirPods Max)…"
+        className="h-8 rounded-md border border-input bg-background px-2 text-xs"
+      />
+      {results.length > 0 ? (
+        <div className="max-h-64 overflow-y-auto rounded-md border border-input bg-background/40">
+          {results.map((r) => (
+            <div
+              key={r.profile_id}
+              className="flex items-center justify-between gap-2 border-b border-input/40 px-2 py-1.5 last:border-0"
+            >
+              <div className="min-w-0 flex-1 truncate">
+                <span className="font-medium">{r.headphone}</span>
+                <span className="ml-2 text-muted-foreground">{r.source}</span>
+              </div>
+              {r.on_disk ? (
+                <span
+                  className="text-[10px] font-semibold uppercase text-emerald-500"
+                  title="Already on disk — pickable in the profile dropdown"
+                >
+                  Installed
+                </span>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => downloadOne(r.profile_id, r.headphone)}
+                  disabled={downloading === r.profile_id}
+                  className="rounded border border-primary bg-primary px-2 py-0.5 text-[10px] font-semibold text-primary-foreground hover:bg-primary/80 disabled:opacity-50"
+                >
+                  {downloading === r.profile_id ? "…" : "Download"}
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="text-muted-foreground">
+          {searching
+            ? "Searching…"
+            : query.trim()
+              ? "No matches in the AutoEQ catalog."
+              : "Start typing to search the full catalog."}
         </div>
       )}
     </div>
