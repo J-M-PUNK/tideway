@@ -151,12 +151,17 @@ export function SearchSuggestions({
   // Keyboard handling lives at the document level so the user can
   // type / arrow-key without the input losing focus. Refs hold the
   // latest activate / onCloseRequested so the listener doesn't have
-  // to re-attach on every render — handy when the parent recreates
-  // the close callback inline (NavBar does).
+  // to re-attach on every render, which matters because NavBar
+  // recreates the close callback inline. The ref writes go in their
+  // own effect rather than the render body so we only update them
+  // for committed renders, not for renders concurrent React may
+  // start and discard.
   const activateRef = useRef(activate);
   const closeRef = useRef(onCloseRequested);
-  activateRef.current = activate;
-  closeRef.current = onCloseRequested;
+  useEffect(() => {
+    activateRef.current = activate;
+    closeRef.current = onCloseRequested;
+  });
 
   useEffect(() => {
     if (!open) return;
