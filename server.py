@@ -526,6 +526,19 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     _cleanup_part_files(output_root)
     local_index.start_scan(output_root)
 
+    # Load the bundled AutoEQ profile catalog. Cheap (one disk
+    # walk over ~7 small text files in this Phase 2 release;
+    # later phases swap in a larger update-channel-managed set).
+    # If the data dir is missing, the index logs and stays empty
+    # — feature degrades to "no profiles available" rather than
+    # blocking server startup.
+    try:
+        from app.audio.autoeq.index import INDEX as _AUTOEQ_INDEX
+        from app.audio.autoeq.index import default_data_dir as _autoeq_data_dir
+        _AUTOEQ_INDEX.load_directory(_autoeq_data_dir())
+    except Exception as exc:
+        print(f"[autoeq] startup index load failed: {exc}", flush=True)
+
     # Start the global media-key listener. Publishes events to
     # _hotkey_bus → /api/hotkey/events SSE → frontend maps to
     # usePlayer actions. On macOS, pynput needs Accessibility
@@ -4746,6 +4759,198 @@ def player_eq_enabled(req: _PlayerEqEnabledRequest) -> dict:
     return {"ok": True, "enabled": settings.eq_enabled}
 
 
+# --- AutoEQ headphone profiles ---------------------------------------------
+# See docs/autoeq-headphone-profiles-scope.md. Phase 2 endpoints:
+# search/list profiles, fetch one, get current state, switch mode,
+# load a profile. Phase 3 (per-device mapping) and 4-6 (A/B,
+# graphs, tilt) are separate PRs.
+
+
+def _profile_summary_dict(profile) -> dict:
+    """Lightweight profile shape for list endpoints — no bands."""
+    return {
+        "id": profile.profile_id,
+        "brand": profile.brand,
+        "model": profile.model,
+        "source": profile.source,
+        "preamp_db": profile.preamp_db,
+        "band_count": len(profile.bands),
+    }
+
+
+def _profile_detail_dict(profile) -> dict:
+    """Full profile shape with band details."""
+    return {
+        **_profile_summary_dict(profile),
+        "bands": [
+            {
+                "filter_type": b.filter_type,
+                "freq_hz": b.freq_hz,
+                "gain_db": b.gain_db,
+                "q": b.q,
+            }
+            for b in profile.bands
+        ],
+    }
+
+
+@app.get("/api/eq/profiles")
+def autoeq_profiles_list(q: str = "", limit: int = 50) -> dict:
+    """Search the bundled AutoEQ catalog. Empty query returns
+    the first `limit` profiles alphabetically — useful for the
+    picker's first paint before the user types anything."""
+    _require_local_access()
+    from app.audio.autoeq.index import INDEX
+
+    limit = max(1, min(int(limit), 200))
+    matches = INDEX.search(q, limit=limit)
+    return {
+        "total": INDEX.count(),
+        "profiles": [_profile_summary_dict(p) for p in matches],
+    }
+
+
+@app.get("/api/eq/profiles/{profile_id:path}")
+def autoeq_profile_detail(profile_id: str) -> dict:
+    """Full profile details including band list. `:path` so IDs
+    with embedded slashes ("oratory1990/Sennheiser HD 600") round-
+    trip without manual URL escaping."""
+    _require_local_access()
+    from app.audio.autoeq.index import INDEX
+
+    profile = INDEX.get(profile_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail=f"profile not found: {profile_id}")
+    return _profile_detail_dict(profile)
+
+
+@app.get("/api/eq/state")
+def autoeq_state() -> dict:
+    """Current EQ state — what mode the user is in, what profile
+    (if any) is active, and the current manual bands. Frontend
+    reads this on mount + on every settings update so the EQ
+    panel reflects reality."""
+    _require_local_access()
+    from app.audio.autoeq.index import INDEX
+
+    active_profile = None
+    if settings.eq_active_profile_id:
+        p = INDEX.get(settings.eq_active_profile_id)
+        if p is not None:
+            active_profile = _profile_summary_dict(p)
+    return {
+        "mode": settings.eq_mode,
+        "enabled": settings.eq_enabled,
+        "active_profile_id": settings.eq_active_profile_id,
+        "active_profile": active_profile,
+        "manual_bands": list(settings.eq_bands),
+        "manual_preamp_db": settings.eq_preamp,
+        "profile_catalog_size": INDEX.count(),
+    }
+
+
+class _AutoEqLoadProfileRequest(BaseModel):
+    profile_id: str
+
+
+@app.post("/api/eq/load-profile")
+def autoeq_load_profile(req: _AutoEqLoadProfileRequest) -> dict:
+    """Switch to profile mode and apply the named profile. The
+    profile compiles to an SOS at the player's current sample
+    rate; on stream reopen the same profile is recompiled at
+    the new rate so the curve survives cross-rate transitions.
+    Persists `eq_mode = "profile"` and `eq_active_profile_id` so
+    the choice survives restart."""
+    _require_local_access()
+    from app.audio.autoeq.index import INDEX
+
+    profile = INDEX.get(req.profile_id)
+    if profile is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"profile not found: {req.profile_id}",
+        )
+
+    settings.eq_mode = "profile"
+    settings.eq_active_profile_id = req.profile_id
+    settings.eq_enabled = True
+    save_settings(settings)
+
+    player = _native_player()
+    try:
+        player.apply_equalizer_profile(profile)
+    except Exception as exc:
+        # Don't roll back the persisted settings — the profile is
+        # valid (we just parsed it from the index), so a transient
+        # apply failure is the player's problem, not the user's.
+        # Surface as a 500 so the UI knows the visual state hasn't
+        # changed even though settings did.
+        raise HTTPException(
+            status_code=500, detail=f"failed to apply profile: {exc}"
+        )
+
+    return {
+        "ok": True,
+        "mode": settings.eq_mode,
+        "active_profile_id": settings.eq_active_profile_id,
+        "active_profile": _profile_detail_dict(profile),
+    }
+
+
+class _AutoEqModeRequest(BaseModel):
+    mode: str  # "off" | "manual" | "profile"
+
+
+@app.post("/api/eq/mode")
+def autoeq_set_mode(req: _AutoEqModeRequest) -> dict:
+    """Switch the EQ mode. Doesn't destroy the other mode's
+    state — switching profile → manual → profile lands the user
+    back at the same profile they had before."""
+    _require_local_access()
+    valid = {"off", "manual", "profile"}
+    if req.mode not in valid:
+        raise HTTPException(
+            status_code=400,
+            detail=f"mode must be one of {sorted(valid)}",
+        )
+
+    settings.eq_mode = req.mode
+    player = _native_player()
+
+    if req.mode == "off":
+        settings.eq_enabled = False
+        player.apply_equalizer([])
+    elif req.mode == "manual":
+        settings.eq_enabled = True
+        if settings.eq_bands:
+            player.apply_equalizer(
+                settings.eq_bands, preamp=settings.eq_preamp
+            )
+        else:
+            player.apply_equalizer([])
+    elif req.mode == "profile":
+        from app.audio.autoeq.index import INDEX
+
+        settings.eq_enabled = True
+        if settings.eq_active_profile_id:
+            p = INDEX.get(settings.eq_active_profile_id)
+            if p is not None:
+                player.apply_equalizer_profile(p)
+            else:
+                # Profile previously selected was removed/renamed.
+                # Bypass rather than crash; user picks a new one.
+                player.apply_equalizer([])
+        else:
+            player.apply_equalizer([])
+
+    save_settings(settings)
+    return {
+        "ok": True,
+        "mode": settings.eq_mode,
+        "enabled": settings.eq_enabled,
+    }
+
+
 @app.get("/api/player/output-devices")
 def player_output_devices() -> dict:
     _require_local_access()
@@ -7755,6 +7960,8 @@ class SettingsPayload(BaseModel):
     start_minimized: Optional[bool] = None
     explicit_content_preference: Optional[str] = None
     download_rate_limit_mbps: Optional[int] = None
+    eq_mode: Optional[str] = None
+    eq_active_profile_id: Optional[str] = None
 
 
 @app.get("/api/settings")

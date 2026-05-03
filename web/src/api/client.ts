@@ -945,6 +945,69 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ enabled }),
       }),
+    /** AutoEQ headphone-profile endpoints (see
+     *  docs/autoeq-headphone-profiles-scope.md). The profile
+     *  catalog is bundled in the desktop app; the picker fetches
+     *  matches from the index built at server startup. */
+    autoEqList: (q: string, limit = 50) =>
+      req<{
+        total: number;
+        profiles: {
+          id: string;
+          brand: string;
+          model: string;
+          source: string;
+          preamp_db: number;
+          band_count: number;
+        }[];
+      }>(
+        `/api/eq/profiles?q=${encodeURIComponent(q)}&limit=${limit}`,
+      ),
+    autoEqState: () =>
+      req<{
+        mode: "off" | "manual" | "profile";
+        enabled: boolean;
+        active_profile_id: string;
+        active_profile: {
+          id: string;
+          brand: string;
+          model: string;
+          source: string;
+          preamp_db: number;
+          band_count: number;
+        } | null;
+        manual_bands: number[];
+        manual_preamp_db: number | null;
+        profile_catalog_size: number;
+      }>("/api/eq/state"),
+    autoEqLoadProfile: (profileId: string) =>
+      req<{
+        ok: boolean;
+        mode: string;
+        active_profile_id: string;
+        active_profile: {
+          id: string;
+          brand: string;
+          model: string;
+          source: string;
+          preamp_db: number;
+          band_count: number;
+          bands: {
+            filter_type: string;
+            freq_hz: number;
+            gain_db: number;
+            q: number;
+          }[];
+        };
+      }>("/api/eq/load-profile", {
+        method: "POST",
+        body: JSON.stringify({ profile_id: profileId }),
+      }),
+    autoEqSetMode: (mode: "off" | "manual" | "profile") =>
+      req<{ ok: boolean; mode: string; enabled: boolean }>("/api/eq/mode", {
+        method: "POST",
+        body: JSON.stringify({ mode }),
+      }),
     outputDevices: () =>
       req<{
         devices: { id: string; name: string }[];
