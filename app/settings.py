@@ -101,6 +101,19 @@ class Settings:
     # eq_mode == "profile"; preserved across mode switches so
     # toggling profile/manual/profile keeps the user's pick.
     eq_active_profile_id: str = ""
+    # Per-device AutoEQ profile mapping (Phase 3 of the scope doc).
+    # Key = device fingerprint as `sounddevice` reports it; value =
+    # profile_id, or None to explicitly skip mapping for that device
+    # (e.g. an HDMI output to a TV where EQ doesn't make sense).
+    # When the active output device changes, the resolver looks up
+    # this map and applies the matching profile.
+    eq_device_mappings: dict[str, Optional[str]] = field(default_factory=dict)
+    # Behaviour when the active device has no mapping entry:
+    #   "bypass" — clear the EQ (safest; user opts in by mapping).
+    #   "use_last_profile" — keep the last-applied profile active
+    #     even on unmapped devices. Convenient for users who only
+    #     ever listen on one pair.
+    eq_fallback_when_unmapped: str = "bypass"
     # sounddevice output-device index (stringified, matches what
     # /api/player/output-devices returns). Empty string means "use
     # the system default". Persisted so USB DAC / Bluetooth

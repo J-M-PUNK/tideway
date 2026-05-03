@@ -4897,6 +4897,119 @@ def autoeq_load_profile(req: _AutoEqLoadProfileRequest) -> dict:
     }
 
 
+class _AutoEqDeviceMappingRequest(BaseModel):
+    fingerprint: str
+    profile_id: Optional[str] = None  # None = "no EQ for this device"
+
+
+class _AutoEqForgetDeviceRequest(BaseModel):
+    fingerprint: str
+
+
+@app.get("/api/eq/devices")
+def autoeq_devices() -> dict:
+    """Seen output devices + their currently-mapped profiles.
+    Powers the per-device profile picker in Settings → Playback.
+
+    Includes a `current_fingerprint` field so the picker can
+    highlight / pin the active device. The fingerprint is
+    derived the same way the resolver does it — by looking up
+    the active device's name in the live device list."""
+    _require_local_access()
+    from app.audio.autoeq.seen_devices import STORE as _SEEN_STORE
+
+    seen = _SEEN_STORE.list()
+    # Decorate each seen device with its current mapping (if any)
+    # so the picker can render checkboxes / dropdowns inline.
+    for entry in seen:
+        fp = entry.get("fingerprint", "")
+        if fp in settings.eq_device_mappings:
+            entry["mapped_profile_id"] = settings.eq_device_mappings[fp]
+        else:
+            entry["mapped_profile_id"] = None
+            entry["unmapped"] = True
+
+    # Active fingerprint — what's currently driving playback.
+    current_fingerprint = ""
+    try:
+        device_list = _native_player().list_output_devices()
+        for entry in device_list:
+            if entry.get("id") == settings.audio_output_device:
+                current_fingerprint = entry.get("name") or ""
+                break
+    except Exception:
+        pass
+
+    return {
+        "devices": seen,
+        "current_fingerprint": current_fingerprint,
+        "fallback_when_unmapped": settings.eq_fallback_when_unmapped,
+    }
+
+
+@app.post("/api/eq/device-mappings")
+def autoeq_set_device_mapping(req: _AutoEqDeviceMappingRequest) -> dict:
+    """Set (or clear) the AutoEQ profile mapped to a specific
+    output device. `profile_id=null` explicitly mutes the EQ for
+    this device. To remove the mapping entirely (so the device
+    falls back to `eq_fallback_when_unmapped`), use the
+    `/api/eq/device-mappings/clear` endpoint."""
+    _require_local_access()
+    from app.audio.autoeq.index import INDEX
+
+    if req.profile_id is not None and INDEX.get(req.profile_id) is None:
+        raise HTTPException(
+            status_code=404, detail=f"profile not found: {req.profile_id}"
+        )
+
+    settings.eq_device_mappings[req.fingerprint] = req.profile_id
+
+    # If this is the currently-active device and we're in profile
+    # mode, apply the new mapping immediately so the user hears
+    # the result without having to switch away and back.
+    try:
+        player = _native_player()
+        device_list = player.list_output_devices()
+        active_fp = ""
+        for entry in device_list:
+            if entry.get("id") == settings.audio_output_device:
+                active_fp = entry.get("name") or ""
+                break
+        if active_fp == req.fingerprint and settings.eq_mode == "profile":
+            if req.profile_id is None:
+                player.apply_equalizer([])
+                settings.eq_active_profile_id = ""
+            else:
+                profile = INDEX.get(req.profile_id)
+                if profile is not None:
+                    player.apply_equalizer_profile(profile)
+                    settings.eq_active_profile_id = req.profile_id
+    except Exception:
+        log = logging.getLogger("autoeq.resolver")
+        log.exception("autoeq apply-on-set failed")
+
+    save_settings(settings)
+    return {
+        "ok": True,
+        "fingerprint": req.fingerprint,
+        "profile_id": req.profile_id,
+    }
+
+
+@app.post("/api/eq/forget-device")
+def autoeq_forget_device(req: _AutoEqForgetDeviceRequest) -> dict:
+    """Remove a device from the seen-list and drop any mapping
+    it had. Doesn't affect the active device or the active
+    profile — just cleans up clutter in the picker."""
+    _require_local_access()
+    from app.audio.autoeq.seen_devices import STORE as _SEEN_STORE
+
+    removed = _SEEN_STORE.forget(req.fingerprint)
+    settings.eq_device_mappings.pop(req.fingerprint, None)
+    save_settings(settings)
+    return {"ok": True, "removed": removed}
+
+
 class _AutoEqModeRequest(BaseModel):
     mode: str  # "off" | "manual" | "profile"
 
@@ -4964,10 +5077,71 @@ def player_output_devices() -> dict:
 @app.post("/api/player/output-device")
 def player_set_output_device(req: _PlayerOutputDeviceRequest) -> dict:
     _require_local_access()
-    _native_player().set_output_device(req.device_id)
+    player = _native_player()
+    player.set_output_device(req.device_id)
     settings.audio_output_device = req.device_id
+
+    # Track this device in the seen-list so the user can map a
+    # profile to it later, and run the AutoEQ resolver to apply
+    # the matching profile (or fallback) if the user is in
+    # profile mode. No-op when in manual / off mode.
+    _autoeq_on_device_change(req.device_id)
+
     save_settings(settings)
     return {"ok": True, "device_id": settings.audio_output_device}
+
+
+def _autoeq_on_device_change(device_id: str) -> None:
+    """Bridge between an output-device change and the AutoEQ
+    per-device resolver. Resolves the device's fingerprint from
+    the active device list, upserts it into the seen-devices
+    store, then applies the resolver's decision to the player and
+    persists `eq_active_profile_id` if the resolver picked or
+    cleared a profile.
+
+    Failures here are logged + swallowed — a bug in the resolver
+    must not prevent the audio device switch from completing.
+    """
+    if settings.eq_mode != "profile":
+        return
+
+    try:
+        from app.audio.autoeq.index import INDEX
+        from app.audio.autoeq.resolver import resolve_for_device
+        from app.audio.autoeq.seen_devices import STORE as _SEEN_STORE
+
+        # Look up the human-readable device name (the fingerprint)
+        # from the active device list. The empty id == "system
+        # default" — we still upsert it so users with one device
+        # can map it.
+        player = _native_player()
+        device_list = player.list_output_devices()
+        fingerprint = ""
+        for entry in device_list:
+            if entry.get("id") == device_id:
+                fingerprint = entry.get("name") or ""
+                break
+        if not fingerprint:
+            return
+
+        _SEEN_STORE.upsert(fingerprint)
+
+        decision = resolve_for_device(
+            fingerprint,
+            device_mappings=dict(settings.eq_device_mappings),
+            fallback=settings.eq_fallback_when_unmapped,
+            current_active_profile_id=settings.eq_active_profile_id,
+            index=INDEX,
+        )
+
+        settings.eq_active_profile_id = decision.active_profile_id
+        if decision.profile is not None:
+            player.apply_equalizer_profile(decision.profile)
+        else:
+            player.apply_equalizer([])
+    except Exception:
+        log = logging.getLogger("autoeq.resolver")
+        log.exception("autoeq device-change resolver failed")
 
 
 # ---------------------------------------------------------------------------
@@ -7962,6 +8136,8 @@ class SettingsPayload(BaseModel):
     download_rate_limit_mbps: Optional[int] = None
     eq_mode: Optional[str] = None
     eq_active_profile_id: Optional[str] = None
+    eq_device_mappings: Optional[dict] = None
+    eq_fallback_when_unmapped: Optional[str] = None
 
 
 @app.get("/api/settings")
