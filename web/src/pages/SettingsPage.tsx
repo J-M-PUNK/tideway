@@ -29,6 +29,11 @@ import {
 import { api } from "@/api/client";
 import type { QualityOption, Settings } from "@/api/types";
 import {
+  useAutoEqState,
+  type AutoEqMode,
+  type AutoEqState,
+} from "@/hooks/useAutoEqState";
+import {
   TEMPLATE_TOKENS,
   previewFilenameTemplateAsString,
 } from "@/lib/filenameTemplate";
@@ -742,6 +747,14 @@ function AudioEngineFields() {
     current: string;
   } | null>(null);
 
+  // The Headphone profile picker above (AutoEqProfileField) is the
+  // single source of truth for whether the EQ stage runs. We read
+  // its mode here so the manual sliders can dim themselves when the
+  // mode is "off" or "profile" without showing a separate Enable
+  // toggle that would just duplicate the picker's "Off" button.
+  const { state: autoEqState } = useAutoEqState(true);
+  const manualActive = autoEqState?.mode === "manual";
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -761,22 +774,6 @@ function AudioEngineFields() {
       cancelled = true;
     };
   }, []);
-
-  const toggleEnabled = async (enabled: boolean) => {
-    if (!eq) return;
-    // Optimistic update so the toggle feels instant; roll back on error.
-    setEq({ ...eq, enabled });
-    try {
-      await api.player.setEqEnabled(enabled);
-    } catch (err) {
-      setEq({ ...eq, enabled: !enabled });
-      toast.show({
-        kind: "error",
-        title: "Couldn't toggle equalizer",
-        description: err instanceof Error ? err.message : String(err),
-      });
-    }
-  };
 
   // Local mirror of the slider state so dragging is instant; flush to
   // the backend on release (via mouse-up / change commit).
@@ -850,66 +847,62 @@ function AudioEngineFields() {
         </select>
       </Field>
 
+      <AutoEqProfileField />
+      <AutoEqDeviceMappingField />
+
       <Field
-        label="Equalizer"
+        label="Manual EQ"
         hint={
-          eq.enabled
+          manualActive
             ? "Drag sliders or pick a preset. Reset flattens to zero."
-            : "Equalizer is off — toggle it on to hear your changes. Curves are saved either way."
+            : 'Switch the Headphone profile picker above to "Manual" to hear these sliders. Curves are saved either way.'
         }
       >
-        <div className="flex flex-col gap-3">
-          <Toggle
-            checked={eq.enabled}
-            onChange={toggleEnabled}
-            label="Enable equalizer"
-          />
-          <div
-            className={cn(
-              "flex flex-col gap-3 transition-opacity",
-              !eq.enabled && "opacity-50",
-            )}
-          >
-            <div className="flex flex-wrap items-center gap-2">
-              <select
-                onChange={(e) => {
-                  const n = parseInt(e.target.value, 10);
-                  if (!isNaN(n)) pickPreset(n);
-                }}
-                value=""
-                className="h-9 rounded-md border border-input bg-secondary px-3 text-xs"
-              >
-                <option value="">Presets…</option>
-                {eq.presets.map((p) => (
-                  <option key={p.index} value={p.index}>
-                    {p.name}
-                  </option>
-                ))}
-              </select>
-              <Button size="sm" variant="outline" onClick={reset}>
-                Reset
-              </Button>
-            </div>
-
-            <div className="flex items-end gap-3">
-              {localBands?.map((v, i) => (
-                <EqSlider
-                  key={i}
-                  value={v}
-                  freq={eq.frequencies[i]}
-                  onChange={(nv) => {
-                    const next = [...localBands];
-                    next[i] = nv;
-                    setLocalBands(next);
-                  }}
-                  onCommit={(nv) => {
-                    const next = [...localBands];
-                    next[i] = nv;
-                    flush(next);
-                  }}
-                />
+        <div
+          className={cn(
+            "flex flex-col gap-3 transition-opacity",
+            !manualActive && "opacity-50",
+          )}
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <select
+              onChange={(e) => {
+                const n = parseInt(e.target.value, 10);
+                if (!isNaN(n)) pickPreset(n);
+              }}
+              value=""
+              className="h-9 rounded-md border border-input bg-secondary px-3 text-xs"
+            >
+              <option value="">Presets…</option>
+              {eq.presets.map((p) => (
+                <option key={p.index} value={p.index}>
+                  {p.name}
+                </option>
               ))}
-            </div>
+            </select>
+            <Button size="sm" variant="outline" onClick={reset}>
+              Reset
+            </Button>
+          </div>
+
+          <div className="flex items-end gap-3">
+            {localBands?.map((v, i) => (
+              <EqSlider
+                key={i}
+                value={v}
+                freq={eq.frequencies[i]}
+                onChange={(nv) => {
+                  const next = [...localBands];
+                  next[i] = nv;
+                  setLocalBands(next);
+                }}
+                onCommit={(nv) => {
+                  const next = [...localBands];
+                  next[i] = nv;
+                  flush(next);
+                }}
+              />
+            ))}
           </div>
         </div>
       </Field>
@@ -976,6 +969,1014 @@ function EqSlider({
  * on pyatv's documented API; first real test will surface any
  * protocol quirks on HomePods, AirPlay speakers, or Apple TVs.
  */
+
+/**
+ * Headphone-profile section — Phase 2 of the AutoEQ work.
+ *
+ * Shows a mode toggle (Off / Manual / Profile) and, when in
+ * profile mode, a search input + result list. Manual mode keeps
+ * the existing 10-band sliders below; the two modes coexist via
+ * the backend `eq_mode` setting.
+ *
+ * Search is server-side (the backend has rapidfuzz when
+ * available; falls back to substring match). We re-fetch on
+ * every keystroke after a 200ms debounce — the catalog is small
+ * enough (~7 profiles in v1, ~5,000 once Phase 7 ships) that the
+ * cost is negligible.
+ */
+// Types moved to @/hooks/useAutoEqState (single source of truth).
+// This block previously had a parallel definition that drifted —
+// it lacked the `bypass` field added in Phase 4, for instance.
+
+function AutoEqProfileField() {
+  const toast = useToast();
+  const [state, setState] = useState<AutoEqState | null>(null);
+
+  // Refetch the EQ state. Called once on mount + whenever a
+  // child surface (HeadphonePicker, etc.) wants to re-pull
+  // because something changed server-side.
+  const refresh = async () => {
+    try {
+      const s = await api.player.autoEqState();
+      setState(s);
+    } catch {
+      /* feature not available — keep section hidden */
+    }
+  };
+
+  useEffect(() => {
+    void refresh();
+  }, []);
+
+  if (state === null) return null;
+
+  const switchMode = async (mode: AutoEqMode) => {
+    const prev = state;
+    setState({ ...state, mode });
+    try {
+      await api.player.autoEqSetMode(mode);
+    } catch (err) {
+      setState(prev);
+      toast.show({
+        kind: "error",
+        title: "Couldn't switch EQ mode",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+
+  const modeBtn = (mode: AutoEqMode, label: string) => (
+    <button
+      key={mode}
+      type="button"
+      onClick={() => switchMode(mode)}
+      className={cn(
+        "flex-1 rounded-md border border-input px-3 py-1.5 text-xs font-semibold transition-colors",
+        state.mode === mode
+          ? "bg-primary text-primary-foreground"
+          : "bg-secondary text-foreground hover:bg-accent",
+      )}
+    >
+      {label}
+    </button>
+  );
+
+  return (
+    <Field
+      label="Headphone profile"
+      hint={
+        state.profile_catalog_size === 0
+          ? "No profiles bundled. Profile mode disabled."
+          : `Pick your headphones; AutoEQ correction applies live.`
+      }
+    >
+      <div className="flex flex-col gap-3">
+        <div className="flex gap-1">
+          {modeBtn("off", "Off")}
+          {modeBtn("manual", "Manual")}
+          {modeBtn("profile", "Profile")}
+        </div>
+
+        {state.mode === "profile" && (
+          <HeadphonePicker
+            activeProfileId={state.active_profile_id}
+            activeProfile={state.active_profile}
+            onPicked={() => {
+              // Server already applied the new profile; refresh
+              // local state so the FR graph + tilt sliders bind
+              // to the correct active id.
+              void refresh();
+            }}
+          />
+        )}
+
+        {state.mode === "profile" && state.active_profile && (
+          <>
+            <AutoEqTiltSliders
+              initial={state.tilt}
+              onChange={(t) =>
+                setState((prev) => (prev ? { ...prev, tilt: t } : prev))
+              }
+            />
+            <AutoEqResponseGraph
+              activeProfileId={state.active_profile_id}
+              tilt={state.tilt}
+            />
+          </>
+        )}
+      </div>
+    </Field>
+  );
+}
+
+/**
+ * Two-level catalog browser: search shows one row per unique
+ * headphone, click a row to expand the list of measurement
+ * sources that have it. Each source row has a clear next-action
+ * — "Active" if it's the currently-loaded profile, "Use" for
+ * already-installed sources, "Download" for ones that need to
+ * be fetched first (which then auto-load on success).
+ *
+ * Collapses the older two-search-input-with-overlapping-data
+ * mess. The user sees one search box; "your headphone" is the
+ * primary mental model and the source picker is the obvious
+ * next step once you've pointed at the right headphone.
+ *
+ * On first mount this fires `/api/eq/check-updates` to populate
+ * the manifest cache so the search returns the full ~5,000-
+ * profile catalog right away. The cache lives for the server
+ * session, so subsequent mounts are instant.
+ */
+type HeadphoneRow = {
+  headphone: string;
+  installed_count: number;
+  total_count: number;
+  sources: {
+    profile_id: string;
+    source: string;
+    on_disk: boolean;
+    is_active: boolean;
+  }[];
+};
+
+function HeadphonePicker({
+  activeProfileId,
+  activeProfile,
+  onPicked,
+}: {
+  activeProfileId: string;
+  activeProfile: AutoEqState["active_profile"];
+  onPicked: () => void;
+}) {
+  const toast = useToast();
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<HeadphoneRow[]>([]);
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const [searching, setSearching] = useState(false);
+  const [busy, setBusy] = useState<string | null>(null); // profile_id in-flight
+  const [manifestStatus, setManifestStatus] = useState<
+    "loading" | "ready" | "failed"
+  >("loading");
+
+  // Populate the manifest on first mount so the search has the
+  // full catalog to scan, not just bundled profiles. The fetch
+  // is ~3 MB JSON from GitHub so a brief loading state is honest.
+  useEffect(() => {
+    let cancelled = false;
+    void (async () => {
+      try {
+        await api.player.autoEqCheckUpdates();
+        if (!cancelled) setManifestStatus("ready");
+      } catch {
+        if (!cancelled) setManifestStatus("failed");
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Debounced search. Only fires once the manifest is in cache
+  // — searching before that would just return empty rows.
+  useEffect(() => {
+    if (manifestStatus !== "ready") return;
+    setSearching(true);
+    const handle = window.setTimeout(async () => {
+      try {
+        const r = await api.player.autoEqHeadphones(query, 25);
+        setResults(r.results);
+      } catch {
+        setResults([]);
+      } finally {
+        setSearching(false);
+      }
+    }, 200);
+    return () => window.clearTimeout(handle);
+  }, [query, manifestStatus]);
+
+  const refreshManifest = async () => {
+    setManifestStatus("loading");
+    try {
+      await api.player.autoEqCheckUpdates();
+      setManifestStatus("ready");
+    } catch (err) {
+      setManifestStatus("failed");
+      toast.show({
+        kind: "error",
+        title: "Couldn't refresh AutoEQ catalog",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+
+  const useProfile = async (profile_id: string) => {
+    setBusy(profile_id);
+    try {
+      await api.player.autoEqLoadProfile(profile_id);
+      onPicked();
+      // Mark this source as active in the local copy so the badge
+      // flips immediately without waiting for the next search round.
+      setResults((prev) =>
+        prev.map((row) => ({
+          ...row,
+          sources: row.sources.map((s) => ({
+            ...s,
+            is_active: s.profile_id === profile_id,
+          })),
+        })),
+      );
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: "Couldn't load profile",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const downloadAndUse = async (profile_id: string, headphone: string) => {
+    setBusy(profile_id);
+    try {
+      await api.player.autoEqDownloadProfile(profile_id);
+      await api.player.autoEqLoadProfile(profile_id);
+      onPicked();
+      toast.show({
+        kind: "success",
+        title: "Downloaded and applied",
+        description: headphone,
+      });
+      setResults((prev) =>
+        prev.map((row) => ({
+          ...row,
+          sources: row.sources.map((s) =>
+            s.profile_id === profile_id
+              ? { ...s, on_disk: true, is_active: true }
+              : { ...s, is_active: false },
+          ),
+          installed_count:
+            row.headphone === headphone
+              ? row.installed_count +
+                (row.sources.find((s) => s.profile_id === profile_id)?.on_disk
+                  ? 0
+                  : 1)
+              : row.installed_count,
+        })),
+      );
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: "Couldn't download",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  return (
+    <div className="flex flex-col gap-3">
+      {/* Active profile card stays at the top so the user always sees
+          which one is currently in effect, even after they scroll the
+          search results. */}
+      {activeProfile && (
+        <div className="flex items-center justify-between gap-3 rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-xs">
+          <div className="flex flex-col">
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-primary">
+              Active profile
+            </span>
+            <span className="text-sm font-semibold">
+              {activeProfile.brand} {activeProfile.model}
+            </span>
+            <span className="text-muted-foreground">
+              {activeProfile.source} · {activeProfile.band_count} bands · preamp{" "}
+              {activeProfile.preamp_db.toFixed(1)} dB
+            </span>
+          </div>
+        </div>
+      )}
+
+      <div className="flex items-center gap-2">
+        <input
+          type="text"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder={
+            manifestStatus === "loading"
+              ? "Loading AutoEQ catalog…"
+              : "Search by headphone (HD 600, AirPods Max, …)"
+          }
+          disabled={manifestStatus !== "ready"}
+          className="h-9 flex-1 rounded-md border border-input bg-background px-3 text-sm disabled:opacity-50"
+        />
+        <button
+          type="button"
+          onClick={refreshManifest}
+          disabled={manifestStatus === "loading"}
+          className="rounded-md border border-input px-2.5 py-1.5 text-[11px] font-semibold text-muted-foreground hover:bg-accent disabled:opacity-50"
+          title="Refetch the AutoEQ manifest from GitHub. Useful when AutoEQ has added new profiles since the app launched."
+        >
+          {manifestStatus === "loading" ? "…" : "Refresh"}
+        </button>
+      </div>
+
+      {manifestStatus === "failed" && (
+        <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
+          Couldn't reach AutoEQ. Search is offline. Click Refresh to retry.
+        </div>
+      )}
+
+      {manifestStatus === "ready" && (
+        <div className="max-h-72 overflow-y-auto rounded-md border border-input">
+          {searching && results.length === 0 && (
+            <div className="px-3 py-2 text-xs text-muted-foreground">
+              Searching…
+            </div>
+          )}
+          {!searching && results.length === 0 && (
+            <div className="px-3 py-2 text-xs text-muted-foreground">
+              {query.trim()
+                ? "No matches in the AutoEQ catalog."
+                : "Start typing to find your headphones."}
+            </div>
+          )}
+          {results.map((row) => (
+            <HeadphoneRowView
+              key={row.headphone}
+              row={row}
+              expanded={expanded === row.headphone}
+              onExpand={() =>
+                setExpanded(expanded === row.headphone ? null : row.headphone)
+              }
+              busyProfileId={busy}
+              onUse={useProfile}
+              onDownloadAndUse={downloadAndUse}
+              currentActiveId={activeProfileId}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function HeadphoneRowView({
+  row,
+  expanded,
+  onExpand,
+  busyProfileId,
+  onUse,
+  onDownloadAndUse,
+  currentActiveId,
+}: {
+  row: HeadphoneRow;
+  expanded: boolean;
+  onExpand: () => void;
+  busyProfileId: string | null;
+  onUse: (profile_id: string) => void;
+  onDownloadAndUse: (profile_id: string, headphone: string) => void;
+  currentActiveId: string;
+}) {
+  const containsActive = row.sources.some(
+    (s) => s.profile_id === currentActiveId,
+  );
+  return (
+    <div className="border-b border-input/60 last:border-b-0">
+      <button
+        type="button"
+        onClick={onExpand}
+        className={cn(
+          "flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-xs hover:bg-accent",
+          containsActive && "bg-primary/5",
+        )}
+      >
+        <span className="truncate font-semibold">{row.headphone}</span>
+        <span className="flex flex-shrink-0 items-center gap-2 text-[11px] text-muted-foreground">
+          {containsActive && (
+            <span className="rounded bg-primary/20 px-1.5 py-0.5 text-[10px] font-semibold text-primary">
+              Active
+            </span>
+          )}
+          <span>
+            {row.installed_count}/{row.total_count} sources
+          </span>
+          <span aria-hidden className="text-muted-foreground/60">
+            {expanded ? "▾" : "▸"}
+          </span>
+        </span>
+      </button>
+      {expanded && (
+        <div className="bg-background/50">
+          {row.sources.map((s) => (
+            <div
+              key={s.profile_id}
+              className={cn(
+                "flex items-center justify-between gap-3 border-t border-input/40 px-6 py-1.5 text-xs",
+                s.is_active && "bg-primary/10",
+              )}
+            >
+              <span className="truncate">
+                {s.source}
+                {s.is_active && (
+                  <span className="ml-2 text-[10px] font-semibold uppercase tracking-wider text-primary">
+                    Active
+                  </span>
+                )}
+              </span>
+              {s.is_active ? (
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-emerald-500">
+                  In use
+                </span>
+              ) : s.on_disk ? (
+                <button
+                  type="button"
+                  onClick={() => onUse(s.profile_id)}
+                  disabled={busyProfileId === s.profile_id}
+                  className="rounded border border-primary bg-primary px-2 py-0.5 text-[10px] font-semibold text-primary-foreground hover:bg-primary/80 disabled:opacity-50"
+                >
+                  {busyProfileId === s.profile_id ? "…" : "Use"}
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => onDownloadAndUse(s.profile_id, row.headphone)}
+                  disabled={busyProfileId === s.profile_id}
+                  className="rounded border border-input px-2 py-0.5 text-[10px] font-semibold text-muted-foreground hover:bg-accent disabled:opacity-50"
+                >
+                  {busyProfileId === s.profile_id
+                    ? "Downloading…"
+                    : "Download & use"}
+                </button>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Phase 6 frequency-response graph. Three overlaid curves on a
+ * log-frequency × dB-amplitude axis:
+ *
+ *  - Raw (gray): the headphone's measured response, the curve
+ *    AutoEQ corrects FROM.
+ *  - Target (dashed): the target AutoEQ aimed at, what a perfect
+ *    correction would land on.
+ *  - Post-EQ (solid primary): the user's predicted response with
+ *    the active profile + tilt applied. Should land near the
+ *    target when the profile is doing its job; the gap is what
+ *    the user's tilt + the profile's irreducible error account
+ *    for.
+ *
+ * When no measurement CSV is bundled for the active profile, the
+ * graph collapses to a single curve showing what the EQ does in
+ * isolation (cascade response only).
+ *
+ * Refetches whenever the active profile or tilt changes — small
+ * payload (~6 KB JSON) and the cascade compute is sub-millisecond,
+ * so the graph tracks the tilt sliders smoothly.
+ */
+type AutoEqResponseData = {
+  frequencies_hz: number[];
+  raw_db: number[] | null;
+  target_db: number[] | null;
+  post_eq_db: number[];
+  sample_rate_hz: number;
+  has_measurement: boolean;
+};
+
+function AutoEqResponseGraph({
+  activeProfileId,
+  tilt,
+}: {
+  activeProfileId: string;
+  tilt: { preamp_offset_db: number; bass_db: number; treble_db: number };
+}) {
+  const [data, setData] = useState<AutoEqResponseData | null>(null);
+
+  // Refetch on profile/tilt changes. Debounce so dragging a
+  // slider doesn't fire 60 requests per second.
+  useEffect(() => {
+    if (!activeProfileId) {
+      setData(null);
+      return;
+    }
+    const handle = window.setTimeout(async () => {
+      try {
+        const r = await api.player.autoEqResponse(384);
+        setData(r);
+      } catch {
+        setData(null);
+      }
+    }, 80);
+    return () => window.clearTimeout(handle);
+  }, [activeProfileId, tilt.preamp_offset_db, tilt.bass_db, tilt.treble_db]);
+
+  if (data === null) return null;
+
+  const W = 480;
+  const H = 180;
+  const PAD_L = 32;
+  const PAD_R = 8;
+  const PAD_T = 8;
+  const PAD_B = 22;
+  const innerW = W - PAD_L - PAD_R;
+  const innerH = H - PAD_T - PAD_B;
+
+  // dB axis: pick a tight range that fits all three curves.
+  const allValues: number[] = [...data.post_eq_db];
+  if (data.raw_db) allValues.push(...data.raw_db);
+  if (data.target_db) allValues.push(...data.target_db);
+  let yMin = Math.min(...allValues);
+  let yMax = Math.max(...allValues);
+  // Pad and round outward to the nearest 5 dB so axis ticks are
+  // sensible.
+  yMin = Math.floor((yMin - 1) / 5) * 5;
+  yMax = Math.ceil((yMax + 1) / 5) * 5;
+  if (yMax - yMin < 10) yMax = yMin + 10;
+
+  const xLogMin = Math.log10(data.frequencies_hz[0]);
+  const xLogMax = Math.log10(
+    data.frequencies_hz[data.frequencies_hz.length - 1],
+  );
+  const xLogRange = xLogMax - xLogMin;
+
+  const px = (f: number) =>
+    PAD_L + ((Math.log10(f) - xLogMin) / xLogRange) * innerW;
+  const py = (db: number) => PAD_T + (1 - (db - yMin) / (yMax - yMin)) * innerH;
+
+  const linePath = (values: number[]) =>
+    values
+      .map(
+        (v, i) =>
+          `${i === 0 ? "M" : "L"} ${px(data.frequencies_hz[i]).toFixed(1)} ${py(v).toFixed(1)}`,
+      )
+      .join(" ");
+
+  const xTicks = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10_000, 20_000];
+  const yTickStep = yMax - yMin >= 30 ? 10 : 5;
+  const yTicks: number[] = [];
+  for (let v = yMin; v <= yMax; v += yTickStep) yTicks.push(v);
+
+  return (
+    <div className="rounded-md border border-input bg-secondary/40 p-3">
+      <div className="mb-2 flex items-center justify-between">
+        <div className="text-xs uppercase tracking-wide text-muted-foreground">
+          Frequency response
+        </div>
+        <div className="flex items-center gap-3 text-[10px] text-muted-foreground">
+          {data.has_measurement && (
+            <>
+              <span className="flex items-center gap-1">
+                <span className="inline-block h-2 w-3 rounded-sm bg-foreground/35" />
+                Raw
+              </span>
+              <span className="flex items-center gap-1">
+                <span className="inline-block h-px w-3 border-t border-dashed border-foreground/60" />
+                Target
+              </span>
+            </>
+          )}
+          <span className="flex items-center gap-1">
+            <span className="inline-block h-1 w-3 rounded-sm bg-primary" />
+            Post-EQ
+          </span>
+        </div>
+      </div>
+      <svg
+        viewBox={`0 0 ${W} ${H}`}
+        className="h-44 w-full"
+        preserveAspectRatio="none"
+      >
+        {yTicks.map((v) => {
+          const y = py(v);
+          return (
+            <g key={`y${v}`}>
+              <line
+                x1={PAD_L}
+                x2={W - PAD_R}
+                y1={y}
+                y2={y}
+                stroke="currentColor"
+                strokeOpacity={v === 0 ? 0.4 : 0.1}
+                strokeWidth={v === 0 ? 1 : 0.5}
+              />
+              <text
+                x={PAD_L - 4}
+                y={y + 3}
+                textAnchor="end"
+                className="fill-current text-[9px] text-muted-foreground"
+              >
+                {v > 0 ? `+${v}` : v}
+              </text>
+            </g>
+          );
+        })}
+        {xTicks.map((f) => {
+          const x = px(f);
+          if (x < PAD_L || x > W - PAD_R) return null;
+          const label = f >= 1000 ? `${f / 1000}k` : `${f}`;
+          return (
+            <g key={`x${f}`}>
+              <line
+                x1={x}
+                x2={x}
+                y1={PAD_T}
+                y2={H - PAD_B}
+                stroke="currentColor"
+                strokeOpacity={0.06}
+                strokeWidth={0.5}
+              />
+              <text
+                x={x}
+                y={H - PAD_B + 12}
+                textAnchor="middle"
+                className="fill-current text-[9px] text-muted-foreground"
+              >
+                {label}
+              </text>
+            </g>
+          );
+        })}
+        {data.raw_db && (
+          <path
+            d={linePath(data.raw_db)}
+            fill="none"
+            stroke="currentColor"
+            strokeOpacity={0.35}
+            strokeWidth={1}
+          />
+        )}
+        {data.target_db && (
+          <path
+            d={linePath(data.target_db)}
+            fill="none"
+            stroke="currentColor"
+            strokeOpacity={0.55}
+            strokeWidth={1}
+            strokeDasharray="3 3"
+          />
+        )}
+        <path
+          d={linePath(data.post_eq_db)}
+          fill="none"
+          stroke="hsl(var(--primary))"
+          strokeWidth={1.6}
+        />
+      </svg>
+      {!data.has_measurement && (
+        <div className="mt-1 text-[10px] text-muted-foreground">
+          No measurement CSV bundled for this profile — showing EQ response
+          only.
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Tilt sliders below the active profile card. Three sliders
+ * (-12..+12 dB): preamp offset, bass, treble. Live local state
+ * for smooth dragging; commits to the server on slider release
+ * via api.player.autoEqSetTilt. A reset button zeros everything.
+ *
+ * Tilt is user-global, not per-device — taste preference travels
+ * with the listener. The backend persists in `eq_tilt_*` settings
+ * fields so a relaunch keeps the user's curve.
+ */
+function AutoEqTiltSliders({
+  initial,
+  onChange,
+}: {
+  initial: { preamp_offset_db: number; bass_db: number; treble_db: number };
+  onChange: (next: {
+    preamp_offset_db: number;
+    bass_db: number;
+    treble_db: number;
+  }) => void;
+}) {
+  const toast = useToast();
+  const [local, setLocal] = useState(initial);
+
+  // Re-sync from props when the parent state refreshes (e.g.
+  // after picking a different profile, the server still returns
+  // the same tilt values but the parent re-renders us).
+  useEffect(() => {
+    setLocal(initial);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [initial.preamp_offset_db, initial.bass_db, initial.treble_db]);
+
+  const commit = async (
+    field: "preamp_offset_db" | "bass_db" | "treble_db",
+    value: number,
+  ) => {
+    const next = { ...local, [field]: value };
+    setLocal(next);
+    onChange(next);
+    try {
+      await api.player.autoEqSetTilt({ [field]: value });
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: "Couldn't update tilt",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+
+  const reset = async () => {
+    const zero = { preamp_offset_db: 0, bass_db: 0, treble_db: 0 };
+    setLocal(zero);
+    onChange(zero);
+    try {
+      await api.player.autoEqSetTilt(zero);
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: "Couldn't reset tilt",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+
+  return (
+    <div className="rounded-md border border-input bg-secondary/40 p-3">
+      <div className="mb-2 flex items-center justify-between">
+        <div className="text-xs uppercase tracking-wide text-muted-foreground">
+          Tilt
+        </div>
+        <button
+          type="button"
+          onClick={reset}
+          className="rounded-md border border-input px-2 py-0.5 text-[11px] text-muted-foreground hover:bg-accent"
+        >
+          Reset
+        </button>
+      </div>
+      <div className="flex flex-col gap-2">
+        <TiltSlider
+          label="Preamp offset"
+          value={local.preamp_offset_db}
+          onChange={(v) =>
+            setLocal((prev) => ({ ...prev, preamp_offset_db: v }))
+          }
+          onCommit={(v) => commit("preamp_offset_db", v)}
+        />
+        <TiltSlider
+          label="Bass (80 Hz shelf)"
+          value={local.bass_db}
+          onChange={(v) => setLocal((prev) => ({ ...prev, bass_db: v }))}
+          onCommit={(v) => commit("bass_db", v)}
+        />
+        <TiltSlider
+          label="Treble (8 kHz shelf)"
+          value={local.treble_db}
+          onChange={(v) => setLocal((prev) => ({ ...prev, treble_db: v }))}
+          onCommit={(v) => commit("treble_db", v)}
+        />
+      </div>
+    </div>
+  );
+}
+
+function TiltSlider({
+  label,
+  value,
+  onChange,
+  onCommit,
+}: {
+  label: string;
+  value: number;
+  onChange: (v: number) => void;
+  onCommit: (v: number) => void;
+}) {
+  return (
+    <label className="flex items-center gap-3 text-xs">
+      <span className="w-32 flex-shrink-0 text-muted-foreground">{label}</span>
+      <input
+        type="range"
+        min={-12}
+        max={12}
+        step={0.5}
+        value={value}
+        onChange={(e) => onChange(parseFloat(e.target.value))}
+        onMouseUp={(e) =>
+          onCommit(parseFloat((e.target as HTMLInputElement).value))
+        }
+        onTouchEnd={(e) =>
+          onCommit(parseFloat((e.target as HTMLInputElement).value))
+        }
+        onKeyUp={(e) =>
+          onCommit(parseFloat((e.target as HTMLInputElement).value))
+        }
+        className="flex-1 cursor-pointer accent-primary"
+      />
+      <span className="w-12 flex-shrink-0 text-right tabular-nums">
+        {value > 0 ? "+" : ""}
+        {value.toFixed(1)} dB
+      </span>
+    </label>
+  );
+}
+
+/**
+ * Per-device AutoEQ profile mapping — Phase 3 of the scope doc.
+ *
+ * For each output device the user has used, lets them pick the
+ * profile to apply. When a device's mapping changes (or the
+ * active device changes), the audio engine resolves the right
+ * profile and applies it live.
+ *
+ * Hidden when the catalog is empty (no profiles bundled) — there
+ * would be nothing to map. Otherwise renders even when no
+ * devices have been seen yet, with a hint about plugging
+ * something in.
+ */
+interface AutoEqDeviceRow {
+  fingerprint: string;
+  display_name: string;
+  kind: string;
+  first_seen: number;
+  last_seen: number;
+  mapped_profile_id: string | null;
+  unmapped?: boolean;
+}
+
+function AutoEqDeviceMappingField() {
+  const toast = useToast();
+  const [data, setData] = useState<{
+    devices: AutoEqDeviceRow[];
+    current_fingerprint: string;
+    fallback: "bypass" | "use_last_profile";
+  } | null>(null);
+  const [profiles, setProfiles] = useState<
+    { id: string; brand: string; model: string }[] | null
+  >(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [d, p] = await Promise.all([
+          api.player.autoEqDevices(),
+          api.player.autoEqList("", 200),
+        ]);
+        if (cancelled) return;
+        setData({
+          devices: d.devices,
+          current_fingerprint: d.current_fingerprint,
+          fallback: d.fallback_when_unmapped,
+        });
+        setProfiles(
+          p.profiles.map((x) => ({ id: x.id, brand: x.brand, model: x.model })),
+        );
+      } catch {
+        /* feature not available — keep section hidden */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const setMapping = async (fingerprint: string, profileId: string | null) => {
+    if (!data) return;
+    const prev = data;
+    setData({
+      ...data,
+      devices: data.devices.map((d) =>
+        d.fingerprint === fingerprint
+          ? { ...d, mapped_profile_id: profileId, unmapped: false }
+          : d,
+      ),
+    });
+    try {
+      await api.player.autoEqSetDeviceMapping(fingerprint, profileId);
+    } catch (err) {
+      setData(prev);
+      toast.show({
+        kind: "error",
+        title: "Couldn't set device profile",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+
+  const forget = async (fingerprint: string) => {
+    if (!data) return;
+    const prev = data;
+    setData({
+      ...data,
+      devices: data.devices.filter((d) => d.fingerprint !== fingerprint),
+    });
+    try {
+      await api.player.autoEqForgetDevice(fingerprint);
+    } catch (err) {
+      setData(prev);
+      toast.show({
+        kind: "error",
+        title: "Couldn't forget device",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+
+  if (data === null || profiles === null) return null;
+  if (profiles.length === 0) return null;
+
+  return (
+    <Field
+      label="Output device profiles"
+      hint={
+        data.devices.length === 0
+          ? "Once you've used an output device, it'll show up here so you can map a profile to it."
+          : "Each output device can have its own AutoEQ profile. Tideway switches automatically when you change devices."
+      }
+    >
+      <div className="flex flex-col gap-2">
+        {data.devices.map((d) => {
+          const isActive = d.fingerprint === data.current_fingerprint;
+          const value = d.unmapped
+            ? "__unmapped__"
+            : (d.mapped_profile_id ?? "__none__");
+          return (
+            <div
+              key={d.fingerprint}
+              className={cn(
+                "flex flex-wrap items-center gap-2 rounded-md border border-input bg-secondary/40 px-3 py-2 text-xs",
+                isActive && "border-primary bg-primary/10",
+              )}
+            >
+              <div className="flex min-w-0 flex-1 flex-col">
+                <span className="truncate font-semibold">
+                  {d.display_name}
+                  {isActive && (
+                    <span className="ml-2 rounded bg-primary px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wide text-primary-foreground">
+                      Active
+                    </span>
+                  )}
+                </span>
+                <span className="text-muted-foreground">
+                  {d.kind === "unknown" ? "device" : d.kind}
+                </span>
+              </div>
+              <select
+                value={value}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  if (v === "__unmapped__") return; // can't pick unmapped
+                  setMapping(d.fingerprint, v === "__none__" ? null : v);
+                }}
+                className="h-8 rounded-md border border-input bg-background px-2"
+              >
+                <option value="__unmapped__" disabled>
+                  Use fallback
+                </option>
+                <option value="__none__">No EQ for this device</option>
+                {profiles.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.brand} {p.model}
+                  </option>
+                ))}
+              </select>
+              <button
+                type="button"
+                onClick={() => forget(d.fingerprint)}
+                className="rounded-md border border-input px-2 py-1 text-[11px] text-muted-foreground hover:bg-accent"
+              >
+                Forget
+              </button>
+            </div>
+          );
+        })}
+      </div>
+    </Field>
+  );
+}
+
 interface AirPlayDeviceRow {
   id: string;
   name: string;

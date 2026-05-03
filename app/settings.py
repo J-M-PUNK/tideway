@@ -88,6 +88,49 @@ class Settings:
     # `eq_preamp` is None no preamp gain is applied.
     eq_bands: list[float] = field(default_factory=list)
     eq_preamp: Optional[float] = None
+    # AutoEQ headphone-profile mode (see
+    # docs/autoeq-headphone-profiles-scope.md).
+    #   "off"     — EQ stage bypassed regardless of eq_enabled.
+    #   "manual"  — uses eq_bands / eq_preamp (the existing path).
+    #   "profile" — uses eq_active_profile_id from the bundled
+    #               AutoEQ catalog.
+    # `eq_enabled` is the master gate for backward compat; this
+    # mode field selects which curve runs when enabled.
+    eq_mode: str = "manual"
+    # Identifier of the currently-loaded AutoEQ profile, formatted
+    # as "<source>/<headphone-dir>" (e.g. "oratory1990/Sennheiser
+    # HD 600"). Empty string = no profile selected. Used only when
+    # eq_mode == "profile"; preserved across mode switches so
+    # toggling profile/manual/profile keeps the user's pick.
+    eq_active_profile_id: str = ""
+    # A/B bypass — momentarily disable the active EQ stage (manual
+    # OR profile) without losing the configuration. Phase 4 of the
+    # scope doc adds a player-UI button + keyboard shortcut for
+    # this so the user can compare correction-on vs correction-off
+    # without unsetting their pick. Persisted so the user can
+    # leave it bypassed and have that survive a relaunch.
+    eq_bypass: bool = False
+    # Per-device AutoEQ profile mapping (Phase 3 of the scope doc).
+    # Key = device fingerprint as `sounddevice` reports it; value =
+    # profile_id, or None to explicitly skip mapping for that device
+    # (e.g. an HDMI output to a TV where EQ doesn't make sense).
+    # When the active output device changes, the resolver looks up
+    # this map and applies the matching profile.
+    eq_device_mappings: dict[str, Optional[str]] = field(default_factory=dict)
+    # Behaviour when the active device has no mapping entry:
+    #   "bypass" — clear the EQ (safest; user opts in by mapping).
+    #   "use_last_profile" — keep the last-applied profile active
+    #     even on unmapped devices. Convenient for users who only
+    #     ever listen on one pair.
+    eq_fallback_when_unmapped: str = "bypass"
+    # Phase 5 user-tilt: shelves stacked after the profile bands +
+    # a master preamp offset. User-global (not per-device) — these
+    # are taste preferences that travel with the listener, not
+    # headphone-specific corrections. Range -12..+12 dB enforced
+    # at the API layer; raw floats persisted here.
+    eq_tilt_preamp_offset_db: float = 0.0
+    eq_tilt_bass_db: float = 0.0
+    eq_tilt_treble_db: float = 0.0
     # sounddevice output-device index (stringified, matches what
     # /api/player/output-devices returns). Empty string means "use
     # the system default". Persisted so USB DAC / Bluetooth

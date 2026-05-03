@@ -77,18 +77,53 @@ class Equalizer:
                 f"expected {self.BAND_COUNT} bands, got {len(bands)}"
             )
         sos = _build_sos(bands, self._sample_rate)
-        # Zero-initialized state — same shape sosfilt expects when
-        # using zi= with an axis. sosfilt_zi gives steady-state
-        # initial conditions for a DC input, which is the right
-        # starting point for audio that begins from silence.
-        zi_single = sosfilt_zi(sos)  # shape (BAND_COUNT, 2)
-        # Broadcast across the channel axis: (BAND_COUNT, 2, channels)
+        self._install_sos(sos, preamp_db)
+
+    def set_sos(
+        self,
+        sos: np.ndarray,
+        preamp_db: Optional[float] = None,
+    ) -> None:
+        """Install an arbitrary pre-built SOS matrix as the active
+        filter. Used by the AutoEQ headphone-profile path, which
+        cascades a mix of peaking + low/high shelves at non-ISO
+        frequencies that don't fit the 10-band manual EQ shape.
+
+        `sos` must be `(N, 6)` float-friendly with `N >= 1`. An
+        empty array clears the EQ (matches set_bands' empty-list
+        behavior). Caller is responsible for getting the sample
+        rate right — coefficients depend on it.
+        """
+        sos_arr = np.asarray(sos, dtype=np.float32)
+        if sos_arr.size == 0:
+            self.clear()
+            return
+        if sos_arr.ndim != 2 or sos_arr.shape[1] != 6:
+            raise ValueError(
+                f"sos must be (N, 6); got shape {sos_arr.shape}"
+            )
+        self._install_sos(sos_arr, preamp_db)
+
+    def _install_sos(
+        self,
+        sos: np.ndarray,
+        preamp_db: Optional[float],
+    ) -> None:
+        """Shared coefficient-swap path for `set_bands` and
+        `set_sos`. State is reinitialised on every install — the
+        AutoEQ profile path swaps cascades only on user action
+        (mode change / profile pick), never per-callback, so the
+        settle transient is acceptable."""
+        # `sosfilt_zi` gives steady-state initial conditions for a
+        # DC input, the right starting point for audio that begins
+        # from silence.
+        zi_single = sosfilt_zi(sos)  # shape (N, 2)
         state = np.tile(
             zi_single[:, :, None], (1, 1, self._channels)
         ).astype(np.float32, copy=False)
         preamp = 1.0 if preamp_db is None else 10.0 ** (float(preamp_db) / 20.0)
         with self._lock:
-            self._sos = sos
+            self._sos = sos.astype(np.float32, copy=False)
             self._state = state
             self._preamp_linear = preamp
 
@@ -164,6 +199,114 @@ def _peaking_biquad(
         [b0 / a0, b1 / a0, b2 / a0, 1.0, a1 / a0, a2 / a0],
         dtype=np.float32,
     )
+
+
+# Shelf-biquad helpers used by the upcoming AutoEQ headphone-profile
+# path (see `docs/autoeq-headphone-profiles-scope.md`). The manual
+# 10-band UI stays peaking-only; these are an internal capability the
+# profile cascade builder will draw on.
+#
+# `q` for shelves follows RBJ's "S" slope convention rather than the
+# bandwidth-Q used for peaking. AutoEQ's `*ParametricEQ.txt` files
+# emit `Q` values that are slope-Q under that convention, so the
+# numeric value parses through directly.
+
+
+def _low_shelf_biquad(
+    freq_hz: float, gain_db: float, q: float, sample_rate: int
+) -> np.ndarray:
+    """RBJ Audio EQ Cookbook low-shelf biquad. Boosts (or cuts) a
+    region below `freq_hz` by `gain_db`; response approaches 0 dB
+    well above the corner. Coefficients packed (b0 b1 b2 a0 a1 a2)
+    normalised so a0 == 1."""
+    A = 10.0 ** (gain_db / 40.0)
+    w0 = 2.0 * math.pi * freq_hz / sample_rate
+    cos_w0 = math.cos(w0)
+    sin_w0 = math.sin(w0)
+    # alpha derivation per the RBJ cookbook's shelf form:
+    #   alpha = sin(w0)/2 * sqrt((A + 1/A)*(1/S - 1) + 2)
+    # with S being slope (1 = max steepness without overshoot).
+    # The Q parameter here IS S — AutoEQ's files use this convention.
+    alpha = (
+        sin_w0
+        / 2.0
+        * math.sqrt(max(0.0, (A + 1.0 / A) * (1.0 / q - 1.0) + 2.0))
+    )
+    sqrt_A = math.sqrt(A)
+    two_sqrt_A_alpha = 2.0 * sqrt_A * alpha
+
+    b0 = A * ((A + 1.0) - (A - 1.0) * cos_w0 + two_sqrt_A_alpha)
+    b1 = 2.0 * A * ((A - 1.0) - (A + 1.0) * cos_w0)
+    b2 = A * ((A + 1.0) - (A - 1.0) * cos_w0 - two_sqrt_A_alpha)
+    a0 = (A + 1.0) + (A - 1.0) * cos_w0 + two_sqrt_A_alpha
+    a1 = -2.0 * ((A - 1.0) + (A + 1.0) * cos_w0)
+    a2 = (A + 1.0) + (A - 1.0) * cos_w0 - two_sqrt_A_alpha
+
+    return np.array(
+        [b0 / a0, b1 / a0, b2 / a0, 1.0, a1 / a0, a2 / a0],
+        dtype=np.float32,
+    )
+
+
+def _high_shelf_biquad(
+    freq_hz: float, gain_db: float, q: float, sample_rate: int
+) -> np.ndarray:
+    """RBJ Audio EQ Cookbook high-shelf biquad. Boosts (or cuts) a
+    region above `freq_hz` by `gain_db`; response approaches 0 dB
+    well below the corner. Mirrors `_low_shelf_biquad` with the
+    cosine-sign flips the cookbook specifies for the high-shelf
+    form."""
+    A = 10.0 ** (gain_db / 40.0)
+    w0 = 2.0 * math.pi * freq_hz / sample_rate
+    cos_w0 = math.cos(w0)
+    sin_w0 = math.sin(w0)
+    alpha = (
+        sin_w0
+        / 2.0
+        * math.sqrt(max(0.0, (A + 1.0 / A) * (1.0 / q - 1.0) + 2.0))
+    )
+    sqrt_A = math.sqrt(A)
+    two_sqrt_A_alpha = 2.0 * sqrt_A * alpha
+
+    b0 = A * ((A + 1.0) + (A - 1.0) * cos_w0 + two_sqrt_A_alpha)
+    b1 = -2.0 * A * ((A - 1.0) + (A + 1.0) * cos_w0)
+    b2 = A * ((A + 1.0) + (A - 1.0) * cos_w0 - two_sqrt_A_alpha)
+    a0 = (A + 1.0) - (A - 1.0) * cos_w0 + two_sqrt_A_alpha
+    a1 = 2.0 * ((A - 1.0) - (A + 1.0) * cos_w0)
+    a2 = (A + 1.0) - (A - 1.0) * cos_w0 - two_sqrt_A_alpha
+
+    return np.array(
+        [b0 / a0, b1 / a0, b2 / a0, 1.0, a1 / a0, a2 / a0],
+        dtype=np.float32,
+    )
+
+
+# AutoEQ ParametricEQ.txt files identify each band by a two- or
+# three-letter type code. The set we need to support is small.
+FilterType = str  # "PK" (peaking) | "LSC" (low shelf) | "HSC" (high shelf)
+PEAKING: FilterType = "PK"
+LOW_SHELF: FilterType = "LSC"
+HIGH_SHELF: FilterType = "HSC"
+
+
+def _compute_biquad(
+    filter_type: FilterType,
+    freq_hz: float,
+    gain_db: float,
+    q: float,
+    sample_rate: int,
+) -> np.ndarray:
+    """Dispatch to the right biquad helper for the AutoEQ profile
+    cascade. Raises ValueError on unknown filter types so a typo'd
+    profile fails loudly instead of silently producing a flat
+    response."""
+    if filter_type == PEAKING:
+        return _peaking_biquad(freq_hz, gain_db, q, sample_rate)
+    if filter_type == LOW_SHELF:
+        return _low_shelf_biquad(freq_hz, gain_db, q, sample_rate)
+    if filter_type == HIGH_SHELF:
+        return _high_shelf_biquad(freq_hz, gain_db, q, sample_rate)
+    raise ValueError(f"unknown biquad filter type: {filter_type!r}")
 
 
 # ---------------------------------------------------------------------------

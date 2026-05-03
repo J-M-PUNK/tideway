@@ -239,6 +239,25 @@ class PCMPlayer:
         self._eq: Optional[Equalizer] = None
         self._eq_bands: list[float] = []
         self._eq_preamp: Optional[float] = None
+        # AutoEQ headphone-profile mode (see
+        # docs/autoeq-headphone-profiles-scope.md). Mutually
+        # exclusive with `_eq_bands` — switching modes clears
+        # whichever isn't active. Held here (rather than just an
+        # SOS) so the stream-reopen path can recompile coefficients
+        # at the new sample rate.
+        self._eq_profile = None  # type: ignore[var-annotated]
+        # Phase 4 A/B bypass — momentary disable that preserves
+        # the active SOS / bands so flipping back is instant. The
+        # audio callback reads this each frame; toggling has the
+        # same ~immediate effect as a coefficient-clear without
+        # the cost of rebuilding when the user toggles back on.
+        self._eq_bypass: bool = False
+        # Phase 5 user-tilt — bass / treble shelves + preamp
+        # offset stacked on top of the active profile. Held as a
+        # separate config so changing tilt without re-picking the
+        # profile is one rebuild. None = no tilt set yet (treat
+        # as flat); a TiltConfig with all-zero gains is also flat.
+        self._eq_tilt = None  # type: ignore[var-annotated]
 
         # Audio-callback diagnostics. Each pair is (count, last-print
         # time) for a different rate-limited stderr message:
@@ -958,6 +977,10 @@ class PCMPlayer:
         Remembered so that a stream reopen (cross-rate bridge,
         track load) rebuilds the EQ coefficients against the new
         sample rate without losing the user's curve.
+
+        Calling this also clears any active AutoEQ profile —
+        manual and profile modes are mutually exclusive in the
+        player.
         """
         is_flat = bands and all(abs(b) < 1e-6 for b in bands) and (
             preamp is None or abs(preamp) < 1e-6
@@ -965,11 +988,84 @@ class PCMPlayer:
         with self._lock:
             self._eq_bands = list(bands)
             self._eq_preamp = preamp
+            self._eq_profile = None
             if self._eq is not None:
                 if bands and not is_flat:
                     self._eq.set_bands(list(bands), preamp_db=preamp)
                 else:
                     self._eq.clear()
+
+    def set_equalizer_bypass(self, bypassed: bool) -> None:
+        """Toggle the A/B bypass flag without touching the active
+        EQ configuration. The audio callback reads this each
+        frame, so the effect is on the next callback (~10 ms).
+        Used by the Phase 4 player-UI button + keyboard shortcut
+        for blink-test comparison."""
+        with self._lock:
+            self._eq_bypass = bool(bypassed)
+
+    def equalizer_bypass(self) -> bool:
+        """Read the current bypass flag — server uses it to expose
+        the value via /api/eq/state."""
+        with self._lock:
+            return self._eq_bypass
+
+    def apply_equalizer_profile(self, profile) -> None:
+        """Switch to AutoEQ profile mode and apply `profile`. The
+        profile object's bands compile to an SOS at the player's
+        current sample rate; on a stream reopen the same profile
+        is recompiled at the new rate (no loss across cross-rate
+        bridges). Clears any manual-mode bands — the modes are
+        mutually exclusive.
+
+        Phase 5: if a user-tilt is active, the cascade includes
+        the tilt shelves + preamp offset. Picking a new profile
+        keeps the tilt setting (taste preference travels with
+        the user, not the headphone)."""
+        from app.audio.autoeq.apply import (
+            TiltConfig,
+            cascade_with_tilt,
+        )
+
+        with self._lock:
+            self._eq_bands = []
+            self._eq_preamp = None
+            self._eq_profile = profile
+            tilt = self._eq_tilt or TiltConfig()
+            if self._eq is not None:
+                sos, preamp_db = cascade_with_tilt(
+                    profile, self._eq.sample_rate(), tilt
+                )
+                if sos.size == 0:
+                    self._eq.clear()
+                else:
+                    self._eq.set_sos(sos, preamp_db=preamp_db)
+
+    def apply_equalizer_tilt(self, tilt) -> None:
+        """Update the user-tilt and rebuild the active cascade if
+        a profile is loaded. No-op when no profile is active —
+        tilt is a stack-on-top thing, not a standalone EQ.
+
+        `tilt` is `TiltConfig | None`; passing None clears tilt
+        back to flat. The profile + sample rate stay the same;
+        only the trailing tilt shelves + preamp offset change."""
+        from app.audio.autoeq.apply import (
+            TiltConfig,
+            cascade_with_tilt,
+        )
+
+        with self._lock:
+            self._eq_tilt = tilt
+            effective = tilt if tilt is not None else TiltConfig()
+            if self._eq_profile is None or self._eq is None:
+                return
+            sos, preamp_db = cascade_with_tilt(
+                self._eq_profile, self._eq.sample_rate(), effective
+            )
+            if sos.size == 0:
+                self._eq.clear()
+            else:
+                self._eq.set_sos(sos, preamp_db=preamp_db)
 
     def apply_equalizer_preset(self, preset_index: int) -> list[float]:
         """Apply a preset by index, push its curve to the live EQ,
@@ -1544,10 +1640,28 @@ class PCMPlayer:
             flush=True,
         )
 
-        # Rebuild the EQ against the new sample rate. Preserves the
-        # user's bands / preamp across tracks.
+        # Rebuild the EQ against the new sample rate. Preserves
+        # whichever mode is active — manual bands or AutoEQ profile.
         self._eq = Equalizer(sample_rate=sample_rate, channels=channels)
-        if self._eq_bands:
+        if self._eq_profile is not None:
+            try:
+                from app.audio.autoeq.apply import (
+                    TiltConfig,
+                    cascade_with_tilt,
+                )
+
+                tilt = self._eq_tilt or TiltConfig()
+                sos, preamp_db = cascade_with_tilt(
+                    self._eq_profile, sample_rate, tilt
+                )
+                if sos.size == 0:
+                    self._eq.clear()
+                else:
+                    self._eq.set_sos(sos, preamp_db=preamp_db)
+            except Exception:
+                log.exception("autoeq profile coefficient build failed")
+                self._eq.clear()
+        elif self._eq_bands:
             try:
                 self._eq.set_bands(self._eq_bands, preamp_db=self._eq_preamp)
             except Exception:
@@ -1829,7 +1943,11 @@ class PCMPlayer:
         # pass-through is preserved at flat EQ + full volume + not
         # muted. Filtering requires float32; we round-trip through
         # float32 when the output dtype is int16/int32.
-        if self._eq is not None and self._eq.is_active():
+        if (
+            self._eq is not None
+            and self._eq.is_active()
+            and not self._eq_bypass
+        ):
             if outdata.dtype == np.float32:
                 self._eq.apply(outdata)
             else:

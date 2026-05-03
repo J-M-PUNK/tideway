@@ -33,6 +33,12 @@ numpy>=1.26.0
 # at 48k; scipy.signal.sosfilt drops into C and comfortably runs
 # all 10 bands inside each callback's deadline.
 scipy>=1.11.0
+# Fast fuzzy-matching for the AutoEQ headphone-profile picker
+# (~5,000 entries, user types a few characters, we want sub-50ms
+# matching with typo tolerance). The picker degrades gracefully
+# to substring search when this isn't installed, so the dep is
+# soft-required for the production app and hard-skipped in tests.
+rapidfuzz>=3.0.0
 # Global media-key listener (play-pause / next / prev work when the
 # window is backgrounded). Has platform-specific backends; pynput picks
 # the right one at import time.
