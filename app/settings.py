@@ -49,12 +49,14 @@ class Settings:
     # Tidal's per-account rate-limit. Users with stable accounts can
     # raise this in Settings; the slider goes up to 10.
     concurrent_downloads: int = 1
-    # Per-track download rate cap in MB/s. 0 = unlimited. Default 20
-    # MB/s — fast enough that a Max-quality 4-minute track finishes in
-    # ~2 seconds on a normal connection, slow enough that the CDN sees
-    # a steady streaming-shaped fetch instead of a "scrape as fast as
-    # possible" pattern that would attract anti-abuse attention.
-    download_rate_limit_mbps: int = 20
+    # Per-track download rate cap in MB/s. 0 = unlimited. Default 10
+    # MB/s — fast enough that a Max-quality 4-minute track finishes
+    # in a few seconds on a normal connection, but well clear of the
+    # "saturate fiber, obviously not listening" pattern that the
+    # previous 20 MB/s default could produce on fast connections.
+    # Existing users keep their previously-saved value; this only
+    # affects fresh installs and explicit "reset to defaults".
+    download_rate_limit_mbps: int = 10
     # When True, the UI hides everything that needs a live Tidal session
     # (search, editorial, favorites, streaming fallback) and the server
     # stops requiring auth on the handful of endpoints that only touch
