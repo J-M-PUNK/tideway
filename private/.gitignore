@@ -1,0 +1,11 @@
+# Ignore everything in this directory by default — `private/` is for
+# local-only working notes (feature scoping, roadmap thinking,
+# personal todo lists, draft docs that aren't ready for the public
+# repo). Anything placed here stays on your machine.
+#
+# Two files are intentionally tracked: this `.gitignore` itself, and
+# the `README.md` that documents the convention. Anything else is
+# yours and stays local.
+*
+!.gitignore
+!README.md
