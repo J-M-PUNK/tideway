@@ -1021,6 +1021,35 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ bypass }),
       }),
+    /** Phase 7 catalog updater. `check-updates` returns counts
+     *  in one round-trip; `download-catalog` kicks off a long-
+     *  running download (background thread) and returns
+     *  immediately; `update-status` polls progress. */
+    autoEqCheckUpdates: () =>
+      req<{
+        ok: boolean;
+        total_in_catalog: number;
+        already_on_disk: number;
+        missing: number;
+        fetched_at: number;
+      }>("/api/eq/check-updates"),
+    autoEqDownloadCatalog: () =>
+      req<{
+        ok: boolean;
+        started: boolean;
+        missing?: number;
+        reason?: string;
+      }>("/api/eq/download-catalog", { method: "POST" }),
+    autoEqUpdateStatus: () =>
+      req<{
+        running: boolean;
+        started_at: number;
+        total: number;
+        done: number;
+        succeeded: number;
+        failed: number;
+        last_error: string;
+      }>("/api/eq/update-status"),
     /** Phase 6 frequency-response data for the FR graph. Returns
      *  three parallel arrays — raw measured curve, target curve,
      *  predicted post-EQ — at log-spaced frequencies. Raw + target

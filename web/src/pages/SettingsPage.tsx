@@ -1027,22 +1027,20 @@ function AutoEqProfileField() {
   const [results, setResults] = useState<AutoEqProfileSummary[]>([]);
   const [loadingResults, setLoadingResults] = useState(false);
 
-  // Initial state load. If the backend doesn't expose the
-  // endpoint (older server build), stay hidden — no error toast.
+  // Refetch the EQ state. Called once on mount + whenever a
+  // child surface (catalog updater, etc.) wants to re-pull
+  // because something changed server-side.
+  const refresh = async () => {
+    try {
+      const s = await api.player.autoEqState();
+      setState(s);
+    } catch {
+      /* feature not available — keep section hidden */
+    }
+  };
+
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const s = await api.player.autoEqState();
-        if (cancelled) return;
-        setState(s);
-      } catch {
-        /* feature not available — keep section hidden */
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
+    void refresh();
   }, []);
 
   // Debounced search. Only fires when in profile mode (no point
@@ -1139,6 +1137,17 @@ function AutoEqProfileField() {
           {modeBtn("manual", "Manual")}
           {modeBtn("profile", "Profile")}
         </div>
+
+        {state.mode === "profile" && (
+          <AutoEqCatalogUpdater
+            catalogSize={state.profile_catalog_size}
+            onCatalogChanged={() => {
+              // Refetch state so the new catalog size + any
+              // newly-available profiles surface in the picker.
+              void refresh();
+            }}
+          />
+        )}
 
         {state.mode === "profile" && state.profile_catalog_size > 0 && (
           <div className="flex flex-col gap-2">
@@ -1440,6 +1449,184 @@ function AutoEqResponseGraph({
         <div className="mt-1 text-[10px] text-muted-foreground">
           No measurement CSV bundled for this profile — showing EQ
           response only.
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Phase 7 catalog updater. One small row under the mode toggle
+ * with a "Check for new headphones" button. Two-step UX:
+ *
+ *   1. Click "Check" → GET /api/eq/check-updates (single GitHub
+ *      API call, ~1-3s). Reveals "X new profiles available" +
+ *      a "Download all" button.
+ *   2. Click "Download all" → POST /api/eq/download-catalog,
+ *      backend kicks off a background download. Frontend polls
+ *      /api/eq/update-status at ~750 ms intervals to drive the
+ *      progress bar.
+ *
+ * On completion, calls onCatalogChanged so the parent picker
+ * re-fetches its state and the new profiles surface in the
+ * search list.
+ */
+function AutoEqCatalogUpdater({
+  catalogSize,
+  onCatalogChanged,
+}: {
+  catalogSize: number;
+  onCatalogChanged: () => void;
+}) {
+  const toast = useToast();
+  const [check, setCheck] = useState<{
+    total_in_catalog: number;
+    already_on_disk: number;
+    missing: number;
+  } | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [progress, setProgress] = useState<{
+    total: number;
+    done: number;
+    succeeded: number;
+    failed: number;
+    running: boolean;
+  } | null>(null);
+
+  const onCheck = async () => {
+    setChecking(true);
+    try {
+      const r = await api.player.autoEqCheckUpdates();
+      setCheck({
+        total_in_catalog: r.total_in_catalog,
+        already_on_disk: r.already_on_disk,
+        missing: r.missing,
+      });
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: "Couldn't reach AutoEQ",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setChecking(false);
+    }
+  };
+
+  const onDownload = async () => {
+    try {
+      const r = await api.player.autoEqDownloadCatalog();
+      if (!r.started) {
+        toast.show({ kind: "info", title: r.reason || "Nothing to download" });
+        return;
+      }
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: "Couldn't start download",
+        description: err instanceof Error ? err.message : String(err),
+      });
+      return;
+    }
+    // Poll. Cleared once status.running flips back to false.
+    const interval = window.setInterval(async () => {
+      try {
+        const s = await api.player.autoEqUpdateStatus();
+        setProgress({
+          total: s.total,
+          done: s.done,
+          succeeded: s.succeeded,
+          failed: s.failed,
+          running: s.running,
+        });
+        if (!s.running) {
+          window.clearInterval(interval);
+          // Re-check the diff so the "missing" number updates.
+          await onCheck();
+          onCatalogChanged();
+          toast.show({
+            kind: "success",
+            title: `Downloaded ${s.succeeded} profile${
+              s.succeeded === 1 ? "" : "s"
+            }`,
+            description:
+              s.failed > 0
+                ? `${s.failed} failed (transient network errors)`
+                : undefined,
+          });
+        }
+      } catch {
+        /* keep polling — server briefly unreachable is fine */
+      }
+    }, 750);
+  };
+
+  return (
+    <div className="rounded-md border border-input bg-secondary/40 p-3 text-xs">
+      {check === null && progress === null && (
+        <div className="flex items-center justify-between gap-3">
+          <div className="text-muted-foreground">
+            {catalogSize} headphone{catalogSize === 1 ? "" : "s"} bundled.
+            Check AutoEQ for the full ~5,000-profile catalog.
+          </div>
+          <button
+            type="button"
+            onClick={onCheck}
+            disabled={checking}
+            className="rounded-md border border-input px-2.5 py-1 text-[11px] font-semibold hover:bg-accent disabled:opacity-50"
+          >
+            {checking ? "Checking…" : "Check for updates"}
+          </button>
+        </div>
+      )}
+      {check !== null && progress === null && (
+        <div className="flex items-center justify-between gap-3">
+          <div className="text-muted-foreground">
+            {check.missing > 0
+              ? `${check.missing} new headphone profile${
+                  check.missing === 1 ? "" : "s"
+                } available (${check.total_in_catalog} total in catalog).`
+              : `Already up to date — ${check.total_in_catalog} profile${
+                  check.total_in_catalog === 1 ? "" : "s"
+                } cached.`}
+          </div>
+          {check.missing > 0 && (
+            <button
+              type="button"
+              onClick={onDownload}
+              className="rounded-md border border-primary bg-primary px-2.5 py-1 text-[11px] font-semibold text-primary-foreground hover:bg-primary/80"
+            >
+              Download all
+            </button>
+          )}
+        </div>
+      )}
+      {progress !== null && (
+        <div className="flex flex-col gap-2">
+          <div className="flex items-center justify-between text-muted-foreground">
+            <span>
+              {progress.running
+                ? `Downloading… ${progress.done}/${progress.total}`
+                : `Done: ${progress.succeeded} succeeded, ${progress.failed} failed`}
+            </span>
+            {progress.failed > 0 && (
+              <span className="text-amber-500">
+                {progress.failed} skipped
+              </span>
+            )}
+          </div>
+          <div className="h-1.5 overflow-hidden rounded-full bg-foreground/10">
+            <div
+              className="h-full bg-primary transition-[width] duration-150"
+              style={{
+                width: `${
+                  progress.total > 0
+                    ? (progress.done / progress.total) * 100
+                    : 0
+                }%`,
+              }}
+            />
+          </div>
         </div>
       )}
     </div>

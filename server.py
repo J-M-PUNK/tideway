@@ -526,16 +526,20 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     _cleanup_part_files(output_root)
     local_index.start_scan(output_root)
 
-    # Load the bundled AutoEQ profile catalog. Cheap (one disk
-    # walk over ~7 small text files in this Phase 2 release;
-    # later phases swap in a larger update-channel-managed set).
-    # If the data dir is missing, the index logs and stays empty
-    # — feature degrades to "no profiles available" rather than
-    # blocking server startup.
+    # Load the AutoEQ profile catalog from BOTH the bundled
+    # snapshot (~7 starter profiles) AND the user's cache dir
+    # populated by Phase 7's "Update profile catalog" button.
+    # Cache wins on conflict — if a downloaded version exists
+    # for a profile we also bundle, the downloaded one (likely
+    # newer) takes precedence. Missing dirs are silently
+    # skipped.
     try:
         from app.audio.autoeq.index import INDEX as _AUTOEQ_INDEX
         from app.audio.autoeq.index import default_data_dir as _autoeq_data_dir
-        _AUTOEQ_INDEX.load_directory(_autoeq_data_dir())
+        from app.audio.autoeq.updater import cache_dir as _autoeq_cache_dir
+        _AUTOEQ_INDEX.load_directories(
+            [_autoeq_data_dir(), _autoeq_cache_dir()]
+        )
     except Exception as exc:
         print(f"[autoeq] startup index load failed: {exc}", flush=True)
 
@@ -4894,6 +4898,182 @@ def autoeq_state() -> dict:
             "treble_db": settings.eq_tilt_treble_db,
         },
     }
+
+
+# --- Phase 7 catalog updates -------------------------------------------------
+#
+# Fetch the full ~5,000-profile AutoEQ catalog from GitHub on
+# user demand; cache to user_data_dir so subsequent launches see
+# the expanded set. Two endpoints:
+#
+#   GET  /api/eq/check-updates  → manifest fetch, returns counts
+#   POST /api/eq/download-catalog → downloads PEQs (and optional
+#                                    CSVs) for the missing set,
+#                                    streams progress as JSON
+#                                    chunks. Long-running.
+#
+# The download endpoint runs in a background thread so the user
+# can navigate elsewhere; status is polled via /api/eq/update-status.
+
+_AUTOEQ_UPDATE_LOCK = threading.Lock()
+_AUTOEQ_UPDATE_STATE: dict = {
+    "running": False,
+    "started_at": 0.0,
+    "total": 0,
+    "done": 0,
+    "succeeded": 0,
+    "failed": 0,
+    "last_error": "",
+}
+_AUTOEQ_UPDATE_MANIFEST_CACHE: dict = {
+    "manifest": None,  # CatalogManifest | None
+    "missing_ids": [],
+    "already_ids": [],
+}
+
+
+@app.get("/api/eq/check-updates")
+def autoeq_check_updates() -> dict:
+    """Fetch the AutoEQ catalog manifest and report what's
+    available vs what the user already has on disk. Single
+    GitHub API call (~3 MB JSON for the full tree). Result
+    cached in-process for the duration of this server session
+    so the subsequent download-catalog call doesn't have to
+    re-fetch."""
+    _require_local_access()
+    from app.audio.autoeq import updater
+
+    try:
+        manifest = updater.fetch_manifest()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=502,
+            detail=f"failed to fetch AutoEQ manifest: {exc}",
+        )
+
+    bundled_root = _autoeq_data_dir_path()
+    already_ids, missing_ids = updater.diff_manifest_against_disk(
+        manifest, bundled_root
+    )
+
+    _AUTOEQ_UPDATE_MANIFEST_CACHE["manifest"] = manifest
+    _AUTOEQ_UPDATE_MANIFEST_CACHE["missing_ids"] = missing_ids
+    _AUTOEQ_UPDATE_MANIFEST_CACHE["already_ids"] = already_ids
+
+    return {
+        "ok": True,
+        "total_in_catalog": len(manifest.profile_paths),
+        "already_on_disk": len(already_ids),
+        "missing": len(missing_ids),
+        "fetched_at": manifest.fetched_at,
+    }
+
+
+def _autoeq_data_dir_path():
+    """Bundled-data root. Imported lazily to keep the autoeq
+    package off server.py's startup import path."""
+    from app.audio.autoeq.index import default_data_dir
+    return default_data_dir()
+
+
+@app.post("/api/eq/download-catalog")
+def autoeq_download_catalog() -> dict:
+    """Kick off a background download of every missing profile
+    PEQ from the cached manifest. Returns immediately; poll
+    `/api/eq/update-status` for progress.
+
+    Caller must have run `/api/eq/check-updates` first so the
+    manifest is in cache. We could re-fetch here but that
+    silently doubles the API hit on a typical "check then
+    download" UX, and the front-end already serialises the two.
+    """
+    _require_local_access()
+
+    with _AUTOEQ_UPDATE_LOCK:
+        if _AUTOEQ_UPDATE_STATE["running"]:
+            raise HTTPException(
+                status_code=409,
+                detail="catalog download already running",
+            )
+        manifest = _AUTOEQ_UPDATE_MANIFEST_CACHE["manifest"]
+        missing_ids = list(_AUTOEQ_UPDATE_MANIFEST_CACHE["missing_ids"])
+        if manifest is None or not missing_ids:
+            return {
+                "ok": True,
+                "started": False,
+                "reason": (
+                    "no manifest cached — call /api/eq/check-updates first"
+                    if manifest is None
+                    else "everything already on disk"
+                ),
+            }
+        _AUTOEQ_UPDATE_STATE.update(
+            running=True,
+            started_at=time.time(),
+            total=len(missing_ids),
+            done=0,
+            succeeded=0,
+            failed=0,
+            last_error="",
+        )
+
+    # Build id → path map once so workers don't redo the lookup.
+    from app.audio.autoeq import updater
+    paths_by_id: dict[str, str] = {}
+    for path in manifest.profile_paths:
+        pid = updater._profile_id_from_path(path)
+        # First wins — manifest can have duplicate ids in rare
+        # cases of renames. Match diff_manifest_against_disk.
+        paths_by_id.setdefault(pid, path)
+
+    def _progress(done: int, total: int, res) -> None:
+        with _AUTOEQ_UPDATE_LOCK:
+            _AUTOEQ_UPDATE_STATE["done"] = done
+            if res.ok:
+                _AUTOEQ_UPDATE_STATE["succeeded"] += 1
+            else:
+                _AUTOEQ_UPDATE_STATE["failed"] += 1
+                _AUTOEQ_UPDATE_STATE["last_error"] = res.reason
+
+    def _run() -> None:
+        try:
+            updater.download_profiles(
+                paths_by_id,
+                missing_ids,
+                include_csv=False,  # see updater module docstring
+                max_workers=3,
+                progress_cb=_progress,
+            )
+        except Exception as exc:
+            log = logging.getLogger("autoeq.updater")
+            log.exception("download_profiles failed: %s", exc)
+            with _AUTOEQ_UPDATE_LOCK:
+                _AUTOEQ_UPDATE_STATE["last_error"] = str(exc)
+        finally:
+            # Reload the index so newly-downloaded profiles
+            # appear in the picker without an app restart.
+            try:
+                from app.audio.autoeq.index import INDEX, default_data_dir
+                INDEX.load_directories(
+                    [default_data_dir(), updater.cache_dir()]
+                )
+            except Exception:
+                pass
+            with _AUTOEQ_UPDATE_LOCK:
+                _AUTOEQ_UPDATE_STATE["running"] = False
+
+    threading.Thread(target=_run, daemon=True, name="autoeq-update").start()
+    return {"ok": True, "started": True, "missing": len(missing_ids)}
+
+
+@app.get("/api/eq/update-status")
+def autoeq_update_status() -> dict:
+    """Snapshot of the download-catalog progress. Frontend polls
+    every ~500 ms while the spinner is up; cheap (no I/O,
+    locked dict read)."""
+    _require_local_access()
+    with _AUTOEQ_UPDATE_LOCK:
+        return dict(_AUTOEQ_UPDATE_STATE)
 
 
 @app.get("/api/eq/response")
