@@ -24,6 +24,7 @@ tilt-slider's onChange handler at slider-drag rates.
 from __future__ import annotations
 
 import csv
+import logging
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
@@ -33,6 +34,9 @@ from scipy.signal import sosfreqz  # type: ignore
 
 from .apply import TiltConfig, cascade_with_tilt
 from .profiles import AutoEqProfile
+from .updater import cache_dir, fetch_csv_for_profile_async
+
+log = logging.getLogger(__name__)
 
 
 @dataclass
@@ -74,8 +78,6 @@ def _measurement_csv_path(profile: AutoEqProfile, data_root: Path) -> Optional[P
         return None
     headphone_dir = f"{profile.brand} {profile.model}"
     csv_name = f"{profile.brand} {profile.model}.csv"
-    # Lazy import to avoid a circular reference at module load.
-    from .updater import cache_dir
     for root in (data_root, cache_dir()):
         candidate = root / profile.source / headphone_dir / csv_name
         if candidate.exists():
@@ -127,7 +129,13 @@ def _read_measurement(
         if not freqs:
             return None
         return np.asarray(freqs), np.asarray(raws), np.asarray(targets)
-    except Exception:
+    except (OSError, csv.Error) as exc:
+        # File missing, permissions denied, or malformed CSV
+        # framing past what the per-row except catches. Anything
+        # else (e.g. a bug inside this function) should propagate
+        # so the test suite catches it instead of silently rendering
+        # an empty graph.
+        log.debug("autoeq measurement read failed for %s: %s", path, exc)
         return None
 
 
@@ -178,11 +186,7 @@ def compute_response(
         # graph debounces another response request (~80ms after
         # the next tilt-slider drag), the CSV is on disk and the
         # graph upgrades to the full three-curve view.
-        try:
-            from .updater import fetch_csv_for_profile_async
-            fetch_csv_for_profile_async(profile.profile_id)
-        except Exception:
-            pass
+        fetch_csv_for_profile_async(profile.profile_id)
         raw_db_list: Optional[list[float]] = None
         target_db_list: Optional[list[float]] = None
         post_eq = cascade_db  # No raw to add to → post-EQ is just
