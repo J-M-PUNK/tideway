@@ -56,37 +56,53 @@ CURATED: list[tuple[str, str, str, str]] = [
 ]
 
 
+def _fetch_url(url: str) -> bytes:
+    req = urllib.request.Request(
+        url, headers={"User-Agent": "tideway-autoeq-vendor/1.0"}
+    )
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        return resp.read()
+
+
 def fetch_one(
     out_root: Path, source: str, kind: str, dir_name: str, file_prefix: str
-) -> Path:
-    """Download one profile into `<out_root>/<source>/<brand_model>/`.
+) -> None:
+    """Download one profile + its raw measurement CSV into
+    `<out_root>/<source>/<brand_model>/`.
 
-    Drops the `<kind>` (over-ear / in-ear) directory level — our
-    index doesn't need it for picking, and keeping the layout flat
-    makes profile IDs shorter. The kind is implicitly captured by
-    which subset of headphones we vendored."""
-    filename = urllib.parse.quote(f"{file_prefix} ParametricEQ.txt")
-    url = (
-        f"{REPO_BASE}/{source}/{kind}/"
-        f"{urllib.parse.quote(dir_name)}/{filename}"
-    )
+    Two files per headphone:
+      - `<prefix> ParametricEQ.txt`: the EQ filters (Phase 2).
+      - `<prefix>.csv`: the raw measurement curve + AutoEQ's
+        target — needed by Phase 6's frequency-response graph
+        to overlay raw / target / post-EQ.
+
+    The CSV is optional; if it 404s we keep the ParametricEQ
+    file so the picker still works (just no FR graph for that
+    one entry)."""
     target_dir = out_root / source / dir_name
     target_dir.mkdir(parents=True, exist_ok=True)
-    target_path = target_dir / f"{file_prefix} ParametricEQ.txt"
+    base_url = (
+        f"{REPO_BASE}/{source}/{kind}/{urllib.parse.quote(dir_name)}"
+    )
+
+    peq_filename = urllib.parse.quote(f"{file_prefix} ParametricEQ.txt")
+    peq_target = target_dir / f"{file_prefix} ParametricEQ.txt"
 
     print(f"fetching {source}/{dir_name} ... ", end="", flush=True)
     try:
-        req = urllib.request.Request(
-            url, headers={"User-Agent": "tideway-autoeq-vendor/1.0"}
-        )
-        with urllib.request.urlopen(req, timeout=30) as resp:
-            data = resp.read().decode("utf-8")
+        peq_target.write_bytes(_fetch_url(f"{base_url}/{peq_filename}"))
     except Exception as exc:
         print(f"FAIL ({exc})")
         raise
-    target_path.write_text(data, encoding="utf-8")
-    print(f"OK ({len(data)} bytes)")
-    return target_path
+
+    csv_filename = urllib.parse.quote(f"{file_prefix}.csv")
+    csv_target = target_dir / f"{file_prefix}.csv"
+    try:
+        csv_data = _fetch_url(f"{base_url}/{csv_filename}")
+        csv_target.write_bytes(csv_data)
+        print(f"OK (PEQ + {len(csv_data)} byte CSV)")
+    except Exception as exc:
+        print(f"OK (PEQ only — CSV missing: {exc})")
 
 
 def main() -> int:

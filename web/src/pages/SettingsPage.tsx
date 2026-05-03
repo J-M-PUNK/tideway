@@ -1202,15 +1202,247 @@ function AutoEqProfileField() {
         )}
 
         {state.mode === "profile" && state.active_profile && (
-          <AutoEqTiltSliders
-            initial={state.tilt}
-            onChange={(t) =>
-              setState((prev) => (prev ? { ...prev, tilt: t } : prev))
-            }
-          />
+          <>
+            <AutoEqTiltSliders
+              initial={state.tilt}
+              onChange={(t) =>
+                setState((prev) => (prev ? { ...prev, tilt: t } : prev))
+              }
+            />
+            <AutoEqResponseGraph
+              activeProfileId={state.active_profile_id}
+              tilt={state.tilt}
+            />
+          </>
         )}
       </div>
     </Field>
+  );
+}
+
+/**
+ * Phase 6 frequency-response graph. Three overlaid curves on a
+ * log-frequency × dB-amplitude axis:
+ *
+ *  - Raw (gray): the headphone's measured response, the curve
+ *    AutoEQ corrects FROM.
+ *  - Target (dashed): the target AutoEQ aimed at, what a perfect
+ *    correction would land on.
+ *  - Post-EQ (solid primary): the user's predicted response with
+ *    the active profile + tilt applied. Should land near the
+ *    target when the profile is doing its job; the gap is what
+ *    the user's tilt + the profile's irreducible error account
+ *    for.
+ *
+ * When no measurement CSV is bundled for the active profile, the
+ * graph collapses to a single curve showing what the EQ does in
+ * isolation (cascade response only).
+ *
+ * Refetches whenever the active profile or tilt changes — small
+ * payload (~6 KB JSON) and the cascade compute is sub-millisecond,
+ * so the graph tracks the tilt sliders smoothly.
+ */
+type AutoEqResponseData = {
+  frequencies_hz: number[];
+  raw_db: number[] | null;
+  target_db: number[] | null;
+  post_eq_db: number[];
+  sample_rate_hz: number;
+  has_measurement: boolean;
+};
+
+function AutoEqResponseGraph({
+  activeProfileId,
+  tilt,
+}: {
+  activeProfileId: string;
+  tilt: { preamp_offset_db: number; bass_db: number; treble_db: number };
+}) {
+  const [data, setData] = useState<AutoEqResponseData | null>(null);
+
+  // Refetch on profile/tilt changes. Debounce so dragging a
+  // slider doesn't fire 60 requests per second.
+  useEffect(() => {
+    if (!activeProfileId) {
+      setData(null);
+      return;
+    }
+    const handle = window.setTimeout(async () => {
+      try {
+        const r = await api.player.autoEqResponse(384);
+        setData(r);
+      } catch {
+        setData(null);
+      }
+    }, 80);
+    return () => window.clearTimeout(handle);
+  }, [
+    activeProfileId,
+    tilt.preamp_offset_db,
+    tilt.bass_db,
+    tilt.treble_db,
+  ]);
+
+  if (data === null) return null;
+
+  const W = 480;
+  const H = 180;
+  const PAD_L = 32;
+  const PAD_R = 8;
+  const PAD_T = 8;
+  const PAD_B = 22;
+  const innerW = W - PAD_L - PAD_R;
+  const innerH = H - PAD_T - PAD_B;
+
+  // dB axis: pick a tight range that fits all three curves.
+  const allValues: number[] = [...data.post_eq_db];
+  if (data.raw_db) allValues.push(...data.raw_db);
+  if (data.target_db) allValues.push(...data.target_db);
+  let yMin = Math.min(...allValues);
+  let yMax = Math.max(...allValues);
+  // Pad and round outward to the nearest 5 dB so axis ticks are
+  // sensible.
+  yMin = Math.floor((yMin - 1) / 5) * 5;
+  yMax = Math.ceil((yMax + 1) / 5) * 5;
+  if (yMax - yMin < 10) yMax = yMin + 10;
+
+  const xLogMin = Math.log10(data.frequencies_hz[0]);
+  const xLogMax = Math.log10(
+    data.frequencies_hz[data.frequencies_hz.length - 1],
+  );
+  const xLogRange = xLogMax - xLogMin;
+
+  const px = (f: number) =>
+    PAD_L + ((Math.log10(f) - xLogMin) / xLogRange) * innerW;
+  const py = (db: number) =>
+    PAD_T + (1 - (db - yMin) / (yMax - yMin)) * innerH;
+
+  const linePath = (values: number[]) =>
+    values
+      .map(
+        (v, i) =>
+          `${i === 0 ? "M" : "L"} ${px(data.frequencies_hz[i]).toFixed(1)} ${py(v).toFixed(1)}`,
+      )
+      .join(" ");
+
+  const xTicks = [20, 50, 100, 200, 500, 1000, 2000, 5000, 10_000, 20_000];
+  const yTickStep = yMax - yMin >= 30 ? 10 : 5;
+  const yTicks: number[] = [];
+  for (let v = yMin; v <= yMax; v += yTickStep) yTicks.push(v);
+
+  return (
+    <div className="rounded-md border border-input bg-secondary/40 p-3">
+      <div className="mb-2 flex items-center justify-between">
+        <div className="text-xs uppercase tracking-wide text-muted-foreground">
+          Frequency response
+        </div>
+        <div className="flex items-center gap-3 text-[10px] text-muted-foreground">
+          {data.has_measurement && (
+            <>
+              <span className="flex items-center gap-1">
+                <span className="inline-block h-2 w-3 rounded-sm bg-foreground/35" />
+                Raw
+              </span>
+              <span className="flex items-center gap-1">
+                <span className="inline-block h-px w-3 border-t border-dashed border-foreground/60" />
+                Target
+              </span>
+            </>
+          )}
+          <span className="flex items-center gap-1">
+            <span className="inline-block h-1 w-3 rounded-sm bg-primary" />
+            Post-EQ
+          </span>
+        </div>
+      </div>
+      <svg
+        viewBox={`0 0 ${W} ${H}`}
+        className="h-44 w-full"
+        preserveAspectRatio="none"
+      >
+        {yTicks.map((v) => {
+          const y = py(v);
+          return (
+            <g key={`y${v}`}>
+              <line
+                x1={PAD_L}
+                x2={W - PAD_R}
+                y1={y}
+                y2={y}
+                stroke="currentColor"
+                strokeOpacity={v === 0 ? 0.4 : 0.1}
+                strokeWidth={v === 0 ? 1 : 0.5}
+              />
+              <text
+                x={PAD_L - 4}
+                y={y + 3}
+                textAnchor="end"
+                className="fill-current text-[9px] text-muted-foreground"
+              >
+                {v > 0 ? `+${v}` : v}
+              </text>
+            </g>
+          );
+        })}
+        {xTicks.map((f) => {
+          const x = px(f);
+          if (x < PAD_L || x > W - PAD_R) return null;
+          const label = f >= 1000 ? `${f / 1000}k` : `${f}`;
+          return (
+            <g key={`x${f}`}>
+              <line
+                x1={x}
+                x2={x}
+                y1={PAD_T}
+                y2={H - PAD_B}
+                stroke="currentColor"
+                strokeOpacity={0.06}
+                strokeWidth={0.5}
+              />
+              <text
+                x={x}
+                y={H - PAD_B + 12}
+                textAnchor="middle"
+                className="fill-current text-[9px] text-muted-foreground"
+              >
+                {label}
+              </text>
+            </g>
+          );
+        })}
+        {data.raw_db && (
+          <path
+            d={linePath(data.raw_db)}
+            fill="none"
+            stroke="currentColor"
+            strokeOpacity={0.35}
+            strokeWidth={1}
+          />
+        )}
+        {data.target_db && (
+          <path
+            d={linePath(data.target_db)}
+            fill="none"
+            stroke="currentColor"
+            strokeOpacity={0.55}
+            strokeWidth={1}
+            strokeDasharray="3 3"
+          />
+        )}
+        <path
+          d={linePath(data.post_eq_db)}
+          fill="none"
+          stroke="hsl(var(--primary))"
+          strokeWidth={1.6}
+        />
+      </svg>
+      {!data.has_measurement && (
+        <div className="mt-1 text-[10px] text-muted-foreground">
+          No measurement CSV bundled for this profile — showing EQ
+          response only.
+        </div>
+      )}
+    </div>
   );
 }
 
