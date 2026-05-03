@@ -1,7 +1,8 @@
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 import {
   ChevronDown,
+  Info,
   Loader2,
   Mic2,
   Minimize2,
@@ -13,10 +14,12 @@ import {
   Shuffle,
   SkipBack,
   SkipForward,
+  Sparkles,
 } from "lucide-react";
 import type { OnDownload } from "@/api/download";
-import type { Lyrics } from "@/api/types";
+import type { CreditEntry, Lyrics } from "@/api/types";
 import { useCoverColor } from "@/hooks/useCoverColor";
+import { useCredits } from "@/hooks/useCredits";
 import { useIsDownloaded } from "@/hooks/useDownloadedSet";
 import { useLyrics } from "@/hooks/useLyrics";
 import {
@@ -28,6 +31,13 @@ import { Button } from "@/components/ui/button";
 import { HeartButton } from "@/components/HeartButton";
 import { DownloadButton } from "@/components/DownloadButton";
 import { cn, formatDuration, imageProxy } from "@/lib/utils";
+
+// Right-pane tab in the full-screen player. Matches the affordance
+// the official Tidal desktop client surfaces in the same view —
+// users dragged from Tidal expect Lyrics / Credits / Similar to
+// be one click apart from each other rather than buried in
+// separate dialogs.
+type RightPaneTab = "similar" | "credits" | "lyrics";
 
 /**
  * Full-screen Now Playing view. Big cover on the left, synced lyrics (if
@@ -68,6 +78,8 @@ export function FullScreenPlayer({
   const dominant = useCoverColor(cover);
   const pct = duration > 0 ? (currentTime / duration) * 100 : 0;
 
+  const [activeTab, setActiveTab] = useState<RightPaneTab>("lyrics");
+
   // Shared with LyricsPanel — same hook, same cache, so opening one view
   // doesn't refetch what the other already has.
   const { lyrics, loading: loadingLyrics } = useLyrics(
@@ -75,10 +87,24 @@ export function FullScreenPlayer({
   );
   const activeIdx = useActiveLyric(lyrics, currentTime);
 
+  // Credits hook only fires when the credits tab is selected, so
+  // the network call is deferred for the common case where the
+  // user opens the full-screen player just to see the cover.
+  const { credits, loading: loadingCredits } = useCredits(
+    open ? (track?.id ?? null) : null,
+    open && activeTab === "credits",
+  );
+
   if (!open || !track) return null;
 
+  // Tidal's full-screen view sits on a single muted cover-derived
+  // tone rather than fading to black. Using `dominant` directly with
+  // a slight bottom darken keeps the controls bar legible without
+  // killing the "the room is the album cover" mood. Falls back to
+  // the old neutral gradient if the dominant-color extraction is
+  // still pending or failed.
   const bg = dominant
-    ? `linear-gradient(180deg, ${dominant} 0%, ${dominant}aa 40%, hsl(0 0% 5%) 85%)`
+    ? `linear-gradient(180deg, ${dominant} 0%, ${dominant} 70%, color-mix(in srgb, ${dominant} 70%, black) 100%)`
     : "linear-gradient(180deg, hsl(0 0% 20%), hsl(0 0% 5%))";
 
   return (
@@ -88,7 +114,7 @@ export function FullScreenPlayer({
       role="dialog"
       aria-modal="true"
     >
-      <div className="flex items-center justify-between px-6 py-4">
+      <div className="flex items-center justify-between gap-4 px-6 py-4">
         <div className="min-w-0">
           <div className="text-xs uppercase tracking-wider text-foreground/70">
             {isLocal ? "Playing from your library" : "Playing preview"}
@@ -103,15 +129,18 @@ export function FullScreenPlayer({
             </Link>
           )}
         </div>
-        <Button
-          variant="ghost"
-          size="icon"
-          onClick={onClose}
-          className="h-9 w-9 bg-black/20 hover:bg-black/40"
-          aria-label="Collapse"
-        >
-          <ChevronDown className="h-5 w-5" />
-        </Button>
+        <div className="flex items-center gap-2">
+          <RightPaneTabs active={activeTab} onChange={setActiveTab} />
+          <Button
+            variant="ghost"
+            size="icon"
+            onClick={onClose}
+            className="h-9 w-9 bg-black/20 hover:bg-black/40"
+            aria-label="Collapse"
+          >
+            <ChevronDown className="h-5 w-5" />
+          </Button>
+        </div>
       </div>
 
       <div className="flex min-h-0 flex-1 flex-col gap-8 px-6 pb-6 md:flex-row md:items-center md:px-12">
@@ -128,23 +157,32 @@ export function FullScreenPlayer({
         </div>
 
         <div className="flex min-h-0 flex-1 flex-col justify-center">
-          {lyrics && lyrics.synced && lyrics.synced.length > 0 ? (
-            <SyncedLyricsPane
-              lines={lyrics.synced}
-              active={activeIdx}
-              onSeek={actions.seek}
+          {activeTab === "lyrics" &&
+            (lyrics && lyrics.synced && lyrics.synced.length > 0 ? (
+              <SyncedLyricsPane
+                lines={lyrics.synced}
+                active={activeIdx}
+                onSeek={actions.seek}
+              />
+            ) : lyrics?.text ? (
+              <pre className="max-h-[55vh] overflow-y-auto whitespace-pre-wrap font-sans text-lg leading-relaxed text-foreground/80 scrollbar-thin">
+                {lyrics.text}
+              </pre>
+            ) : loadingLyrics ? (
+              <div className="flex items-center gap-2 text-foreground/60">
+                <Loader2 className="h-4 w-4 animate-spin" /> Loading lyrics…
+              </div>
+            ) : (
+              <LyricsPlaceholder />
+            ))}
+          {activeTab === "credits" && (
+            <CreditsPane
+              credits={credits}
+              loading={loadingCredits}
+              onArtistClick={onClose}
             />
-          ) : lyrics?.text ? (
-            <pre className="max-h-[50vh] overflow-y-auto whitespace-pre-wrap font-sans text-lg leading-relaxed text-foreground/80 scrollbar-thin">
-              {lyrics.text}
-            </pre>
-          ) : loadingLyrics ? (
-            <div className="flex items-center gap-2 text-foreground/60">
-              <Loader2 className="h-4 w-4 animate-spin" /> Loading lyrics…
-            </div>
-          ) : (
-            <LyricsPlaceholder />
           )}
+          {activeTab === "similar" && <SimilarPlaceholder />}
         </div>
       </div>
 
@@ -347,6 +385,123 @@ function LyricsPlaceholder() {
     <div className="flex items-center gap-3 rounded-lg bg-white/5 p-6 text-sm text-foreground/60">
       <Mic2 className="h-5 w-5 flex-shrink-0" />
       <span>No lyrics available for this track.</span>
+    </div>
+  );
+}
+
+const TAB_LABELS: { id: RightPaneTab; label: string }[] = [
+  { id: "similar", label: "Similar tracks" },
+  { id: "credits", label: "Credits" },
+  { id: "lyrics", label: "Lyrics" },
+];
+
+function RightPaneTabs({
+  active,
+  onChange,
+}: {
+  active: RightPaneTab;
+  onChange: (tab: RightPaneTab) => void;
+}) {
+  return (
+    <div className="flex items-center gap-1.5">
+      {TAB_LABELS.map((t) => {
+        const isActive = active === t.id;
+        return (
+          <button
+            key={t.id}
+            type="button"
+            onClick={() => onChange(t.id)}
+            aria-pressed={isActive}
+            className={cn(
+              "rounded-full px-4 py-1.5 text-sm font-semibold transition-colors",
+              isActive
+                ? "bg-white text-black"
+                : "bg-black/25 text-foreground/85 hover:bg-black/40 hover:text-foreground",
+            )}
+          >
+            {t.label}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+function CreditsPane({
+  credits,
+  loading,
+  onArtistClick,
+}: {
+  credits: CreditEntry[] | null;
+  loading: boolean;
+  onArtistClick: () => void;
+}) {
+  if (loading) {
+    return (
+      <div className="flex items-center gap-2 text-foreground/60">
+        <Loader2 className="h-4 w-4 animate-spin" /> Loading credits…
+      </div>
+    );
+  }
+  if (!credits || credits.length === 0) {
+    return (
+      <div className="flex items-center gap-3 rounded-lg bg-white/5 p-6 text-sm text-foreground/60">
+        <Info className="h-5 w-5 flex-shrink-0" />
+        <span>No credits listed for this track.</span>
+      </div>
+    );
+  }
+  return (
+    <div className="max-h-[55vh] overflow-y-auto pr-2 scrollbar-thin">
+      <div className="flex flex-col gap-5">
+        {credits.map((entry) => (
+          <div key={entry.role} className="flex flex-col gap-1">
+            <div className="text-xs font-semibold uppercase tracking-wider text-foreground/60">
+              {entry.role}
+            </div>
+            <div className="text-base leading-snug">
+              {entry.contributors.map((c, i) => (
+                <span key={`${c.name}-${i}`}>
+                  {i > 0 && <span className="text-foreground/50">, </span>}
+                  {c.id ? (
+                    <Link
+                      to={`/artist/${c.id}`}
+                      onClick={onArtistClick}
+                      className="hover:underline"
+                    >
+                      {c.name}
+                    </Link>
+                  ) : (
+                    c.name
+                  )}
+                </span>
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function SimilarPlaceholder() {
+  // Stubbed for the v1 reskin. Backend exposes search-time
+  // "similar artists" today but no per-track similar-tracks
+  // endpoint yet — adding that is a follow-up (likely a thin
+  // wrapper around tidalapi's track radio). The placeholder
+  // tells the user it's coming rather than rendering an empty
+  // panel that reads as broken.
+  return (
+    <div className="flex items-start gap-3 rounded-lg bg-white/5 p-6 text-sm text-foreground/70">
+      <Sparkles className="mt-0.5 h-5 w-5 flex-shrink-0" />
+      <div className="flex flex-col gap-1">
+        <div className="font-semibold text-foreground">Similar tracks</div>
+        <p className="text-foreground/60">
+          Coming in a future release — a per-track radio fed by Tidal&apos;s
+          recommendation graph, surfaced alongside lyrics and credits so you can
+          chase a vibe without leaving the now-playing view.
+        </p>
+      </div>
     </div>
   );
 }
