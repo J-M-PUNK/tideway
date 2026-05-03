@@ -77,7 +77,6 @@ export function NowPlaying({
     volume,
     shuffle,
     repeat,
-    hasNext,
     hasPrev,
     queue,
     streamInfo,
@@ -272,7 +271,6 @@ export function NowPlaying({
               size="icon"
               className="h-8 w-8"
               onClick={actions.next}
-              disabled={!hasNext && !shuffle && repeat === "off"}
               title="Next"
             >
               <SkipForward className="h-4 w-4" fill="currentColor" />

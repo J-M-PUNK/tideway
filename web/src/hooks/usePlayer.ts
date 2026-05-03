@@ -911,7 +911,21 @@ export function usePlayer() {
       : -1;
     const fromIdx = intendedIdx >= 0 ? intendedIdx : s.queueIndex;
     const n = pickNextIndex({ ...s, queueIndex: fromIdx });
-    if (n !== null) playAtIndex(n);
+    if (n !== null) {
+      playAtIndex(n);
+      return;
+    }
+    // End of queue with shuffle off + repeat off — explicit stop
+    // rather than silent no-op, so clicking Next on the last track
+    // of an album produces a predictable result instead of a
+    // button that pretends to do nothing. Matches Spotify / Apple
+    // Music behaviour, and lets the UI keep the Next button
+    // enabled (which a no-op `next` did not justify).
+    if (s.queue.length > 0) {
+      expectedTrackIdRef.current = null;
+      void api.player.stop().catch(() => {});
+      setState(INITIAL);
+    }
   }, [playAtIndex]);
 
   const prev = useCallback(() => {
