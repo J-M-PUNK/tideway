@@ -28,10 +28,11 @@ import {
 } from "lucide-react";
 import { api } from "@/api/client";
 import type { QualityOption, Settings } from "@/api/types";
-import type {
-  AutoEqMode,
-  AutoEqProfileSummary,
-  AutoEqState,
+import {
+  useAutoEqState,
+  type AutoEqMode,
+  type AutoEqProfileSummary,
+  type AutoEqState,
 } from "@/hooks/useAutoEqState";
 import {
   TEMPLATE_TOKENS,
@@ -747,6 +748,14 @@ function AudioEngineFields() {
     current: string;
   } | null>(null);
 
+  // The Headphone profile picker above (AutoEqProfileField) is the
+  // single source of truth for whether the EQ stage runs. We read
+  // its mode here so the manual sliders can dim themselves when the
+  // mode is "off" or "profile" without showing a separate Enable
+  // toggle that would just duplicate the picker's "Off" button.
+  const { state: autoEqState } = useAutoEqState(true);
+  const manualActive = autoEqState?.mode === "manual";
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -766,22 +775,6 @@ function AudioEngineFields() {
       cancelled = true;
     };
   }, []);
-
-  const toggleEnabled = async (enabled: boolean) => {
-    if (!eq) return;
-    // Optimistic update so the toggle feels instant; roll back on error.
-    setEq({ ...eq, enabled });
-    try {
-      await api.player.setEqEnabled(enabled);
-    } catch (err) {
-      setEq({ ...eq, enabled: !enabled });
-      toast.show({
-        kind: "error",
-        title: "Couldn't toggle equalizer",
-        description: err instanceof Error ? err.message : String(err),
-      });
-    }
-  };
 
   // Local mirror of the slider state so dragging is instant; flush to
   // the backend on release (via mouse-up / change commit).
@@ -859,65 +852,58 @@ function AudioEngineFields() {
       <AutoEqDeviceMappingField />
 
       <Field
-        label="Equalizer"
+        label="Manual EQ"
         hint={
-          eq.enabled
+          manualActive
             ? "Drag sliders or pick a preset. Reset flattens to zero."
-            : "Equalizer is off — toggle it on to hear your changes. Curves are saved either way."
+            : 'Switch the Headphone profile picker above to "Manual" to hear these sliders. Curves are saved either way.'
         }
       >
-        <div className="flex flex-col gap-3">
-          <Toggle
-            checked={eq.enabled}
-            onChange={toggleEnabled}
-            label="Enable equalizer"
-          />
-          <div
-            className={cn(
-              "flex flex-col gap-3 transition-opacity",
-              !eq.enabled && "opacity-50",
-            )}
-          >
-            <div className="flex flex-wrap items-center gap-2">
-              <select
-                onChange={(e) => {
-                  const n = parseInt(e.target.value, 10);
-                  if (!isNaN(n)) pickPreset(n);
-                }}
-                value=""
-                className="h-9 rounded-md border border-input bg-secondary px-3 text-xs"
-              >
-                <option value="">Presets…</option>
-                {eq.presets.map((p) => (
-                  <option key={p.index} value={p.index}>
-                    {p.name}
-                  </option>
-                ))}
-              </select>
-              <Button size="sm" variant="outline" onClick={reset}>
-                Reset
-              </Button>
-            </div>
-
-            <div className="flex items-end gap-3">
-              {localBands?.map((v, i) => (
-                <EqSlider
-                  key={i}
-                  value={v}
-                  freq={eq.frequencies[i]}
-                  onChange={(nv) => {
-                    const next = [...localBands];
-                    next[i] = nv;
-                    setLocalBands(next);
-                  }}
-                  onCommit={(nv) => {
-                    const next = [...localBands];
-                    next[i] = nv;
-                    flush(next);
-                  }}
-                />
+        <div
+          className={cn(
+            "flex flex-col gap-3 transition-opacity",
+            !manualActive && "opacity-50",
+          )}
+        >
+          <div className="flex flex-wrap items-center gap-2">
+            <select
+              onChange={(e) => {
+                const n = parseInt(e.target.value, 10);
+                if (!isNaN(n)) pickPreset(n);
+              }}
+              value=""
+              className="h-9 rounded-md border border-input bg-secondary px-3 text-xs"
+            >
+              <option value="">Presets…</option>
+              {eq.presets.map((p) => (
+                <option key={p.index} value={p.index}>
+                  {p.name}
+                </option>
               ))}
-            </div>
+            </select>
+            <Button size="sm" variant="outline" onClick={reset}>
+              Reset
+            </Button>
+          </div>
+
+          <div className="flex items-end gap-3">
+            {localBands?.map((v, i) => (
+              <EqSlider
+                key={i}
+                value={v}
+                freq={eq.frequencies[i]}
+                onChange={(nv) => {
+                  const next = [...localBands];
+                  next[i] = nv;
+                  setLocalBands(next);
+                }}
+                onCommit={(nv) => {
+                  const next = [...localBands];
+                  next[i] = nv;
+                  flush(next);
+                }}
+              />
+            ))}
           </div>
         </div>
       </Field>
