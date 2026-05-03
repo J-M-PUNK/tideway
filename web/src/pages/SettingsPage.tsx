@@ -850,6 +850,8 @@ function AudioEngineFields() {
         </select>
       </Field>
 
+      <AutoEqProfileField />
+
       <Field
         label="Equalizer"
         hint={
@@ -976,6 +978,227 @@ function EqSlider({
  * on pyatv's documented API; first real test will surface any
  * protocol quirks on HomePods, AirPlay speakers, or Apple TVs.
  */
+
+/**
+ * Headphone-profile section — Phase 2 of the AutoEQ work.
+ *
+ * Shows a mode toggle (Off / Manual / Profile) and, when in
+ * profile mode, a search input + result list. Manual mode keeps
+ * the existing 10-band sliders below; the two modes coexist via
+ * the backend `eq_mode` setting.
+ *
+ * Search is server-side (the backend has rapidfuzz when
+ * available; falls back to substring match). We re-fetch on
+ * every keystroke after a 200ms debounce — the catalog is small
+ * enough (~7 profiles in v1, ~5,000 once Phase 7 ships) that the
+ * cost is negligible.
+ */
+type AutoEqMode = "off" | "manual" | "profile";
+
+interface AutoEqProfileSummary {
+  id: string;
+  brand: string;
+  model: string;
+  source: string;
+  preamp_db: number;
+  band_count: number;
+}
+
+interface AutoEqState {
+  mode: AutoEqMode;
+  enabled: boolean;
+  active_profile_id: string;
+  active_profile: AutoEqProfileSummary | null;
+  manual_bands: number[];
+  manual_preamp_db: number | null;
+  profile_catalog_size: number;
+}
+
+function AutoEqProfileField() {
+  const toast = useToast();
+  const [state, setState] = useState<AutoEqState | null>(null);
+  const [query, setQuery] = useState("");
+  const [results, setResults] = useState<AutoEqProfileSummary[]>([]);
+  const [loadingResults, setLoadingResults] = useState(false);
+
+  // Initial state load. If the backend doesn't expose the
+  // endpoint (older server build), stay hidden — no error toast.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const s = await api.player.autoEqState();
+        if (cancelled) return;
+        setState(s);
+      } catch {
+        /* feature not available — keep section hidden */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Debounced search. Only fires when in profile mode (no point
+  // populating the dropdown when the user can't pick from it).
+  useEffect(() => {
+    if (state?.mode !== "profile") return;
+    const handle = window.setTimeout(async () => {
+      setLoadingResults(true);
+      try {
+        const r = await api.player.autoEqList(query, 50);
+        setResults(r.profiles);
+      } catch {
+        setResults([]);
+      } finally {
+        setLoadingResults(false);
+      }
+    }, 200);
+    return () => window.clearTimeout(handle);
+  }, [query, state?.mode]);
+
+  if (state === null) return null;
+
+  const switchMode = async (mode: AutoEqMode) => {
+    const prev = state;
+    setState({ ...state, mode });
+    try {
+      await api.player.autoEqSetMode(mode);
+    } catch (err) {
+      setState(prev);
+      toast.show({
+        kind: "error",
+        title: "Couldn't switch EQ mode",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+
+  const pickProfile = async (id: string) => {
+    try {
+      const r = await api.player.autoEqLoadProfile(id);
+      setState({
+        ...state,
+        mode: "profile",
+        enabled: true,
+        active_profile_id: r.active_profile_id,
+        active_profile: {
+          id: r.active_profile.id,
+          brand: r.active_profile.brand,
+          model: r.active_profile.model,
+          source: r.active_profile.source,
+          preamp_db: r.active_profile.preamp_db,
+          band_count: r.active_profile.band_count,
+        },
+      });
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: "Couldn't load profile",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+
+  const modeBtn = (mode: AutoEqMode, label: string) => (
+    <button
+      key={mode}
+      type="button"
+      onClick={() => switchMode(mode)}
+      className={cn(
+        "flex-1 rounded-md border border-input px-3 py-1.5 text-xs font-semibold transition-colors",
+        state.mode === mode
+          ? "bg-primary text-primary-foreground"
+          : "bg-secondary text-foreground hover:bg-accent",
+      )}
+    >
+      {label}
+    </button>
+  );
+
+  return (
+    <Field
+      label="Headphone profile"
+      hint={
+        state.profile_catalog_size === 0
+          ? "No profiles bundled. Profile mode disabled."
+          : `${state.profile_catalog_size} profile${
+              state.profile_catalog_size === 1 ? "" : "s"
+            } available. Picking one applies AutoEQ correction live.`
+      }
+    >
+      <div className="flex flex-col gap-3">
+        <div className="flex gap-1">
+          {modeBtn("off", "Off")}
+          {modeBtn("manual", "Manual")}
+          {modeBtn("profile", "Profile")}
+        </div>
+
+        {state.mode === "profile" && state.profile_catalog_size > 0 && (
+          <div className="flex flex-col gap-2">
+            <input
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search headphones — brand or model"
+              className="h-9 rounded-md border border-input bg-secondary px-3 text-sm"
+            />
+            <div className="max-h-48 overflow-y-auto rounded-md border border-input">
+              {loadingResults && results.length === 0 && (
+                <div className="px-3 py-2 text-xs text-muted-foreground">
+                  Searching…
+                </div>
+              )}
+              {!loadingResults && results.length === 0 && (
+                <div className="px-3 py-2 text-xs text-muted-foreground">
+                  No matches.
+                </div>
+              )}
+              {results.map((p) => {
+                const isActive = p.id === state.active_profile_id;
+                return (
+                  <button
+                    key={p.id}
+                    type="button"
+                    onClick={() => pickProfile(p.id)}
+                    className={cn(
+                      "flex w-full items-center justify-between gap-3 border-b border-input px-3 py-2 text-left text-xs last:border-b-0 hover:bg-accent",
+                      isActive && "bg-accent",
+                    )}
+                  >
+                    <span className="truncate">
+                      <span className="font-semibold">{p.brand}</span>{" "}
+                      {p.model}
+                    </span>
+                    <span className="flex-shrink-0 text-muted-foreground">
+                      {p.band_count} bands · {p.preamp_db.toFixed(1)} dB preamp
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        {state.mode === "profile" && state.active_profile && (
+          <div className="rounded-md border border-input bg-secondary/40 p-3">
+            <div className="text-xs uppercase tracking-wide text-muted-foreground">
+              Active profile
+            </div>
+            <div className="mt-1 text-sm font-semibold">
+              {state.active_profile.brand} {state.active_profile.model}
+            </div>
+            <div className="text-xs text-muted-foreground">
+              {state.active_profile.source} · {state.active_profile.band_count}{" "}
+              bands · preamp {state.active_profile.preamp_db.toFixed(1)} dB
+            </div>
+          </div>
+        )}
+      </div>
+    </Field>
+  );
+}
+
 interface AirPlayDeviceRow {
   id: string;
   name: string;

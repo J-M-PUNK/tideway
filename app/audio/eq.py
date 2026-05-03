@@ -77,18 +77,53 @@ class Equalizer:
                 f"expected {self.BAND_COUNT} bands, got {len(bands)}"
             )
         sos = _build_sos(bands, self._sample_rate)
-        # Zero-initialized state — same shape sosfilt expects when
-        # using zi= with an axis. sosfilt_zi gives steady-state
-        # initial conditions for a DC input, which is the right
-        # starting point for audio that begins from silence.
-        zi_single = sosfilt_zi(sos)  # shape (BAND_COUNT, 2)
-        # Broadcast across the channel axis: (BAND_COUNT, 2, channels)
+        self._install_sos(sos, preamp_db)
+
+    def set_sos(
+        self,
+        sos: np.ndarray,
+        preamp_db: Optional[float] = None,
+    ) -> None:
+        """Install an arbitrary pre-built SOS matrix as the active
+        filter. Used by the AutoEQ headphone-profile path, which
+        cascades a mix of peaking + low/high shelves at non-ISO
+        frequencies that don't fit the 10-band manual EQ shape.
+
+        `sos` must be `(N, 6)` float-friendly with `N >= 1`. An
+        empty array clears the EQ (matches set_bands' empty-list
+        behavior). Caller is responsible for getting the sample
+        rate right — coefficients depend on it.
+        """
+        sos_arr = np.asarray(sos, dtype=np.float32)
+        if sos_arr.size == 0:
+            self.clear()
+            return
+        if sos_arr.ndim != 2 or sos_arr.shape[1] != 6:
+            raise ValueError(
+                f"sos must be (N, 6); got shape {sos_arr.shape}"
+            )
+        self._install_sos(sos_arr, preamp_db)
+
+    def _install_sos(
+        self,
+        sos: np.ndarray,
+        preamp_db: Optional[float],
+    ) -> None:
+        """Shared coefficient-swap path for `set_bands` and
+        `set_sos`. State is reinitialised on every install — the
+        AutoEQ profile path swaps cascades only on user action
+        (mode change / profile pick), never per-callback, so the
+        settle transient is acceptable."""
+        # `sosfilt_zi` gives steady-state initial conditions for a
+        # DC input, the right starting point for audio that begins
+        # from silence.
+        zi_single = sosfilt_zi(sos)  # shape (N, 2)
         state = np.tile(
             zi_single[:, :, None], (1, 1, self._channels)
         ).astype(np.float32, copy=False)
         preamp = 1.0 if preamp_db is None else 10.0 ** (float(preamp_db) / 20.0)
         with self._lock:
-            self._sos = sos
+            self._sos = sos.astype(np.float32, copy=False)
             self._state = state
             self._preamp_linear = preamp
 
