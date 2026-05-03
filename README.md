@@ -159,8 +159,16 @@ but never expected.
 Grab the latest from the Releases page for whichever fork of this
 repo you are installing from.
 
-On macOS, download `Tideway-<version>.dmg`, double-click it, and
-drag the `Tideway` app into `/Applications`.
+On macOS, download the DMG matching your CPU, double-click it,
+and drag the `Tideway` app into `/Applications`:
+
+- **Apple Silicon** (M1 / M2 / M3 / M4): `Tideway-<version>-arm64.dmg`
+- **Intel**: `Tideway-<version>-x64.dmg`
+
+The app's auto-updater picks the right one for you on subsequent
+releases — this only matters for the first install. Not sure
+which you have? Apple → About This Mac. "Apple silicon" or
+"Apple M…" = arm64; "Intel" = x64.
 
 On Windows, download `Tideway-setup-<version>.exe` and run it. The
 installer drops the app under your user profile, registers a Start
@@ -406,10 +414,12 @@ npm --prefix web run build
 scripts/build_dmg.sh
 ```
 
-The DMG lands at `dist/Tideway-<version>.dmg`. Users drag the
-`.app` into Applications and launch. The CI builds on macOS 14
-(Apple Silicon), so the DMG produced by the release workflow is
-arm64. Intel Mac builds aren't part of the release pipeline today.
+The DMG lands at `dist/Tideway-<version>-<arch>.dmg`, where
+`<arch>` is `arm64` on Apple Silicon and `x64` on Intel — the
+build script picks the suffix from `uname -m`. Users drag the
+`.app` into Applications and launch. The release pipeline builds
+both: arm64 on macOS 14 and x64 on macOS 13, so the auto-updater
+hands each user the matching DMG.
 
 ### Windows
 
@@ -450,7 +460,8 @@ can replace the bundle.
 The release asset names must match these patterns:
 
 ```
-Tideway-<version>.dmg                       (macOS, Apple Silicon)
+Tideway-<version>-arm64.dmg                 (macOS, Apple Silicon)
+Tideway-<version>-x64.dmg                   (macOS, Intel)
 Tideway-setup-<version>.exe                 (Windows x64)
 Tideway-setup-<version>-arm64.exe           (Windows ARM64)
 Tideway-<version>-x86_64.AppImage           (Linux x86_64)

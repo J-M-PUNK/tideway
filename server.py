@@ -1351,17 +1351,18 @@ def _match_release_asset(release_data: dict) -> Optional[str]:
 
     Naming convention (matches scripts/build_dmg.sh, the Inno Setup
     script, and scripts/build_appimage.sh):
-      - macOS:           Tideway-<version>.dmg
-      - Windows x64:     Tideway-setup-<version>.exe
-      - Windows ARM64:   Tideway-setup-<version>-arm64.exe
-      - Linux x86_64:    Tideway-<version>-x86_64.AppImage
+      - macOS Apple Silicon: Tideway-<version>-arm64.dmg
+      - macOS Intel:         Tideway-<version>-x64.dmg
+      - Windows x64:         Tideway-setup-<version>.exe
+      - Windows ARM64:       Tideway-setup-<version>-arm64.exe
+      - Linux x86_64:        Tideway-<version>-x86_64.AppImage
 
-    On Windows we pick the asset matching the host CPU rather than the
-    process arch. platform.machine() reflects the underlying CPU even
-    when we're running as an emulated x64 process on an ARM64 host
-    (Prism exposes PROCESSOR_ARCHITEW6432=ARM64), so an ARM64 user who
-    accidentally installed the x64 build will still be offered the
-    correct ARM64 installer on the next update.
+    On Windows AND macOS we pick the asset matching the host CPU
+    rather than the process arch. platform.machine() reflects the
+    underlying CPU even when we're running as an emulated x64
+    process on an ARM64 host, so an ARM64 user who accidentally
+    installed the x64 build will still be offered the correct
+    ARM64 installer on the next update.
 
     Linux is currently x86_64-only — ARM Linux (Raspberry Pi etc.)
     isn't built and falls through to None until someone asks. Old
@@ -1369,16 +1370,34 @@ def _match_release_asset(release_data: dict) -> Optional[str]:
     either, so a Linux user pinned to a pre-AppImage release simply
     sees "no installer available" until a newer release lands.
     """
-    want_arm64 = False
+    # `arch_suffix` is the architecture marker we expect at the
+    # tail of the asset filename (before the extension). Empty
+    # string means "no arch suffix" — used by the Windows x64
+    # build's unsuffixed naming for back-compat.
+    arch_suffix = ""
     if sys.platform == "darwin":
         suffix = ".dmg"
+        host = platform.machine().lower()
+        if host in ("arm64", "aarch64"):
+            arch_suffix = "-arm64"
+        elif host in ("x86_64", "amd64", "i386"):
+            arch_suffix = "-x64"
+        else:
+            # Unknown Mac architecture — try an unsuffixed match
+            # for back-compat with releases predating the
+            # arch-tagged DMGs (≤v1.4.0). The strict / fallback
+            # logic below handles this gracefully.
+            arch_suffix = ""
     elif sys.platform.startswith("win"):
         suffix = ".exe"
-        want_arm64 = platform.machine().lower() in ("arm64", "aarch64")
+        if platform.machine().lower() in ("arm64", "aarch64"):
+            arch_suffix = "-arm64"
+        # Windows x64 ships unsuffixed (Tideway-setup-<v>.exe);
+        # leave arch_suffix as "" for the strict-match path.
     elif sys.platform.startswith("linux"):
         # Only x86_64 ships today. An aarch64 Linux host gets None
-        # rather than a wrong-arch download — same defensive shape as
-        # the Windows fallback below, just lacking a graceful
+        # rather than a wrong-arch download — same defensive shape
+        # as the platform fallback below, just lacking a graceful
         # "any matching ext" branch because there's nothing to fall
         # back to (no aarch64 AppImage exists yet).
         if platform.machine().lower() not in ("x86_64", "amd64"):
@@ -1388,7 +1407,7 @@ def _match_release_asset(release_data: dict) -> Optional[str]:
         return None
 
     assets = release_data.get("assets") or []
-    candidates: list[tuple[bool, str]] = []
+    candidates: list[tuple[str, str]] = []  # (asset_arch_tag, url)
     for a in assets:
         name = (a.get("name") or "").lower()
         if not (name.endswith(suffix) and name.startswith("tideway")):
@@ -1396,17 +1415,32 @@ def _match_release_asset(release_data: dict) -> Optional[str]:
         url = a.get("browser_download_url")
         if not url:
             continue
-        is_arm64 = name.endswith("-arm64" + suffix)
-        candidates.append((is_arm64, url))
+        # Detect the asset's arch tag — `-arm64`, `-x64`, or empty
+        # (= no tag, the back-compat naming for Windows x64 and
+        # for Mac releases ≤v1.4.0).
+        stem_lower = name[: -len(suffix)]
+        if stem_lower.endswith("-arm64"):
+            asset_arch = "-arm64"
+        elif stem_lower.endswith("-x64"):
+            asset_arch = "-x64"
+        else:
+            asset_arch = ""
+        candidates.append((asset_arch, url))
 
-    # Strict pass: only an asset with the matching arch suffix.
-    for is_arm64, url in candidates:
-        if is_arm64 == want_arm64:
+    # Strict pass: only an asset with the matching arch tag.
+    for asset_arch, url in candidates:
+        if asset_arch == arch_suffix:
             return url
-    # Fallback: any matching extension. Lets older releases that
-    # predate the ARM64 build still expose their single x64 asset to
-    # ARM64 hosts (the install will fail at runtime, but that is the
-    # pre-fix status quo and not a regression).
+    # Fallback: prefer an unsuffixed asset before settling for any
+    # matching extension. Older Mac releases (≤v1.4.0) had a
+    # single unsuffixed DMG that was actually arm64 — Apple
+    # Silicon users running an Intel-host installer should still
+    # get pointed at it for back-compat. Intel Mac users get the
+    # same unsuffixed download, which won't run, but that's the
+    # pre-fix status quo (not a regression).
+    for asset_arch, url in candidates:
+        if asset_arch == "":
+            return url
     if candidates:
         return candidates[0][1]
     return None

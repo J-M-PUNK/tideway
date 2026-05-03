@@ -22,13 +22,32 @@ env:
 
 jobs:
   # -------------------------------------------------------------------
-  # macOS .app bundle. Produces Tideway-macOS.zip containing
-  # the .app — users drag it to /Applications. Unsigned / unnotarized
-  # so first-launch shows Gatekeeper's "cannot be verified" warning;
-  # README tells them to right-click → Open.
+  # macOS DMG build, run twice — once on Apple Silicon (macos-14
+  # is arm64-native) and once on Intel (macos-13). Each runner
+  # uses host-arch Python + PyInstaller, so the DMG that comes
+  # out matches the runner's architecture. build_dmg.sh tags the
+  # output filename with the arch suffix, so both DMGs can sit
+  # in the release alongside each other.
+  #
+  # Without the Intel job, an Apple Silicon-only build forces
+  # Intel Mac users into Rosetta 2 (which works for most things
+  # but breaks bit-perfect audio) or just leaves them with a
+  # download that won't launch.
   # -------------------------------------------------------------------
   build-macos:
-    runs-on: macos-14
+    strategy:
+      # `fail-fast: false` so an Intel-runner deprecation doesn't
+      # take down the arm64 build alongside it. Each architecture
+      # ships independently.
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runs-on: macos-14
+          - arch: x64
+            runs-on: macos-13
+    name: build-macos (${{ matrix.arch }})
+    runs-on: ${{ matrix.runs-on }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -93,13 +112,16 @@ jobs:
         # the image, shows the drag-to-Applications window, users
         # eject when done. ZIP technically works but fails the
         # Mac-native install expectation, so we ship only the DMG.
-        # Name matches the auto-updater's convention:
-        # Tideway-<version>.dmg.
+        # build_dmg.sh tags the output with the host arch:
+        # Tideway-<version>-arm64.dmg / Tideway-<version>-x64.dmg.
         run: bash scripts/build_dmg.sh
 
       - uses: actions/upload-artifact@v7
         with:
-          name: Tideway-macOS
+          # Per-arch artifact name so the matrix legs don't collide
+          # in the artifact storage. The release-publish job
+          # downloads both via a wildcard.
+          name: Tideway-macOS-${{ matrix.arch }}
           path: dist/Tideway-*.dmg
           if-no-files-found: error
 
@@ -398,7 +420,13 @@ jobs:
 
       - uses: actions/download-artifact@v8
         with:
-          name: Tideway-macOS
+          # Both Mac legs (arm64 + x64) upload under
+          # `Tideway-macOS-<arch>` artifact names. Glob via
+          # `pattern` + `merge-multiple` so one download step
+          # picks up both DMGs into the same flat `artifacts/`
+          # directory the existing release glob expects.
+          pattern: Tideway-macOS-*
+          merge-multiple: true
           path: artifacts
       - uses: actions/download-artifact@v8
         with:

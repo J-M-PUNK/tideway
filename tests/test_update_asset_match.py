@@ -86,16 +86,84 @@ def test_x64_host_does_not_pick_arm64_only_release(force_windows, monkeypatch):
     )
 
 
-def test_macos_picks_dmg_ignoring_arch(force_macos, monkeypatch):
-    """macOS doesn't yet ship per-arch DMGs, so the matcher should
-    return the .dmg unconditionally and ignore the Windows assets."""
+def test_macos_apple_silicon_picks_arm64_dmg(force_macos, monkeypatch):
+    """Apple Silicon Macs should be offered the arm64 DMG when both
+    are present. Critical for the bit-perfect audio path — running
+    an x64 binary under Rosetta 2 changes ALSA / CoreAudio behaviour
+    in subtle ways that compromise the engine's invariants."""
     _set_machine(monkeypatch, "arm64")
     rel = _release(
-        "Tideway-1.0.0.dmg",
-        "Tideway-setup-1.0.0.exe",
-        "Tideway-setup-1.0.0-arm64.exe",
+        "Tideway-1.5.0-arm64.dmg",
+        "Tideway-1.5.0-x64.dmg",
+        "Tideway-setup-1.5.0.exe",
     )
-    assert server._match_release_asset(rel) == "https://example/Tideway-1.0.0.dmg"
+    assert (
+        server._match_release_asset(rel)
+        == "https://example/Tideway-1.5.0-arm64.dmg"
+    )
+
+
+def test_macos_intel_picks_x64_dmg(force_macos, monkeypatch):
+    """The whole reason this PR exists: Intel Mac users were
+    silently getting served the arm64 DMG and hitting "this
+    application is damaged" or worse. The x64-tagged DMG must
+    win for Intel hosts."""
+    _set_machine(monkeypatch, "x86_64")
+    rel = _release(
+        "Tideway-1.5.0-arm64.dmg",
+        "Tideway-1.5.0-x64.dmg",
+    )
+    assert (
+        server._match_release_asset(rel)
+        == "https://example/Tideway-1.5.0-x64.dmg"
+    )
+
+
+def test_macos_apple_silicon_falls_back_to_unsuffixed_dmg(force_macos, monkeypatch):
+    """Releases predating this PR (≤v1.4.0) shipped a single
+    unsuffixed `Tideway-<v>.dmg` that was actually arm64. Apple
+    Silicon users running the auto-updater against one of those
+    older releases (e.g. browsing back through the release log)
+    should still get pointed at it."""
+    _set_machine(monkeypatch, "arm64")
+    rel = _release("Tideway-1.4.0.dmg")
+    assert (
+        server._match_release_asset(rel)
+        == "https://example/Tideway-1.4.0.dmg"
+    )
+
+
+def test_macos_intel_falls_back_to_unsuffixed_dmg_on_old_release(
+    force_macos, monkeypatch
+):
+    """An Intel Mac user updating against a pre-PR release gets
+    handed the unsuffixed (=arm64) DMG as a fallback. It won't
+    actually run on Intel — but that's the pre-fix status quo,
+    not a regression. The new arch-tagged releases will give
+    them a working install going forward."""
+    _set_machine(monkeypatch, "x86_64")
+    rel = _release("Tideway-1.4.0.dmg")
+    assert (
+        server._match_release_asset(rel)
+        == "https://example/Tideway-1.4.0.dmg"
+    )
+
+
+def test_macos_picks_dmg_ignoring_windows_and_linux_assets(force_macos, monkeypatch):
+    """Sanity: with all four platforms' assets in the release,
+    the matcher only looks at .dmg files."""
+    _set_machine(monkeypatch, "arm64")
+    rel = _release(
+        "Tideway-1.5.0-arm64.dmg",
+        "Tideway-1.5.0-x64.dmg",
+        "Tideway-setup-1.5.0.exe",
+        "Tideway-setup-1.5.0-arm64.exe",
+        "Tideway-1.5.0-x86_64.AppImage",
+    )
+    assert (
+        server._match_release_asset(rel)
+        == "https://example/Tideway-1.5.0-arm64.dmg"
+    )
 
 
 def test_no_matching_asset_returns_none(force_windows, monkeypatch):

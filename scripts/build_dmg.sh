@@ -40,7 +40,23 @@ trap 'rm -rf "$STAGING"' EXIT
 cp -R "$APP_PATH" "$STAGING/${APP_NAME}.app"
 ln -s /Applications "$STAGING/Applications"
 
-DMG_OUT="dist/${APP_NAME}-${VERSION}.dmg"
+# Tag the DMG with the host architecture so `Tideway-<v>-arm64.dmg`
+# and `Tideway-<v>-x64.dmg` can coexist as separate release assets.
+# The auto-updater (server.py:_match_release_asset) picks the right
+# one based on the running Mac's CPU. Without arch tagging, Intel
+# Mac users would download the arm64 binary and get a "PowerPC?
+# this won't run" failure on first launch.
+HOST_ARCH="$(uname -m)"
+case "$HOST_ARCH" in
+  arm64)  ARCH_SUFFIX="arm64" ;;
+  x86_64) ARCH_SUFFIX="x64"   ;;
+  *)
+    echo "ERROR: unrecognised mac architecture: $HOST_ARCH" >&2
+    exit 1
+    ;;
+esac
+
+DMG_OUT="dist/${APP_NAME}-${VERSION}-${ARCH_SUFFIX}.dmg"
 rm -f "$DMG_OUT"
 
 # `hdiutil create -srcfolder ... -format UDZO` produces a compressed,
