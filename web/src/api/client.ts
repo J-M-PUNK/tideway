@@ -1113,6 +1113,18 @@ export const api = {
           body: JSON.stringify({ headphone_name, content, overwrite }),
         },
       ),
+    /** Delete a user-imported profile. Refuses to delete bundled
+     *  profiles (those ship with the app and come back on reinstall).
+     *  If the deleted profile was active, the server clears the
+     *  active selection too. */
+    autoEqDeleteProfile: (profile_id: string) =>
+      req<{ ok: boolean; profile_id: string; cleared_active: boolean }>(
+        "/api/eq/delete-profile",
+        {
+          method: "POST",
+          body: JSON.stringify({ profile_id }),
+        },
+      ),
     /** Phase 6 frequency-response data for the FR graph. Returns
      *  three parallel arrays — raw measured curve, target curve,
      *  predicted post-EQ — at log-spaced frequencies. Raw + target
