@@ -1361,10 +1361,13 @@ function ProfilesDialog({
               className="underline hover:text-foreground"
             >
               autoeq.app
-            </a>{" "}
-            (export as <span className="font-mono">Generic Parametric EQ</span>{" "}
-            or <span className="font-mono">Equalizer APO Parametric</span>) or
-            anywhere else that publishes AutoEQ-format PEQ.txt files.
+            </a>
+            : pick your headphones, choose a target, then under{" "}
+            <strong>Download</strong> select{" "}
+            <span className="font-mono">EqualizerAPO Parametric Eq</span> or{" "}
+            <span className="font-mono">Custom Parametric Eq</span>. Both import
+            as-is. Convolution, Graphic EQ (10-band / 31-band), and Wavelet
+            exports aren't parametric and won't work.
           </DialogDescription>
         </DialogHeader>
 

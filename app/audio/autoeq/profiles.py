@@ -80,10 +80,10 @@ _PREAMP_RE = re.compile(
 )
 
 # Equalizer APO config files use the same Filter / Preamp lines
-# AutoEQ's Generic Parametric format does, but prepend a
-# `Channel: all` (or per-channel) header that selects which audio
-# channels the EQ applies to. AutoEQ.app's "Equalizer APO Parametric"
-# export option produces this; users frequently grab that export
+# the bare-parametric format does, but prepend a `Channel: all`
+# (or per-channel) header that selects which audio channels the
+# EQ applies to. AutoEQ.app's "EqualizerAPO Parametric Eq"
+# download option produces this; users frequently grab that export
 # because Equalizer APO is the most popular Windows EQ host. We
 # don't honour the channel-selection semantics — Tideway always EQs
 # all channels — but skipping the line lets those exports import
@@ -140,7 +140,7 @@ def parse_profile_text(
             continue
 
         # Equalizer APO header lines — see comment above the regex.
-        # Skipped silently so AutoEQ.app's "Equalizer APO Parametric"
+        # Skipped silently so AutoEQ.app's "EqualizerAPO Parametric Eq"
         # export imports without modification.
         if _EQUALIZER_APO_HEADER_RE.match(line):
             continue
@@ -188,8 +188,8 @@ def parse_profile_text(
             raise AutoEqParseError(
                 f"This looks like a {wrong_format} file, which Tideway "
                 f"doesn't import. Re-export from autoeq.app and pick "
-                f"‘Generic Parametric EQ’ (or ‘Equalizer APO "
-                f"Parametric’) instead. Line {line_idx}: {line!r}"
+                f"‘EqualizerAPO Parametric Eq’ (or ‘Custom Parametric "
+                f"Eq’) instead. Line {line_idx}: {line!r}"
             )
 
         # Anything else is unrecognised. Be strict — a typo'd line
@@ -202,8 +202,8 @@ def parse_profile_text(
     if not saw_filter_or_preamp:
         raise AutoEqParseError(
             "File contained no Filter or Preamp lines. "
-            "Make sure you exported as 'Generic Parametric EQ' "
-            "(or 'Equalizer APO Parametric') from autoeq.app."
+            "Make sure you exported as 'EqualizerAPO Parametric Eq' "
+            "(or 'Custom Parametric Eq') from autoeq.app."
         )
 
     return profile
@@ -216,7 +216,7 @@ def _detect_wrong_format(line: str) -> Optional[str]:
     them, else None.
 
     Used so the parse error names the actual problem ("you exported
-    as Graphic EQ; pick Generic Parametric EQ") instead of a
+    as Graphic EQ; pick EqualizerAPO Parametric Eq") instead of a
     generic "unrecognised line".
     """
     stripped = line.strip()

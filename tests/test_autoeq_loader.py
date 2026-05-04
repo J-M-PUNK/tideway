@@ -114,7 +114,7 @@ def test_parse_rejects_garbled_line():
 
 
 def test_parse_accepts_equalizer_apo_format():
-    """AutoEQ.app's "Equalizer APO Parametric" export prepends a
+    """AutoEQ.app's "EqualizerAPO Parametric Eq" export prepends a
     Channel: header before the Filter / Preamp lines. Same parametric
     payload, just with the EqualizerAPO host's channel-selection
     semantics on top. We don't honour those semantics (Tideway always
@@ -149,10 +149,10 @@ Filter 1: ON PK Fc 1000 Hz Gain 2 dB Q 1.4
 
 
 def test_parse_rejects_graphic_eq_format_with_helpful_message():
-    """A user who exported AutoEQ.app's "Graphic EQ" instead of
-    "Generic Parametric EQ" gets a `25 -3.0; 31 -3.0; ...` payload
-    that isn't parametric. The error should name the wrong format
-    so the user knows which export option to switch to."""
+    """A user who exported AutoEQ.app's "Graphic EQ" instead of a
+    parametric format gets a `25 -3.0; 31 -3.0; ...` payload that
+    isn't parametric. The error should name the wrong format so the
+    user knows which export option to switch to."""
     text = "GraphicEQ: 25 -3.0; 31 -3.0; 40 -2.5; 50 -2.0"
     with pytest.raises(AutoEqParseError, match="Graphic EQ"):
         parse_profile_text(text)
@@ -167,28 +167,33 @@ def test_parse_rejects_empty_file_with_helpful_message():
 # Some comment
 Channel: all
 """
-    with pytest.raises(AutoEqParseError, match="Generic Parametric EQ"):
+    with pytest.raises(AutoEqParseError, match="EqualizerAPO Parametric Eq"):
         parse_profile_text(text)
 
 
 def test_parse_real_file_shape():
-    """Smoke-test against a real AutoEQ ParametricEQ.txt that lives
-    in the bundled data directory. If the curated set ever loses
-    HD 600 we'll want to know — that's the reference profile we
-    ship demos against."""
-    from app.audio.autoeq.index import default_data_dir
-
-    path = (
-        default_data_dir()
-        / "oratory1990"
-        / "Sennheiser HD 600"
-        / "Sennheiser HD 600 ParametricEQ.txt"
+    """Smoke-test against a real AutoEQ-shaped ParametricEQ.txt — a
+    snapshot of oratory1990's HD 600 PEQ as of AutoEQ master. We
+    don't ship bundled profiles anymore, so this can't read off
+    disk; the inline copy serves as a "real-world fixture" so
+    parser regressions on actual production input get caught
+    without depending on disk state."""
+    text = (
+        "Preamp: -6.3 dB\n"
+        "Filter 1: ON LSC Fc 105 Hz Gain 6.5 dB Q 0.70\n"
+        "Filter 2: ON PK Fc 125 Hz Gain -2.7 dB Q 0.55\n"
+        "Filter 3: ON PK Fc 8445 Hz Gain 3.3 dB Q 1.61\n"
+        "Filter 4: ON PK Fc 522 Hz Gain 0.7 dB Q 1.02\n"
+        "Filter 5: ON PK Fc 1298 Hz Gain -1.2 dB Q 2.14\n"
+        "Filter 6: ON HSC Fc 10000 Hz Gain -3.1 dB Q 0.70\n"
+        "Filter 7: ON PK Fc 3158 Hz Gain -1.8 dB Q 3.67\n"
+        "Filter 8: ON PK Fc 2166 Hz Gain 0.9 dB Q 3.32\n"
+        "Filter 9: ON PK Fc 6639 Hz Gain 2.2 dB Q 5.82\n"
+        "Filter 10: ON PK Fc 5433 Hz Gain -1.2 dB Q 5.70\n"
     )
-    text = path.read_text(encoding="utf-8")
     p = parse_profile_text(text)
     assert p.preamp_db < 0  # real profiles always need some headroom
     assert len(p.bands) >= 5
-    # Every band has a positive frequency and a finite Q.
     for band in p.bands:
         assert band.freq_hz > 0
         assert band.q > 0
