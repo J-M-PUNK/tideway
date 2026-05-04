@@ -1382,6 +1382,79 @@ function HeadphonePicker({
     }
   };
 
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [importing, setImporting] = useState(false);
+
+  const handleImport = async (file: File) => {
+    setImporting(true);
+    try {
+      const text = await file.text();
+      // Default-name from filename: "Sennheiser HD 600 ParametricEQ.txt"
+      // -> "Sennheiser HD 600". User can rename the file before
+      // import if they want a different display name (e.g. to
+      // distinguish "Sennheiser HD 600 Harman 2017" from a default
+      // import of the same model).
+      const baseName = file.name
+        .replace(/\.txt$/i, "")
+        .replace(/\s+ParametricEQ$/i, "")
+        .trim();
+      const headphoneName =
+        window
+          .prompt(
+            "Save this profile under what name?",
+            baseName || "Custom profile",
+          )
+          ?.trim() || "";
+      if (!headphoneName) return;
+      try {
+        const r = await api.player.autoEqImportProfile(headphoneName, text);
+        toast.show({
+          kind: "success",
+          title: "Profile imported",
+          description: r.headphone,
+        });
+        // Auto-load the imported profile so the user immediately
+        // hears the correction and the active card updates.
+        await api.player.autoEqLoadProfile(r.profile_id);
+        onPicked();
+      } catch (err) {
+        // 409 = exists. Offer to overwrite.
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg.startsWith("409:")) {
+          if (
+            window.confirm(
+              `A profile named "${headphoneName}" already exists. Replace it?`,
+            )
+          ) {
+            const r = await api.player.autoEqImportProfile(
+              headphoneName,
+              text,
+              true,
+            );
+            toast.show({
+              kind: "success",
+              title: "Profile replaced",
+              description: r.headphone,
+            });
+            await api.player.autoEqLoadProfile(r.profile_id);
+            onPicked();
+          }
+        } else {
+          throw err;
+        }
+      }
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: "Couldn't import profile",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setImporting(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  };
+
   return (
     <div className="flex flex-col gap-3">
       <div className="flex items-center gap-2">
@@ -1397,6 +1470,25 @@ function HeadphonePicker({
           disabled={manifestStatus !== "ready"}
           className="h-9 flex-1 rounded-md border border-input bg-background px-3 text-sm disabled:opacity-50"
         />
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept=".txt,text/plain"
+          onChange={(e) => {
+            const f = e.target.files?.[0];
+            if (f) void handleImport(f);
+          }}
+          className="hidden"
+        />
+        <button
+          type="button"
+          onClick={() => fileInputRef.current?.click()}
+          disabled={importing}
+          className="rounded-md border border-input px-2.5 py-1.5 text-[11px] font-semibold text-muted-foreground hover:bg-accent disabled:opacity-50"
+          title="Import an AutoEQ ParametricEQ.txt file — useful for headphones AutoEQ doesn't measure, custom-tuned curves, or autoeq.app exports against a non-default target."
+        >
+          {importing ? "Importing…" : "Import"}
+        </button>
         <button
           type="button"
           onClick={refreshManifest}
@@ -1407,6 +1499,20 @@ function HeadphonePicker({
           {manifestStatus === "loading" ? "…" : "Refresh"}
         </button>
       </div>
+
+      <p className="text-[11px] text-muted-foreground">
+        Want a different target curve? Generate one at{" "}
+        <a
+          href="https://autoeq.app"
+          target="_blank"
+          rel="noopener noreferrer"
+          className="underline hover:text-foreground"
+        >
+          autoeq.app
+        </a>{" "}
+        (Harman 2017, ER-4XR, custom tilts, etc.) and click Import to add the
+        downloaded ParametricEQ.txt.
+      </p>
 
       {manifestStatus === "failed" && (
         <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
