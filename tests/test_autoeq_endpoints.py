@@ -207,6 +207,81 @@ def test_delete_404_when_profile_missing(client):
     assert r.status_code == 404
 
 
+def test_device_mapping_rejects_empty_fingerprint(client):
+    """An empty-string fingerprint would silently become the
+    fallback-for-unknown-device entry: the devices listing
+    reports `current_fingerprint=""` for any device the live
+    OS list doesn't expose. Reject before write."""
+    client.post(
+        "/api/eq/import-profile",
+        json={"headphone_name": "FP Test", "content": _VALID_PEQ},
+    )
+    r = client.post(
+        "/api/eq/device-mappings",
+        json={"fingerprint": "", "profile_id": "User imported/FP Test"},
+    )
+    assert r.status_code == 400
+    assert "non-empty" in r.json()["detail"]
+
+
+def test_tilt_rejects_nan_and_inf(client):
+    """Pydantic's Optional[float] accepts NaN and Infinity by
+    default. They'd propagate into the biquad math as NaN
+    samples or DC scale-by-infinity. Server rejects before
+    clamp."""
+    for bad in [float("nan"), float("inf"), float("-inf")]:
+        # FastAPI / Pydantic-2 actually rejects NaN/inf at JSON
+        # serialization for some configs; we send via .request
+        # with a hand-built JSON body to make sure the server's
+        # check fires regardless.
+        body_value = (
+            "NaN" if str(bad) == "nan"
+            else "Infinity" if bad > 0
+            else "-Infinity"
+        )
+        r = client.request(
+            "POST",
+            "/api/eq/tilt",
+            content=f'{{"preamp_offset_db": {body_value}}}',
+            headers={"Content-Type": "application/json"},
+        )
+        # Either FastAPI rejects at parse time (422) or our
+        # explicit check rejects (400). Both are acceptable —
+        # the value never reaches the biquad math.
+        assert r.status_code in (400, 422), f"got {r.status_code} for {bad}"
+
+
+def test_mode_switch_is_transactional(client, monkeypatch):
+    """If player.apply_equalizer raises during a mode switch, the
+    persisted settings should NOT advance to the new mode. Old
+    order set settings.eq_mode then called apply, so a failure
+    left settings half-written and inconsistent with the audio
+    path. Test by switching to "manual" first (works), then
+    forcing apply_equalizer to raise and trying to switch to
+    "off". The 500 should bubble up and settings.eq_mode stays
+    "manual"."""
+    import server
+
+    # Get into a known mode by going through the (working) path.
+    r = client.post("/api/eq/mode", json={"mode": "manual"})
+    assert r.status_code == 200
+    assert server.settings.eq_mode == "manual"
+
+    # Now force the player call to raise.
+    def boom(*_a, **_kw):
+        raise RuntimeError("simulated audio engine failure")
+
+    player = server._native_player()
+    monkeypatch.setattr(player, "apply_equalizer", boom)
+
+    # Try to switch to "off" — that calls apply_equalizer([]).
+    # The player throws, the endpoint should 500, and eq_mode
+    # must NOT advance.
+    r = client.post("/api/eq/mode", json={"mode": "off"})
+    assert r.status_code == 500
+    assert server.settings.eq_mode == "manual"
+
+
 def test_import_rejects_oversized_payload(client):
     """An import POST with a multi-megabyte body would otherwise
     sit in the parser. Cap is 256 KB — way above any realistic
