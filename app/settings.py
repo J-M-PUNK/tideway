@@ -88,15 +88,17 @@ class Settings:
     # `eq_preamp` is None no preamp gain is applied.
     eq_bands: list[float] = field(default_factory=list)
     eq_preamp: Optional[float] = None
-    # AutoEQ headphone-profile mode (see
-    # docs/autoeq-headphone-profiles-scope.md).
+    # EQ mode. Defaults off so a fresh install plays bit-perfect
+    # audio — the user opts into the EQ stage explicitly via the
+    # Settings picker rather than discovering one is silently
+    # applying a flat curve.
     #   "off"     — EQ stage bypassed regardless of eq_enabled.
     #   "manual"  — uses eq_bands / eq_preamp (the existing path).
-    #   "profile" — uses eq_active_profile_id from the bundled
-    #               AutoEQ catalog.
+    #   "profile" — uses eq_active_profile_id from a user-imported
+    #               AutoEQ profile.
     # `eq_enabled` is the master gate for backward compat; this
     # mode field selects which curve runs when enabled.
-    eq_mode: str = "manual"
+    eq_mode: str = "off"
     # Identifier of the currently-loaded AutoEQ profile, formatted
     # as "<source>/<headphone-dir>" (e.g. "oratory1990/Sennheiser
     # HD 600"). Empty string = no profile selected. Used only when
