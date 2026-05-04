@@ -528,8 +528,17 @@ class TestRefreshEndpointNaNGuard:
         import server  # noqa: WPS433
         from fastapi.testclient import TestClient
 
-        with TestClient(server.app) as c:
-            yield c
+        # `/api/dlna/refresh` is gated by `_require_local_access`. In
+        # CI, default settings have offline_mode=False, so the request
+        # gets a 401 before our handler ever runs and we can't observe
+        # the NaN guard. Flip it on for the test scope and restore.
+        original = server.settings.offline_mode
+        server.settings.offline_mode = True
+        try:
+            with TestClient(server.app) as c:
+                yield c
+        finally:
+            server.settings.offline_mode = original
 
     @pytest.mark.parametrize("body_value", ["NaN", "Infinity", "-Infinity"])
     def test_rejects_nan_and_infinity(self, client, body_value):
