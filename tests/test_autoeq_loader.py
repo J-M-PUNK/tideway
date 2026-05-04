@@ -130,6 +130,62 @@ Filter 2: ON LSC Fc 105 Hz Gain 6.0 dB Q 0.7
     assert len(p.bands) == 2
 
 
+def test_parse_rejects_zero_or_negative_q():
+    """A zero or negative Q would divide-by-zero / produce NaN
+    inside the biquad math. Reject during parse, before the
+    filter ever reaches the cascade."""
+    text = "Filter 1: ON PK Fc 1000 Hz Gain 1 dB Q 0\n"
+    with pytest.raises(AutoEqParseError, match="Q .* out of"):
+        parse_profile_text(text)
+    text = "Filter 1: ON PK Fc 1000 Hz Gain 1 dB Q -1.4\n"
+    with pytest.raises(AutoEqParseError, match="Q .* out of"):
+        parse_profile_text(text)
+
+
+def test_parse_rejects_negative_or_excessive_frequency():
+    """Fc must be positive and below any reasonable Nyquist. The
+    regex matches the textual shape with a leading minus sign so
+    a corrupt file emitting `Fc -200 Hz` would otherwise hand a
+    nonsense value to the biquad math."""
+    text = "Filter 1: ON PK Fc -200 Hz Gain 1 dB Q 1\n"
+    with pytest.raises(AutoEqParseError, match="frequency .* out of"):
+        parse_profile_text(text)
+    text = "Filter 1: ON PK Fc 200000 Hz Gain 1 dB Q 1\n"
+    with pytest.raises(AutoEqParseError, match="frequency .* out of"):
+        parse_profile_text(text)
+
+
+def test_parse_rejects_absurd_gain():
+    """A 1e9 dB gain in a malformed file could blow speakers or
+    clip the cascade into noise. ±60 dB is the wide bound — real
+    AutoEQ outputs stay within ±15 dB."""
+    text = "Filter 1: ON PK Fc 1000 Hz Gain 100 dB Q 1\n"
+    with pytest.raises(AutoEqParseError, match="gain .* exceeds"):
+        parse_profile_text(text)
+
+
+def test_parse_caps_filter_count():
+    """A file with hundreds of filters would crater the audio
+    engine. Cap at 50 (well above AutoEQ's longest published
+    profile of ~20 bands)."""
+    body = "\n".join(
+        f"Filter {i}: ON PK Fc 1000 Hz Gain 1 dB Q 1" for i in range(1, 60)
+    )
+    with pytest.raises(AutoEqParseError, match="more than .* filters"):
+        parse_profile_text(body)
+
+
+def test_parse_strips_utf8_bom():
+    """Windows text editors sometimes prepend a UTF-8 BOM to
+    saved files. Without stripping, the BOM glues to the first
+    line and that line fails the recogniser with a baffling
+    'unrecognised line' error pointing at invisible bytes."""
+    text = "﻿Preamp: -3.0 dB\nFilter 1: ON PK Fc 1000 Hz Gain 1 dB Q 1\n"
+    p = parse_profile_text(text)
+    assert p.preamp_db == -3.0
+    assert len(p.bands) == 1
+
+
 def test_parse_rejects_per_channel_filter_blocks():
     """An Equalizer APO file with separate filter blocks per
     channel can't be honoured — Tideway doesn't have a way to
