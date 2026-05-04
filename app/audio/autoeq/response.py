@@ -34,7 +34,7 @@ from scipy.signal import sosfreqz  # type: ignore
 
 from .apply import TiltConfig, cascade_with_tilt
 from .profiles import AutoEqProfile
-from .updater import cache_dir, fetch_csv_for_profile_async
+from .updater import cache_dir
 
 log = logging.getLogger(__name__)
 
@@ -177,16 +177,15 @@ def compute_response(
         cascade_db = cascade_db + total_preamp_db
 
     # Raw + target — interpolate onto the same grid if available.
+    # User-imported profiles typically don't ship a measurement CSV
+    # alongside the PEQ.txt (autoeq.app's parametric exports omit
+    # them by default), so the FR graph degrades to post-EQ only
+    # for those. If users want raw + target overlays they can drop
+    # the headphone's `<name>.csv` into the same directory as the
+    # imported PEQ.txt and the next response request will pick it
+    # up.
     csv_path = _measurement_csv_path(profile, data_root)
     if csv_path is None:
-        # CSV missing — kick off a best-effort lazy fetch in the
-        # background. If the user has run "Check for updates"
-        # this session, the manifest cache has the AutoEQ repo
-        # path and the fetcher can grab the CSV. By the time the
-        # graph debounces another response request (~80ms after
-        # the next tilt-slider drag), the CSV is on disk and the
-        # graph upgrades to the full three-curve view.
-        fetch_csv_for_profile_async(profile.profile_id)
         raw_db_list: Optional[list[float]] = None
         target_db_list: Optional[list[float]] = None
         post_eq = cascade_db  # No raw to add to → post-EQ is just
