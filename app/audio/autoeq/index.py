@@ -221,7 +221,14 @@ INDEX = AutoEqIndex()
 
 
 def default_data_dir() -> Path:
-    """Bundled-data location: the package's `data/results` dir.
-    Distinct from the on-disk update path Phase 7 will introduce
-    for fetching newer profiles after install."""
+    """Legacy bundled-data location. Tideway no longer ships starter
+    profiles — users import their own from autoeq.app or other
+    sources via the Settings UI (`/api/eq/import-profile`). The
+    path is preserved as a return value because the index walker
+    accepts a list of roots and gracefully no-ops on missing
+    directories; passing this in alongside `updater.cache_dir()`
+    keeps the call sites stable.
+
+    A user / packager could re-vendor profiles into this dir if
+    they want a custom starter set baked into a fork."""
     return Path(__file__).resolve().parent / "data" / "results"
