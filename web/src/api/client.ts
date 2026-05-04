@@ -1096,6 +1096,23 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ profile_id }),
       }),
+    /** Import a PEQ.txt file from the user (or generated on
+     *  autoeq.app with a non-default target). Validates against the
+     *  same parser bundled / catalog profiles go through; surfaces
+     *  per-line parse errors so the user knows which line is wrong.
+     *  Lands under `User imported/<headphone>/...` in the cache. */
+    autoEqImportProfile: (
+      headphone_name: string,
+      content: string,
+      overwrite = false,
+    ) =>
+      req<{ ok: boolean; profile_id: string; headphone: string }>(
+        "/api/eq/import-profile",
+        {
+          method: "POST",
+          body: JSON.stringify({ headphone_name, content, overwrite }),
+        },
+      ),
     /** Phase 6 frequency-response data for the FR graph. Returns
      *  three parallel arrays — raw measured curve, target curve,
      *  predicted post-EQ — at log-spaced frequencies. Raw + target

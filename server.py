@@ -5062,6 +5062,95 @@ class _AutoEqDownloadOneRequest(BaseModel):
     profile_id: str
 
 
+class _AutoEqImportRequest(BaseModel):
+    headphone_name: str  # used for both the directory name and the display name
+    content: str  # raw text of a `<headphone> ParametricEQ.txt` file
+    overwrite: bool = False  # opt-in replacement of an existing same-named import
+
+
+# Local-only namespace under which user-imported profiles live in the
+# cache dir. Mirrors AutoEQ's `<source>/<headphone>/` layout so the
+# index walker doesn't need a special case — the only thing it doesn't
+# match is anything in the upstream manifest, which is what makes
+# imports show up in the picker as a distinct group.
+_USER_IMPORTED_SOURCE = "User imported"
+
+
+@app.post("/api/eq/import-profile")
+def autoeq_import_profile(req: _AutoEqImportRequest) -> dict:
+    """Import a PEQ.txt file from the user's filesystem (or generated
+    on autoeq.app with a non-default target curve) as a custom
+    profile. Lives under `User imported/<headphone>/...` in the
+    cache dir; AutoEQ's catalog manifest never produces that source
+    name so user imports stay distinct.
+
+    Validates by running the same parser the bundled / downloaded
+    profiles go through. If the file isn't a valid AutoEQ
+    ParametricEQ.txt, we surface the parse error verbatim so the
+    user knows which line is wrong rather than seeing a generic
+    "couldn't import" toast.
+    """
+    _require_local_access()
+    from app.audio.autoeq import updater
+    from app.audio.autoeq.index import INDEX, default_data_dir
+    from app.audio.autoeq.profiles import AutoEqParseError, parse_profile_text
+
+    name = req.headphone_name.strip()
+    if not name:
+        raise HTTPException(
+            status_code=400,
+            detail="headphone_name is required (e.g. 'Sennheiser HD 600 (custom Harman 2017)')",
+        )
+    # Reject path-traversal-ish characters so the filename can't
+    # break out of the user_imported/ dir.
+    if any(c in name for c in ("/", "\\", "..", "\x00")):
+        raise HTTPException(
+            status_code=400,
+            detail="headphone_name can't contain slashes, '..', or null bytes",
+        )
+
+    try:
+        parse_profile_text(req.content)
+    except AutoEqParseError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"PEQ file isn't a valid AutoEQ ParametricEQ.txt: {exc}",
+        )
+
+    target_dir = updater.cache_dir() / _USER_IMPORTED_SOURCE / name
+    target_file = target_dir / f"{name} ParametricEQ.txt"
+
+    if target_file.exists() and not req.overwrite:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"A profile named {name!r} already exists. Pass overwrite=true "
+                f"to replace it."
+            ),
+        )
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+    # Atomic write so a crash mid-import doesn't leave half a file
+    # the parser would later choke on.
+    tmp = target_file.with_suffix(target_file.suffix + ".part")
+    tmp.write_text(req.content)
+    tmp.replace(target_file)
+
+    # Reload the in-memory index so the new profile is selectable
+    # immediately.
+    try:
+        INDEX.load_directories([default_data_dir(), updater.cache_dir()])
+    except Exception:
+        log = logging.getLogger("autoeq.import")
+        log.exception("post-import index reload failed")
+
+    return {
+        "ok": True,
+        "profile_id": f"{_USER_IMPORTED_SOURCE}/{name}",
+        "headphone": name,
+    }
+
+
 @app.post("/api/eq/download-profile")
 def autoeq_download_profile(req: _AutoEqDownloadOneRequest) -> dict:
     """Download a single AutoEQ profile by id. Synchronous: blocks
