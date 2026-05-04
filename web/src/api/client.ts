@@ -923,7 +923,7 @@ export const api = {
         preamp: number | null;
         band_count: number;
         frequencies: number[];
-        presets: { index: number; name: string }[];
+        presets: { index: number; name: string; bands: number[] }[];
       }>("/api/player/eq"),
     setEq: (bands: number[], preamp: number | null) =>
       req<{
