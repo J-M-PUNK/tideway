@@ -26,7 +26,7 @@ pywebview>=6.2.1
 # and samples hit the OS audio API at the track's native rate for
 # bit-perfect output.
 av>=12.0.0
-sounddevice>=0.4.6
+sounddevice>=0.5.5
 numpy>=1.26.0
 # scipy powers the PCM engine's 10-band parametric EQ. Biquad IIR
 # filtering in a Python loop can't keep up with the audio callback
