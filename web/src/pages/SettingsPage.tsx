@@ -28,11 +28,7 @@ import {
 } from "lucide-react";
 import { api } from "@/api/client";
 import type { QualityOption, Settings } from "@/api/types";
-import {
-  useAutoEqState,
-  type AutoEqMode,
-  type AutoEqState,
-} from "@/hooks/useAutoEqState";
+import { type AutoEqMode, type AutoEqState } from "@/hooks/useAutoEqState";
 import {
   TEMPLATE_TOKENS,
   previewFilenameTemplateAsString,
@@ -741,37 +737,17 @@ function ThemePicker({
  */
 function AudioEngineFields() {
   const toast = useToast();
-  const [eq, setEq] = useState<{
-    enabled: boolean;
-    bands: number[];
-    preamp: number | null;
-    band_count: number;
-    frequencies: number[];
-    presets: { index: number; name: string }[];
-  } | null>(null);
   const [devices, setDevices] = useState<{
     devices: { id: string; name: string }[];
     current: string;
   } | null>(null);
 
-  // The Headphone profile picker above (AutoEqProfileField) is the
-  // single source of truth for whether the EQ stage runs. We read
-  // its mode here so the manual sliders can dim themselves when the
-  // mode is "off" or "profile" without showing a separate Enable
-  // toggle that would just duplicate the picker's "Off" button.
-  const { state: autoEqState } = useAutoEqState(true);
-  const manualActive = autoEqState?.mode === "manual";
-
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const [e, d] = await Promise.all([
-          api.player.eq(),
-          api.player.outputDevices(),
-        ]);
+        const d = await api.player.outputDevices();
         if (cancelled) return;
-        setEq(e);
         setDevices(d);
       } catch {
         /* audio engine not available — fields stay hidden */
@@ -782,9 +758,275 @@ function AudioEngineFields() {
     };
   }, []);
 
-  // Local mirror of the slider state so dragging is instant; flush to
-  // the backend on release (via mouse-up / change commit).
+  if (!devices) return null;
+
+  const pickDevice = async (id: string) => {
+    try {
+      await api.player.setOutputDevice(id);
+      setDevices({ ...devices, current: id });
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: "Couldn't switch output device",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+
+  return (
+    <>
+      <Field label="Output device">
+        <select
+          value={devices.current}
+          onChange={(e) => pickDevice(e.target.value)}
+          className="h-10 rounded-md border border-input bg-secondary px-3 text-sm"
+        >
+          {devices.devices.map((d) => (
+            <option key={d.id || "default"} value={d.id}>
+              {d.name}
+            </option>
+          ))}
+        </select>
+      </Field>
+
+      <EqField />
+    </>
+  );
+}
+
+/**
+ * The whole EQ section as one Field with a single mode picker.
+ *
+ * The previous layout had three separate sections — Headphone
+ * profile (mode picker), Manual EQ (always-rendered sliders),
+ * Per-device profiles (a button) — and users couldn't tell which
+ * combination of them was actually doing the EQ work. Sliders
+ * dimmed themselves when not in manual mode, but they were still
+ * visually present, suggesting they did something. The mode
+ * picker said "Off" / "Manual" / "Profile" but those words also
+ * appeared in the manual-EQ enable hint.
+ *
+ * Now: one decision, one set of controls. The mode picker decides
+ * what kind of EQ runs. Whatever's appropriate for that mode
+ * renders below the picker; nothing else is on screen.
+ *
+ *   Off:     "Audio plays bit-perfect, no EQ stage."
+ *   Manual:  10-band sliders + presets + reset.
+ *   Profile: active-profile card, headphone catalog button, tone
+ *            adjuster button, per-device mapping button. The
+ *            mapping button's only useful when the user has
+ *            profiles to map to, so it lives inside this branch
+ *            instead of as a top-level affordance.
+ */
+function EqField() {
+  const toast = useToast();
+  const [state, setState] = useState<AutoEqState | null>(null);
+  const [catalogOpen, setCatalogOpen] = useState(false);
+  const [toneOpen, setToneOpen] = useState(false);
+  const [deviceMappingOpen, setDeviceMappingOpen] = useState(false);
+
+  const refresh = async () => {
+    try {
+      const s = await api.player.autoEqState();
+      setState(s);
+    } catch {
+      /* feature not available — keep section hidden */
+    }
+  };
+
+  useEffect(() => {
+    void refresh();
+  }, []);
+
+  if (state === null) return null;
+
+  const switchMode = async (mode: AutoEqMode) => {
+    const prev = state;
+    setState({ ...state, mode });
+    try {
+      await api.player.autoEqSetMode(mode);
+    } catch (err) {
+      setState(prev);
+      toast.show({
+        kind: "error",
+        title: "Couldn't switch EQ mode",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+
+  const modeBtn = (mode: AutoEqMode, label: string, hint: string) => (
+    <button
+      key={mode}
+      type="button"
+      onClick={() => switchMode(mode)}
+      title={hint}
+      className={cn(
+        "flex-1 rounded-md border border-input px-3 py-1.5 text-xs font-semibold transition-colors",
+        state.mode === mode
+          ? "bg-primary text-primary-foreground"
+          : "bg-secondary text-foreground hover:bg-accent",
+      )}
+    >
+      {label}
+    </button>
+  );
+
+  const hasActive = state.active_profile !== null;
+  const hint =
+    state.mode === "off"
+      ? "Audio plays bit-perfect with no EQ stage."
+      : state.mode === "manual"
+        ? "10-band parametric EQ. Drag sliders or pick a preset; correction applies live."
+        : state.profile_catalog_size === 0
+          ? "Profile mode unavailable — no AutoEQ profiles bundled."
+          : "Pick your headphones; AutoEQ correction applies live.";
+
+  return (
+    <Field label="Equalizer" hint={hint}>
+      <div className="flex flex-col gap-3">
+        <div className="flex gap-1">
+          {modeBtn(
+            "off",
+            "Off",
+            "Bypass the EQ stage entirely. Bit-perfect audio.",
+          )}
+          {modeBtn(
+            "manual",
+            "Manual",
+            "Use the 10-band parametric EQ with your own curve or a preset.",
+          )}
+          {modeBtn(
+            "profile",
+            "Profile",
+            "Apply an AutoEQ correction profile for your specific headphones.",
+          )}
+        </div>
+
+        {state.mode === "manual" && <ManualEqSliders />}
+
+        {state.mode === "profile" && (
+          <>
+            {hasActive && state.active_profile && (
+              <div className="rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-xs">
+                <div className="text-[10px] font-semibold uppercase tracking-wider text-primary">
+                  Active profile
+                </div>
+                <div className="mt-0.5 text-sm font-semibold">
+                  {state.active_profile.brand} {state.active_profile.model}
+                </div>
+                <div className="text-muted-foreground">
+                  {state.active_profile.source} ·{" "}
+                  {state.active_profile.band_count} bands · preamp{" "}
+                  {state.active_profile.preamp_db.toFixed(1)} dB
+                </div>
+              </div>
+            )}
+
+            <div className="flex flex-wrap gap-2">
+              <button
+                type="button"
+                onClick={() => setCatalogOpen(true)}
+                className="rounded-md border border-input bg-secondary px-3 py-1.5 text-xs font-semibold hover:bg-accent"
+              >
+                {hasActive ? "Change headphones" : "Pick headphones"}
+              </button>
+              <button
+                type="button"
+                onClick={() => setToneOpen(true)}
+                disabled={!hasActive}
+                className="rounded-md border border-input bg-secondary px-3 py-1.5 text-xs font-semibold hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
+                title={
+                  hasActive
+                    ? "Tilt + frequency response graph"
+                    : "Pick a profile first"
+                }
+              >
+                Adjust tone
+              </button>
+              <button
+                type="button"
+                onClick={() => setDeviceMappingOpen(true)}
+                className="rounded-md border border-input bg-secondary px-3 py-1.5 text-xs font-semibold hover:bg-accent"
+                title="Map output devices to specific profiles so plugging in a different DAC swaps the EQ automatically."
+              >
+                Per-device profiles
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+
+      <HeadphoneCatalogDialog
+        open={catalogOpen}
+        onOpenChange={setCatalogOpen}
+        activeProfileId={state.active_profile_id}
+        onPicked={() => {
+          void refresh();
+        }}
+      />
+      <ToneDialog
+        open={toneOpen}
+        onOpenChange={setToneOpen}
+        activeProfileId={state.active_profile_id}
+        tilt={state.tilt}
+        onTiltChange={(t) =>
+          setState((prev) => (prev ? { ...prev, tilt: t } : prev))
+        }
+      />
+      <Dialog open={deviceMappingOpen} onOpenChange={setDeviceMappingOpen}>
+        <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Per-device profiles</DialogTitle>
+            <DialogDescription>
+              Tideway can pick a different AutoEQ profile depending on which
+              output device is active. Useful if you switch between IEMs on a
+              portable DAC and over-ears on a desktop amp.
+            </DialogDescription>
+          </DialogHeader>
+          <AutoEqDeviceMappingField />
+        </DialogContent>
+      </Dialog>
+    </Field>
+  );
+}
+
+/**
+ * 10-band parametric EQ surface. Self-contained: fetches its own
+ * state from /api/player/eq, renders the preset dropdown + sliders,
+ * commits changes on slider release. Only mounted when EQ mode is
+ * "manual" — outside that mode the UI doesn't render at all, so
+ * there's no risk of confusing "are these sliders doing anything?"
+ * questions.
+ */
+function ManualEqSliders() {
+  const toast = useToast();
+  const [eq, setEq] = useState<{
+    enabled: boolean;
+    bands: number[];
+    preamp: number | null;
+    band_count: number;
+    frequencies: number[];
+    presets: { index: number; name: string }[];
+  } | null>(null);
   const [localBands, setLocalBands] = useState<number[] | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const e = await api.player.eq();
+        if (cancelled) return;
+        setEq(e);
+      } catch {
+        /* engine not available */
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   useEffect(() => {
     if (eq)
       setLocalBands(
@@ -792,7 +1034,7 @@ function AudioEngineFields() {
       );
   }, [eq]);
 
-  if (!eq || !devices) return null;
+  if (!eq || localBands === null) return null;
 
   const flush = async (bands: number[]) => {
     setLocalBands(bands);
@@ -825,95 +1067,49 @@ function AudioEngineFields() {
     flush(flat);
   };
 
-  const pickDevice = async (id: string) => {
-    try {
-      await api.player.setOutputDevice(id);
-      setDevices({ ...devices, current: id });
-    } catch (err) {
-      toast.show({
-        kind: "error",
-        title: "Couldn't switch output device",
-        description: err instanceof Error ? err.message : String(err),
-      });
-    }
-  };
-
   return (
-    <>
-      <Field label="Output device">
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-wrap items-center gap-2">
         <select
-          value={devices.current}
-          onChange={(e) => pickDevice(e.target.value)}
-          className="h-10 rounded-md border border-input bg-secondary px-3 text-sm"
+          onChange={(e) => {
+            const n = parseInt(e.target.value, 10);
+            if (!isNaN(n)) pickPreset(n);
+          }}
+          value=""
+          className="h-9 rounded-md border border-input bg-secondary px-3 text-xs"
         >
-          {devices.devices.map((d) => (
-            <option key={d.id || "default"} value={d.id}>
-              {d.name}
+          <option value="">Presets…</option>
+          {eq.presets.map((p) => (
+            <option key={p.index} value={p.index}>
+              {p.name}
             </option>
           ))}
         </select>
-      </Field>
+        <Button size="sm" variant="outline" onClick={reset}>
+          Reset
+        </Button>
+      </div>
 
-      <AutoEqProfileField />
-      <AutoEqDeviceMappingButton />
-
-      <Field
-        label="Manual EQ"
-        hint={
-          manualActive
-            ? "Drag sliders or pick a preset. Reset flattens to zero."
-            : 'Switch the Headphone profile picker above to "Manual" to hear these sliders. Curves are saved either way.'
-        }
-      >
-        <div
-          className={cn(
-            "flex flex-col gap-3 transition-opacity",
-            !manualActive && "opacity-50",
-          )}
-        >
-          <div className="flex flex-wrap items-center gap-2">
-            <select
-              onChange={(e) => {
-                const n = parseInt(e.target.value, 10);
-                if (!isNaN(n)) pickPreset(n);
-              }}
-              value=""
-              className="h-9 rounded-md border border-input bg-secondary px-3 text-xs"
-            >
-              <option value="">Presets…</option>
-              {eq.presets.map((p) => (
-                <option key={p.index} value={p.index}>
-                  {p.name}
-                </option>
-              ))}
-            </select>
-            <Button size="sm" variant="outline" onClick={reset}>
-              Reset
-            </Button>
-          </div>
-
-          <div className="flex items-end gap-3">
-            {localBands?.map((v, i) => (
-              <EqSlider
-                key={i}
-                value={v}
-                freq={eq.frequencies[i]}
-                onChange={(nv) => {
-                  const next = [...localBands];
-                  next[i] = nv;
-                  setLocalBands(next);
-                }}
-                onCommit={(nv) => {
-                  const next = [...localBands];
-                  next[i] = nv;
-                  flush(next);
-                }}
-              />
-            ))}
-          </div>
-        </div>
-      </Field>
-    </>
+      <div className="flex items-end gap-3">
+        {localBands.map((v, i) => (
+          <EqSlider
+            key={i}
+            value={v}
+            freq={eq.frequencies[i]}
+            onChange={(nv) => {
+              const next = [...localBands];
+              next[i] = nv;
+              setLocalBands(next);
+            }}
+            onCommit={(nv) => {
+              const next = [...localBands];
+              next[i] = nv;
+              flush(next);
+            }}
+          />
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -994,151 +1190,6 @@ function EqSlider({
 // Types moved to @/hooks/useAutoEqState (single source of truth).
 // This block previously had a parallel definition that drifted —
 // it lacked the `bypass` field added in Phase 4, for instance.
-
-function AutoEqProfileField() {
-  const toast = useToast();
-  const [state, setState] = useState<AutoEqState | null>(null);
-
-  // Each deep-config surface gets its own dialog. Inline rendering
-  // turned the Settings page into a wall of audiophile knobs the
-  // user had to scroll past to reach anything else; dialogs let the
-  // user keep the catalog browser, tone adjustment, and graph
-  // separate and focused, opening just the one they need.
-  const [catalogOpen, setCatalogOpen] = useState(false);
-  const [toneOpen, setToneOpen] = useState(false);
-
-  // Refetch the EQ state. Called once on mount + whenever a
-  // child surface (catalog dialog, etc.) wants to re-pull
-  // because something changed server-side.
-  const refresh = async () => {
-    try {
-      const s = await api.player.autoEqState();
-      setState(s);
-    } catch {
-      /* feature not available — keep section hidden */
-    }
-  };
-
-  useEffect(() => {
-    void refresh();
-  }, []);
-
-  if (state === null) return null;
-
-  const switchMode = async (mode: AutoEqMode) => {
-    const prev = state;
-    setState({ ...state, mode });
-    try {
-      await api.player.autoEqSetMode(mode);
-    } catch (err) {
-      setState(prev);
-      toast.show({
-        kind: "error",
-        title: "Couldn't switch EQ mode",
-        description: err instanceof Error ? err.message : String(err),
-      });
-    }
-  };
-
-  const modeBtn = (mode: AutoEqMode, label: string) => (
-    <button
-      key={mode}
-      type="button"
-      onClick={() => switchMode(mode)}
-      className={cn(
-        "flex-1 rounded-md border border-input px-3 py-1.5 text-xs font-semibold transition-colors",
-        state.mode === mode
-          ? "bg-primary text-primary-foreground"
-          : "bg-secondary text-foreground hover:bg-accent",
-      )}
-    >
-      {label}
-    </button>
-  );
-
-  const profileMode = state.mode === "profile";
-  const hasActive = profileMode && state.active_profile !== null;
-
-  return (
-    <Field
-      label="Headphone profile"
-      hint={
-        state.profile_catalog_size === 0
-          ? "No profiles bundled. Profile mode disabled."
-          : `Pick your headphones; AutoEQ correction applies live.`
-      }
-    >
-      <div className="flex flex-col gap-3">
-        <div className="flex gap-1">
-          {modeBtn("off", "Off")}
-          {modeBtn("manual", "Manual")}
-          {modeBtn("profile", "Profile")}
-        </div>
-
-        {profileMode && state.active_profile && (
-          <div className="rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-xs">
-            <div className="text-[10px] font-semibold uppercase tracking-wider text-primary">
-              Active profile
-            </div>
-            <div className="mt-0.5 text-sm font-semibold">
-              {state.active_profile.brand} {state.active_profile.model}
-            </div>
-            <div className="text-muted-foreground">
-              {state.active_profile.source} · {state.active_profile.band_count}{" "}
-              bands · preamp {state.active_profile.preamp_db.toFixed(1)} dB
-            </div>
-          </div>
-        )}
-
-        {profileMode && (
-          <div className="flex flex-wrap gap-2">
-            <button
-              type="button"
-              onClick={() => setCatalogOpen(true)}
-              className="rounded-md border border-input bg-secondary px-3 py-1.5 text-xs font-semibold hover:bg-accent"
-            >
-              {hasActive ? "Change headphones" : "Pick headphones"}
-            </button>
-            <button
-              type="button"
-              onClick={() => setToneOpen(true)}
-              disabled={!hasActive}
-              className="rounded-md border border-input bg-secondary px-3 py-1.5 text-xs font-semibold hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
-              title={
-                hasActive
-                  ? "Tilt + frequency response graph"
-                  : "Pick a profile first"
-              }
-            >
-              Adjust tone
-            </button>
-          </div>
-        )}
-      </div>
-
-      <HeadphoneCatalogDialog
-        open={catalogOpen}
-        onOpenChange={setCatalogOpen}
-        activeProfileId={state.active_profile_id}
-        onPicked={() => {
-          // Server already applied the new profile; refresh local
-          // state so the active card + tone dialog bind to the
-          // correct active id on the next open.
-          void refresh();
-        }}
-      />
-      <ToneDialog
-        open={toneOpen}
-        onOpenChange={setToneOpen}
-        activeProfileId={state.active_profile_id}
-        tilt={state.tilt}
-        onTiltChange={(t) =>
-          setState((prev) => (prev ? { ...prev, tilt: t } : prev))
-        }
-      />
-    </Field>
-  );
-}
 
 /**
  * Dialog wrapper around the headphone-catalog browser. Keeps the
@@ -2048,36 +2099,6 @@ interface AutoEqDeviceRow {
  * have headphones, EQ them" path until the user actually has
  * multiple devices to manage.
  */
-function AutoEqDeviceMappingButton() {
-  const [open, setOpen] = useState(false);
-  return (
-    <Field
-      label="Per-device profiles"
-      hint="Map each output device to its own AutoEQ profile so plugging in a different DAC swaps the EQ automatically."
-    >
-      <button
-        type="button"
-        onClick={() => setOpen(true)}
-        className="self-start rounded-md border border-input bg-secondary px-3 py-1.5 text-xs font-semibold hover:bg-accent"
-      >
-        Manage device mappings
-      </button>
-      <Dialog open={open} onOpenChange={setOpen}>
-        <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
-          <DialogHeader>
-            <DialogTitle>Per-device profiles</DialogTitle>
-            <DialogDescription>
-              Tideway can pick a different AutoEQ profile depending on which
-              output device is active. Useful if you switch between IEMs on a
-              portable DAC and over-ears on a desktop amp.
-            </DialogDescription>
-          </DialogHeader>
-          <AutoEqDeviceMappingField />
-        </DialogContent>
-      </Dialog>
-    </Field>
-  );
-}
 
 function AutoEqDeviceMappingField() {
   const toast = useToast();
