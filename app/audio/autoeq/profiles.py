@@ -79,6 +79,21 @@ _PREAMP_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Equalizer APO config files use the same Filter / Preamp lines
+# AutoEQ's Generic Parametric format does, but prepend a
+# `Channel: all` (or per-channel) header that selects which audio
+# channels the EQ applies to. AutoEQ.app's "Equalizer APO Parametric"
+# export option produces this; users frequently grab that export
+# because Equalizer APO is the most popular Windows EQ host. We
+# don't honour the channel-selection semantics — Tideway always EQs
+# all channels — but skipping the line lets those exports import
+# unchanged. Same logic for `Device:` (binds the config to a
+# specific Windows audio endpoint, also irrelevant to us).
+_EQUALIZER_APO_HEADER_RE = re.compile(
+    r"^\s*(?:Channel|Device|Include|Stage|Eval)\s*:\s*\S",
+    re.IGNORECASE,
+)
+
 # `Filter N: ON <type> Fc <hz> Hz Gain <db> dB Q <q>` — one band.
 # The "ON" / "OFF" toggle is in the spec but every AutoEQ-emitted
 # file ships ON; we still tolerate OFF (skip the band) since
@@ -118,9 +133,16 @@ def parse_profile_text(
         source=source,
         target=target,
     )
+    saw_filter_or_preamp = False
     for line_idx, raw_line in enumerate(text.splitlines(), start=1):
         line = raw_line.strip()
         if not line or line.startswith("#"):
+            continue
+
+        # Equalizer APO header lines — see comment above the regex.
+        # Skipped silently so AutoEQ.app's "Equalizer APO Parametric"
+        # export imports without modification.
+        if _EQUALIZER_APO_HEADER_RE.match(line):
             continue
 
         # Preamp line — at most one per file, and AutoEQ always
@@ -129,11 +151,13 @@ def parse_profile_text(
         m = _PREAMP_RE.match(line)
         if m is not None:
             profile.preamp_db = float(m.group(1))
+            saw_filter_or_preamp = True
             continue
 
         # Filter line.
         m = _FILTER_RE.match(line)
         if m is not None:
+            saw_filter_or_preamp = True
             if m.group("state").upper() == "OFF":
                 # User-disabled band — preserve numbering by
                 # skipping rather than raising.
@@ -154,6 +178,20 @@ def parse_profile_text(
             )
             continue
 
+        # Detect-and-name a few common AutoEQ.app exports that we
+        # can't import as-is so the user gets a useful error
+        # instead of "line N: unrecognised line ...". The keys are
+        # the most distinctive markers each format emits early in
+        # the file.
+        wrong_format = _detect_wrong_format(line)
+        if wrong_format is not None:
+            raise AutoEqParseError(
+                f"This looks like a {wrong_format} file, which Tideway "
+                f"doesn't import. Re-export from autoeq.app and pick "
+                f"‘Generic Parametric EQ’ (or ‘Equalizer APO "
+                f"Parametric’) instead. Line {line_idx}: {line!r}"
+            )
+
         # Anything else is unrecognised. Be strict — a typo'd line
         # would otherwise silently drop a band and the user would
         # hear the wrong correction.
@@ -161,4 +199,42 @@ def parse_profile_text(
             f"line {line_idx}: unrecognised line {line!r}"
         )
 
+    if not saw_filter_or_preamp:
+        raise AutoEqParseError(
+            "File contained no Filter or Preamp lines. "
+            "Make sure you exported as 'Generic Parametric EQ' "
+            "(or 'Equalizer APO Parametric') from autoeq.app."
+        )
+
     return profile
+
+
+def _detect_wrong_format(line: str) -> Optional[str]:
+    """Recognise the first line of a few common autoeq.app export
+    formats that aren't parametric. Returns the format's
+    user-friendly name when the line clearly indicates one of
+    them, else None.
+
+    Used so the parse error names the actual problem ("you exported
+    as Graphic EQ; pick Generic Parametric EQ") instead of a
+    generic "unrecognised line".
+    """
+    stripped = line.strip()
+    # Graphic EQ format: a single line that's either "<freq>
+    # <gain>; <freq> <gain>; ..." pairs or AutoEQ.app's
+    # "GraphicEQ: 25 -3.0; 31 -3.0; ..." variant. The
+    # semicolon-separated freq/gain payload is the distinctive
+    # marker.
+    if stripped.lower().startswith("graphiceq:") or (
+        ";" in stripped and re.match(r"^[\d.\-\s;]+$", stripped)
+    ):
+        return "Graphic EQ"
+    # Convolution / Wavelet exports tend to start with binary or
+    # JSON. We rarely see those as text imports, but a leading
+    # "{" / "RIFF" is a giveaway.
+    if stripped.startswith("{") or stripped.startswith("RIFF"):
+        return "Convolution / WAV"
+    # Roon DSP exports use a YAML-ish "- type:" style.
+    if stripped.startswith("- type:") or stripped.startswith("- Type:"):
+        return "Roon DSP"
+    return None

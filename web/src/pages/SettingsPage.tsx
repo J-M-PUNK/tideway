@@ -1500,8 +1500,9 @@ function HeadphonePicker({
         </button>
       </div>
 
-      <p className="text-[11px] text-muted-foreground">
-        Want a different target curve? Generate one at{" "}
+      <p className="text-[11px] leading-relaxed text-muted-foreground">
+        Want a different target curve, a community tune, or a headphone AutoEQ
+        doesn't measure? Click Import. From{" "}
         <a
           href="https://autoeq.app"
           target="_blank"
@@ -1510,8 +1511,10 @@ function HeadphonePicker({
         >
           autoeq.app
         </a>{" "}
-        (Harman 2017, ER-4XR, custom tilts, etc.) and click Import to add the
-        downloaded ParametricEQ.txt.
+        pick <span className="font-mono">Generic Parametric EQ</span> or{" "}
+        <span className="font-mono">Equalizer APO Parametric</span> — both
+        import as-is. Graphic EQ, Wavelet, Convolution, Roon DSP, and miniDSP
+        exports aren't parametric and won't work.
       </p>
 
       {manifestStatus === "failed" && (

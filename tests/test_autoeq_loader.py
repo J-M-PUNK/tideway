@@ -113,6 +113,64 @@ def test_parse_rejects_garbled_line():
         parse_profile_text(text)
 
 
+def test_parse_accepts_equalizer_apo_format():
+    """AutoEQ.app's "Equalizer APO Parametric" export prepends a
+    Channel: header before the Filter / Preamp lines. Same parametric
+    payload, just with the EqualizerAPO host's channel-selection
+    semantics on top. We don't honour those semantics (Tideway always
+    EQs all channels), but the file should import without error."""
+    text = """\
+Channel: all
+Preamp: -3.5 dB
+Filter 1: ON PK Fc 200 Hz Gain -3.0 dB Q 1.4
+Filter 2: ON LSC Fc 105 Hz Gain 6.0 dB Q 0.7
+"""
+    p = parse_profile_text(text)
+    assert p.preamp_db == -3.5
+    assert len(p.bands) == 2
+
+
+def test_parse_skips_other_equalizer_apo_directives():
+    """Other Equalizer APO directives (Device:, Include:, Stage:,
+    Eval:) also appear in real-world configs, especially when users
+    edited the file by hand or imported via a more elaborate APO
+    plugin. None affect the parametric content; skip them rather
+    than rejecting otherwise-valid files."""
+    text = """\
+Device: Speakers
+Channel: all
+Stage: pre-mix
+Preamp: -2.0 dB
+Filter 1: ON PK Fc 1000 Hz Gain 2 dB Q 1.4
+"""
+    p = parse_profile_text(text)
+    assert p.preamp_db == -2.0
+    assert len(p.bands) == 1
+
+
+def test_parse_rejects_graphic_eq_format_with_helpful_message():
+    """A user who exported AutoEQ.app's "Graphic EQ" instead of
+    "Generic Parametric EQ" gets a `25 -3.0; 31 -3.0; ...` payload
+    that isn't parametric. The error should name the wrong format
+    so the user knows which export option to switch to."""
+    text = "GraphicEQ: 25 -3.0; 31 -3.0; 40 -2.5; 50 -2.0"
+    with pytest.raises(AutoEqParseError, match="Graphic EQ"):
+        parse_profile_text(text)
+
+
+def test_parse_rejects_empty_file_with_helpful_message():
+    """A file with only headers / comments and no Filter or Preamp
+    lines means the user grabbed something that isn't a parametric
+    EQ at all. Tell them which format to pick instead of returning
+    a silently-empty profile that would no-op the audio."""
+    text = """\
+# Some comment
+Channel: all
+"""
+    with pytest.raises(AutoEqParseError, match="Generic Parametric EQ"):
+        parse_profile_text(text)
+
+
 def test_parse_real_file_shape():
     """Smoke-test against a real AutoEQ ParametricEQ.txt that lives
     in the bundled data directory. If the curated set ever loses
