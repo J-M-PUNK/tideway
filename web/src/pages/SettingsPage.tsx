@@ -41,6 +41,13 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
 import { useToast } from "@/components/toast";
 import { useOfflineMode } from "@/hooks/useOfflineMode";
 import {
@@ -848,7 +855,7 @@ function AudioEngineFields() {
       </Field>
 
       <AutoEqProfileField />
-      <AutoEqDeviceMappingField />
+      <AutoEqDeviceMappingButton />
 
       <Field
         label="Manual EQ"
@@ -992,8 +999,16 @@ function AutoEqProfileField() {
   const toast = useToast();
   const [state, setState] = useState<AutoEqState | null>(null);
 
+  // Each deep-config surface gets its own dialog. Inline rendering
+  // turned the Settings page into a wall of audiophile knobs the
+  // user had to scroll past to reach anything else; dialogs let the
+  // user keep the catalog browser, tone adjustment, and graph
+  // separate and focused, opening just the one they need.
+  const [catalogOpen, setCatalogOpen] = useState(false);
+  const [toneOpen, setToneOpen] = useState(false);
+
   // Refetch the EQ state. Called once on mount + whenever a
-  // child surface (HeadphonePicker, etc.) wants to re-pull
+  // child surface (catalog dialog, etc.) wants to re-pull
   // because something changed server-side.
   const refresh = async () => {
     try {
@@ -1041,6 +1056,9 @@ function AutoEqProfileField() {
     </button>
   );
 
+  const profileMode = state.mode === "profile";
+  const hasActive = profileMode && state.active_profile !== null;
+
   return (
     <Field
       label="Headphone profile"
@@ -1057,35 +1075,146 @@ function AutoEqProfileField() {
           {modeBtn("profile", "Profile")}
         </div>
 
-        {state.mode === "profile" && (
-          <HeadphonePicker
-            activeProfileId={state.active_profile_id}
-            activeProfile={state.active_profile}
-            onPicked={() => {
-              // Server already applied the new profile; refresh
-              // local state so the FR graph + tilt sliders bind
-              // to the correct active id.
-              void refresh();
-            }}
-          />
+        {profileMode && state.active_profile && (
+          <div className="rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-xs">
+            <div className="text-[10px] font-semibold uppercase tracking-wider text-primary">
+              Active profile
+            </div>
+            <div className="mt-0.5 text-sm font-semibold">
+              {state.active_profile.brand} {state.active_profile.model}
+            </div>
+            <div className="text-muted-foreground">
+              {state.active_profile.source} · {state.active_profile.band_count}{" "}
+              bands · preamp {state.active_profile.preamp_db.toFixed(1)} dB
+            </div>
+          </div>
         )}
 
-        {state.mode === "profile" && state.active_profile && (
-          <>
-            <AutoEqTiltSliders
-              initial={state.tilt}
-              onChange={(t) =>
-                setState((prev) => (prev ? { ...prev, tilt: t } : prev))
+        {profileMode && (
+          <div className="flex flex-wrap gap-2">
+            <button
+              type="button"
+              onClick={() => setCatalogOpen(true)}
+              className="rounded-md border border-input bg-secondary px-3 py-1.5 text-xs font-semibold hover:bg-accent"
+            >
+              {hasActive ? "Change headphones" : "Pick headphones"}
+            </button>
+            <button
+              type="button"
+              onClick={() => setToneOpen(true)}
+              disabled={!hasActive}
+              className="rounded-md border border-input bg-secondary px-3 py-1.5 text-xs font-semibold hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
+              title={
+                hasActive
+                  ? "Tilt + frequency response graph"
+                  : "Pick a profile first"
               }
-            />
-            <AutoEqResponseGraph
-              activeProfileId={state.active_profile_id}
-              tilt={state.tilt}
-            />
-          </>
+            >
+              Adjust tone
+            </button>
+          </div>
         )}
       </div>
+
+      <HeadphoneCatalogDialog
+        open={catalogOpen}
+        onOpenChange={setCatalogOpen}
+        activeProfileId={state.active_profile_id}
+        onPicked={() => {
+          // Server already applied the new profile; refresh local
+          // state so the active card + tone dialog bind to the
+          // correct active id on the next open.
+          void refresh();
+        }}
+      />
+      <ToneDialog
+        open={toneOpen}
+        onOpenChange={setToneOpen}
+        activeProfileId={state.active_profile_id}
+        tilt={state.tilt}
+        onTiltChange={(t) =>
+          setState((prev) => (prev ? { ...prev, tilt: t } : prev))
+        }
+      />
     </Field>
+  );
+}
+
+/**
+ * Dialog wrapper around the headphone-catalog browser. Keeps the
+ * full picker surface (search, two-level expansion, per-source
+ * Use / Download & use actions) but lifts it out of the Settings
+ * page's main scroll so the user isn't forced to scroll through
+ * a 5,000-row catalog to reach anything else.
+ */
+function HeadphoneCatalogDialog({
+  open,
+  onOpenChange,
+  activeProfileId,
+  onPicked,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  activeProfileId: string;
+  onPicked: () => void;
+}) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>Headphone catalog</DialogTitle>
+          <DialogDescription>
+            Search AutoEQ for your headphones, then pick a measurement source.
+            Each lab measures slightly differently — pick one, A/B against the
+            others if you're not sure which sounds right.
+          </DialogDescription>
+        </DialogHeader>
+        <HeadphonePicker
+          activeProfileId={activeProfileId}
+          onPicked={onPicked}
+        />
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/**
+ * Tilt sliders + frequency-response graph in one dialog. They
+ * belong together: tone adjustments are most intuitive when the
+ * user can watch the FR curve respond to slider drags. Putting
+ * them in separate dialogs would force the user to imagine the
+ * effect, which defeats the point of having a graph.
+ */
+function ToneDialog({
+  open,
+  onOpenChange,
+  activeProfileId,
+  tilt,
+  onTiltChange,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  activeProfileId: string;
+  tilt: AutoEqState["tilt"];
+  onTiltChange: (next: AutoEqState["tilt"]) => void;
+}) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle>Adjust tone</DialogTitle>
+          <DialogDescription>
+            Tilt sliders stack on top of the active profile. The graph below
+            shows what they do — raw measurement, target curve, and predicted
+            post-EQ response.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="flex flex-col gap-4">
+          <AutoEqResponseGraph activeProfileId={activeProfileId} tilt={tilt} />
+          <AutoEqTiltSliders initial={tilt} onChange={onTiltChange} />
+        </div>
+      </DialogContent>
+    </Dialog>
   );
 }
 
@@ -1121,11 +1250,9 @@ type HeadphoneRow = {
 
 function HeadphonePicker({
   activeProfileId,
-  activeProfile,
   onPicked,
 }: {
   activeProfileId: string;
-  activeProfile: AutoEqState["active_profile"];
   onPicked: () => void;
 }) {
   const toast = useToast();
@@ -1257,26 +1384,6 @@ function HeadphonePicker({
 
   return (
     <div className="flex flex-col gap-3">
-      {/* Active profile card stays at the top so the user always sees
-          which one is currently in effect, even after they scroll the
-          search results. */}
-      {activeProfile && (
-        <div className="flex items-center justify-between gap-3 rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-xs">
-          <div className="flex flex-col">
-            <span className="text-[10px] font-semibold uppercase tracking-wider text-primary">
-              Active profile
-            </span>
-            <span className="text-sm font-semibold">
-              {activeProfile.brand} {activeProfile.model}
-            </span>
-            <span className="text-muted-foreground">
-              {activeProfile.source} · {activeProfile.band_count} bands · preamp{" "}
-              {activeProfile.preamp_db.toFixed(1)} dB
-            </span>
-          </div>
-        </div>
-      )}
-
       <div className="flex items-center gap-2">
         <input
           type="text"
@@ -1825,6 +1932,44 @@ interface AutoEqDeviceRow {
   unmapped?: boolean;
 }
 
+/**
+ * Per-device profile mapping is a power-user surface — most users
+ * have one set of headphones plugged into one DAC. Hide it behind
+ * a button + dialog so the Settings page reads as the simple "I
+ * have headphones, EQ them" path until the user actually has
+ * multiple devices to manage.
+ */
+function AutoEqDeviceMappingButton() {
+  const [open, setOpen] = useState(false);
+  return (
+    <Field
+      label="Per-device profiles"
+      hint="Map each output device to its own AutoEQ profile so plugging in a different DAC swaps the EQ automatically."
+    >
+      <button
+        type="button"
+        onClick={() => setOpen(true)}
+        className="self-start rounded-md border border-input bg-secondary px-3 py-1.5 text-xs font-semibold hover:bg-accent"
+      >
+        Manage device mappings
+      </button>
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
+          <DialogHeader>
+            <DialogTitle>Per-device profiles</DialogTitle>
+            <DialogDescription>
+              Tideway can pick a different AutoEQ profile depending on which
+              output device is active. Useful if you switch between IEMs on a
+              portable DAC and over-ears on a desktop amp.
+            </DialogDescription>
+          </DialogHeader>
+          <AutoEqDeviceMappingField />
+        </DialogContent>
+      </Dialog>
+    </Field>
+  );
+}
+
 function AutoEqDeviceMappingField() {
   const toast = useToast();
   const [data, setData] = useState<{
@@ -1904,18 +2049,25 @@ function AutoEqDeviceMappingField() {
     }
   };
 
-  if (data === null || profiles === null) return null;
-  if (profiles.length === 0) return null;
+  if (data === null || profiles === null)
+    return (
+      <div className="text-xs text-muted-foreground">Loading device list…</div>
+    );
+  if (profiles.length === 0)
+    return (
+      <div className="text-xs text-muted-foreground">
+        No AutoEQ profiles installed yet. Use the headphone catalog to download
+        one, then come back to map devices.
+      </div>
+    );
 
   return (
-    <Field
-      label="Output device profiles"
-      hint={
-        data.devices.length === 0
+    <div className="flex flex-col gap-3">
+      <p className="text-xs text-muted-foreground">
+        {data.devices.length === 0
           ? "Once you've used an output device, it'll show up here so you can map a profile to it."
-          : "Each output device can have its own AutoEQ profile. Tideway switches automatically when you change devices."
-      }
-    >
+          : "Tideway swaps EQ profiles automatically when you change output devices."}
+      </p>
       <div className="flex flex-col gap-2">
         {data.devices.map((d) => {
           const isActive = d.fingerprint === data.current_fingerprint;
@@ -1973,7 +2125,7 @@ function AutoEqDeviceMappingField() {
           );
         })}
       </div>
-    </Field>
+    </div>
   );
 }
 
