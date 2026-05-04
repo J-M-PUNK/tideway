@@ -825,6 +825,14 @@ function EqField() {
   const [toneOpen, setToneOpen] = useState(false);
   const [deviceMappingOpen, setDeviceMappingOpen] = useState(false);
 
+  // Per-device mappings only make sense when the user has more
+  // than one output device (or has explicitly mapped at least one
+  // already). Single-DAC users would just see noise. We poll the
+  // device list on mount and refresh when the dialog closes so a
+  // newly-plugged DAC shows up without an app restart.
+  const [deviceCount, setDeviceCount] = useState(0);
+  const [mappedCount, setMappedCount] = useState(0);
+
   const refresh = async () => {
     try {
       const s = await api.player.autoEqState();
@@ -834,8 +842,21 @@ function EqField() {
     }
   };
 
+  const refreshDevices = async () => {
+    try {
+      const d = await api.player.autoEqDevices();
+      setDeviceCount(d.devices.length);
+      setMappedCount(
+        d.devices.filter((dev) => dev.mapped_profile_id !== null).length,
+      );
+    } catch {
+      /* fine — section just won't surface the per-device button */
+    }
+  };
+
   useEffect(() => {
     void refresh();
+    void refreshDevices();
   }, []);
 
   if (state === null) return null;
@@ -855,105 +876,176 @@ function EqField() {
     }
   };
 
-  const modeBtn = (mode: AutoEqMode, label: string, hint: string) => (
-    <button
-      key={mode}
-      type="button"
-      onClick={() => switchMode(mode)}
-      title={hint}
-      className={cn(
-        "flex-1 rounded-md border border-input px-3 py-1.5 text-xs font-semibold transition-colors",
-        state.mode === mode
-          ? "bg-primary text-primary-foreground"
-          : "bg-secondary text-foreground hover:bg-accent",
-      )}
-    >
-      {label}
-    </button>
-  );
+  const toggleBypass = async () => {
+    if (state.active_profile === null) return;
+    const next = !state.bypass;
+    setState({ ...state, bypass: next });
+    try {
+      await api.player.autoEqSetBypass(next);
+    } catch (err) {
+      setState({ ...state, bypass: !next });
+      toast.show({
+        kind: "error",
+        title: "Couldn't toggle bypass",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
 
   const hasActive = state.active_profile !== null;
-  const hint =
-    state.mode === "off"
-      ? "Audio plays bit-perfect with no EQ stage."
-      : state.mode === "manual"
-        ? "10-band parametric EQ. Drag sliders or pick a preset; correction applies live."
-        : state.profile_catalog_size === 0
-          ? "Profile mode unavailable — no AutoEQ profiles bundled."
-          : "Pick or import an AutoEQ profile for your headphones. Get profiles from autoeq.app.";
+  const hasProfiles = state.profile_catalog_size > 0;
+  // Per-device profiles is a power-user surface — only show it
+  // when there's actually something to map (>1 known output
+  // device, or at least one already mapped).
+  const showPerDeviceButton = deviceCount > 1 || mappedCount > 0;
 
   return (
-    <Field label="Equalizer" hint={hint}>
+    <Field label="Equalizer">
       <div className="flex flex-col gap-3">
-        <div className="flex gap-1">
-          {modeBtn(
-            "off",
-            "Off",
-            "Bypass the EQ stage entirely. Bit-perfect audio.",
-          )}
-          {modeBtn(
-            "manual",
-            "Manual",
-            "Use the 10-band parametric EQ with your own curve or a preset.",
-          )}
-          {modeBtn(
-            "profile",
-            "Profile",
-            "Apply an AutoEQ correction profile for your specific headphones.",
-          )}
-        </div>
+        <ModeCard
+          mode="off"
+          active={state.mode === "off"}
+          label="Off"
+          description="Bypass the EQ stage. Audio plays bit-perfect."
+          onSelect={() => switchMode("off")}
+        />
+        <ModeCard
+          mode="manual"
+          active={state.mode === "manual"}
+          label="Manual"
+          description="10-band parametric EQ. Drag sliders or pick a preset."
+          onSelect={() => switchMode("manual")}
+        />
+        <ModeCard
+          mode="profile"
+          active={state.mode === "profile"}
+          label="Profile"
+          description="AutoEQ correction tuned to your specific headphones. Imported from autoeq.app."
+          onSelect={() => switchMode("profile")}
+        />
 
-        {state.mode === "manual" && <ManualEqSliders />}
+        {state.mode === "manual" && (
+          <div className="mt-2">
+            <ManualEqSliders />
+          </div>
+        )}
 
-        {state.mode === "profile" && (
-          <>
+        {state.mode === "profile" && !hasProfiles && (
+          <div className="mt-2 flex flex-col items-start gap-3 rounded-md border border-primary/30 bg-primary/5 p-4">
+            <div className="text-sm font-semibold">No profiles yet.</div>
+            <p className="text-xs text-muted-foreground">
+              Tideway no longer ships starter profiles. Generate one for your
+              headphones at{" "}
+              <a
+                href="https://autoeq.app"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="underline hover:text-foreground"
+              >
+                autoeq.app
+              </a>{" "}
+              (download as{" "}
+              <span className="font-mono">EqualizerAPO Parametric Eq</span> or{" "}
+              <span className="font-mono">Custom Parametric Eq</span>) and
+              import the file here.
+            </p>
+            <button
+              type="button"
+              onClick={() => setCatalogOpen(true)}
+              className="rounded-md border border-primary bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground hover:bg-primary/80"
+            >
+              Import your first profile
+            </button>
+          </div>
+        )}
+
+        {state.mode === "profile" && hasProfiles && (
+          <div className="mt-2 flex flex-col gap-2">
             {hasActive && state.active_profile && (
-              <div className="rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-xs">
-                <div className="text-[10px] font-semibold uppercase tracking-wider text-primary">
-                  Active profile
+              <button
+                type="button"
+                onClick={() => setCatalogOpen(true)}
+                className="flex items-start justify-between gap-3 rounded-md border border-primary/30 bg-primary/5 px-3 py-2 text-left text-xs transition-colors hover:bg-primary/10"
+                title="Click to change profile"
+              >
+                <div className="min-w-0 flex-1">
+                  <div className="text-[10px] font-semibold uppercase tracking-wider text-primary">
+                    Active profile
+                  </div>
+                  <div className="mt-0.5 truncate text-sm font-semibold">
+                    {state.active_profile.brand} {state.active_profile.model}
+                  </div>
+                  <div className="truncate text-muted-foreground">
+                    {state.active_profile.source} ·{" "}
+                    {state.active_profile.band_count} bands · preamp{" "}
+                    {state.active_profile.preamp_db.toFixed(1)} dB
+                  </div>
                 </div>
-                <div className="mt-0.5 text-sm font-semibold">
-                  {state.active_profile.brand} {state.active_profile.model}
-                </div>
-                <div className="text-muted-foreground">
-                  {state.active_profile.source} ·{" "}
-                  {state.active_profile.band_count} bands · preamp{" "}
-                  {state.active_profile.preamp_db.toFixed(1)} dB
-                </div>
-              </div>
+                <span className="flex-shrink-0 self-center rounded border border-primary/40 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-primary">
+                  Change
+                </span>
+              </button>
             )}
 
             <div className="flex flex-wrap gap-2">
+              {!hasActive && (
+                <button
+                  type="button"
+                  onClick={() => setCatalogOpen(true)}
+                  className="rounded-md border border-primary bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground hover:bg-primary/80"
+                >
+                  Pick a profile
+                </button>
+              )}
+              {hasActive && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() => setToneOpen(true)}
+                    className="rounded-md border border-input bg-secondary px-3 py-1.5 text-xs font-semibold hover:bg-accent"
+                    title="Tilt sliders + frequency-response graph"
+                  >
+                    Tilt &amp; graph
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void toggleBypass()}
+                    className={cn(
+                      "rounded-md border px-3 py-1.5 text-xs font-semibold transition-colors",
+                      state.bypass
+                        ? "border-amber-500/40 bg-amber-500/10 text-amber-500 hover:bg-amber-500/20"
+                        : "border-input bg-secondary text-foreground hover:bg-accent",
+                    )}
+                    title="A/B compare with the EQ off without losing your selection."
+                  >
+                    {state.bypass ? "Bypassed (A/B)" : "Bypass A/B"}
+                  </button>
+                </>
+              )}
               <button
                 type="button"
                 onClick={() => setCatalogOpen(true)}
                 className="rounded-md border border-input bg-secondary px-3 py-1.5 text-xs font-semibold hover:bg-accent"
               >
-                {hasActive ? "Change profile" : "Manage profiles"}
+                Manage profiles
               </button>
-              <button
-                type="button"
-                onClick={() => setToneOpen(true)}
-                disabled={!hasActive}
-                className="rounded-md border border-input bg-secondary px-3 py-1.5 text-xs font-semibold hover:bg-accent disabled:cursor-not-allowed disabled:opacity-50"
-                title={
-                  hasActive
-                    ? "Tilt + frequency response graph"
-                    : "Pick a profile first"
-                }
-              >
-                Adjust tone
-              </button>
-              <button
-                type="button"
-                onClick={() => setDeviceMappingOpen(true)}
-                className="rounded-md border border-input bg-secondary px-3 py-1.5 text-xs font-semibold hover:bg-accent"
-                title="Map output devices to specific profiles so plugging in a different DAC swaps the EQ automatically."
-              >
-                Per-device profiles
-              </button>
+              {showPerDeviceButton && (
+                <button
+                  type="button"
+                  onClick={() => setDeviceMappingOpen(true)}
+                  className="rounded-md border border-input bg-secondary px-3 py-1.5 text-xs font-semibold hover:bg-accent"
+                  title="Map output devices to specific profiles so plugging in a different DAC swaps the EQ automatically."
+                >
+                  Per-device profiles
+                  {mappedCount > 0 && (
+                    <span className="ml-1 text-muted-foreground">
+                      ({mappedCount})
+                    </span>
+                  )}
+                </button>
+              )}
             </div>
-          </>
+          </div>
         )}
       </div>
 
@@ -974,7 +1066,15 @@ function EqField() {
           setState((prev) => (prev ? { ...prev, tilt: t } : prev))
         }
       />
-      <Dialog open={deviceMappingOpen} onOpenChange={setDeviceMappingOpen}>
+      <Dialog
+        open={deviceMappingOpen}
+        onOpenChange={(open) => {
+          setDeviceMappingOpen(open);
+          // Refresh device list when the dialog closes so the
+          // mapped-count badge stays accurate.
+          if (!open) void refreshDevices();
+        }}
+      >
         <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
           <DialogHeader>
             <DialogTitle>Per-device profiles</DialogTitle>
@@ -988,6 +1088,56 @@ function EqField() {
         </DialogContent>
       </Dialog>
     </Field>
+  );
+}
+
+/**
+ * One row in the EQ mode picker. Replaces the old pill buttons —
+ * each mode now has a label AND a one-line description so a first-
+ * time user can read what each option does without hovering for a
+ * tooltip.
+ */
+function ModeCard({
+  active,
+  label,
+  description,
+  onSelect,
+}: {
+  mode: AutoEqMode;
+  active: boolean;
+  label: string;
+  description: string;
+  onSelect: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      className={cn(
+        "flex items-start gap-3 rounded-md border px-3 py-2 text-left transition-colors",
+        active
+          ? "border-primary bg-primary/10"
+          : "border-input bg-secondary hover:bg-accent",
+      )}
+    >
+      <div
+        className={cn(
+          "mt-0.5 h-3.5 w-3.5 flex-shrink-0 rounded-full border-2 transition-colors",
+          active ? "border-primary bg-primary" : "border-muted-foreground/40",
+        )}
+      />
+      <div className="min-w-0 flex-1">
+        <div
+          className={cn(
+            "text-xs font-semibold",
+            active ? "text-primary" : "text-foreground",
+          )}
+        >
+          {label}
+        </div>
+        <div className="text-[11px] text-muted-foreground">{description}</div>
+      </div>
+    </button>
   );
 }
 
@@ -1007,7 +1157,7 @@ function ManualEqSliders() {
     preamp: number | null;
     band_count: number;
     frequencies: number[];
-    presets: { index: number; name: string }[];
+    presets: { index: number; name: string; bands: number[] }[];
   } | null>(null);
   const [localBands, setLocalBands] = useState<number[] | null>(null);
 
@@ -1067,27 +1217,49 @@ function ManualEqSliders() {
     flush(flat);
   };
 
+  // Match a preset against current sliders so the active preset's
+  // card highlights as "selected." Compare with a small epsilon
+  // because sliders snap to 0.5 dB but presets are integer dB.
+  const activePresetIdx = (() => {
+    for (const p of eq.presets) {
+      if (p.bands.length !== localBands.length) continue;
+      let same = true;
+      for (let i = 0; i < p.bands.length; i++) {
+        if (Math.abs(p.bands[i] - localBands[i]) > 0.05) {
+          same = false;
+          break;
+        }
+      }
+      if (same) return p.index;
+    }
+    return null;
+  })();
+
   return (
     <div className="flex flex-col gap-3">
-      <div className="flex flex-wrap items-center gap-2">
-        <select
-          onChange={(e) => {
-            const n = parseInt(e.target.value, 10);
-            if (!isNaN(n)) pickPreset(n);
-          }}
-          value=""
-          className="h-9 rounded-md border border-input bg-secondary px-3 text-xs"
-        >
-          <option value="">Presets…</option>
-          {eq.presets.map((p) => (
-            <option key={p.index} value={p.index}>
-              {p.name}
-            </option>
-          ))}
-        </select>
+      <div className="flex items-center justify-between">
+        <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+          Presets
+        </div>
         <Button size="sm" variant="outline" onClick={reset}>
           Reset
         </Button>
+      </div>
+
+      {/* Horizontal scroll of preset cards. Each card shows the
+          name plus a tiny SVG of the band gains, so the user can
+          eyeball "this one boosts bass and treble" without applying
+          and reverting. Click to apply. */}
+      <div className="flex gap-2 overflow-x-auto pb-1">
+        {eq.presets.map((p) => (
+          <PresetCard
+            key={p.index}
+            name={p.name}
+            bands={p.bands}
+            active={activePresetIdx === p.index}
+            onClick={() => pickPreset(p.index)}
+          />
+        ))}
       </div>
 
       <div className="flex items-end gap-3">
@@ -1110,6 +1282,107 @@ function ManualEqSliders() {
         ))}
       </div>
     </div>
+  );
+}
+
+/**
+ * One preset in the manual-EQ preset row. Renders the name plus a
+ * tiny bar chart of the preset's band gains — green bars for boost
+ * (positive gain), red for cut, neutral for flat. Lets the user
+ * recognise "Bass Boost" at a glance because the leftmost bars
+ * are taller, instead of having to apply and revert to discover
+ * what each name actually does.
+ *
+ * SVG dimensions are deliberately small (90x32 ish); the row is
+ * horizontally scrollable so adding more presets doesn't break
+ * the Settings page width.
+ */
+function PresetCard({
+  name,
+  bands,
+  active,
+  onClick,
+}: {
+  name: string;
+  bands: number[];
+  active: boolean;
+  onClick: () => void;
+}) {
+  const w = 80;
+  const h = 28;
+  const barGap = 1;
+  const barW =
+    bands.length > 0 ? (w - (bands.length - 1) * barGap) / bands.length : 0;
+  // Bands clamp to ±12 dB at the slider level. Use that as the
+  // chart's vertical range so a "Bass Boost +6" preset renders as
+  // bars half the chart height — predictable scale across presets.
+  const maxAbs = 12;
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      title={`Apply preset "${name}"`}
+      className={cn(
+        "flex flex-shrink-0 flex-col items-center gap-1 rounded-md border px-2 py-1.5 transition-colors",
+        active
+          ? "border-primary bg-primary/10"
+          : "border-input bg-secondary hover:bg-accent",
+      )}
+    >
+      <svg
+        width={w}
+        height={h}
+        viewBox={`0 0 ${w} ${h}`}
+        className="overflow-visible"
+      >
+        {/* Zero-line so the user reads boost vs cut at a glance. */}
+        <line
+          x1={0}
+          y1={h / 2}
+          x2={w}
+          y2={h / 2}
+          stroke="currentColor"
+          strokeOpacity={0.2}
+          strokeWidth={1}
+        />
+        {bands.map((g, i) => {
+          const norm = Math.max(-1, Math.min(1, g / maxAbs));
+          const barH = (Math.abs(norm) * h) / 2;
+          const x = i * (barW + barGap);
+          const y = norm >= 0 ? h / 2 - barH : h / 2;
+          // Green-ish for boost, red-ish for cut, muted for flat.
+          // Using rgb literals because Tailwind's `fill-emerald-500`
+          // etc. aren't reachable from inline SVG without arbitrary
+          // class plumbing — direct values are simpler and stable.
+          const color =
+            Math.abs(g) < 0.1
+              ? "rgb(120, 120, 120)"
+              : g > 0
+                ? "rgb(74, 222, 128)"
+                : "rgb(248, 113, 113)";
+          return (
+            <rect
+              key={i}
+              x={x}
+              y={y}
+              width={barW}
+              height={Math.max(barH, 0.5)}
+              fill={color}
+              opacity={0.85}
+            />
+          );
+        })}
+      </svg>
+      <div
+        className={cn(
+          "max-w-[80px] truncate text-[10px] font-medium",
+          active ? "text-primary" : "text-foreground/80",
+        )}
+      >
+        {name}
+      </div>
+    </button>
   );
 }
 

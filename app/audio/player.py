@@ -956,7 +956,19 @@ class PCMPlayer:
 
     @staticmethod
     def eq_presets() -> list[dict]:
-        return [{"index": p["index"], "name": p["name"]} for p in EQ_PRESETS]
+        # `bands` ships with each preset so the Settings UI can
+        # render mini-curve previews next to the preset name without
+        # a second round-trip per preset. The same data is what
+        # `apply_equalizer` would receive if the user picked the
+        # preset, so the preview is exact, not a redrawing.
+        return [
+            {
+                "index": p["index"],
+                "name": p["name"],
+                "bands": list(p.get("bands") or []),
+            }
+            for p in EQ_PRESETS
+        ]
 
     @staticmethod
     def eq_bands_count() -> int:
