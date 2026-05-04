@@ -4245,9 +4245,24 @@ def _native_player() -> PCMPlayer:
     if not _player_bootstrapped:
         _player_bootstrapped = True
         try:
-            # Restore EQ — Phase 2 added profile mode, so prefer
-            # the profile path when one is selected; otherwise
-            # fall back to the manual bands path.
+            # Rationalise eq_mode + eq_enabled. A hand-edited
+            # settings.json could leave them inconsistent (e.g.
+            # eq_mode="manual" with eq_enabled=False) which would
+            # render as "Manual mode selected" in the UI but no
+            # audible EQ — mode picker lying about reality. Force
+            # eq_enabled to track eq_mode here so the picker and
+            # the audio path agree.
+            if settings.eq_mode == "off" and settings.eq_enabled:
+                settings.eq_enabled = False
+            elif settings.eq_mode in ("manual", "profile") and not settings.eq_enabled:
+                # Don't auto-flip True — a False eq_enabled was the
+                # legacy way to disable EQ entirely. Honour it but
+                # also normalise the mode so the UI's mode picker
+                # shows what's actually happening.
+                settings.eq_mode = "off"
+            # Restore EQ. Profile mode takes priority over the
+            # legacy manual-bands path when both happen to be
+            # set.
             if (
                 settings.eq_enabled
                 and settings.eq_mode == "profile"
@@ -5213,6 +5228,16 @@ def autoeq_set_tilt(req: _AutoEqTiltRequest) -> dict:
     _require_local_access()
 
     def _clamp(v: float) -> float:
+        # Pydantic's `Optional[float]` accepts NaN and Infinity by
+        # default — which would propagate into the biquad math as
+        # NaN audio samples or DC scale-by-infinity. Reject them
+        # before clamping rather than silently mapping inf to ±12.
+        import math
+        if not math.isfinite(v):
+            raise HTTPException(
+                status_code=400,
+                detail=f"tilt value {v!r} must be a finite number",
+            )
         return max(-_TILT_RANGE_DB, min(_TILT_RANGE_DB, float(v)))
 
     if req.preamp_offset_db is not None:
@@ -5379,6 +5404,16 @@ def autoeq_set_device_mapping(req: _AutoEqDeviceMappingRequest) -> dict:
     _require_local_access()
     from app.audio.autoeq.index import INDEX
 
+    # Empty fingerprint would silently become a fallback-for-
+    # unknown-device entry: `autoeq_devices` reports
+    # `current_fingerprint=""` for any device the live OS list
+    # didn't expose, and a "" key would then masquerade as the
+    # mapping for those phantom devices. Reject before write.
+    if not req.fingerprint.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="fingerprint must be non-empty",
+        )
     if req.profile_id is not None and INDEX.get(req.profile_id) is None:
         raise HTTPException(
             status_code=404, detail=f"profile not found: {req.profile_id}"
@@ -5449,35 +5484,56 @@ def autoeq_set_mode(req: _AutoEqModeRequest) -> dict:
             detail=f"mode must be one of {sorted(valid)}",
         )
 
-    settings.eq_mode = req.mode
+    # Apply to the player FIRST, then write settings only if the
+    # apply succeeded. Old order set settings.eq_mode then called
+    # apply_equalizer, which would leave settings half-written if
+    # the player threw — disk would have the old mode but in-
+    # memory settings would have the new one, and the next request
+    # would see inconsistent state.
     player = _native_player()
-
-    if req.mode == "off":
-        settings.eq_enabled = False
-        player.apply_equalizer([])
-    elif req.mode == "manual":
-        settings.eq_enabled = True
-        if settings.eq_bands:
-            player.apply_equalizer(
-                settings.eq_bands, preamp=settings.eq_preamp
-            )
-        else:
+    new_enabled: bool
+    try:
+        if req.mode == "off":
+            new_enabled = False
             player.apply_equalizer([])
-    elif req.mode == "profile":
-        from app.audio.autoeq.index import INDEX
-
-        settings.eq_enabled = True
-        if settings.eq_active_profile_id:
-            p = INDEX.get(settings.eq_active_profile_id)
-            if p is not None:
-                player.apply_equalizer_profile(p)
+        elif req.mode == "manual":
+            new_enabled = True
+            if settings.eq_bands:
+                player.apply_equalizer(
+                    settings.eq_bands, preamp=settings.eq_preamp
+                )
             else:
-                # Profile previously selected was removed/renamed.
-                # Bypass rather than crash; user picks a new one.
+                player.apply_equalizer([])
+        elif req.mode == "profile":
+            from app.audio.autoeq.index import INDEX
+
+            new_enabled = True
+            if settings.eq_active_profile_id:
+                p = INDEX.get(settings.eq_active_profile_id)
+                if p is not None:
+                    player.apply_equalizer_profile(p)
+                else:
+                    # Profile previously selected was removed/renamed.
+                    # Bypass rather than crash; user picks a new one.
+                    player.apply_equalizer([])
+            else:
                 player.apply_equalizer([])
         else:
-            player.apply_equalizer([])
+            # Belt-and-suspenders; we already validated `req.mode`
+            # against the {off, manual, profile} set at the top.
+            raise HTTPException(
+                status_code=400, detail=f"unhandled mode: {req.mode!r}"
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"player.apply_equalizer failed for mode {req.mode!r}: {exc}",
+        )
 
+    settings.eq_mode = req.mode
+    settings.eq_enabled = new_enabled
     save_settings(settings)
     return {
         "ok": True,
@@ -8559,7 +8615,12 @@ class SettingsPayload(BaseModel):
     eq_mode: Optional[str] = None
     eq_active_profile_id: Optional[str] = None
     eq_bypass: Optional[bool] = None
-    eq_device_mappings: Optional[dict] = None
+    # `dict[str, Optional[str]]` matches the Settings field
+    # exactly: device fingerprint (string) → profile id (string)
+    # or `None` to mute the EQ for that device. The previous
+    # `Optional[dict]` would accept arbitrary nested structures
+    # via PUT /api/settings.
+    eq_device_mappings: Optional[dict[str, Optional[str]]] = None
     eq_fallback_when_unmapped: Optional[str] = None
     eq_tilt_preamp_offset_db: Optional[float] = None
     eq_tilt_bass_db: Optional[float] = None
