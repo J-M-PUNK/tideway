@@ -5076,6 +5076,88 @@ class _AutoEqImportRequest(BaseModel):
 _USER_IMPORTED_SOURCE = "User imported"
 
 
+class _AutoEqDeleteRequest(BaseModel):
+    profile_id: str
+
+
+@app.post("/api/eq/delete-profile")
+def autoeq_delete_profile(req: _AutoEqDeleteRequest) -> dict:
+    """Delete a user-imported profile from the cache. Refuses to
+    delete bundled profiles (the ones shipped under
+    `app/audio/autoeq/data/results/...`) — those live alongside
+    the source code and aren't user-removable through the UI; they
+    come back on next install anyway.
+
+    If the deleted profile was the active one, clears the active
+    selection and stops applying it. Caller's UI should refresh
+    the EQ state after this returns.
+    """
+    _require_local_access()
+    from app.audio.autoeq import updater
+    from app.audio.autoeq.index import INDEX, default_data_dir
+
+    pid = req.profile_id
+    if not pid.startswith(_USER_IMPORTED_SOURCE + "/"):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Only user-imported profiles can be deleted. Bundled "
+                "profiles ship with the app."
+            ),
+        )
+
+    parts = pid.split("/", 1)
+    if len(parts) != 2 or not parts[1]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"profile_id has unexpected shape: {pid!r}",
+        )
+    headphone = parts[1]
+
+    profile_dir = updater.cache_dir() / _USER_IMPORTED_SOURCE / headphone
+    if not profile_dir.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"profile {pid!r} not found on disk",
+        )
+
+    # Best-effort recursive remove. If something else (Finder,
+    # Spotlight) has a file open we may get an error — surface it
+    # rather than leaving a partial-delete state hidden.
+    import shutil
+    try:
+        shutil.rmtree(profile_dir)
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"couldn't remove {profile_dir}: {exc}",
+        )
+
+    # If we just deleted the active profile, clear the active
+    # selection so the player doesn't keep referencing a stale id.
+    cleared_active = False
+    if settings.eq_active_profile_id == pid:
+        settings.eq_active_profile_id = ""
+        save_settings(settings)
+        try:
+            _native_player().apply_equalizer([])
+        except Exception:
+            log = logging.getLogger("autoeq.delete")
+            log.exception("apply_equalizer([]) after delete failed")
+        cleared_active = True
+
+    # Reload the index so the deleted profile drops out of the
+    # listing immediately (otherwise it'd stay until a separate
+    # action triggered the next reload).
+    try:
+        INDEX.load_directories([default_data_dir(), updater.cache_dir()])
+    except Exception:
+        log = logging.getLogger("autoeq.delete")
+        log.exception("post-delete index reload failed")
+
+    return {"ok": True, "profile_id": pid, "cleared_active": cleared_active}
+
+
 @app.post("/api/eq/import-profile")
 def autoeq_import_profile(req: _AutoEqImportRequest) -> dict:
     """Import a PEQ.txt file from the user's filesystem (or generated

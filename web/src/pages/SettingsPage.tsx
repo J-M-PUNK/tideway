@@ -880,7 +880,7 @@ function EqField() {
         ? "10-band parametric EQ. Drag sliders or pick a preset; correction applies live."
         : state.profile_catalog_size === 0
           ? "Profile mode unavailable — no AutoEQ profiles bundled."
-          : "Pick your headphones; AutoEQ correction applies live.";
+          : "Pick or import an AutoEQ profile for your headphones. Get profiles from autoeq.app.";
 
   return (
     <Field label="Equalizer" hint={hint}>
@@ -929,7 +929,7 @@ function EqField() {
                 onClick={() => setCatalogOpen(true)}
                 className="rounded-md border border-input bg-secondary px-3 py-1.5 text-xs font-semibold hover:bg-accent"
               >
-                {hasActive ? "Change headphones" : "Pick headphones"}
+                {hasActive ? "Change profile" : "Manage profiles"}
               </button>
               <button
                 type="button"
@@ -957,11 +957,11 @@ function EqField() {
         )}
       </div>
 
-      <HeadphoneCatalogDialog
+      <ProfilesDialog
         open={catalogOpen}
         onOpenChange={setCatalogOpen}
         activeProfileId={state.active_profile_id}
-        onPicked={() => {
+        onChanged={() => {
           void refresh();
         }}
       />
@@ -1192,38 +1192,268 @@ function EqSlider({
 // it lacked the `bypass` field added in Phase 4, for instance.
 
 /**
- * Dialog wrapper around the headphone-catalog browser. Keeps the
- * full picker surface (search, two-level expansion, per-source
- * Use / Download & use actions) but lifts it out of the Settings
- * page's main scroll so the user isn't forced to scroll through
- * a 5,000-row catalog to reach anything else.
+ * Dialog that lists installed profiles and lets the user import,
+ * use, or delete them. Replaces the previous AutoEQ catalog
+ * search — Tideway no longer browses AutoEQ's 5,000-profile
+ * upstream from inside the app. Users grab the PEQ.txt files
+ * they want from autoeq.app (or anywhere else that publishes
+ * AutoEQ-format profiles) and import them here.
+ *
+ * Bundled profiles ship as a starter set so the picker isn't
+ * empty out of the box, but they can't be deleted (they live
+ * alongside the source code; reinstalling brings them back).
+ * User-imported profiles get a Delete button.
  */
-function HeadphoneCatalogDialog({
+function ProfilesDialog({
   open,
   onOpenChange,
   activeProfileId,
-  onPicked,
+  onChanged,
 }: {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   activeProfileId: string;
-  onPicked: () => void;
+  onChanged: () => void;
 }) {
+  const toast = useToast();
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const [profiles, setProfiles] = useState<
+    {
+      id: string;
+      brand: string;
+      model: string;
+      source: string;
+      preamp_db: number;
+      band_count: number;
+    }[]
+  >([]);
+  const [loading, setLoading] = useState(false);
+  const [busyId, setBusyId] = useState<string | null>(null);
+  const [importing, setImporting] = useState(false);
+
+  const refresh = async () => {
+    setLoading(true);
+    try {
+      const r = await api.player.autoEqList("", 500);
+      setProfiles(r.profiles);
+    } catch {
+      setProfiles([]);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (open) void refresh();
+  }, [open]);
+
+  const handleUse = async (id: string) => {
+    setBusyId(id);
+    try {
+      await api.player.autoEqLoadProfile(id);
+      onChanged();
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: "Couldn't load profile",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const handleDelete = async (id: string, name: string) => {
+    if (!window.confirm(`Delete "${name}"? This can't be undone.`)) return;
+    setBusyId(id);
+    try {
+      await api.player.autoEqDeleteProfile(id);
+      toast.show({ kind: "success", title: "Deleted", description: name });
+      void refresh();
+      onChanged();
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: "Couldn't delete",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setBusyId(null);
+    }
+  };
+
+  const handleImport = async (file: File) => {
+    setImporting(true);
+    try {
+      const text = await file.text();
+      // Default-name from filename: "Sennheiser HD 600 ParametricEQ.txt"
+      // -> "Sennheiser HD 600". User can rename when prompted.
+      const baseName = file.name
+        .replace(/\.txt$/i, "")
+        .replace(/\s+ParametricEQ$/i, "")
+        .trim();
+      const headphoneName =
+        window.prompt("Save this profile under what name?", baseName)?.trim() ||
+        "";
+      if (!headphoneName) return;
+      try {
+        const r = await api.player.autoEqImportProfile(headphoneName, text);
+        toast.show({
+          kind: "success",
+          title: "Imported",
+          description: r.headphone,
+        });
+        // Auto-load the imported profile so the user immediately
+        // hears the correction.
+        await api.player.autoEqLoadProfile(r.profile_id);
+        onChanged();
+        void refresh();
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg.startsWith("409:")) {
+          if (
+            window.confirm(
+              `A profile named "${headphoneName}" already exists. Replace it?`,
+            )
+          ) {
+            const r = await api.player.autoEqImportProfile(
+              headphoneName,
+              text,
+              true,
+            );
+            toast.show({
+              kind: "success",
+              title: "Replaced",
+              description: r.headphone,
+            });
+            await api.player.autoEqLoadProfile(r.profile_id);
+            onChanged();
+            void refresh();
+          }
+        } else {
+          throw err;
+        }
+      }
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: "Couldn't import profile",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    } finally {
+      setImporting(false);
+      if (fileInputRef.current) fileInputRef.current.value = "";
+    }
+  };
+
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-h-[85vh] max-w-2xl overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>Headphone catalog</DialogTitle>
+          <DialogTitle>Headphone profiles</DialogTitle>
           <DialogDescription>
-            Search AutoEQ for your headphones, then pick a measurement source.
-            Each lab measures slightly differently — pick one, A/B against the
-            others if you're not sure which sounds right.
+            Pick which AutoEQ profile is active, or import a new one. Get
+            profiles from{" "}
+            <a
+              href="https://autoeq.app"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="underline hover:text-foreground"
+            >
+              autoeq.app
+            </a>{" "}
+            (export as <span className="font-mono">Generic Parametric EQ</span>{" "}
+            or <span className="font-mono">Equalizer APO Parametric</span>) or
+            anywhere else that publishes AutoEQ-format PEQ.txt files.
           </DialogDescription>
         </DialogHeader>
-        <HeadphonePicker
-          activeProfileId={activeProfileId}
-          onPicked={onPicked}
-        />
+
+        <div className="flex flex-col gap-3">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept=".txt,text/plain"
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) void handleImport(f);
+            }}
+            className="hidden"
+          />
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            disabled={importing}
+            className="self-start rounded-md border border-primary bg-primary px-3 py-1.5 text-xs font-semibold text-primary-foreground hover:bg-primary/80 disabled:opacity-50"
+          >
+            {importing ? "Importing…" : "Import a profile…"}
+          </button>
+
+          {loading && profiles.length === 0 && (
+            <div className="px-1 py-2 text-xs text-muted-foreground">
+              Loading profiles…
+            </div>
+          )}
+          {!loading && profiles.length === 0 && (
+            <div className="rounded-md border border-input bg-secondary/40 px-3 py-3 text-xs text-muted-foreground">
+              No profiles yet. Click "Import a profile…" to add one.
+            </div>
+          )}
+          {profiles.length > 0 && (
+            <div className="max-h-96 overflow-y-auto rounded-md border border-input">
+              {profiles.map((p) => {
+                const isActive = p.id === activeProfileId;
+                const isImported = p.source === "User imported";
+                return (
+                  <div
+                    key={p.id}
+                    className={cn(
+                      "flex items-center justify-between gap-3 border-b border-input/40 px-3 py-2 text-xs last:border-b-0",
+                      isActive && "bg-primary/5",
+                    )}
+                  >
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate font-semibold">
+                        {p.brand} {p.model}
+                      </div>
+                      <div className="text-muted-foreground">
+                        {p.source} · {p.band_count} bands · preamp{" "}
+                        {p.preamp_db.toFixed(1)} dB
+                      </div>
+                    </div>
+                    <div className="flex flex-shrink-0 items-center gap-1.5">
+                      {isActive ? (
+                        <span className="rounded bg-primary/20 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-primary">
+                          In use
+                        </span>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => handleUse(p.id)}
+                          disabled={busyId === p.id}
+                          className="rounded border border-primary bg-primary px-2 py-0.5 text-[10px] font-semibold text-primary-foreground hover:bg-primary/80 disabled:opacity-50"
+                        >
+                          {busyId === p.id ? "…" : "Use"}
+                        </button>
+                      )}
+                      {isImported && (
+                        <button
+                          type="button"
+                          onClick={() =>
+                            handleDelete(p.id, `${p.brand} ${p.model}`)
+                          }
+                          disabled={busyId === p.id}
+                          className="rounded border border-input px-2 py-0.5 text-[10px] font-semibold text-muted-foreground hover:bg-destructive/10 hover:text-destructive disabled:opacity-50"
+                        >
+                          Delete
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
       </DialogContent>
     </Dialog>
   );
@@ -1269,463 +1499,6 @@ function ToneDialog({
   );
 }
 
-/**
- * Two-level catalog browser: search shows one row per unique
- * headphone, click a row to expand the list of measurement
- * sources that have it. Each source row has a clear next-action
- * — "Active" if it's the currently-loaded profile, "Use" for
- * already-installed sources, "Download" for ones that need to
- * be fetched first (which then auto-load on success).
- *
- * Collapses the older two-search-input-with-overlapping-data
- * mess. The user sees one search box; "your headphone" is the
- * primary mental model and the source picker is the obvious
- * next step once you've pointed at the right headphone.
- *
- * On first mount this fires `/api/eq/check-updates` to populate
- * the manifest cache so the search returns the full ~5,000-
- * profile catalog right away. The cache lives for the server
- * session, so subsequent mounts are instant.
- */
-type HeadphoneRow = {
-  headphone: string;
-  installed_count: number;
-  total_count: number;
-  sources: {
-    profile_id: string;
-    source: string;
-    on_disk: boolean;
-    is_active: boolean;
-  }[];
-};
-
-function HeadphonePicker({
-  activeProfileId,
-  onPicked,
-}: {
-  activeProfileId: string;
-  onPicked: () => void;
-}) {
-  const toast = useToast();
-  const [query, setQuery] = useState("");
-  const [results, setResults] = useState<HeadphoneRow[]>([]);
-  const [expanded, setExpanded] = useState<string | null>(null);
-  const [searching, setSearching] = useState(false);
-  const [busy, setBusy] = useState<string | null>(null); // profile_id in-flight
-  const [manifestStatus, setManifestStatus] = useState<
-    "loading" | "ready" | "failed"
-  >("loading");
-
-  // Populate the manifest on first mount so the search has the
-  // full catalog to scan, not just bundled profiles. The fetch
-  // is ~3 MB JSON from GitHub so a brief loading state is honest.
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        await api.player.autoEqCheckUpdates();
-        if (!cancelled) setManifestStatus("ready");
-      } catch {
-        if (!cancelled) setManifestStatus("failed");
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  // Debounced search. Only fires once the manifest is in cache
-  // — searching before that would just return empty rows.
-  useEffect(() => {
-    if (manifestStatus !== "ready") return;
-    setSearching(true);
-    const handle = window.setTimeout(async () => {
-      try {
-        const r = await api.player.autoEqHeadphones(query, 25);
-        setResults(r.results);
-      } catch {
-        setResults([]);
-      } finally {
-        setSearching(false);
-      }
-    }, 200);
-    return () => window.clearTimeout(handle);
-  }, [query, manifestStatus]);
-
-  const refreshManifest = async () => {
-    setManifestStatus("loading");
-    try {
-      await api.player.autoEqCheckUpdates();
-      setManifestStatus("ready");
-    } catch (err) {
-      setManifestStatus("failed");
-      toast.show({
-        kind: "error",
-        title: "Couldn't refresh AutoEQ catalog",
-        description: err instanceof Error ? err.message : String(err),
-      });
-    }
-  };
-
-  const useProfile = async (profile_id: string) => {
-    setBusy(profile_id);
-    try {
-      await api.player.autoEqLoadProfile(profile_id);
-      onPicked();
-      // Mark this source as active in the local copy so the badge
-      // flips immediately without waiting for the next search round.
-      setResults((prev) =>
-        prev.map((row) => ({
-          ...row,
-          sources: row.sources.map((s) => ({
-            ...s,
-            is_active: s.profile_id === profile_id,
-          })),
-        })),
-      );
-    } catch (err) {
-      toast.show({
-        kind: "error",
-        title: "Couldn't load profile",
-        description: err instanceof Error ? err.message : String(err),
-      });
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const downloadAndUse = async (profile_id: string, headphone: string) => {
-    setBusy(profile_id);
-    try {
-      await api.player.autoEqDownloadProfile(profile_id);
-      await api.player.autoEqLoadProfile(profile_id);
-      onPicked();
-      toast.show({
-        kind: "success",
-        title: "Downloaded and applied",
-        description: headphone,
-      });
-      setResults((prev) =>
-        prev.map((row) => ({
-          ...row,
-          sources: row.sources.map((s) =>
-            s.profile_id === profile_id
-              ? { ...s, on_disk: true, is_active: true }
-              : { ...s, is_active: false },
-          ),
-          installed_count:
-            row.headphone === headphone
-              ? row.installed_count +
-                (row.sources.find((s) => s.profile_id === profile_id)?.on_disk
-                  ? 0
-                  : 1)
-              : row.installed_count,
-        })),
-      );
-    } catch (err) {
-      toast.show({
-        kind: "error",
-        title: "Couldn't download",
-        description: err instanceof Error ? err.message : String(err),
-      });
-    } finally {
-      setBusy(null);
-    }
-  };
-
-  const fileInputRef = useRef<HTMLInputElement | null>(null);
-  const [importing, setImporting] = useState(false);
-
-  const handleImport = async (file: File) => {
-    setImporting(true);
-    try {
-      const text = await file.text();
-      // Default-name from filename: "Sennheiser HD 600 ParametricEQ.txt"
-      // -> "Sennheiser HD 600". User can rename the file before
-      // import if they want a different display name (e.g. to
-      // distinguish "Sennheiser HD 600 Harman 2017" from a default
-      // import of the same model).
-      const baseName = file.name
-        .replace(/\.txt$/i, "")
-        .replace(/\s+ParametricEQ$/i, "")
-        .trim();
-      const headphoneName =
-        window
-          .prompt(
-            "Save this profile under what name?",
-            baseName || "Custom profile",
-          )
-          ?.trim() || "";
-      if (!headphoneName) return;
-      try {
-        const r = await api.player.autoEqImportProfile(headphoneName, text);
-        toast.show({
-          kind: "success",
-          title: "Profile imported",
-          description: r.headphone,
-        });
-        // Auto-load the imported profile so the user immediately
-        // hears the correction and the active card updates.
-        await api.player.autoEqLoadProfile(r.profile_id);
-        onPicked();
-      } catch (err) {
-        // 409 = exists. Offer to overwrite.
-        const msg = err instanceof Error ? err.message : String(err);
-        if (msg.startsWith("409:")) {
-          if (
-            window.confirm(
-              `A profile named "${headphoneName}" already exists. Replace it?`,
-            )
-          ) {
-            const r = await api.player.autoEqImportProfile(
-              headphoneName,
-              text,
-              true,
-            );
-            toast.show({
-              kind: "success",
-              title: "Profile replaced",
-              description: r.headphone,
-            });
-            await api.player.autoEqLoadProfile(r.profile_id);
-            onPicked();
-          }
-        } else {
-          throw err;
-        }
-      }
-    } catch (err) {
-      toast.show({
-        kind: "error",
-        title: "Couldn't import profile",
-        description: err instanceof Error ? err.message : String(err),
-      });
-    } finally {
-      setImporting(false);
-      if (fileInputRef.current) fileInputRef.current.value = "";
-    }
-  };
-
-  return (
-    <div className="flex flex-col gap-3">
-      <div className="flex items-center gap-2">
-        <input
-          type="text"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder={
-            manifestStatus === "loading"
-              ? "Loading AutoEQ catalog…"
-              : "Search by headphone (HD 600, AirPods Max, …)"
-          }
-          disabled={manifestStatus !== "ready"}
-          className="h-9 flex-1 rounded-md border border-input bg-background px-3 text-sm disabled:opacity-50"
-        />
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept=".txt,text/plain"
-          onChange={(e) => {
-            const f = e.target.files?.[0];
-            if (f) void handleImport(f);
-          }}
-          className="hidden"
-        />
-        <button
-          type="button"
-          onClick={() => fileInputRef.current?.click()}
-          disabled={importing}
-          className="rounded-md border border-input px-2.5 py-1.5 text-[11px] font-semibold text-muted-foreground hover:bg-accent disabled:opacity-50"
-          title="Import an AutoEQ ParametricEQ.txt file — useful for headphones AutoEQ doesn't measure, custom-tuned curves, or autoeq.app exports against a non-default target."
-        >
-          {importing ? "Importing…" : "Import"}
-        </button>
-        <button
-          type="button"
-          onClick={refreshManifest}
-          disabled={manifestStatus === "loading"}
-          className="rounded-md border border-input px-2.5 py-1.5 text-[11px] font-semibold text-muted-foreground hover:bg-accent disabled:opacity-50"
-          title="Refetch the AutoEQ manifest from GitHub. Useful when AutoEQ has added new profiles since the app launched."
-        >
-          {manifestStatus === "loading" ? "…" : "Refresh"}
-        </button>
-      </div>
-
-      <p className="text-[11px] leading-relaxed text-muted-foreground">
-        Want a different target curve, a community tune, or a headphone AutoEQ
-        doesn't measure? Click Import. From{" "}
-        <a
-          href="https://autoeq.app"
-          target="_blank"
-          rel="noopener noreferrer"
-          className="underline hover:text-foreground"
-        >
-          autoeq.app
-        </a>{" "}
-        pick <span className="font-mono">Generic Parametric EQ</span> or{" "}
-        <span className="font-mono">Equalizer APO Parametric</span> — both
-        import as-is. Graphic EQ, Wavelet, Convolution, Roon DSP, and miniDSP
-        exports aren't parametric and won't work.
-      </p>
-
-      {manifestStatus === "failed" && (
-        <div className="rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs text-destructive">
-          Couldn't reach AutoEQ. Search is offline. Click Refresh to retry.
-        </div>
-      )}
-
-      {manifestStatus === "ready" && (
-        <div className="max-h-72 overflow-y-auto rounded-md border border-input">
-          {searching && results.length === 0 && (
-            <div className="px-3 py-2 text-xs text-muted-foreground">
-              Searching…
-            </div>
-          )}
-          {!searching && results.length === 0 && (
-            <div className="px-3 py-2 text-xs text-muted-foreground">
-              {query.trim()
-                ? "No matches in the AutoEQ catalog."
-                : "Start typing to find your headphones."}
-            </div>
-          )}
-          {results.map((row) => (
-            <HeadphoneRowView
-              key={row.headphone}
-              row={row}
-              expanded={expanded === row.headphone}
-              onExpand={() =>
-                setExpanded(expanded === row.headphone ? null : row.headphone)
-              }
-              busyProfileId={busy}
-              onUse={useProfile}
-              onDownloadAndUse={downloadAndUse}
-              currentActiveId={activeProfileId}
-            />
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-function HeadphoneRowView({
-  row,
-  expanded,
-  onExpand,
-  busyProfileId,
-  onUse,
-  onDownloadAndUse,
-  currentActiveId,
-}: {
-  row: HeadphoneRow;
-  expanded: boolean;
-  onExpand: () => void;
-  busyProfileId: string | null;
-  onUse: (profile_id: string) => void;
-  onDownloadAndUse: (profile_id: string, headphone: string) => void;
-  currentActiveId: string;
-}) {
-  const containsActive = row.sources.some(
-    (s) => s.profile_id === currentActiveId,
-  );
-  return (
-    <div className="border-b border-input/60 last:border-b-0">
-      <button
-        type="button"
-        onClick={onExpand}
-        className={cn(
-          "flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-xs hover:bg-accent",
-          containsActive && "bg-primary/5",
-        )}
-      >
-        <span className="truncate font-semibold">{row.headphone}</span>
-        <span className="flex flex-shrink-0 items-center gap-2 text-[11px] text-muted-foreground">
-          {containsActive && (
-            <span className="rounded bg-primary/20 px-1.5 py-0.5 text-[10px] font-semibold text-primary">
-              Active
-            </span>
-          )}
-          <span>
-            {row.installed_count}/{row.total_count} sources
-          </span>
-          <span aria-hidden className="text-muted-foreground/60">
-            {expanded ? "▾" : "▸"}
-          </span>
-        </span>
-      </button>
-      {expanded && (
-        <div className="bg-background/50">
-          {row.sources.map((s) => (
-            <div
-              key={s.profile_id}
-              className={cn(
-                "flex items-center justify-between gap-3 border-t border-input/40 px-6 py-1.5 text-xs",
-                s.is_active && "bg-primary/10",
-              )}
-            >
-              <span className="truncate">
-                {s.source}
-                {s.is_active && (
-                  <span className="ml-2 text-[10px] font-semibold uppercase tracking-wider text-primary">
-                    Active
-                  </span>
-                )}
-              </span>
-              {s.is_active ? (
-                <span className="text-[10px] font-semibold uppercase tracking-wider text-emerald-500">
-                  In use
-                </span>
-              ) : s.on_disk ? (
-                <button
-                  type="button"
-                  onClick={() => onUse(s.profile_id)}
-                  disabled={busyProfileId === s.profile_id}
-                  className="rounded border border-primary bg-primary px-2 py-0.5 text-[10px] font-semibold text-primary-foreground hover:bg-primary/80 disabled:opacity-50"
-                >
-                  {busyProfileId === s.profile_id ? "…" : "Use"}
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => onDownloadAndUse(s.profile_id, row.headphone)}
-                  disabled={busyProfileId === s.profile_id}
-                  className="rounded border border-input px-2 py-0.5 text-[10px] font-semibold text-muted-foreground hover:bg-accent disabled:opacity-50"
-                >
-                  {busyProfileId === s.profile_id
-                    ? "Downloading…"
-                    : "Download & use"}
-                </button>
-              )}
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-/**
- * Phase 6 frequency-response graph. Three overlaid curves on a
- * log-frequency × dB-amplitude axis:
- *
- *  - Raw (gray): the headphone's measured response, the curve
- *    AutoEQ corrects FROM.
- *  - Target (dashed): the target AutoEQ aimed at, what a perfect
- *    correction would land on.
- *  - Post-EQ (solid primary): the user's predicted response with
- *    the active profile + tilt applied. Should land near the
- *    target when the profile is doing its job; the gap is what
- *    the user's tilt + the profile's irreducible error account
- *    for.
- *
- * When no measurement CSV is bundled for the active profile, the
- * graph collapses to a single curve showing what the EQ does in
- * isolation (cascade response only).
- *
- * Refetches whenever the active profile or tilt changes — small
- * payload (~6 KB JSON) and the cascade compute is sub-millisecond,
- * so the graph tracks the tilt sliders smoothly.
- */
 type AutoEqResponseData = {
   frequencies_hz: number[];
   raw_db: number[] | null;
