@@ -79,7 +79,7 @@ pyobjc-framework-MediaPlayer>=10.0; sys_platform == "darwin"
 # the Linn / Naim side of the streamer market. Optional: if the
 # wheel fails to install, app/audio/upnp.py silently disables the
 # UPnP output path and the rest of the app keeps working.
-async-upnp-client>=0.38.0
+async-upnp-client>=0.47.0
 # Chromecast sender. Used by app/audio/cast.py for device discovery
 # (mDNS via zeroconf) and the Cast Application Framework control
 # channel. We hand the Cast device an HTTP URL serving Tideway's
