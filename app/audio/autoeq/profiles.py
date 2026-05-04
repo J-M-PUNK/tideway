@@ -89,10 +89,20 @@ _PREAMP_RE = re.compile(
 # all channels — but skipping the line lets those exports import
 # unchanged. Same logic for `Device:` (binds the config to a
 # specific Windows audio endpoint, also irrelevant to us).
+#
+# CAVEAT: a hand-edited or unusual export with per-channel filter
+# blocks (e.g. `Channel: L\nFilter 1: ...\nChannel: R\nFilter 2: ...`)
+# would silently apply ALL filters to ALL channels, because we
+# treat every Channel: line as a no-op. That's almost certainly
+# not what the user wants. The parser explicitly rejects files
+# with two or more *distinct* channel selectors so we surface the
+# mismatch instead of silently flattening it; see the seen-channels
+# check in parse_profile_text.
 _EQUALIZER_APO_HEADER_RE = re.compile(
     r"^\s*(?:Channel|Device|Include|Stage|Eval)\s*:\s*\S",
     re.IGNORECASE,
 )
+_CHANNEL_RE = re.compile(r"^\s*Channel\s*:\s*(.+?)\s*$", re.IGNORECASE)
 
 # `Filter N: ON <type> Fc <hz> Hz Gain <db> dB Q <q>` — one band.
 # The "ON" / "OFF" toggle is in the spec but every AutoEQ-emitted
@@ -134,6 +144,7 @@ def parse_profile_text(
         target=target,
     )
     saw_filter_or_preamp = False
+    seen_channels: set[str] = set()
     for line_idx, raw_line in enumerate(text.splitlines(), start=1):
         line = raw_line.strip()
         if not line or line.startswith("#"):
@@ -141,7 +152,29 @@ def parse_profile_text(
 
         # Equalizer APO header lines — see comment above the regex.
         # Skipped silently so AutoEQ.app's "EqualizerAPO Parametric Eq"
-        # export imports without modification.
+        # export imports without modification. Special-case Channel:
+        # to detect per-channel filter blocks, which we can't honour
+        # and shouldn't silently flatten.
+        ch_match = _CHANNEL_RE.match(line)
+        if ch_match is not None:
+            sel = ch_match.group(1).strip().lower()
+            seen_channels.add(sel)
+            if len(seen_channels) >= 2:
+                # File specifies different filters for different
+                # channels (typically L vs R, or per-surround). We
+                # don't have a way to express that in our
+                # equalizer cascade, and silently mixing all
+                # filters into one mono curve would produce wrong
+                # audio without the user knowing.
+                raise AutoEqParseError(
+                    f"line {line_idx}: file uses per-channel filter "
+                    f"blocks ({sorted(seen_channels)}). Tideway can't "
+                    f"apply different EQ to different channels — re-"
+                    f"export from autoeq.app with a single ‘Channel: "
+                    f"all’ section, or hand-merge the per-channel "
+                    f"filters first."
+                )
+            continue
         if _EQUALIZER_APO_HEADER_RE.match(line):
             continue
 

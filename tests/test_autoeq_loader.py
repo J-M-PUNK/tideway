@@ -130,6 +130,23 @@ Filter 2: ON LSC Fc 105 Hz Gain 6.0 dB Q 0.7
     assert len(p.bands) == 2
 
 
+def test_parse_rejects_per_channel_filter_blocks():
+    """An Equalizer APO file with separate filter blocks per
+    channel can't be honoured — Tideway doesn't have a way to
+    apply different EQs to L vs R. Silently mixing all filters
+    into one curve would produce wrong audio. The parser must
+    raise so the user can re-export with a single 'Channel: all'
+    section."""
+    text = """\
+Channel: L
+Filter 1: ON PK Fc 200 Hz Gain -3.0 dB Q 1.4
+Channel: R
+Filter 2: ON PK Fc 200 Hz Gain -2.0 dB Q 1.4
+"""
+    with pytest.raises(AutoEqParseError, match="per-channel"):
+        parse_profile_text(text)
+
+
 def test_parse_skips_other_equalizer_apo_directives():
     """Other Equalizer APO directives (Device:, Include:, Stage:,
     Eval:) also appear in real-world configs, especially when users

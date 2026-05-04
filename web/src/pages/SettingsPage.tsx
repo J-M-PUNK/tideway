@@ -833,9 +833,36 @@ function EqField() {
   const [deviceCount, setDeviceCount] = useState(0);
   const [mappedCount, setMappedCount] = useState(0);
 
+  // True only across the very first refresh, so the stale-profile
+  // toast fires once at mount and not again when the user switches
+  // modes or imports a new profile.
+  const firstLoadRef = useRef(true);
+
   const refresh = async () => {
     try {
       const s = await api.player.autoEqState();
+      // Stale-profile detection: user was in profile mode with a
+      // previously-loaded headphone, but the profile id no longer
+      // resolves to anything on disk (typical after upgrading from
+      // a Tideway version that bundled a profile we've since
+      // removed, or after the user deleted the imported profile by
+      // hand on the filesystem). Server's bootstrap silently
+      // declines to apply the missing profile — the audio is
+      // bit-perfect, but the user has no idea why their EQ
+      // disappeared. Surface it once.
+      if (
+        firstLoadRef.current &&
+        s.mode === "profile" &&
+        s.active_profile_id &&
+        s.active_profile === null
+      ) {
+        toast.show({
+          kind: "info",
+          title: "AutoEQ profile missing",
+          description: `“${s.active_profile_id}” is no longer installed. Pick or import a profile in Settings.`,
+        });
+      }
+      firstLoadRef.current = false;
       setState(s);
     } catch {
       /* feature not available — keep section hidden */
