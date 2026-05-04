@@ -104,6 +104,29 @@ _EQUALIZER_APO_HEADER_RE = re.compile(
 )
 _CHANNEL_RE = re.compile(r"^\s*Channel\s*:\s*(.+?)\s*$", re.IGNORECASE)
 
+
+# Per-band sanity bounds. Numbers chosen to comfortably accept any
+# realistic AutoEQ output while rejecting obviously-broken files
+# that would otherwise produce nonsense filters or panic the
+# biquad math downstream.
+#
+# Fc must be positive and below Nyquist for any reasonable sample
+# rate (so 0 < fc < 96 kHz is generous — the filter still gets
+# clamped against the actual Nyquist when scipy compiles the
+# biquad). Q must be > 0 because the biquad bandwidth math divides
+# by Q. Gain stays in a wide range that still rules out a corrupt
+# file emitting `Gain 1e9 dB`.
+_FC_MIN_HZ = 1.0
+_FC_MAX_HZ = 96000.0
+_Q_MIN = 0.01
+_Q_MAX = 50.0
+_GAIN_ABS_MAX_DB = 60.0
+# Filter count cap. AutoEQ's longest published profiles are around
+# 20 filters; 50 leaves headroom for hand-tuned files while
+# rejecting a 10,000-band malicious file that would crater the
+# audio engine.
+_MAX_FILTERS = 50
+
 # `Filter N: ON <type> Fc <hz> Hz Gain <db> dB Q <q>` — one band.
 # The "ON" / "OFF" toggle is in the spec but every AutoEQ-emitted
 # file ships ON; we still tolerate OFF (skip the band) since
@@ -143,6 +166,13 @@ def parse_profile_text(
         source=source,
         target=target,
     )
+    # Strip a leading UTF-8 BOM so a Windows-exported file
+    # (some text editors add `﻿` to the start) doesn't fail
+    # the first-line check with a baffling "unrecognised line"
+    # error pointing at invisible bytes.
+    if text.startswith("﻿"):
+        text = text[1:]
+
     saw_filter_or_preamp = False
     seen_channels: set[str] = set()
     for line_idx, raw_line in enumerate(text.splitlines(), start=1):
@@ -201,12 +231,44 @@ def parse_profile_text(
                     f"line {line_idx}: unsupported filter type {ftype!r} "
                     f"(expected one of {sorted(_VALID_TYPES)})"
                 )
+            fc = float(m.group("fc"))
+            gain = float(m.group("gain"))
+            q = float(m.group("q"))
+            # Sanity-check the values. The `_FILTER_RE` regex matches
+            # the textual shape but doesn't bound the numbers — we'd
+            # otherwise hand `Q -1.4` or `Fc -200 Hz` straight to the
+            # biquad math, which would produce nonsense filters at
+            # best and divide-by-zero / NaN audio at worst.
+            if not (_FC_MIN_HZ <= fc <= _FC_MAX_HZ):
+                raise AutoEqParseError(
+                    f"line {line_idx}: filter frequency {fc} Hz is "
+                    f"out of the supported range "
+                    f"[{_FC_MIN_HZ}, {_FC_MAX_HZ}] Hz"
+                )
+            if not (_Q_MIN <= q <= _Q_MAX):
+                raise AutoEqParseError(
+                    f"line {line_idx}: filter Q {q} is out of the "
+                    f"supported range [{_Q_MIN}, {_Q_MAX}]"
+                )
+            if abs(gain) > _GAIN_ABS_MAX_DB:
+                raise AutoEqParseError(
+                    f"line {line_idx}: filter gain {gain} dB exceeds "
+                    f"the ±{_GAIN_ABS_MAX_DB} dB sanity bound"
+                )
+            if len(profile.bands) >= _MAX_FILTERS:
+                raise AutoEqParseError(
+                    f"line {line_idx}: more than {_MAX_FILTERS} "
+                    f"filters in one profile. AutoEQ's longest "
+                    f"published profiles are ~20 bands; this is "
+                    f"either a hand-edited mega-curve or a malformed "
+                    f"file."
+                )
             profile.bands.append(
                 AutoEqBand(
                     filter_type=ftype,
-                    freq_hz=float(m.group("fc")),
-                    gain_db=float(m.group("gain")),
-                    q=float(m.group("q")),
+                    freq_hz=fc,
+                    gain_db=gain,
+                    q=q,
                 )
             )
             continue

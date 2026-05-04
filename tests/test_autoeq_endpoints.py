@@ -207,6 +207,20 @@ def test_delete_404_when_profile_missing(client):
     assert r.status_code == 404
 
 
+def test_import_rejects_oversized_payload(client):
+    """An import POST with a multi-megabyte body would otherwise
+    sit in the parser. Cap is 256 KB — way above any realistic
+    AutoEQ file (3-5 KB) but tight enough to refuse a deliberate
+    DoS or a wrong-file slip."""
+    junk = "Filter 1: ON PK Fc 1000 Hz Gain 1 dB Q 1\n" * 10_000
+    r = client.post(
+        "/api/eq/import-profile",
+        json={"headphone_name": "Too Big", "content": junk},
+    )
+    assert r.status_code == 400
+    assert "larger than" in r.json()["detail"].lower()
+
+
 def test_imports_are_atomic(client, tmp_path):
     """Successful import shouldn't leave a `.part` file behind —
     the tmp file is renamed into place, not left as a sibling.

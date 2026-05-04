@@ -5049,6 +5049,22 @@ def autoeq_import_profile(req: _AutoEqImportRequest) -> dict:
             detail="headphone_name can't contain slashes, '..', or null bytes",
         )
 
+    # Sanity cap on PEQ.txt size. Real AutoEQ files are 1-3 KB; we
+    # accept up to ~256 KB to leave headroom for hand-edited mega-
+    # curves and BOM / CRLF noise. Without a cap a misuse / DoS
+    # POST could push hundreds of MB through the parser before
+    # rejection.
+    _PEQ_MAX_BYTES = 256 * 1024
+    if len(req.content.encode("utf-8")) > _PEQ_MAX_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"PEQ file is larger than {_PEQ_MAX_BYTES // 1024} KB. "
+                f"Real AutoEQ profiles are a few kilobytes — this is "
+                f"almost certainly the wrong file."
+            ),
+        )
+
     try:
         parse_profile_text(req.content)
     except AutoEqParseError as exc:
@@ -5071,10 +5087,28 @@ def autoeq_import_profile(req: _AutoEqImportRequest) -> dict:
 
     target_dir.mkdir(parents=True, exist_ok=True)
     # Atomic write so a crash mid-import doesn't leave half a file
-    # the parser would later choke on.
-    tmp = target_file.with_suffix(target_file.suffix + ".part")
-    tmp.write_text(req.content)
-    tmp.replace(target_file)
+    # the parser would later choke on. The .part file gets a uuid
+    # suffix so concurrent imports of the same name don't fight
+    # over a shared tempfile path. Cleanup-on-failure keeps stale
+    # .part files from accumulating in the cache dir.
+    import uuid as _uuid
+    tmp = target_dir / f".{_uuid.uuid4().hex}.part"
+    try:
+        tmp.write_text(req.content)
+        tmp.replace(target_file)
+    except OSError as exc:
+        # Best-effort cleanup. If unlink also fails the user has
+        # bigger problems (disk full, permissions, etc.) and the
+        # error message will reflect the original write failure.
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
+        raise HTTPException(
+            status_code=500,
+            detail=f"couldn't write profile to disk: {exc}",
+        )
 
     # Reload the in-memory index so the new profile is selectable
     # immediately.
