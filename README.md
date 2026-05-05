@@ -64,8 +64,13 @@ same limitation Tidal desktop and foobar2000 have.
 
 A 10 band parametric equalizer is available with presets and a
 preamp. The output device picker lists every USB DAC, Bluetooth
-sink, and builtin option the OS exposes, and you can switch mid
-playback. Global media keys for play, pause, next, and previous
+sink, and builtin option the OS exposes, plus Chromecast targets,
+Tidal Connect renderers, and UPnP/DLNA devices discovered on the
+LAN. You can switch between any of them mid playback. The DLNA
+path covers WiiM, newer Bluesound, Cambridge, NAD, most network
+AVRs, and a long tail of cheaper Hi-Fi network bridges. See
+[docs/dlna-renderer.md](docs/dlna-renderer.md) for the DLNA-side
+details. Global media keys for play, pause, next, and previous
 work even when the window is minimized. A tray icon keeps playback
 running when you close the window, and there is an opt-in desktop
 notification on every track change.
@@ -345,29 +350,21 @@ either a Dolby-capable renderer on the OS side or a receiver on
 the other end of HDMI, which most setups do not have. If any of
 that changes, we can revisit.
 
-**Network audio output.** Tidal Connect, Chromecast, and AirPlay
-are all ways of casting a stream from a desktop app to a network
-streamer, DAC, or smart speaker. Their status here:
+**Network audio output is mostly there, with caveats.**
+Chromecast, Tidal Connect, and UPnP/DLNA all ship in the output
+device picker. AirPlay is still coming: the code is written, the
+PCM tap on the audio engine feeds a live FLAC stream out to a
+paired receiver, but the feature is off in the current build
+because we haven't tested it against real hardware yet.
 
-- **AirPlay** is coming soon. The code is written and wired into
-  the Settings page, and the PCM tap on the audio engine already
-  feeds a live FLAC stream out to a paired receiver. The feature
-  is off in the current build because we have not tested it
-  against real hardware yet. It will enable in a future release
-  once that testing is done.
-- **Chromecast** is not implemented today. Possibly coming later.
-- **Tidal Connect** is not planned. Pairing with Tidal's own
-  protocol requires the partner authorization that immersive
-  audio does, and that is the same reason the Atmos / 360 tiers
-  are excluded.
-
-Audio in the shipping build goes to whichever output device the
-host OS exposes, which is any wired DAC, Bluetooth sink, or
-builtin speaker you can select from the Settings output-device
-picker. Network streamers that only accept Tidal Connect or
-Chromecast will not receive audio from this app yet. If your
-streamer also shows up as a Bluetooth device or a USB DAC, you
-can use that path instead.
+The DLNA path in particular has not been bench-tested against
+real renderers. The unit tests cover the SOAP wrappers, session
+lifecycle, and audio plumbing, but device-side behaviour (does
+your specific WiiM accept the FLAC stream, does pause respond
+fast, does the device cleanly disconnect when you switch) is
+unverified. If you hit a renderer that misbehaves, please file a
+GitHub issue with the device's manufacturer and model and any
+log output from the diagnostic panel.
 
 **Play reporting to Tidal Recently Played is best effort.** Every
 play fires a `playback_session` event at Tidal's event producer
