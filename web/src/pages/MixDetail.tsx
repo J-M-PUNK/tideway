@@ -4,7 +4,7 @@ import { api } from "@/api/client";
 import type { OnDownload } from "@/api/download";
 import { useApi } from "@/hooks/useApi";
 import { useTrackPrefetch } from "@/hooks/useTrackPrefetch";
-import { AddTracksToPlaylistButton } from "@/components/AddTracksToPlaylistButton";
+import { AddToLibraryButton } from "@/components/AddToLibraryButton";
 import { CollectionOverflowMenu } from "@/components/CollectionOverflowMenu";
 import { DetailHero } from "@/components/DetailHero";
 import { PlayAllButton } from "@/components/PlayAllButton";
@@ -69,7 +69,7 @@ export function MixDetail({ onDownload }: { onDownload: OnDownload }) {
                 onChange={setShuffleIntent}
               />
               <div className="ml-auto flex items-center gap-6">
-                <AddTracksToPlaylistButton tracks={mix.tracks} />
+                <AddToLibraryButton kind="mix" id={mix.id} />
                 <ShareButton shareUrl={shareUrl} />
                 <CollectionOverflowMenu tracks={mix.tracks} />
               </div>

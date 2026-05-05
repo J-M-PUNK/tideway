@@ -362,6 +362,162 @@ function BackLink({ onBack }: { onBack: () => void }) {
   );
 }
 
+type LibraryFilters = {
+  since?: string;
+  until?: string;
+  albumType?: "album" | "single" | "compilation";
+};
+
+function LibraryFilterForm({
+  libraryKind,
+  filters,
+  onChange,
+  onCancel,
+  onContinue,
+}: {
+  libraryKind: LibraryKind;
+  filters: LibraryFilters;
+  onChange: (next: LibraryFilters) => void;
+  onCancel: () => void;
+  onContinue: () => void;
+}) {
+  // Followed-artists has no per-item metadata Spotify exposes, so
+  // its filter form is intentionally empty — skipped at the call site.
+  const showDateRange = libraryKind !== "followed-artists";
+  const showAlbumType = libraryKind === "saved-albums";
+
+  // Quick-pick date presets. ISO YYYY-MM-DD; the backend's compare
+  // is lexicographic so this is direct.
+  const today = new Date().toISOString().slice(0, 10);
+  const monthsAgo = (n: number) => {
+    const d = new Date();
+    d.setMonth(d.getMonth() - n);
+    return d.toISOString().slice(0, 10);
+  };
+  const presets: Array<{ label: string; since?: string }> = [
+    { label: "All time" },
+    { label: "Last month", since: monthsAgo(1) },
+    { label: "Last 6 months", since: monthsAgo(6) },
+    { label: "Last year", since: monthsAgo(12) },
+    { label: "Last 5 years", since: monthsAgo(60) },
+  ];
+
+  const albumTypeOptions: Array<{
+    label: string;
+    value?: "album" | "single" | "compilation";
+  }> = [
+    { label: "All" },
+    { label: "Albums", value: "album" },
+    { label: "Singles", value: "single" },
+    { label: "Compilations", value: "compilation" },
+  ];
+
+  return (
+    <div className="flex flex-col gap-4">
+      <BackLink onBack={onCancel} />
+      <div className="rounded-lg border border-border/50 bg-card/40 p-5">
+        <h3 className="text-base font-semibold">
+          Filter {LIBRARY_LABELS[libraryKind].toLowerCase()} before matching
+        </h3>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Match against Tidal can take a while on a big library. Filtering first
+          means we only spend match budget on items you actually want.
+        </p>
+
+        {showDateRange && (
+          <div className="mt-5">
+            <label className="text-xs font-semibold text-muted-foreground">
+              Added to Spotify
+            </label>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {presets.map((p) => {
+                const active = (filters.since || "") === (p.since || "");
+                return (
+                  <button
+                    key={p.label}
+                    type="button"
+                    onClick={() => onChange({ ...filters, since: p.since })}
+                    className={cn(
+                      "rounded-full border px-3 py-1 text-xs",
+                      active
+                        ? "border-primary bg-primary text-primary-foreground"
+                        : "border-border/50 bg-secondary text-foreground hover:bg-secondary/80",
+                    )}
+                  >
+                    {p.label}
+                  </button>
+                );
+              })}
+            </div>
+            <div className="mt-3 grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <div>
+                <label className="text-xs text-muted-foreground">From</label>
+                <Input
+                  type="date"
+                  value={filters.since || ""}
+                  max={filters.until || today}
+                  onChange={(e) =>
+                    onChange({ ...filters, since: e.target.value || undefined })
+                  }
+                />
+              </div>
+              <div>
+                <label className="text-xs text-muted-foreground">To</label>
+                <Input
+                  type="date"
+                  value={filters.until || ""}
+                  min={filters.since || undefined}
+                  max={today}
+                  onChange={(e) =>
+                    onChange({ ...filters, until: e.target.value || undefined })
+                  }
+                />
+              </div>
+            </div>
+          </div>
+        )}
+
+        {showAlbumType && (
+          <div className="mt-5">
+            <label className="text-xs font-semibold text-muted-foreground">
+              Type
+            </label>
+            <div className="mt-2 flex flex-wrap gap-2">
+              {albumTypeOptions.map((opt) => {
+                const active = (filters.albumType || "") === (opt.value || "");
+                return (
+                  <button
+                    key={opt.label}
+                    type="button"
+                    onClick={() =>
+                      onChange({ ...filters, albumType: opt.value })
+                    }
+                    className={cn(
+                      "rounded-full border px-3 py-1 text-xs",
+                      active
+                        ? "border-primary bg-primary text-primary-foreground"
+                        : "border-border/50 bg-secondary text-foreground hover:bg-secondary/80",
+                    )}
+                  >
+                    {opt.label}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+
+        <div className="mt-6 flex justify-end gap-2">
+          <Button variant="ghost" onClick={onCancel}>
+            Cancel
+          </Button>
+          <Button onClick={onContinue}>Continue</Button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function LibraryMatching({
   libraryKind,
   onReady,
@@ -372,18 +528,38 @@ function LibraryMatching({
   onBack: () => void;
 }) {
   const toast = useToast();
+  // followed-artists has no filter metadata; jump straight to match.
+  const [phase, setPhase] = useState<"configure" | "matching">(
+    libraryKind === "followed-artists" ? "matching" : "configure",
+  );
+  const [filters, setFilters] = useState<LibraryFilters>({});
+
   useEffect(() => {
+    if (phase !== "matching") return;
     let cancelled = false;
     api.import.spotify
-      .matchLibrary(libraryKind)
+      .matchLibrary(libraryKind, filters)
       .then((r) => {
         if (cancelled) return;
         if (r.total === 0) {
+          // Distinguish "Spotify has nothing" from "your filters
+          // excluded everything" — both produce total === 0 but
+          // the message should match.
+          const filtered = (r.raw_total ?? 0) > 0;
           toast.show({
             kind: "info",
-            title: `No ${LIBRARY_LABELS[libraryKind].toLowerCase()} found`,
+            title: filtered
+              ? `No ${LIBRARY_LABELS[libraryKind].toLowerCase()} match those filters`
+              : `No ${LIBRARY_LABELS[libraryKind].toLowerCase()} found`,
           });
-          onBack();
+          // On filtered-empty, drop back to the filter form so the
+          // user can widen the range without losing their other
+          // selections. On true-empty, leave the import flow.
+          if (filtered) {
+            setPhase("configure");
+          } else {
+            onBack();
+          }
           return;
         }
         onReady(r.rows);
@@ -401,7 +577,20 @@ function LibraryMatching({
       cancelled = true;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [libraryKind]);
+  }, [libraryKind, phase]);
+
+  if (phase === "configure") {
+    return (
+      <LibraryFilterForm
+        libraryKind={libraryKind}
+        filters={filters}
+        onChange={setFilters}
+        onCancel={onBack}
+        onContinue={() => setPhase("matching")}
+      />
+    );
+  }
+
   return (
     <div className="flex flex-col gap-3">
       <BackLink onBack={onBack} />
@@ -425,6 +614,14 @@ function ConnectForm({
   const [clientId, setClientId] = useState("");
   const [busy, setBusy] = useState(false);
   const [awaiting, setAwaiting] = useState(false);
+
+  // If the parent reports an auth error, the authorize-then-poll
+  // dance is over and Spotify said no. Drop back to the "Authorize
+  // in browser" button so the user can retry without restarting
+  // the whole flow.
+  useEffect(() => {
+    if (status.auth_error) setAwaiting(false);
+  }, [status.auth_error]);
 
   const start = async () => {
     const id = clientId.trim();
@@ -456,6 +653,44 @@ function ConnectForm({
         ID, authorize in your browser, and your playlists show up here.
       </p>
 
+      <div className="mt-4 flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm">
+        <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0 text-amber-600 dark:text-amber-400" />
+        <div className="text-amber-900 dark:text-amber-200">
+          <strong>Spotify Premium required (on the Spotify side).</strong> As of
+          2024, Spotify rejects API calls from Developer apps unless the account
+          that <em>registered</em> the app has an active Spotify Premium
+          subscription. Token exchange will look like it worked, but every
+          actual fetch returns 403. If you don't have Premium, the{" "}
+          <strong>File / Text</strong> tab is the workaround: export your
+          Spotify library to a text file via{" "}
+          <button
+            onClick={() =>
+              api.openExternal("https://soundiiz.com").catch(() => {})
+            }
+            className="text-primary hover:underline"
+          >
+            Soundiiz
+          </button>
+          ,{" "}
+          <button
+            onClick={() =>
+              api.openExternal("https://www.tunemymusic.com").catch(() => {})
+            }
+            className="text-primary hover:underline"
+          >
+            TuneMyMusic
+          </button>
+          , or similar and paste it there. No Spotify API call, no Premium gate.
+        </div>
+      </div>
+
+      {status.auth_error && (
+        <div className="mt-4 flex items-start gap-2 rounded-md border border-destructive/50 bg-destructive/10 p-3 text-sm">
+          <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0 text-destructive" />
+          <div className="text-destructive">{status.auth_error}</div>
+        </div>
+      )}
+
       <ol className="mt-4 list-decimal space-y-2 pl-5 text-sm">
         <li>
           Go to{" "}
@@ -469,7 +704,8 @@ function ConnectForm({
           >
             developer.spotify.com/dashboard
           </button>{" "}
-          and create a new app.
+          and create a new app. The Spotify account that owns it must have
+          active Premium (see warning above).
         </li>
         <li>
           Add this as a Redirect URI exactly:

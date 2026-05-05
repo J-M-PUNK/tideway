@@ -1636,6 +1636,23 @@ class PCMPlayer:
             device=device,
             callback=self._audio_callback,
             finished_callback=self._on_stream_finished,
+            # PortAudio defaults to its lowest-latency setting (~5-10ms
+            # on macOS, similar on Windows WASAPI), which leaves the
+            # callback no headroom when a concurrent thread holds the
+            # GIL for longer than the buffer can drain. Heavy Python
+            # work elsewhere in the app — building a few hundred dicts
+            # for the artist endpoint, parsing a 200KB Spotify GraphQL
+            # response, occasional gen-0 GC sweeps — can hold the GIL
+            # for 5-15ms, and the audio callback (which has to acquire
+            # the GIL to enter Python) misses its deadline. The user
+            # hears that as stutter.
+            #
+            # 100ms latency gives the callback ~10x more headroom than
+            # PortAudio's default. The user-perceived cost is 100ms
+            # added on play / seek / pause; for music playback that's
+            # imperceptible. Anyone who later wants tighter latency
+            # for live monitoring or pro-audio use can override here.
+            latency=0.1,
         )
         if extra_settings is not None:
             stream_kwargs["extra_settings"] = extra_settings
