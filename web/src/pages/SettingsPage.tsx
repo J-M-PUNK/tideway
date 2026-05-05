@@ -299,6 +299,12 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
                 label="Continue playing music after your queue ends"
                 hint="When on, the player queues an Artist Radio mix seeded from the last track's primary artist so playback never stops on its own. When off, an album re-primes its first track paused (one tap of Play repeats the album); other queues just stop."
               />
+              <Toggle
+                checked={settings.pause_on_other_device}
+                onChange={(v) => patch({ pause_on_other_device: v })}
+                label="Pause when another device starts playing"
+                hint="When you start playback on another device on the same Tidal account (phone, web, another computer), Tideway pauses local playback. Matches Spotify and the official Tidal client. The listener that drives this is wired up but the realtime protocol capture is still pending, so the toggle has no effect today; flipping it off ahead of time means it'll already be off when the listener goes live."
+              />
             </Section>
           </TabsContent>
 

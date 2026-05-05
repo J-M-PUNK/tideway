@@ -49,6 +49,7 @@ from app.audio.macos_now_playing import MacOSNowPlayingBridge
 from app.audio.player import PCMPlayer
 from app import playlist_import
 from app import spotify_import
+from app import tidal_realtime
 from app.downloader import DownloadItem, DownloadStatus, Downloader
 from app.http import SESSION
 from app.lastfm import LastFmClient
@@ -978,6 +979,40 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             daemon=True,
         ).start()
 
+    # Tidal realtime listener: pauses local playback when another
+    # device on the user's Tidal account starts playing. The listener
+    # itself is currently a scaffold; the protocol-specific bits
+    # (WebSocket URL, frame parser) need a packet capture from the
+    # Tidal web client to land before this does anything. Until then
+    # start() reports phase=disabled and never opens a connection.
+    # Wiring it now so the settings toggle, status endpoint, and
+    # lifespan hook are in place when the protocol capture lands.
+    def _on_other_device_started(_payload: dict) -> None:
+        if not getattr(settings, "pause_on_other_device", True):
+            # User opted out: keep playing through cross-device events.
+            return
+        try:
+            _native_player().pause()
+        except Exception as exc:
+            print(
+                f"[tidal-realtime] pause-on-other-device failed: {exc!r}",
+                flush=True,
+            )
+
+    def _tidal_token_provider() -> Optional[str]:
+        try:
+            return getattr(tidal.session, "access_token", None)
+        except Exception:
+            return None
+
+    try:
+        tidal_realtime.start_listener(
+            token_provider=_tidal_token_provider,
+            on_other_device_started=_on_other_device_started,
+        )
+    except Exception as exc:
+        print(f"[tidal-realtime] startup failed: {exc!r}", flush=True)
+
     try:
         yield
     finally:
@@ -1015,6 +1050,12 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         try:
             from app.audio.upnp import upnp_manager as _upnp_manager
             _upnp_manager.disconnect()
+        except Exception:
+            pass
+        # Cancel the Tidal realtime listener task. No-op when the
+        # listener stayed disabled (protocol capture still pending).
+        try:
+            tidal_realtime.stop_listener()
         except Exception:
             pass
         # Close the shared requests session so sockets in its connection pool
@@ -6504,6 +6545,38 @@ def _autoeq_on_device_change(device_id: str) -> None:
         log.exception("autoeq device-change resolver failed")
 
 
+@app.get("/api/realtime/status")
+def realtime_status() -> dict:
+    """Diagnostic snapshot of the Tidal realtime listener.
+
+    Surfaces phase / last_error / reconnect_count / events_received
+    so a user reporting "cross-device pause didn't work" can paste
+    the response into a bug report and we can see whether the
+    listener was even connected. Loopback-only because there's no
+    reason for an external caller to read this and the listener's
+    internals leak protocol details we don't want to advertise.
+    """
+    _require_local_access()
+    listener = tidal_realtime.get_listener()
+    if listener is None:
+        return {
+            "phase": "idle",
+            "last_error": None,
+            "reconnect_count": 0,
+            "events_received": 0,
+            "protocol_known": False,
+        }
+    s = listener.status()
+    return {
+        "phase": s.phase,
+        "last_error": s.last_error,
+        "reconnect_count": s.reconnect_count,
+        "events_received": s.events_received,
+        "protocol_known": listener.is_protocol_known,
+    }
+
+
+
 @app.get("/api/cast/devices")
 def cast_devices() -> dict:
     """Snapshot of Chromecast devices currently visible on the LAN.
@@ -9873,6 +9946,7 @@ class SettingsPayload(BaseModel):
     exclusive_mode: Optional[bool] = None
     force_volume: Optional[bool] = None
     continue_playing_after_queue_ends: Optional[bool] = None
+    pause_on_other_device: Optional[bool] = None
     explicit_content_preference: Optional[str] = None
     download_rate_limit_mbps: Optional[int] = None
     eq_mode: Optional[str] = None

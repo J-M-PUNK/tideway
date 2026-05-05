@@ -310,6 +310,13 @@ export interface Settings {
    *  falls back to per-source defaults (stop, or for albums prime
    *  track 0 paused so one tap repeats the album). */
   continue_playing_after_queue_ends: boolean;
+  /** When another device on the same Tidal account starts playing,
+   *  pause Tideway. Matches Spotify / official Tidal client behaviour.
+   *  On by default. The realtime listener that drives this is wired
+   *  up but the protocol capture is pending (see
+   *  private/features/cross-device-pause-listener.md), so the toggle
+   *  has no effect today regardless of value. */
+  pause_on_other_device: boolean;
   /** Per-track download rate cap in MB/s. 0 = unlimited. Default 10
    *  so downloads look like aggressive prefetch rather than a scrape
    *  to Tidal's CDN — the single most effective ban-risk reduction
