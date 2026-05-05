@@ -86,15 +86,36 @@ type TidalConnectDevicesResponse = {
   devices: TidalConnectDeviceSummary[];
 };
 
+type DlnaDeviceSummary = {
+  id: string;
+  name: string;
+  manufacturer: string;
+  model: string;
+  has_avtransport: boolean;
+};
+
+type DlnaDevicesResponse = {
+  status: {
+    available: boolean;
+    device_count: number;
+    last_scan_age_s?: number | null;
+    connected_id?: string | null;
+    connected_name?: string | null;
+  };
+  devices: DlnaDeviceSummary[];
+};
+
 const LOCAL_PREFIX = "local:";
 const CAST_PREFIX = "cast:";
 const TC_PREFIX = "tc:";
+const DLNA_PREFIX = "dlna:";
 
 export function OutputDevicePicker() {
   const toast = useToast();
   const opts = useAudioOptions();
   const [cast, setCast] = useState<CastDevicesResponse | null>(null);
   const [tc, setTc] = useState<TidalConnectDevicesResponse | null>(null);
+  const [dlna, setDlna] = useState<DlnaDevicesResponse | null>(null);
   const [busy, setBusy] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   // Pending Tidal Connect device — once the user picks one, we
@@ -144,19 +165,35 @@ export function OutputDevicePicker() {
         .devices()
         .then((res) => setTc(res))
         .catch(() => {}),
+      // DLNA also uses SSDP. /api/dlna/refresh blocks for the
+      // scan timeout (default 5s) and returns the fresh list; the
+      // dropdown waits on this so the user sees populated devices
+      // when it opens, rather than an empty list that fills in
+      // seconds later.
+      api.dlna
+        .refresh()
+        .then((res) => setDlna(res))
+        .catch(() => {}),
     ]);
   };
 
   // What the radio shows as selected. Remote sessions win — if
-  // either Cast or Tidal Connect is open, the remote device is
-  // the active sound output. Otherwise we surface the local device id.
+  // any of Cast / Tidal Connect / DLNA is open, the remote device
+  // is the active sound output. Otherwise we surface the local
+  // device id. At most one remote session can be active at a time
+  // (the manager-side disconnect-before-connect contract enforces
+  // it), so the order of these ternaries doesn't matter for
+  // correctness.
   const castConnectedId = cast?.status.connected_id ?? null;
   const tcConnectedId = tc?.status.connected_id ?? null;
+  const dlnaConnectedId = dlna?.status.connected_id ?? null;
   const selectedValue = castConnectedId
     ? `${CAST_PREFIX}${castConnectedId}`
     : tcConnectedId
       ? `${TC_PREFIX}${tcConnectedId}`
-      : `${LOCAL_PREFIX}${opts.current}`;
+      : dlnaConnectedId
+        ? `${DLNA_PREFIX}${dlnaConnectedId}`
+        : `${LOCAL_PREFIX}${opts.current}`;
 
   const showCastSection =
     cast !== null &&
@@ -168,6 +205,11 @@ export function OutputDevicePicker() {
     tc.status.available &&
     (tc.devices.length > 0 || tcConnectedId !== null);
 
+  const showDlnaSection =
+    dlna !== null &&
+    dlna.status.available &&
+    (dlna.devices.length > 0 || dlnaConnectedId !== null);
+
   const switchAwayFromRemoteIfActive = async () => {
     // Disconnecting whichever remote is currently active so the
     // new selection has a clean slate. Order matters: we always
@@ -176,6 +218,7 @@ export function OutputDevicePicker() {
     // feeds two destinations and produces a stutter.
     if (castConnectedId !== null) await api.cast.disconnect();
     if (tcConnectedId !== null) await api.tidalConnect.disconnect();
+    if (dlnaConnectedId !== null) await api.dlna.disconnect();
   };
 
   const onSelect = async (value: string) => {
@@ -204,6 +247,15 @@ export function OutputDevicePicker() {
           kind: "success",
           title: `Casting to ${result.device.friendly_name}`,
           description: "Audio is streaming to the device.",
+        });
+      } else if (value.startsWith(DLNA_PREFIX)) {
+        const deviceId = value.slice(DLNA_PREFIX.length);
+        await switchAwayFromRemoteIfActive();
+        const result = await api.dlna.connect(deviceId);
+        toast.show({
+          kind: "success",
+          title: `Streaming to ${result.device.name}`,
+          description: "Audio is going to the DLNA renderer.",
         });
       } else if (value.startsWith(LOCAL_PREFIX)) {
         const localId = value.slice(LOCAL_PREFIX.length);
@@ -280,18 +332,23 @@ export function OutputDevicePicker() {
   };
 
   // Trigger appearance: highlights when audio is going somewhere
-  // unusual — Cast / Tidal Connect active OR Exclusive Mode on.
-  // All three are "this isn't default speakers" states worth
-  // surfacing at a glance.
+  // unusual — Cast / Tidal Connect / DLNA active OR Exclusive
+  // Mode on. All four are "this isn't default speakers" states
+  // worth surfacing at a glance.
   const triggerHighlight =
-    castConnectedId !== null || tcConnectedId !== null || opts.exclusiveMode;
+    castConnectedId !== null ||
+    tcConnectedId !== null ||
+    dlnaConnectedId !== null ||
+    opts.exclusiveMode;
   const currentLocalName =
     opts.devices.find((d) => d.id === opts.current)?.name ?? "System default";
   const triggerTitle = castConnectedId
     ? `Casting to ${cast?.status.connected_name ?? "device"}`
     : tcConnectedId
       ? `Tidal Connect: ${tc?.status.connected_name ?? "device"}`
-      : `Output: ${currentLocalName}`;
+      : dlnaConnectedId
+        ? `Streaming to ${dlna?.status.connected_name ?? "device"}`
+        : `Output: ${currentLocalName}`;
 
   return (
     <>
@@ -428,8 +485,44 @@ export function OutputDevicePicker() {
                 )}
               </>
             )}
+
+            {showDlnaSection && (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuLabel className="text-muted-foreground">
+                  DLNA / UPnP
+                </DropdownMenuLabel>
+                {dlna.devices.length === 0 ? (
+                  <div className="px-2 py-1.5 text-xs text-muted-foreground">
+                    No DLNA renderers visible. Open the dropdown to re-scan;
+                    SSDP discovery takes a few seconds.
+                  </div>
+                ) : (
+                  dlna.devices.map((d) => (
+                    <DropdownMenuRadioItem
+                      key={d.id}
+                      value={`${DLNA_PREFIX}${d.id}`}
+                      onSelect={(e) => e.preventDefault()}
+                      className="text-sm"
+                      disabled={busy}
+                    >
+                      <div className="flex flex-col">
+                        <span>{d.name}</span>
+                        <span className="text-[11px] text-muted-foreground">
+                          {d.manufacturer && d.model
+                            ? `${d.manufacturer} ${d.model}`
+                            : d.manufacturer || d.model || "DLNA renderer"}
+                        </span>
+                      </div>
+                    </DropdownMenuRadioItem>
+                  ))
+                )}
+              </>
+            )}
           </DropdownMenuRadioGroup>
-          {(castConnectedId !== null || tcConnectedId !== null) && (
+          {(castConnectedId !== null ||
+            tcConnectedId !== null ||
+            dlnaConnectedId !== null) && (
             <>
               <DropdownMenuSeparator />
               <DropdownMenuItem
@@ -440,7 +533,9 @@ export function OutputDevicePicker() {
               >
                 {castConnectedId !== null
                   ? "Stop casting and return to local output"
-                  : "Stop Tidal Connect and return to local output"}
+                  : tcConnectedId !== null
+                    ? "Stop Tidal Connect and return to local output"
+                    : "Stop DLNA streaming and return to local output"}
               </DropdownMenuItem>
             </>
           )}

@@ -670,6 +670,20 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     except Exception as exc:
         print(f"[tidal-connect] startup wiring failed: {exc}", flush=True)
 
+    # Wire the DLNA / UPnP renderer manager. Same silencer pattern
+    # Cast and Tidal Connect use. When the user sends audio to a
+    # DLNA target the local sounddevice output goes silent so the
+    # two don't fight. Discovery is on-demand (the picker triggers
+    # /api/dlna/refresh when its dropdown opens) so there's no
+    # background browser to start here. See app/audio/upnp.py.
+    try:
+        from app.audio.upnp import upnp_manager as _upnp_manager
+        _upnp_manager.set_local_silencer(
+            _native_player().set_external_output_active
+        )
+    except Exception as exc:
+        print(f"[upnp] startup wiring failed: {exc}", flush=True)
+
     # Cold-start prefetch: warm the manifest cache for whatever was
     # playing when the user last quit, BEFORE the React shell even
     # mounts. By the time the frontend's restore-on-launch effect
@@ -732,6 +746,14 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         try:
             from app.audio.cast import cast_manager as _cast_manager
             _cast_manager.stop_discovery()
+        except Exception:
+            pass
+        # Disconnect any active DLNA / UPnP session so the device
+        # gets AVTransport.Stop on the way out and isn't left
+        # holding a dead HTTP pull. Best-effort.
+        try:
+            from app.audio.upnp import upnp_manager as _upnp_manager
+            _upnp_manager.disconnect()
         except Exception:
             pass
         # Close the shared requests session so sockets in its connection pool
@@ -4349,6 +4371,23 @@ def _tc_active() -> bool:
         return False
 
 
+def _dlna_active() -> bool:
+    """True if a DLNA session is currently open. The diversion in
+    `player_play` / `player_pause` / `player_resume` / `player_stop`
+    uses this to send AVTransport.Pause / Play to the device in
+    parallel with the local engine's pause / resume. Without that
+    diversion, the device keeps draining its buffered audio for ~8
+    seconds after the user clicks pause (because the local pause
+    just stops feeding the encoder, and the device's pull doesn't
+    know to stop). Sending Pause makes the WiiM react instantly.
+    """
+    try:
+        from app.audio.upnp import upnp_manager
+        return upnp_manager.is_active()
+    except Exception:
+        return False
+
+
 def _tc_snapshot(track_id: Optional[str] = None) -> dict:
     """Synthesize a player-snapshot-shaped dict from Tidal Connect
     state. Same fields the local PCMPlayer's snapshot produces, so
@@ -4526,10 +4565,19 @@ def player_play_track(req: _PlayerLoadRequest) -> dict:
     track-end. Shorter code path = smaller perceptible gap.
 
     When a Tidal Connect session is active, this diverts to
-    `tidal_connect_manager.load_track(track_id)` — the device fetches
+    `tidal_connect_manager.load_track(track_id)`. The device fetches
     the audio from Tidal directly, PCMPlayer stays idle. Returns a
     synthesized snapshot in the same shape the local engine produces
-    so the frontend reads it identically."""
+    so the frontend reads it identically.
+
+    DLNA is different from TC: the local engine still plays, the
+    encoder still produces FLAC, and the device keeps pulling.
+    Track-change is invisible to the device. The only thing we
+    have to handle is the case where the device was previously
+    paused (via AVTransport.Pause from a player_pause / player_stop)
+    and the user is now clicking a track to play. Send Play so the
+    device resumes pulling instead of letting new FLAC frames pile
+    up in the ring buffer behind a still-paused renderer."""
     _require_local_access()
     if _tc_active():
         from app.audio.tidal_connect import get_manager
@@ -4540,6 +4588,8 @@ def player_play_track(req: _PlayerLoadRequest) -> dict:
                 status_code=502, detail=f"Tidal Connect: {exc}"
             ) from exc
         return _tc_snapshot(track_id=str(req.track_id))
+    if _dlna_active():
+        _dlna_send("play")
     snap = _native_player().play_track(req.track_id, quality=req.quality)
     return _snapshot_dict(snap)
 
@@ -4586,9 +4636,14 @@ def player_prefetch(req: _PlayerPrefetchRequest) -> dict:
     Tidal. Called by the frontend on hover (single id) and on
     album / playlist mount (batched).
 
-    Runs the resolves in parallel with a small worker pool, but
-    caps at ~10 to respect tidalapi's implicit rate budget. Errors
-    are swallowed per-track — prefetch is fire-and-forget.
+    Runs the resolves in parallel with a small worker pool. Each
+    track's prefetch fires three sequential Tidal API calls (track,
+    get_stream, get_stream_manifest), so the request fan-out from
+    one album mount is workers * 3. We cap at 2 workers and let
+    `player.prefetch` jitter its first request per worker, which
+    keeps the 12-track-album burst inside Tidal's tolerance even at
+    a cold cache. Errors are swallowed per-track. Prefetch is
+    fire-and-forget.
 
     No-ops when offline mode is on — the user has explicitly opted
     out of network activity for browsing, and prefetch is pure
@@ -4604,7 +4659,7 @@ def player_prefetch(req: _PlayerPrefetchRequest) -> dict:
     if prefetch is None:
         return {"prefetched": 0, "total": len(ids)}
     with ThreadPoolExecutor(
-        max_workers=min(3, len(ids)), thread_name_prefix="prefetch"
+        max_workers=min(2, len(ids)), thread_name_prefix="prefetch"
     ) as pool:
         results = list(
             pool.map(
@@ -4626,6 +4681,27 @@ def player_preload_clear() -> dict:
     return {"ok": True}
 
 
+def _dlna_send(action: str) -> None:
+    """Best-effort AVTransport passthrough for the player endpoints.
+
+    `action` is one of "play" or "pause". The local engine handles
+    the visible state change either way; sending the corresponding
+    SOAP command lets the device react instantly instead of waiting
+    out the buffered FLAC bytes still in flight from before the
+    pause. Errors are intentionally swallowed: a transient network
+    glitch shouldn't turn a successful local pause into an HTTP
+    502 the user has to retry.
+    """
+    try:
+        from app.audio.upnp import upnp_manager
+        if action == "play":
+            upnp_manager.play()
+        elif action == "pause":
+            upnp_manager.pause()
+    except Exception as exc:  # noqa: BLE001 see docstring
+        log.debug("dlna %s passthrough failed: %r", action, exc)
+
+
 @app.post("/api/player/play")
 def player_play() -> dict:
     _require_local_access()
@@ -4638,6 +4714,8 @@ def player_play() -> dict:
                 status_code=502, detail=f"Tidal Connect: {exc}"
             ) from exc
         return _tc_snapshot()
+    if _dlna_active():
+        _dlna_send("play")
     return _snapshot_dict(_native_player().play())
 
 
@@ -4653,6 +4731,8 @@ def player_pause() -> dict:
                 status_code=502, detail=f"Tidal Connect: {exc}"
             ) from exc
         return _tc_snapshot()
+    if _dlna_active():
+        _dlna_send("pause")
     return _snapshot_dict(_native_player().pause())
 
 
@@ -4668,6 +4748,8 @@ def player_resume() -> dict:
                 status_code=502, detail=f"Tidal Connect: {exc}"
             ) from exc
         return _tc_snapshot()
+    if _dlna_active():
+        _dlna_send("play")
     return _snapshot_dict(_native_player().resume())
 
 
@@ -4677,7 +4759,7 @@ def player_stop() -> dict:
     if _tc_active():
         # Stop on Tidal Connect just clears the queue + pauses the
         # device. Disconnecting is a separate user action through
-        # the picker — stopping a track shouldn't tear down the
+        # the picker. Stopping a track shouldn't tear down the
         # whole session.
         from app.audio.tidal_connect import get_manager
         try:
@@ -4687,6 +4769,11 @@ def player_stop() -> dict:
                 status_code=502, detail=f"Tidal Connect: {exc}"
             ) from exc
         return _tc_snapshot()
+    if _dlna_active():
+        # Same logic as TC: stop pauses the device, leaves the
+        # session intact for a subsequent play. Disconnect is
+        # what the picker does to fully tear down.
+        _dlna_send("pause")
     return _snapshot_dict(_native_player().stop())
 
 
@@ -5719,6 +5806,137 @@ def cast_disconnect() -> dict:
     from app.audio.cast import cast_manager  # noqa: WPS433
 
     cast_manager.disconnect()
+    return {"ok": True}
+
+
+# ---------------------------------------------------------------------
+# DLNA / UPnP MediaRenderer
+#
+# Discovery is on-demand. The picker triggers `/api/dlna/refresh`
+# when its dropdown opens. SSDP is more network-noisy than mDNS so
+# we don't run a continuous browser like Cast does. The cached
+# device list survives between refresh calls so the picker has
+# something to render before the next scan finishes.
+# ---------------------------------------------------------------------
+
+
+@app.get("/api/dlna/devices")
+def dlna_devices() -> dict:
+    """Snapshot of DLNA renderers currently visible on the LAN.
+
+    Reads the manager's last-known cache without triggering a fresh
+    SSDP scan. The frontend can call /api/dlna/refresh first if it
+    wants up-to-the-second results (slower, blocks for the SSDP
+    timeout). Returns an empty list when async-upnp-client isn't
+    installed. The picker hides the section in that case rather
+    than showing an error.
+    """
+    _require_local_access()
+    from app.audio.upnp import upnp_manager  # noqa: WPS433
+
+    devices = upnp_manager.list_devices()
+    return {
+        "status": upnp_manager.status(),
+        "devices": [
+            {
+                "id": d.id,
+                "name": d.name,
+                "manufacturer": d.manufacturer,
+                "model": d.model,
+                "has_avtransport": d.has_avtransport,
+            }
+            for d in devices
+        ],
+    }
+
+
+class _DlnaRefreshRequest(BaseModel):
+    # We don't use Pydantic `ge` / `le` constraints because
+    # FastAPI's default validation error handler tries to serialize
+    # the offending input back into the 422 body, and `json.dumps(NaN)`
+    # raises ValueError. Result: the user gets a 500 with a stack
+    # trace instead of a clean rejection. Validate in the handler
+    # instead. Pydantic still rejects "abc" and other non-floats
+    # for free, we just do the range / NaN / inf check ourselves.
+    timeout_s: float = 5.0
+
+
+@app.post("/api/dlna/refresh")
+def dlna_refresh(req: Optional[_DlnaRefreshRequest] = None) -> dict:
+    """Trigger a fresh SSDP scan and return the new device list.
+
+    Blocks the caller for at most `timeout_s` (default 5s, capped
+    at 15s). The frontend should call this when the picker opens
+    so the dropdown has up-to-date devices, then poll
+    /api/dlna/devices if it wants to re-render without re-scanning.
+    """
+    _require_local_access()
+    import math
+    from app.audio.upnp import upnp_manager  # noqa: WPS433
+
+    raw_timeout = req.timeout_s if req is not None else 5.0
+    if math.isnan(raw_timeout) or math.isinf(raw_timeout):
+        raise HTTPException(
+            status_code=400,
+            detail="timeout_s must be a finite number, not NaN or Infinity",
+        )
+    timeout = max(1.0, min(15.0, float(raw_timeout)))
+    devices = upnp_manager.refresh(timeout)
+    return {
+        "status": upnp_manager.status(),
+        "devices": [
+            {
+                "id": d.id,
+                "name": d.name,
+                "manufacturer": d.manufacturer,
+                "model": d.model,
+                "has_avtransport": d.has_avtransport,
+            }
+            for d in devices
+        ],
+    }
+
+
+class _DlnaConnectRequest(BaseModel):
+    device_id: str
+
+
+@app.post("/api/dlna/connect")
+def dlna_connect(req: _DlnaConnectRequest) -> dict:
+    """Open a DLNA session against the given device. Tears down
+    any existing session first. Blocks for the SOAP handshake
+    (typically a few hundred ms on the LAN). 404 if the id isn't
+    in discovery, 502 if the handshake fails (descriptor fetch,
+    SetAVTransportURI rejection, HTTP server bind failure)."""
+    _require_local_access()
+    from app.audio.upnp import upnp_manager  # noqa: WPS433
+
+    try:
+        device = upnp_manager.connect(req.device_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return {
+        "ok": True,
+        "device": {
+            "id": device.id,
+            "name": device.name,
+            "manufacturer": device.manufacturer,
+            "model": device.model,
+        },
+    }
+
+
+@app.post("/api/dlna/disconnect")
+def dlna_disconnect() -> dict:
+    """Tear down the active DLNA session, returning audio to the
+    local output. Sends AVTransport.Stop to the device so it
+    drops its pull. Idempotent: safe to call with no session."""
+    _require_local_access()
+    from app.audio.upnp import upnp_manager  # noqa: WPS433
+
+    upnp_manager.disconnect()
     return {"ok": True}
 
 

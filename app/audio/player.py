@@ -1471,9 +1471,30 @@ class PCMPlayer:
         caches those bytes too, so the next click's decoder_init
         can skip the network entirely.
 
+        Jitters 50-200ms before the first Tidal request. Album-mount
+        prefetch fans out via a ThreadPoolExecutor: without jitter, all
+        N workers hit `session.track(...)` within the same few ms, and
+        each one then runs three sequential Tidal API calls (track ->
+        get_stream -> get_stream_manifest). That stack of N*3 requests
+        inside one second is exactly the burst pattern Tidal's anti-
+        abuse layer flags as a 429 (with longer 403/`abuse_detected`
+        escalations from there). The jitter is per-worker, so the first
+        request from each worker spreads across a 150 ms window before
+        the sequential chain even starts. Foreground play is
+        unaffected: `_resolve_source` is unchanged, and the
+        `play_track` path doesn't go through `prefetch`.
+
         No-ops when prefetch is disabled by the caller — the endpoint
         layer bails out on offline_mode before ever reaching this
         method, so we only get here when prefetch is wanted."""
+        # Lazy import: tidal_client doesn't import player, but
+        # importing it from module-load time would still couple the
+        # two trees together for no reason. The function is a tiny
+        # `time.sleep(uniform(...))`, so the import cost is paid once
+        # per process at first prefetch and never again.
+        from app.tidal_client import tidal_jitter_sleep
+
+        tidal_jitter_sleep()
         try:
             source_spec, _dur, _info, _bytes = self._resolve_source(track_id, quality)
         except Exception as exc:
@@ -1925,6 +1946,34 @@ class PCMPlayer:
                     )
         except Exception:
             # Never let Cast errors take down local playback.
+            pass
+
+        # UPnP / DLNA tap. Same pre-EQ / pre-volume position and
+        # same dtype handling as Cast. The streaming pipeline is
+        # FLAC-over-HTTP for both, so the encoder ingestion contract
+        # is identical. `is_active()` is a single attribute read,
+        # and `upnp_manager` is a module-level singleton (no lock,
+        # no lazy-init branch), so the cost when DLNA isn't in use
+        # is exactly two attribute reads per audio callback.
+        try:
+            from app.audio.upnp import upnp_manager as _upnp_manager
+            if _upnp_manager.is_active():
+                if outdata.dtype == np.int16:
+                    _dtype_name = "int16"
+                elif outdata.dtype == np.int32:
+                    _dtype_name = "int32"
+                elif outdata.dtype == np.float32:
+                    _dtype_name = "float32"
+                else:
+                    _dtype_name = None
+                if _dtype_name is not None:
+                    _upnp_manager.push_pcm(
+                        np.ascontiguousarray(outdata),
+                        sample_rate=self._stream_sample_rate or 44100,
+                        dtype=_dtype_name,
+                    )
+        except Exception:
+            # Never let DLNA errors take down local playback.
             pass
 
         # External output active: silence local. Done AFTER the
