@@ -298,6 +298,39 @@ export interface Settings {
    *  to Tidal's CDN — the single most effective ban-risk reduction
    *  lever on the client. */
   download_rate_limit_mbps: number;
+  /** AutoEQ mode: "off" bypasses the EQ stage, "manual" uses
+   *  `eq_bands` / `eq_preamp`, "profile" uses the bundled / cached
+   *  AutoEQ profile named by `eq_active_profile_id`. The legacy
+   *  `eq_enabled` flag is the master gate; this picks which path
+   *  runs when enabled. Most state changes flow through the
+   *  dedicated `/api/eq/*` endpoints rather than `PUT /api/settings`,
+   *  but the field still has to mirror through the Pydantic
+   *  payload so settings.json round-trips don't lose it. */
+  eq_mode: "off" | "manual" | "profile";
+  /** Currently-loaded AutoEQ profile id (e.g. `oratory1990/Sennheiser HD 600`).
+   *  Empty when no profile is loaded. */
+  eq_active_profile_id: string;
+  /** A/B-bypass flag for the active EQ profile. Toggled from the
+   *  signal-path strip in the FullScreenPlayer. Persisted across
+   *  restart so the user's last comparison state is preserved. */
+  eq_bypass: boolean;
+  /** Output-device fingerprint → profile_id map for automatic
+   *  profile switching when the user plugs in a different DAC.
+   *  null value means "explicitly mapped to no profile" (i.e.
+   *  EQ off for this device); missing key means "no mapping yet". */
+  eq_device_mappings: Record<string, string | null>;
+  /** Behaviour when an output device has no mapping in
+   *  `eq_device_mappings`. "bypass" runs the audio without EQ;
+   *  "use_last_profile" keeps whatever profile was last active. */
+  eq_fallback_when_unmapped: "bypass" | "use_last_profile";
+  /** User taste-layer adjustment stacked on top of the profile
+   *  correction. Master preamp added to the profile's recommended
+   *  preamp; UI clamps to ±12 dB. */
+  eq_tilt_preamp_offset_db: number;
+  /** Low-shelf boost / cut at 80 Hz, layered after the profile bands. */
+  eq_tilt_bass_db: number;
+  /** High-shelf boost / cut at 8 kHz, layered after the profile bands. */
+  eq_tilt_treble_db: number;
 }
 
 export interface AuthStatus {
