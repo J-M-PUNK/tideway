@@ -211,8 +211,9 @@ def test_parse_release_card_picks_user_score_over_critic():
 
 def test_parse_release_card_returns_none_when_only_critic_score():
     """If a release has no user score yet (brand-new, nobody's rated),
-    we report None rather than falling back to the critic score —
-    consistent with the rest of the app showing user-driven scores."""
+    we report None rather than falling back to the critic score, to
+    keep this row consistent with the rest of the app's user-side
+    data."""
     html = """
 <div class="albumBlock">
   <div class="image"><a href="/x"><img src="https://x" alt="x"/></a></div>

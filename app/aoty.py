@@ -311,7 +311,7 @@ def _parse_album_block_cards(html: str) -> list[AotyAlbum]:
         # AOTY's release cards carry up to two `.ratingRow` children:
         # one labelled "critic score" and one labelled "user score".
         # On `/releases/this-week/` both are present once a release has
-        # accumulated reviews, and they sit in that order — critic
+        # accumulated reviews, and they sit in that order: critic
         # first, user second. We deliberately pick the user-score row
         # to match the rest of the app: `Top albums of <year>` reads
         # AOTY's user-rating chart, the album quality badges on detail

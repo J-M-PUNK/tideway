@@ -735,11 +735,13 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # it pays it in the background instead of after the user opens
     # Home, so by the time they navigate the rows are populated.
     #
-    # Daemon thread for the same reason as the prefetch above —
-    # don't block lifespan startup on Tidal/AOTY availability. If
-    # Tidal auth isn't ready yet, individual resolves return None
-    # for `tidal_album` and the AOTY listing still caches so
-    # subsequent calls don't re-fetch HTML.
+    # Daemon thread for the same reason as the prefetch above:
+    # don't block lifespan startup on Tidal or AOTY availability.
+    # If Tidal auth isn't ready yet, individual resolves return
+    # None for `tidal_album` and aoty_resolver doesn't persist
+    # those misses, so when the user later navigates to Home the
+    # resolver re-runs from scratch. Worst case the user pays
+    # the cost they pay today; we never cache a poisoned listing.
     def _prewarm_aoty() -> None:
         try:
             year = datetime.now().year
@@ -748,8 +750,8 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             listing_new = aoty_module.recent_releases(limit=60)
             aoty_resolver.resolve_listing(listing_new)
         except Exception:
-            # Best-effort. If pre-warm fails the user just pays the
-            # cost on first navigation — same as today.
+            # Best-effort. If pre-warm fails the user just pays
+            # the cost on first navigation, same as today.
             pass
 
     threading.Thread(
