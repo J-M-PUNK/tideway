@@ -1,6 +1,15 @@
 tidalapi>=0.8.11
 mutagen>=1.47.0
 requests>=2.33.1
+# orjson is a Rust-based JSON encoder that releases the GIL during
+# serialization and is roughly 5x faster than the stdlib `json` for
+# typical response payloads. We wire it in as FastAPI's default
+# response class so every API response benefits, but the
+# load-bearing case is the artist endpoint (~270KB serialized
+# response with 150+ dict-comprehensions). Lower GIL hold there
+# means less starvation of the audio callback thread when the user
+# cold-navigates to an artist page mid-playback.
+orjson>=3.10.0
 # TLS-impersonation HTTP client. We patch tidalapi's request_session to
 # use a curl-cffi Session whose ClientHello and HTTP/2 SETTINGS match a
 # real mobile-Chrome stack, so anti-abuse layers can't fingerprint us

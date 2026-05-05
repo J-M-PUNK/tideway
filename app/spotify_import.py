@@ -412,7 +412,10 @@ def _shape_match(t: dict, *, confidence: float, reason: str) -> dict:
 
 def list_liked_tracks(auth: SpotifyAuth) -> list[dict]:
     """Paginate /me/tracks — the user's Liked Songs — and return
-    match-shaped rows."""
+    match-shaped rows. Includes `added_at` (ISO timestamp string)
+    so the import UI can offer a date-range filter — Spotify's
+    `/me/tracks` returns this on the wrapper item, not the inner
+    track payload."""
     out: list[dict] = []
     url = "/me/tracks?limit=50"
     while url:
@@ -429,6 +432,7 @@ def list_liked_tracks(auth: SpotifyAuth) -> list[dict]:
                     "artists": [a for a in artists if a],
                     "duration_ms": track.get("duration_ms") or 0,
                     "isrc": (track.get("external_ids") or {}).get("isrc") or None,
+                    "added_at": item.get("added_at") or None,
                 }
             )
         next_url = data.get("next")
@@ -438,7 +442,9 @@ def list_liked_tracks(auth: SpotifyAuth) -> list[dict]:
 
 def list_saved_albums(auth: SpotifyAuth) -> list[dict]:
     """Paginate /me/albums. Rows are normalized to what our album
-    matcher expects (name, primary_artist, upc, total_tracks)."""
+    matcher expects (name, primary_artist, upc, total_tracks).
+    Includes `added_at` and `album_type` so the import UI can
+    offer date-range and album/single/compilation filters."""
     out: list[dict] = []
     url = "/me/albums?limit=50"
     while url:
@@ -460,6 +466,12 @@ def list_saved_albums(auth: SpotifyAuth) -> list[dict]:
                         if album.get("images")
                         else None
                     ),
+                    "added_at": item.get("added_at") or None,
+                    # Spotify reports "album", "single", or
+                    # "compilation". Frontend uses this to drive
+                    # the album-type filter on the saved-albums
+                    # import view.
+                    "album_type": album.get("album_type") or "album",
                 }
             )
         next_url = data.get("next")
@@ -676,6 +688,9 @@ def match_tracks(session, rows: list[dict]) -> list[dict]:
                 "artists": r.get("artists") or [],
                 "duration_ms": r.get("duration_ms") or 0,
                 "isrc": r.get("isrc"),
+                # Optional — populated only by liked-tracks rows.
+                # Playlist / Deezer rows leave this absent.
+                "added_at": r.get("added_at"),
             },
             "match": m,
         }
@@ -692,6 +707,11 @@ def match_albums(session, rows: list[dict]) -> list[dict]:
                 "artists": r.get("artists") or [],
                 "duration_ms": 0,
                 "isrc": None,
+                # Saved-albums-specific metadata. The playlist /
+                # Deezer paths don't populate these.
+                "added_at": r.get("added_at"),
+                "album_type": r.get("album_type"),
+                "total_tracks": r.get("total_tracks") or 0,
             },
             "match": m,
         }

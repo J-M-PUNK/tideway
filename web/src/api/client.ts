@@ -561,6 +561,12 @@ export const api = {
           username: string | null;
           client_id_set: boolean;
           redirect_uri: string;
+          /** Populated when token exchange succeeded but a follow-up
+           *  Spotify API call (`/me`) was rejected. Most commonly
+           *  fires when the Developer app's owner doesn't have
+           *  active Spotify Premium. UI should show this verbatim
+           *  if present. */
+          auth_error?: string | null;
         }>("/api/import/spotify/status"),
       connect: (clientId: string) =>
         req<{ auth_url: string }>("/api/import/spotify/connect", {
@@ -623,14 +629,38 @@ export const api = {
         }),
       matchLibrary: (
         kind: "liked-tracks" | "saved-albums" | "followed-artists",
-      ) =>
-        req<{
+        filters?: {
+          /** YYYY-MM-DD inclusive lower bound on Spotify added_at.
+           *  Ignored for followed-artists (Spotify doesn't expose a
+           *  follow timestamp). */
+          since?: string;
+          /** YYYY-MM-DD inclusive upper bound. */
+          until?: string;
+          /** Restrict saved albums to one Spotify release type.
+           *  Ignored for liked-tracks and followed-artists. */
+          albumType?: "album" | "single" | "compilation";
+        },
+      ) => {
+        const params = new URLSearchParams();
+        if (filters?.since) params.set("since", filters.since);
+        if (filters?.until) params.set("until", filters.until);
+        if (filters?.albumType && kind === "saved-albums") {
+          params.set("album_type", filters.albumType);
+        }
+        const qs = params.toString();
+        const path = qs
+          ? `/api/import/spotify/${kind}/match?${qs}`
+          : `/api/import/spotify/${kind}/match`;
+        return req<{
           rows: {
             spotify: {
               name: string;
               artists: string[];
               duration_ms: number;
               isrc: string | null;
+              added_at?: string | null;
+              album_type?: string | null;
+              total_tracks?: number;
             };
             match: {
               tidal_id: string;
@@ -644,7 +674,9 @@ export const api = {
           }[];
           total: number;
           matched: number;
-        }>(`/api/import/spotify/${kind}/match`, { method: "POST" }),
+          raw_total?: number;
+        }>(path, { method: "POST" });
+      },
     },
     favorite: (kind: "track" | "album" | "artist", ids: string[]) =>
       req<{ kind: string; added: number; failed: number }>(

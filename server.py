@@ -764,7 +764,21 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             pass
 
 
-app = FastAPI(title="Tideway", lifespan=lifespan)
+# ORJSONResponse hands serialization off to orjson, which is a Rust
+# extension and releases the GIL during encoding. For the artist
+# endpoint's ~270KB response (built from 150+ dict comprehensions),
+# this drops the JSON-encode portion of the GIL hold from ~3-5ms to
+# under 1ms and stops blocking the audio callback during that window.
+# Routes that already return a `Response` subclass (StreamingResponse,
+# HTMLResponse for the Spotify callback, etc.) are unaffected — only
+# the dict-returning routes route through ORJSONResponse.
+from fastapi.responses import ORJSONResponse as _ORJSONResponse  # noqa: E402
+
+app = FastAPI(
+    title="Tideway",
+    lifespan=lifespan,
+    default_response_class=_ORJSONResponse,
+)
 
 
 # Any Tidal request inside a backoff window raises this. FastAPI would
@@ -1748,19 +1762,52 @@ def spotify_status() -> dict:
     auth = spotify_import.load_session()
     connected = auth is not None
     username = None
+    auth_error: Optional[str] = None
     if auth is not None:
         try:
             me = spotify_import.current_user(auth)
             username = me.get("display_name") or me.get("id")
-        except Exception:
-            # Token might be invalid — report not-connected so the UI
-            # surfaces the re-auth path.
+        except Exception as exc:
+            # Distinguish recoverable token problems from policy
+            # rejections so the UI can show an actionable message.
+            #
+            # The most common policy rejection in 2024+ is Spotify
+            # requiring the *owner* of the Developer app (the user
+            # who registered it at developer.spotify.com) to have an
+            # active Premium subscription. Token exchange succeeds
+            # but every /me call comes back 403 with body containing
+            # "Active premium subscription required for the owner of
+            # the app." That's not something Tideway can fix; we
+            # just need to tell the user clearly.
             connected = False
+            body = ""
+            resp = getattr(exc, "response", None)
+            try:
+                if resp is not None:
+                    body = resp.text or ""
+            except Exception:
+                body = ""
+            if "premium subscription required" in body.lower():
+                auth_error = (
+                    "Spotify rejected the API call: the owner of your "
+                    "Spotify Developer app needs an active Spotify "
+                    "Premium subscription for the app to work. Either "
+                    "subscribe to Premium with the same account that "
+                    "registered the app, or register a new Developer "
+                    "app under a Premium account and paste its client "
+                    "ID below."
+                )
+            else:
+                auth_error = (
+                    "Spotify rejected the saved token. Disconnect and "
+                    "reconnect to retry the authorization flow."
+                )
     return {
         "connected": connected,
         "username": username,
         "client_id_set": bool(settings.spotify_client_id),
         "redirect_uri": _spotify_redirect_uri(),
+        "auth_error": auth_error,
     }
 
 
@@ -1873,11 +1920,54 @@ class _TextImportRequest(BaseModel):
     text: str
 
 
+def _parse_iso_date(value: Optional[str]) -> Optional[str]:
+    """Validate a YYYY-MM-DD string and return it (or None on miss).
+    The frontend's date pickers emit this format. Filtering is done
+    by lexicographic compare against ISO-8601 added_at timestamps,
+    which is correct because ISO-8601 sorts the same as chronological
+    when the prefix is YYYY-MM-DD."""
+    if not value:
+        return None
+    try:
+        # Throws ValueError on bad input; we use the result purely to
+        # validate and return the original normalized form.
+        datetime.strptime(value, "%Y-%m-%d")
+    except ValueError:
+        return None
+    return value
+
+
+def _within_added_range(
+    added_at: Optional[str], since: Optional[str], until: Optional[str]
+) -> bool:
+    """True if `added_at` falls within [since, until]. Either bound
+    can be None for open-ended. Items with no `added_at` (rare —
+    Spotify's API has historically always returned it) are kept; we
+    don't filter aggressively when the data is missing."""
+    if added_at is None:
+        return True
+    # added_at is "2024-03-15T18:23:09Z"; lexicographic prefix compare
+    # is sufficient because both sides are ISO-8601 with the date
+    # leading.
+    if since and added_at[: len(since)] < since:
+        return False
+    if until and added_at[: len(until)] > until:
+        return False
+    return True
+
+
 @app.post("/api/import/spotify/liked-tracks/match")
-def spotify_match_liked_tracks() -> dict:
+def spotify_match_liked_tracks(
+    since: Optional[str] = None, until: Optional[str] = None
+) -> dict:
     """Pull the user's Liked Songs + match each against Tidal. Same
     shape as the playlist matcher; frontend feeds rows into the
-    bulk-favorite flow instead of creating a playlist."""
+    bulk-favorite flow instead of creating a playlist.
+
+    Optional `since` / `until` query params (YYYY-MM-DD) filter by
+    Spotify's `added_at` timestamp before matching, so a request to
+    re-import "everything I liked in the last six months" doesn't
+    waste match budget on years of older tracks."""
     _require_auth()
     auth = spotify_import.load_session()
     if auth is None:
@@ -1886,13 +1976,35 @@ def spotify_match_liked_tracks() -> dict:
         tracks = spotify_import.list_liked_tracks(auth)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc))
+    raw_total = len(tracks)
+    s = _parse_iso_date(since)
+    u = _parse_iso_date(until)
+    if s or u:
+        tracks = [
+            t for t in tracks if _within_added_range(t.get("added_at"), s, u)
+        ]
     rows = spotify_import.match_tracks(tidal.session, tracks)
     matched = sum(1 for r in rows if r["match"] is not None)
-    return {"rows": rows, "total": len(rows), "matched": matched}
+    return {
+        "rows": rows,
+        "total": len(rows),
+        "matched": matched,
+        # Surface the pre-filter count so the UI can show "Showing
+        # 47 of 1,283 liked tracks" when filters are active.
+        "raw_total": raw_total,
+    }
 
 
 @app.post("/api/import/spotify/saved-albums/match")
-def spotify_match_saved_albums() -> dict:
+def spotify_match_saved_albums(
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    album_type: Optional[str] = None,
+) -> dict:
+    """Match the user's Saved Albums against Tidal. Optional
+    `since` / `until` (YYYY-MM-DD) filter on Spotify's `added_at`
+    timestamp; optional `album_type` ("album" / "single" /
+    "compilation") filters on Spotify's release classification."""
     _require_auth()
     auth = spotify_import.load_session()
     if auth is None:
@@ -1901,9 +2013,23 @@ def spotify_match_saved_albums() -> dict:
         albums = spotify_import.list_saved_albums(auth)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc))
+    raw_total = len(albums)
+    s = _parse_iso_date(since)
+    u = _parse_iso_date(until)
+    if s or u:
+        albums = [
+            a for a in albums if _within_added_range(a.get("added_at"), s, u)
+        ]
+    if album_type and album_type in ("album", "single", "compilation"):
+        albums = [a for a in albums if (a.get("album_type") or "album") == album_type]
     rows = spotify_import.match_albums(tidal.session, albums)
     matched = sum(1 for r in rows if r["match"] is not None)
-    return {"rows": rows, "total": len(rows), "matched": matched}
+    return {
+        "rows": rows,
+        "total": len(rows),
+        "matched": matched,
+        "raw_total": raw_total,
+    }
 
 
 @app.post("/api/import/spotify/followed-artists/match")
@@ -2522,6 +2648,24 @@ _OPEN_EXTERNAL_HOSTS = {
     # scrobbling setup flow from inside Settings.
     "last.fm",
     "www.last.fm",
+    # Spotify accounts host — users open this during the PKCE flow
+    # for Spotify → Tidal playlist import. SPOTIFY_AUTH_URL in
+    # app/spotify_import.py points at accounts.spotify.com/authorize.
+    # Token exchange is server-to-server and doesn't go through this
+    # endpoint, so only the accounts host needs to be allowlisted.
+    "accounts.spotify.com",
+    # Developer dashboard — surfaced from the import setup UI so the
+    # user can register a Spotify Developer app, which is the prereq
+    # for the PKCE flow above.
+    "developer.spotify.com",
+    # Spotify-to-Tidal workarounds for users without Spotify Premium
+    # (which is required by Spotify for any Developer-app API call).
+    # These services export a Spotify library to a text / M3U file
+    # the user can paste into the File / Text import tab.
+    "soundiiz.com",
+    "www.soundiiz.com",
+    "tunemymusic.com",
+    "www.tunemymusic.com",
 }
 
 
