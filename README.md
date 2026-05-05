@@ -178,7 +178,10 @@ Grab the latest from the Releases page for whichever fork of this
 repo you are installing from.
 
 On macOS, download `Tideway-<version>.dmg`, double-click it, and
-drag the `Tideway` app into `/Applications`.
+drag the `Tideway` app into `/Applications`. Apple Silicon only:
+the binary is arm64-native and won't launch on Intel Macs. This
+has been the case since the earliest signed release; the README
+just hadn't called it out before.
 
 On Windows, download `Tideway-setup-<version>.exe` and run it. The
 installer drops the app under your user profile, registers a Start
