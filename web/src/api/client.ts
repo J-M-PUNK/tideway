@@ -1215,6 +1215,67 @@ export const api = {
         method: "POST",
       }),
   },
+  dlna: {
+    // Returns the cached device list without triggering a fresh
+    // SSDP scan. Cheap and safe to poll. Use refresh() when the
+    // picker dropdown opens so a stale cache doesn't hide a
+    // device that just powered on.
+    devices: () =>
+      req<{
+        status: {
+          available: boolean;
+          device_count: number;
+          last_scan_age_s?: number | null;
+          connected_id?: string | null;
+          connected_name?: string | null;
+          bytes_encoded?: number;
+          media_loaded?: boolean;
+          stream_url?: string;
+        };
+        devices: {
+          id: string;
+          name: string;
+          manufacturer: string;
+          model: string;
+          has_avtransport: boolean;
+        }[];
+      }>("/api/dlna/devices"),
+    refresh: (timeoutS: number = 5) =>
+      req<{
+        status: {
+          available: boolean;
+          device_count: number;
+          last_scan_age_s?: number | null;
+          connected_id?: string | null;
+          connected_name?: string | null;
+        };
+        devices: {
+          id: string;
+          name: string;
+          manufacturer: string;
+          model: string;
+          has_avtransport: boolean;
+        }[];
+      }>("/api/dlna/refresh", {
+        method: "POST",
+        body: JSON.stringify({ timeout_s: timeoutS }),
+      }),
+    connect: (deviceId: string) =>
+      req<{
+        ok: boolean;
+        device: {
+          id: string;
+          name: string;
+          manufacturer: string;
+          model: string;
+        };
+      }>("/api/dlna/connect", {
+        method: "POST",
+        body: JSON.stringify({ device_id: deviceId }),
+      }),
+    disconnect: () =>
+      req<{ ok: boolean }>("/api/dlna/disconnect", { method: "POST" }),
+  },
   airplay: {
     devices: () =>
       req<{
