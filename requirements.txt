@@ -87,7 +87,7 @@ async-upnp-client>=0.47.0
 # command to the Default Media Receiver. Same library Home
 # Assistant, Mopidy, and Music Assistant use, MIT-licensed and
 # actively maintained.
-pychromecast>=14.0.0
+pychromecast>=14.0.10
 # Build-only: PyInstaller packages desktop.py + web/dist into a native
 # .exe / .app. Not needed at runtime but bundling keeps the build command
 # documented in a single place.
