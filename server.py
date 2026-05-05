@@ -725,6 +725,39 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         daemon=True,
     ).start()
 
+    # AOTY pre-warm. The Home page's two AOTY rows take 30-60s to
+    # populate on a fully cold cache (HTML fetch is ~1s, Tidal
+    # resolution of 30+60 albums via 3 jittered workers is the
+    # bottleneck). Per-album resolutions are cached on disk for 30
+    # days, so warm launches mostly skip the resolve work and the
+    # cost reduces to the ~1s HTML fetch. First launch on a new
+    # install (or after a cache wipe) still pays the full cost, but
+    # it pays it in the background instead of after the user opens
+    # Home, so by the time they navigate the rows are populated.
+    #
+    # Daemon thread for the same reason as the prefetch above —
+    # don't block lifespan startup on Tidal/AOTY availability. If
+    # Tidal auth isn't ready yet, individual resolves return None
+    # for `tidal_album` and the AOTY listing still caches so
+    # subsequent calls don't re-fetch HTML.
+    def _prewarm_aoty() -> None:
+        try:
+            year = datetime.now().year
+            listing_top = aoty_module.top_albums_of_year(year, limit=30)
+            aoty_resolver.resolve_listing(listing_top)
+            listing_new = aoty_module.recent_releases(limit=60)
+            aoty_resolver.resolve_listing(listing_new)
+        except Exception:
+            # Best-effort. If pre-warm fails the user just pays the
+            # cost on first navigation — same as today.
+            pass
+
+    threading.Thread(
+        target=_prewarm_aoty,
+        name="aoty-prewarm",
+        daemon=True,
+    ).start()
+
     try:
         yield
     finally:
