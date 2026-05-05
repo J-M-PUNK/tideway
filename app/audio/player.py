@@ -52,6 +52,33 @@ from app.audio.manifest_cache import ManifestCache
 from app.audio.output_devices import list_output_devices
 from app.audio.segment_reader import SegmentReader
 
+# Optional audio output taps. Imported at module load (not lazily
+# from inside the audio callback) because Python's `import` statement
+# acquires the import lock to look up an already-cached module, and
+# during a concurrent cold-load elsewhere in the process — Spotify
+# enrichment first-loading spotapi when the user opens an artist page
+# is the canonical case — that lock can be held for hundreds of ms.
+# A lazy `import` inside the callback would block on it for the same
+# duration and starve the realtime audio thread. The user hears that
+# as stutter and clipping during cold artist-page navigation. With
+# the imports here, the callback does plain attribute reads on
+# already-loaded modules; the import lock is never touched on the
+# realtime path. If the optional dep is missing on this machine
+# (pyatv not installed, etc.) the reference stays None and the
+# corresponding tap branch is skipped.
+try:
+    from app.audio import airplay as _airplay_mod
+except Exception:  # noqa: BLE001
+    _airplay_mod = None  # type: ignore[assignment]
+try:
+    from app.audio import cast as _cast_mod
+except Exception:  # noqa: BLE001
+    _cast_mod = None  # type: ignore[assignment]
+try:
+    from app.audio.upnp import upnp_manager as _upnp_manager
+except Exception:  # noqa: BLE001
+    _upnp_manager = None  # type: ignore[assignment]
+
 log = logging.getLogger(__name__)
 
 
@@ -1898,24 +1925,23 @@ class PCMPlayer:
         # copy of the raw decoded PCM to the AirPlay pipe BEFORE
         # EQ / volume / mute run. The AirPlay receiver has its own
         # volume control, so sending pre-volume audio keeps local
-        # mute from silencing the remote speaker. Import is lazy to
-        # avoid loading pyatv's import tree on machines that never
-        # use AirPlay, and to sidestep a circular-import risk
-        # between app.audio and server startup.
-        try:
-            from app.audio import airplay as _airplay_mod
-            if _airplay_mod.AirPlayManager.is_available():
-                mgr = _airplay_mod.AirPlayManager.instance()
-                if mgr.is_connected():
-                    # np.ascontiguousarray is a no-op when outdata is
-                    # already contiguous (which it always is coming
-                    # from sounddevice), so no copy cost on the hot
-                    # path. The encoder runs off-thread and is
-                    # tolerant of dropped chunks.
-                    mgr.push_pcm(np.ascontiguousarray(outdata))
-        except Exception:
-            # Never let AirPlay errors take down local playback.
-            pass
+        # mute from silencing the remote speaker. The module is
+        # imported at file scope, so this branch does only attribute
+        # reads on the realtime path (no import lock).
+        if _airplay_mod is not None:
+            try:
+                if _airplay_mod.AirPlayManager.is_available():
+                    mgr = _airplay_mod.AirPlayManager.instance()
+                    if mgr.is_connected():
+                        # np.ascontiguousarray is a no-op when outdata
+                        # is already contiguous (which it always is
+                        # coming from sounddevice), so no copy cost
+                        # on the hot path. The encoder runs off-thread
+                        # and is tolerant of dropped chunks.
+                        mgr.push_pcm(np.ascontiguousarray(outdata))
+            except Exception:
+                # Never let AirPlay errors take down local playback.
+                pass
 
         # Cast tap. Same pre-EQ / pre-volume position as AirPlay —
         # the Cast device has its own volume control, so muting
@@ -1927,26 +1953,26 @@ class PCMPlayer:
         # OutputStream comes out as float32 (device mixer format),
         # so we hand all three through; cast_manager.push_pcm
         # converts float32 to int32 internally for the FLAC encoder.
-        try:
-            from app.audio import cast as _cast_mod
-            if _cast_mod.cast_manager.is_active():
-                if outdata.dtype == np.int16:
-                    _dtype_name = "int16"
-                elif outdata.dtype == np.int32:
-                    _dtype_name = "int32"
-                elif outdata.dtype == np.float32:
-                    _dtype_name = "float32"
-                else:
-                    _dtype_name = None
-                if _dtype_name is not None:
-                    _cast_mod.cast_manager.push_pcm(
-                        np.ascontiguousarray(outdata),
-                        sample_rate=self._stream_sample_rate or 44100,
-                        dtype=_dtype_name,
-                    )
-        except Exception:
-            # Never let Cast errors take down local playback.
-            pass
+        if _cast_mod is not None:
+            try:
+                if _cast_mod.cast_manager.is_active():
+                    if outdata.dtype == np.int16:
+                        _dtype_name = "int16"
+                    elif outdata.dtype == np.int32:
+                        _dtype_name = "int32"
+                    elif outdata.dtype == np.float32:
+                        _dtype_name = "float32"
+                    else:
+                        _dtype_name = None
+                    if _dtype_name is not None:
+                        _cast_mod.cast_manager.push_pcm(
+                            np.ascontiguousarray(outdata),
+                            sample_rate=self._stream_sample_rate or 44100,
+                            dtype=_dtype_name,
+                        )
+            except Exception:
+                # Never let Cast errors take down local playback.
+                pass
 
         # UPnP / DLNA tap. Same pre-EQ / pre-volume position and
         # same dtype handling as Cast. The streaming pipeline is
@@ -1955,26 +1981,26 @@ class PCMPlayer:
         # and `upnp_manager` is a module-level singleton (no lock,
         # no lazy-init branch), so the cost when DLNA isn't in use
         # is exactly two attribute reads per audio callback.
-        try:
-            from app.audio.upnp import upnp_manager as _upnp_manager
-            if _upnp_manager.is_active():
-                if outdata.dtype == np.int16:
-                    _dtype_name = "int16"
-                elif outdata.dtype == np.int32:
-                    _dtype_name = "int32"
-                elif outdata.dtype == np.float32:
-                    _dtype_name = "float32"
-                else:
-                    _dtype_name = None
-                if _dtype_name is not None:
-                    _upnp_manager.push_pcm(
-                        np.ascontiguousarray(outdata),
-                        sample_rate=self._stream_sample_rate or 44100,
-                        dtype=_dtype_name,
-                    )
-        except Exception:
-            # Never let DLNA errors take down local playback.
-            pass
+        if _upnp_manager is not None:
+            try:
+                if _upnp_manager.is_active():
+                    if outdata.dtype == np.int16:
+                        _dtype_name = "int16"
+                    elif outdata.dtype == np.int32:
+                        _dtype_name = "int32"
+                    elif outdata.dtype == np.float32:
+                        _dtype_name = "float32"
+                    else:
+                        _dtype_name = None
+                    if _dtype_name is not None:
+                        _upnp_manager.push_pcm(
+                            np.ascontiguousarray(outdata),
+                            sample_rate=self._stream_sample_rate or 44100,
+                            dtype=_dtype_name,
+                        )
+            except Exception:
+                # Never let DLNA errors take down local playback.
+                pass
 
         # External output active: silence local. Done AFTER the
         # AirPlay / Cast / Tidal Connect taps above (so the remote
