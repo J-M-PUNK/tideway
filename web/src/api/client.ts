@@ -143,11 +143,10 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ url }),
     }),
-  /** Force a full app shutdown. Needed because close-to-tray swallows
-   *  the red-X / Cmd+Q, so the user needs an explicit exit path.
-   *  Returns `{ok: false, reason}` when running outside the desktop
-   *  launcher (e.g. plain browser dev mode) — the UI should hide the
-   *  Quit entry in that case. */
+  /** Force a full app shutdown from the in-app Quit menu. Equivalent
+   *  to clicking the native red-X. Returns `{ok: false, reason}` when
+   *  running outside the desktop launcher (e.g. plain browser dev
+   *  mode) — the UI should hide the Quit entry in that case. */
   quitApp: () =>
     req<{ ok: boolean; reason?: string }>("/api/_internal/quit", {
       method: "POST",

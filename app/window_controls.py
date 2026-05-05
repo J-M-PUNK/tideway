@@ -160,10 +160,9 @@ def maximize_toggle() -> bool:
 
 
 def close() -> bool:
-    """Trigger the window's close path. On Windows this fires
-    pywebview's `closing` event, which our `_on_closing` handler
-    converts to hide-to-tray when the tray is up — matching the
-    behavior of the OS-drawn close button."""
+    """Trigger the window's close path. Fires pywebview's `closing`
+    event, which destroys the window and exits — same as clicking
+    the OS-drawn close button."""
     if _close_callback is None:
         return False
     try:

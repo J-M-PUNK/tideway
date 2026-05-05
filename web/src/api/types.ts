@@ -289,10 +289,6 @@ export interface Settings {
    *  falls back to per-source defaults (stop, or for albums prime
    *  track 0 paused so one tap repeats the album). */
   continue_playing_after_queue_ends: boolean;
-  /** Launch directly to tray without opening a window. Pairs with
-   *  the Launch-on-login toggle so the app can run headlessly from
-   *  boot until the user clicks the tray icon. */
-  start_minimized: boolean;
   /** Per-track download rate cap in MB/s. 0 = unlimited. Default 10
    *  so downloads look like aggressive prefetch rather than a scrape
    *  to Tidal's CDN — the single most effective ban-risk reduction

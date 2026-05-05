@@ -5,8 +5,7 @@ platform. Every path is fire-and-forget: failures are swallowed so a
 broken notification stack can't break playback or downloads.
 
 - macOS: `osascript -e 'display notification ...'`. Works on every
-  macOS version we care about. Same mechanism pystray uses internally,
-  so if the tray icon works, notifications work too.
+  macOS version we care about.
 - Windows: PowerShell toast via the WinRT ToastNotificationManager.
   Only requires Windows 10+ (the supported matrix for pywebview).
 - Linux: `notify-send` (libnotify). Present in every modern DE.

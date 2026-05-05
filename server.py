@@ -1107,10 +1107,10 @@ _HEALTH_MARKER = "tidal-downloader"
 # nobody registered one (web-only dev run) the endpoint no-ops.
 _focus_callback: Optional[Callable[[], None]] = None
 
-# Set by the desktop launcher so /api/_internal/quit can tear the app
-# down from the UI. Needed because close-to-tray intercepts the red-X
-# button, so Cmd+Q / the in-app Quit menu need a different path to an
-# actual window.destroy().
+# Set by the desktop launcher so /api/_internal/quit can tear the
+# app down from the UI's Quit menu. The native red-X already does
+# this directly via window.destroy(); the endpoint exists so a
+# JS-side "Quit" affordance has the same effect.
 _quit_callback: Optional[Callable[[], None]] = None
 
 # Set by the desktop launcher so /api/_internal/mini_player can spawn
@@ -2098,12 +2098,12 @@ def focus_window(request: Request) -> dict:
 
 @app.post("/api/_internal/quit", include_in_schema=False)
 def quit_app(request: Request) -> dict:
-    """Force a real app shutdown from the UI.
+    """Force a real app shutdown from the UI's Quit menu.
 
-    The close-to-tray handler swallows the red-X button, so the user
-    needs a dedicated "Quit" path that bypasses it. Restricted to
-    loopback for the same reason as /focus — only legitimate caller is
-    the local UI.
+    The native red-X already triggers a clean shutdown; this endpoint
+    exists so the in-app menu's "Quit" affordance behaves identically.
+    Restricted to loopback for the same reason as /focus — only
+    legitimate caller is the local UI.
     """
     client = request.client
     host = client.host if client else ""
@@ -2227,8 +2227,7 @@ def window_maximize(request: Request) -> dict:
 @app.post("/api/_internal/window/close", include_in_schema=False)
 def window_close(request: Request) -> dict:
     """Trigger the window's close path. Goes through pywebview's
-    `closing` event, so close-to-tray (when the tray is up) takes over
-    from here exactly as it does for the native red-X."""
+    `closing` event, same as the native red-X."""
     _ensure_loopback(request)
     try:
         from app import window_controls
@@ -8827,7 +8826,6 @@ class SettingsPayload(BaseModel):
     exclusive_mode: Optional[bool] = None
     force_volume: Optional[bool] = None
     continue_playing_after_queue_ends: Optional[bool] = None
-    start_minimized: Optional[bool] = None
     explicit_content_preference: Optional[str] = None
     download_rate_limit_mbps: Optional[int] = None
     eq_mode: Optional[str] = None

@@ -88,7 +88,7 @@ rest. **Do not tag** until the deploy branch is green and manually
 verified.
 
 For the desktop pywebview window specifically (chrome, drag,
-traffic lights, global media keys, tray), you have to build the
+traffic lights, global media keys), you have to build the
 frontend and launch via `desktop.py` rather than `./run.sh`:
 
 ```bash

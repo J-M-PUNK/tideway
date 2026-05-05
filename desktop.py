@@ -301,175 +301,6 @@ def _enable_webview_media_prefs() -> None:
     BrowserView.__init__ = patched_init
 
 
-# Held at module scope so the Objective-C runtime keeps a strong ref
-# to the observer for the lifetime of the process.
-_macos_notification_observer: Optional[object] = None
-_macos_quit_observer: Optional[object] = None
-_macos_quit_delegate: Optional[object] = None
-
-
-def _wire_macos_dock_reopen(window) -> None:  # type: ignore[no-untyped-def]
-    """Restore the window on Dock-icon click after close-to-tray.
-
-    The canonical macOS API for "Dock click on a running app" is
-    `applicationShouldHandleReopen:hasVisibleWindows:` on the app
-    delegate. Empirically it doesn't fire under pywebview's run-loop
-    + pyobjc setup even when the delegate is installed and responds
-    to the selector — diagnosed in session logs from 2026-04-21.
-    `NSApplicationDidBecomeActive` does fire reliably, provided the
-    app is actually deactivated first (see `_on_closing` below,
-    where we call `NSApp.hide_(None)` after `window.hide()`). With
-    that in place, any activation event (Dock click, cmd-tab,
-    launch) routes through the observer and restores the window.
-    Calling `window.show()` on an already-visible window is a no-op,
-    so redundant activations are harmless.
-    """
-    global _macos_notification_observer
-    if sys.platform != "darwin":
-        return
-    try:
-        from PyObjCTools import AppHelper
-        from Foundation import NSObject
-        import AppKit
-    except Exception as exc:
-        print(f"[desktop] dock-reopen imports failed: {exc!r}",
-              file=sys.stderr, flush=True)
-        return
-
-    class _AppActiveObserver(NSObject):
-        def didBecomeActive_(self, _n):  # noqa: N802
-            try:
-                AppHelper.callAfter(window.show)
-            except Exception:
-                pass
-
-    try:
-        observer = _AppActiveObserver.alloc().init()
-        AppKit.NSNotificationCenter.defaultCenter().addObserver_selector_name_object_(
-            observer,
-            "didBecomeActive:",
-            AppKit.NSApplicationDidBecomeActiveNotification,
-            None,
-        )
-        _macos_notification_observer = observer
-    except Exception as exc:
-        print(f"[desktop] dock-reopen observer install failed: {exc!r}",
-              file=sys.stderr, flush=True)
-
-
-def _wire_macos_app_quit(window, actually_quitting) -> None:  # type: ignore[no-untyped-def]
-    """Make Cmd+Q, Dock right-click Quit, and menu-bar Quit actually
-    quit the app instead of falling into the hide-to-tray branch.
-
-    The mechanism: wrap pywebview's NSApp delegate with an Objective-C
-    proxy. Our wrapper intercepts `applicationShouldTerminate:`, sets
-    the quit flag, and forwards the call to the original delegate so
-    pywebview still drives its normal close sequence. Our window close
-    handler then sees the flag set and returns True, allowing the
-    termination to proceed. Every other selector is forwarded to the
-    original delegate unchanged via standard NSProxy forwarding, so
-    pywebview's delegate behaviour is otherwise untouched.
-
-    pywebview installs its delegate during `webview.start()`, which is
-    after this function is called, so we wait for the
-    `NSApplicationDidFinishLaunching` notification to do the swap.
-    """
-    global _macos_quit_observer, _macos_quit_delegate
-    if sys.platform != "darwin":
-        return
-    try:
-        import AppKit
-        import objc
-        from Foundation import NSObject
-    except Exception as exc:
-        print(f"[desktop] quit hook imports failed: {exc!r}",
-              file=sys.stderr, flush=True)
-        return
-
-    class _QuitWrapperDelegate(NSObject):
-        def initWithInner_flag_(self, inner, flag_ref):  # noqa: N802
-            s = objc.super(_QuitWrapperDelegate, self).init()
-            if s is None:
-                return None
-            s._inner = inner
-            s._flag = flag_ref
-            return s
-
-        def applicationShouldTerminate_(self, sender):  # noqa: N802
-            try:
-                self._flag["value"] = True
-            except Exception:
-                pass
-            inner = getattr(self, "_inner", None)
-            if inner is not None and inner.respondsToSelector_(b"applicationShouldTerminate:"):
-                return inner.applicationShouldTerminate_(sender)
-            return AppKit.NSTerminateNow
-
-        # ---- Forwarding plumbing so pywebview's delegate keeps
-        # receiving every other selector exactly as before.
-        def methodSignatureForSelector_(self, sel):  # noqa: N802
-            sig = objc.super(_QuitWrapperDelegate, self).methodSignatureForSelector_(sel)
-            if sig is not None:
-                return sig
-            inner = getattr(self, "_inner", None)
-            if inner is not None:
-                return inner.methodSignatureForSelector_(sel)
-            return None
-
-        def forwardInvocation_(self, invocation):  # noqa: N802
-            inner = getattr(self, "_inner", None)
-            if inner is not None and inner.respondsToSelector_(invocation.selector()):
-                invocation.invokeWithTarget_(inner)
-            else:
-                objc.super(_QuitWrapperDelegate, self).forwardInvocation_(invocation)
-
-        def respondsToSelector_(self, sel):  # noqa: N802
-            if objc.super(_QuitWrapperDelegate, self).respondsToSelector_(sel):
-                return True
-            inner = getattr(self, "_inner", None)
-            if inner is not None and inner.respondsToSelector_(sel):
-                return True
-            return False
-
-    def _install_wrapper() -> None:
-        global _macos_quit_delegate
-        app = AppKit.NSApplication.sharedApplication()
-        existing = app.delegate()
-        if existing is None:
-            print("[desktop] quit hook: no NSApp delegate to wrap yet",
-                  file=sys.stderr, flush=True)
-            return
-        wrapper = _QuitWrapperDelegate.alloc().initWithInner_flag_(existing, actually_quitting)
-        if wrapper is None:
-            return
-        app.setDelegate_(wrapper)
-        # Strong reference; without this the Objective-C runtime
-        # eventually releases the wrapper and we silently revert to
-        # pywebview's original delegate.
-        _macos_quit_delegate = wrapper
-
-    class _DidLaunchObserver(NSObject):
-        def didFinishLaunching_(self, _n):  # noqa: N802
-            _install_wrapper()
-
-    try:
-        # If pywebview's run loop already fired didFinishLaunching we
-        # install right now; otherwise wait for the notification.
-        app = AppKit.NSApplication.sharedApplication()
-        if app.delegate() is not None:
-            _install_wrapper()
-        else:
-            observer = _DidLaunchObserver.alloc().init()
-            AppKit.NSNotificationCenter.defaultCenter().addObserver_selector_name_object_(
-                observer,
-                "didFinishLaunching:",
-                AppKit.NSApplicationDidFinishLaunchingNotification,
-                None,
-            )
-            _macos_quit_observer = observer
-    except Exception as exc:
-        print(f"[desktop] quit hook install failed: {exc!r}",
-              file=sys.stderr, flush=True)
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -526,17 +357,6 @@ def main(argv: Optional[list[str]] = None) -> int:
         _graceful_shutdown(server)
         return 0
 
-    # "Start minimized" — read via the FastAPI process's own settings
-    # module so we don't duplicate the on-disk file's format here.
-    # Fails open: if the setting module fails to import (fresh install,
-    # corrupted settings.json) we show the window normally.
-    start_hidden = False
-    try:
-        from app.settings import load_settings as _load_settings  # type: ignore
-        start_hidden = bool(getattr(_load_settings(), "start_minimized", False))
-    except Exception:
-        start_hidden = False
-
     # On Windows we suppress the OS-drawn caption (min/max/close) and
     # let the React shell paint its own integrated titlebar — same
     # pattern as VS Code, Discord, Spotify. macOS keeps the native
@@ -554,7 +374,6 @@ def main(argv: Optional[list[str]] = None) -> int:
         width=1280,
         height=800,
         min_size=(800, 600),
-        hidden=start_hidden,
         frameless=use_frameless,
         # easy_drag would make every mousedown try to drag the window,
         # which breaks button clicks and feels laggy. We declare drag
@@ -563,17 +382,17 @@ def main(argv: Optional[list[str]] = None) -> int:
         easy_drag=False,
     )
 
-    # --- Hide-on-close + tray wiring ---------------------------------
-    # Ordering is load-bearing here. We want close-to-tray behavior
-    # (red-X hides the window so playback keeps running, tray menu
-    # exposes Quit) *only* when the tray is actually up. Otherwise the
-    # window disappears into limbo — playback still running, nothing in
-    # the menu bar, no way to restore or terminate — and the user has
-    # to kill the process from Activity Monitor. So: try the tray
-    # first, and install the hide handler only if it started.
-    actually_quitting = {"value": False}
+    # Close behavior: clicking the X (or Cmd+Q on macOS, or any
+    # other native close path) destroys the window and exits the
+    # process. There is no hide-to-tray; the tray icon was removed
+    # in v1.5.2 because the hide-on-close behavior was unexpected
+    # and the tray's only documented purpose was to give the user
+    # a way back from the hidden state.
 
     def _show_window() -> None:
+        # Used by the focus callback for second-instance launches:
+        # bring the existing window to front instead of spawning a
+        # second one.
         try:
             window.show()
         except Exception:
@@ -583,8 +402,10 @@ def main(argv: Optional[list[str]] = None) -> int:
         except Exception:
             pass
 
-    def _quit_from_tray() -> None:
-        actually_quitting["value"] = True
+    def _quit_app() -> None:
+        # Used by the in-app Quit menu's /api/_internal/quit
+        # endpoint. Equivalent to clicking the OS close button
+        # now that there's no hide-to-tray interception.
         try:
             window.destroy()
         except Exception:
@@ -1151,8 +972,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     import server as _server
     _server.register_focus_callback(_show_window)
     # Register the quit callback so the in-app "Quit" menu entry can
-    # force a real shutdown that bypasses close-to-tray.
-    _server.register_quit_callback(_quit_from_tray)
+    # destroy the window and exit the process.
+    _server.register_quit_callback(_quit_app)
     # Register the mini-player callback so the in-app "Open mini
     # player" control can spawn a second pywebview window.
     _server.register_mini_player_callback(_open_mini_player)
@@ -1170,11 +991,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         from app import window_controls as _window_controls
 
         def _close_via_chrome() -> None:
-            # Equivalent to clicking the OS red-X. pywebview's
-            # `closing` event handler intercepts and either hides the
-            # window to tray or lets it close, depending on tray
-            # availability — so the in-app close button matches the
-            # native one's behavior in either configuration.
+            # Equivalent to clicking the OS red-X. Destroys the
+            # window and exits the process.
             try:
                 window.destroy()
             except Exception:
@@ -1220,204 +1038,90 @@ def main(argv: Optional[list[str]] = None) -> int:
     if sys.platform != "darwin":
         _server.register_inapp_login_callback(_open_login_window)
 
-    # Start the tray icon. Non-blocking (run_detached internally).
-    # `tray is None` when pystray's platform deps are missing, the icon
-    # asset can't be found, or creation raised — in all those cases we
-    # fall back to "close = quit" so the user can always terminate.
-    tray = None
-    try:
-        from app.tray import start_tray
-
-        icon_path = _find_tray_icon()
-        if icon_path is None:
-            print(
-                "[desktop] tray icon asset not found — close button will quit.",
-                file=sys.stderr,
-                flush=True,
-            )
-        else:
-            tray = start_tray(
-                icon_path=icon_path,
-                port=PORT,
-                on_show=_show_window,
-                on_quit=_quit_from_tray,
-            )
-            if tray is None:
-                print(
-                    "[desktop] tray startup returned None — close button will quit.",
-                    file=sys.stderr,
-                    flush=True,
-                )
-    except Exception as exc:
-        print(
-            f"[desktop] tray startup failed ({exc!r}) — close button will quit.",
-            file=sys.stderr,
-            flush=True,
-        )
-        tray = None
-
-    # Hide-on-close only if the tray is up to give the user a way back.
-    # Without a tray, leave pywebview's default close-quits behavior so
-    # the X button works as expected.
-    if tray is not None:
-        is_windows = sys.platform.startswith("win")
-
-        def _on_closing() -> bool:
-            if actually_quitting["value"]:
-                return True  # Quit from tray — let pywebview really close
-            try:
-                if is_windows:
-                    # Windows: minimize keeps the taskbar entry, which
-                    # is the native restore affordance.
-                    window.minimize()
-                else:
-                    # macOS: hide the window, then hide the app. The
-                    # second call is load-bearing: without it the app
-                    # stays active with no visible windows and the OS
-                    # never fires a reactivation on Dock click (and
-                    # `applicationShouldHandleReopen:hasVisibleWindows:`
-                    # doesn't fire under pywebview's run loop either).
-                    # Hiding the app at the NSApp level is what the
-                    # standard Cmd+H flow does, which means a Dock
-                    # click reactivates us and our observer in
-                    # `_wire_macos_dock_reopen` calls window.show().
-                    window.hide()
-                    try:
-                        import AppKit  # local to keep Windows deps clean
-                        AppKit.NSApplication.sharedApplication().hide_(None)
-                    except Exception:
-                        pass
-            except Exception as exc:
-                print(f"[desktop] close handler failed: {exc!r}",
-                      file=sys.stderr, flush=True)
-            return False  # cancel the close; app stays up behind the tray
-
+    # macOS: re-apply chrome on multiple events because pywebview's
+    # cocoa backend installs the WebView as the NSWindow's
+    # contentView only AFTER the page finishes loading (line
+    # 386 of pywebview's cocoa.py: `setContentView_(webview)`
+    # inside webView_didFinishNavigation_). At BrowserView
+    # __init__ AND at the `shown` event, the contentView is
+    # still plain NSView and the WebView isn't reachable. Only
+    # after `loaded` fires is the contentView actually the
+    # WebView. We hook BOTH `shown` (for early styleMask /
+    # backgroundColor settings that affect the chrome layer)
+    # AND `loaded` (for the WebView-aware steps that actually
+    # make the band blend). Diagnostic log records both.
+    if sys.platform == "darwin":
         try:
-            window.events.closing += _on_closing
+            from app import window_chrome as _window_chrome
+
+            def _on_shown_macos_chrome() -> None:
+                try:
+                    _window_chrome.reapply_macos_chrome()
+                except Exception:
+                    pass
+
+            def _on_loaded_macos_chrome() -> None:
+                # The contentView swap happens here — by now
+                # nswindow.contentView() returns the WebView.
+                # Reapplying lets our chrome code see the
+                # right view and resize / configure it.
+                try:
+                    _window_chrome.reapply_macos_chrome()
+                except Exception:
+                    pass
+
+            window.events.shown += _on_shown_macos_chrome
+            window.events.loaded += _on_loaded_macos_chrome
         except Exception:
-            # Older pywebview versions used a different hook shape;
-            # fall through to legacy close-kills-everything behavior.
             pass
 
-        # macOS: wire the Dock-click → window.show() path. No-op on
-        # Windows (minimize handles it natively via the taskbar).
-        _wire_macos_dock_reopen(window)
+    # Windows: tint the title bar to match the app's background
+    # color. The hwnd doesn't exist until after the window is
+    # actually shown, so we hook the `shown` event rather than
+    # registering at create time. macOS handles tinting in the
+    # BrowserView constructor patch (see _enable_webview_media_prefs)
+    # AND on shown (above) so styleMask changes stick.
+    if sys.platform == "win32":
+        try:
+            from app import window_chrome as _window_chrome
+            from app import window_controls as _window_controls_mod
 
-        # macOS: re-apply chrome on multiple events because pywebview's
-        # cocoa backend installs the WebView as the NSWindow's
-        # contentView only AFTER the page finishes loading (line
-        # 386 of pywebview's cocoa.py: `setContentView_(webview)`
-        # inside webView_didFinishNavigation_). At BrowserView
-        # __init__ AND at the `shown` event, the contentView is
-        # still plain NSView and the WebView isn't reachable. Only
-        # after `loaded` fires is the contentView actually the
-        # WebView. We hook BOTH `shown` (for early styleMask /
-        # backgroundColor settings that affect the chrome layer)
-        # AND `loaded` (for the WebView-aware steps that actually
-        # make the band blend). Diagnostic log records both.
-        if sys.platform == "darwin":
-            try:
-                from app import window_chrome as _window_chrome
+            def _on_shown_tint() -> None:
+                try:
+                    hwnd = _window_chrome.find_pywebview_hwnd(window)
+                    if not hwnd:
+                        return
+                    _window_chrome.register_windows_hwnd(hwnd)
+                    # When the launcher created the window
+                    # frameless (Windows VS-Code-style chrome),
+                    # add WS_THICKFRAME back so the OS runs
+                    # native edge resize, and subclass the
+                    # WindowProc on the GUI thread so later
+                    # drag/resize triggers from worker threads
+                    # land on the right thread for ReleaseCapture
+                    # to actually release the WebView2 child's
+                    # mouse capture.
+                    if use_frameless:
+                        _window_controls_mod.enable_native_resize(hwnd)
+                        _window_controls_mod.ensure_wndproc_subclass(hwnd)
+                except Exception:
+                    # Anything in the lookup or DWM call going wrong
+                    # leaves the OS-default titlebar — visible but
+                    # off-color. Worth not crashing for.
+                    pass
 
-                def _on_shown_macos_chrome() -> None:
-                    try:
-                        _window_chrome.reapply_macos_chrome()
-                    except Exception:
-                        pass
-
-                def _on_loaded_macos_chrome() -> None:
-                    # The contentView swap happens here — by now
-                    # nswindow.contentView() returns the WebView.
-                    # Reapplying lets our chrome code see the
-                    # right view and resize / configure it.
-                    try:
-                        _window_chrome.reapply_macos_chrome()
-                    except Exception:
-                        pass
-
-                window.events.shown += _on_shown_macos_chrome
-                window.events.loaded += _on_loaded_macos_chrome
-            except Exception:
-                pass
-
-        # Windows: tint the title bar to match the app's background
-        # color. The hwnd doesn't exist until after the window is
-        # actually shown, so we hook the `shown` event rather than
-        # registering at create time. macOS handles tinting in the
-        # BrowserView constructor patch (see _enable_webview_media_prefs)
-        # AND on shown (above) so styleMask changes stick.
-        if sys.platform == "win32":
-            try:
-                from app import window_chrome as _window_chrome
-                from app import window_controls as _window_controls_mod
-
-                def _on_shown_tint() -> None:
-                    try:
-                        hwnd = _window_chrome.find_pywebview_hwnd(window)
-                        if not hwnd:
-                            return
-                        _window_chrome.register_windows_hwnd(hwnd)
-                        # When the launcher created the window
-                        # frameless (Windows VS-Code-style chrome),
-                        # add WS_THICKFRAME back so the OS runs
-                        # native edge resize, and subclass the
-                        # WindowProc on the GUI thread so later
-                        # drag/resize triggers from worker threads
-                        # land on the right thread for ReleaseCapture
-                        # to actually release the WebView2 child's
-                        # mouse capture.
-                        if use_frameless:
-                            _window_controls_mod.enable_native_resize(hwnd)
-                            _window_controls_mod.ensure_wndproc_subclass(hwnd)
-                    except Exception:
-                        # Anything in the lookup or DWM call going wrong
-                        # leaves the OS-default titlebar — visible but
-                        # off-color. Worth not crashing for.
-                        pass
-
-                window.events.shown += _on_shown_tint
-            except Exception:
-                pass
-        # Cmd+Q / Dock right-click Quit / menu-bar "Quit Tideway" all go
-        # through NSApp.terminate → applicationShouldTerminate:, which
-        # pywebview's delegate translates into our window's closing
-        # event. Without special handling our closing handler hides
-        # instead of quitting, so the user can never fully exit except
-        # via the tray menu. Wrap the app delegate so those three
-        # paths set the quit flag first, then let pywebview close
-        # windows normally.
-        _wire_macos_app_quit(window, actually_quitting)
+            window.events.shown += _on_shown_tint
+        except Exception:
+            pass
 
     try:
         # gui=None lets pywebview pick the native backend
         # (edgechromium/WebView2 on Windows, WebKit on macOS).
         webview.start()
     finally:
-        if tray is not None:
-            try:
-                tray.stop()
-            except Exception:
-                pass
         _graceful_shutdown(server)
 
     return 0
-
-
-def _find_tray_icon() -> Optional["Path"]:
-    """Locate the tray icon PNG in dev mode and in a PyInstaller bundle.
-    Returns None when no icon can be resolved — the caller treats that
-    as "skip the tray" rather than crashing."""
-    candidates: list[Path] = []
-    if getattr(sys, "frozen", False):
-        meipass = Path(getattr(sys, "_MEIPASS", ""))
-        if meipass.is_dir():
-            candidates.append(meipass / "assets" / "tray-icon.png")
-    repo_root = Path(__file__).resolve().parent
-    candidates.append(repo_root / "assets" / "tray-icon.png")
-    for p in candidates:
-        if p.is_file():
-            return p
-    return None
 
 
 if __name__ == "__main__":
