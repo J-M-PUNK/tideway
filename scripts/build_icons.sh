@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Generate macOS .icns and Windows .ico from a single source PNG.
+# Generate macOS .icns, Windows .ico, and Linux .png from a single
+# source PNG.
 #
 # Drop a 1024x1024 PNG at `assets/icon-source.png`, then run:
 #   scripts/build_icons.sh
@@ -8,6 +9,8 @@
 #   assets/icon.icns  (macOS — picked up by Tideway-mac.spec)
 #   assets/icon.ico   (Windows — picked up by Tideway-win.spec
 #                      and scripts/Tideway.iss)
+#   assets/icon.png   (Linux AppImage — picked up by
+#                      scripts/build_appimage.sh)
 #
 # Prereqs: `iconutil` (ships with Xcode Command Line Tools) and
 # either ImageMagick (`brew install imagemagick`) or `sips` (ships
@@ -87,3 +90,11 @@ img.save(
 )
 print("Wrote: assets/icon.ico")
 PY
+
+# --- Linux .png ----------------------------------------------------------
+# AppImage's .desktop file references `Icon=tideway` and the build
+# script (scripts/build_appimage.sh) installs whatever lives at
+# assets/icon.png as that icon. 256x256 is the size hicolor wants
+# at that path; AppImage launchers downsample as needed for menus.
+sips -z 256 256 "$SRC" --out assets/icon.png > /dev/null
+echo "Wrote: assets/icon.png"

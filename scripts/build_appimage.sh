@@ -7,8 +7,8 @@
 #     `pyinstaller Tideway-linux.spec --noconfirm` first).
 #   - `appimagetool` available on PATH or downloadable; the script
 #     fetches the official x86_64 build into ./tools/ if missing.
-#   - A 256x256 PNG icon at assets/tray-icon.png (current location)
-#     or assets/icon.png (preferred name; falls back to tray-icon).
+#   - A 256x256 PNG icon at assets/icon.png (produced by
+#     scripts/build_icons.sh from assets/icon-source.png).
 #
 # Output: dist/Tideway-<version>-x86_64.AppImage
 # Naming convention matches the asset matcher in server.py.
@@ -44,22 +44,16 @@ cp -a dist/Tideway/. "$APPDIR/usr/bin/"
 cp scripts/appimage/tideway.desktop "$APPDIR/usr/share/applications/tideway.desktop"
 ln -sf usr/share/applications/tideway.desktop "$APPDIR/tideway.desktop"
 
-# Icon — accept either name so we don't break if assets/icon.png
-# lands later. Keeping the existing tray-icon.png as the default
-# means we don't need to commit a new file alongside this script.
-ICON_SRC=""
-for cand in assets/icon.png assets/tray-icon.png; do
-  if [ -f "$cand" ]; then
-    ICON_SRC="$cand"
-    break
-  fi
-done
-if [ -z "$ICON_SRC" ]; then
-  echo "No icon found at assets/icon.png or assets/tray-icon.png — AppImage will lack an icon." >&2
-else
-  cp "$ICON_SRC" "$APPDIR/usr/share/icons/hicolor/256x256/apps/tideway.png"
-  ln -sf usr/share/icons/hicolor/256x256/apps/tideway.png "$APPDIR/tideway.png"
+# Icon — copy assets/icon.png into the AppDir's hicolor tree and
+# symlink it to the AppDir root, where appimagetool expects to
+# find a tideway.png matching the .desktop file's Icon= field.
+ICON_SRC="assets/icon.png"
+if [ ! -f "$ICON_SRC" ]; then
+  echo "No icon found at $ICON_SRC. Run scripts/build_icons.sh to produce it." >&2
+  exit 1
 fi
+cp "$ICON_SRC" "$APPDIR/usr/share/icons/hicolor/256x256/apps/tideway.png"
+ln -sf usr/share/icons/hicolor/256x256/apps/tideway.png "$APPDIR/tideway.png"
 
 # AppRun is the entry script the AppImage runtime invokes. Must be
 # executable.
