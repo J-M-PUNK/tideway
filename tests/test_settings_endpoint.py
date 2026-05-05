@@ -62,12 +62,6 @@ def test_put_force_volume_persists(client):
     assert r.json()["force_volume"] is True
 
 
-def test_put_start_minimized_persists(client):
-    r = client.put("/api/settings", json={"start_minimized": True})
-    assert r.status_code == 200
-    assert r.json()["start_minimized"] is True
-
-
 def test_put_explicit_content_preference_persists(client):
     for value in ("clean", "both", "explicit"):
         r = client.put(

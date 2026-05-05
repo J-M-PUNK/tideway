@@ -683,15 +683,23 @@ def _install_drag_monitor(nswindow) -> None:
         except Exception:
             pass
 
-    # Width of the corner zones we leave for the OS resize cursor.
-    # Clicks within this many points of the left or right window
-    # edge fall through to the OS (which then engages its top-left
-    # / top-right corner resize). Without this, our drag monitor
-    # would steal clicks meant for resize. ~10pt matches what
-    # AppKit treats as the corner hit-zone for standard windows;
-    # a tighter value misses near-corner clicks, a looser value
-    # eats too much real drag space.
+    # Width of the right-side corner zone we leave for the OS
+    # resize cursor. Clicks within this many points of the right
+    # edge fall through so the OS engages its top-right corner
+    # resize cursor. ~10pt matches what AppKit treats as the
+    # corner hit-zone for standard windows.
     _CORNER_RESIZE_ZONE_PT = 10
+    # Width of the LEFT-side zone we leave for the standard window
+    # buttons (close / minimize / zoom). The traffic-light cluster
+    # spans roughly x=[8, 62] in window coords on modern macOS;
+    # 78pt gives margin so clicks on the buttons fall through to
+    # AppKit's button handlers instead of being consumed by the
+    # drag monitor. Without this, the buttons are visible but
+    # unclickable — local NSEvent monitors run before normal
+    # event dispatch, so consuming a left-mouseDown by returning
+    # None starves the button handlers. Revisit if Apple changes
+    # the cluster layout.
+    _TRAFFIC_LIGHTS_ZONE_PT = 78
 
     def _handler(event):
         try:
@@ -711,12 +719,12 @@ def _install_drag_monitor(nswindow) -> None:
                 return event
             if location.y > window_height:
                 return event
-            # Skip the corner zones so the OS can engage its
-            # top-left / top-right resize cursor. Without this,
-            # the very top corners of the window are stuck as drag
-            # surface even though the OS would otherwise show a
-            # diagonal-resize cursor and let the user resize.
-            if location.x < float(_CORNER_RESIZE_ZONE_PT):
+            # Skip the left zone so clicks on the standard window
+            # buttons (close / minimize / zoom) reach AppKit
+            # instead of being eaten by performWindowDragWithEvent_.
+            # Skip the right corner zone so the OS still shows the
+            # top-right resize cursor.
+            if location.x < float(_TRAFFIC_LIGHTS_ZONE_PT):
                 return event
             if location.x > (window_width - float(_CORNER_RESIZE_ZONE_PT)):
                 return event
@@ -937,8 +945,8 @@ def find_pywebview_hwnd(window: object) -> Optional[int]:
             if pid.value != our_pid:
                 return True
             # Match by title when we have one — there can be multiple
-            # top-level windows per process (tray helper, mini player,
-            # WebView2 host children that escape parenting). When no
+            # top-level windows per process (mini player, WebView2
+            # host children that escape parenting). When no
             # title hint, pick the first visible top-level we own and
             # hope it's the main one.
             if target_title:

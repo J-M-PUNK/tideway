@@ -483,7 +483,7 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
           </TabsContent>
 
           <TabsContent value="autostart" className="mt-0">
-            <AutostartSection settings={settings} patch={patch} />
+            <AutostartSection />
           </TabsContent>
 
           <TabsContent value="lastfm" className="mt-0">
@@ -2871,13 +2871,7 @@ function LastFmSection() {
  * / reinstalled / moved. Component fetches its own status and writes
  * directly; no coupling to the Settings dataclass.
  */
-function AutostartSection({
-  settings,
-  patch,
-}: {
-  settings: Settings;
-  patch: (p: Partial<Settings>) => void;
-}) {
+function AutostartSection() {
   const toast = useToast();
   const [status, setStatus] = useState<{
     available: boolean;
@@ -2950,11 +2944,6 @@ function AutostartSection({
           </code>
         </div>
       )}
-      <Toggle
-        checked={settings.start_minimized}
-        onChange={(v) => patch({ start_minimized: v })}
-        label="Start in the tray without opening a window"
-      />
     </Section>
   );
 }

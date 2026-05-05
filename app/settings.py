@@ -171,10 +171,6 @@ class Settings:
     # user who had the old toggle off ends up with the new toggle on
     # — they can flip it off again if they didn't want it.
     continue_playing_after_queue_ends: bool = True
-    # Don't restore the main window on launch; go straight to the
-    # tray. Useful for "Launch on login" users who want Tideway
-    # running without grabbing focus each reboot.
-    start_minimized: bool = False
     # Spotify Developer app client_id, used by the Spotify → Tidal
     # playlist importer. Users register their own app at
     # developer.spotify.com and paste the id here. PKCE OAuth so we

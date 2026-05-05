@@ -51,12 +51,6 @@ datas = [
 if _version_file.is_file():
     datas.append((str(_version_file), "."))
 
-# Tray icon asset — desktop.py's _find_tray_icon() probes
-# <_MEIPASS>/assets/tray-icon.png first.
-_tray_icon = repo_root / "assets" / "tray-icon.png"
-if _tray_icon.is_file():
-    datas.append((str(_tray_icon), "assets"))
-
 binaries: list[tuple[str, str]] = []
 
 # Same collect_all set as the macOS spec — these packages have native
@@ -120,14 +114,6 @@ hiddenimports = [
     "pynput",
     "pynput.keyboard",
     "pynput.keyboard._xorg",
-    # Tray icon — pystray's Linux backend prefers libappindicator
-    # (works under GNOME with the AppIndicator extension, KDE, XFCE),
-    # falling back to a plain GTK status icon. We import both so the
-    # backend dispatch finds whichever the host happens to provide.
-    "pystray",
-    "pystray._appindicator",
-    "pystray._gtk",
-    "PIL.Image",
     "app.spotify_curl_session",
 ]
 

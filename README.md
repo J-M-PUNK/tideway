@@ -84,8 +84,7 @@ DLNA path covers WiiM, newer Bluesound, Cambridge, NAD, most
 network AVRs, and a long tail of cheaper Hi-Fi network bridges.
 See [docs/dlna-renderer.md](docs/dlna-renderer.md) for the
 DLNA-side details. Global media keys for play, pause, next, and previous
-work even when the window is minimized. A tray icon keeps playback
-running when you close the window, and there is an opt-in desktop
+work even when the window is minimized. There is an opt-in desktop
 notification on every track change.
 
 **Browsing and library.** Search, a unified Charts page (Popular,
@@ -206,10 +205,8 @@ glibc-based distro.
 >   Fedora: `libnotify`.
 >
 > Global media keys require an X11 session (Wayland will degrade —
-> the player still works, the global hotkeys do not). The tray icon
-> needs a desktop with AppIndicator support; on GNOME this means
-> the AppIndicator extension. ARM Linux (Raspberry Pi etc.) is not
-> built today.
+> the player still works, the global hotkeys do not). ARM Linux
+> (Raspberry Pi etc.) is not built today.
 
 ### Why the OS warns you on first launch
 
@@ -280,8 +277,8 @@ changes instantly.
 ### Desktop window (packaged shell)
 
 Anything that depends on the native pywebview window (macOS chrome,
-window drag, traffic lights, global media keys, tray icon) only
-exercises in the desktop shell. To launch it from source:
+window drag, traffic lights, global media keys) only exercises in
+the desktop shell. To launch it from source:
 
 ```bash
 (cd web && npm run build)

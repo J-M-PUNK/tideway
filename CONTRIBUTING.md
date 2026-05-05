@@ -65,8 +65,8 @@ Day-to-day frontend work, with hot module reload:
 ```
 
 To exercise the desktop pywebview window (chrome, drag, traffic
-lights, global media keys, tray icon), build the frontend then
-launch the desktop entry point:
+lights, global media keys), build the frontend then launch the
+desktop entry point:
 
 ```bash
 (cd web && npm run build)

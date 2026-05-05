@@ -46,12 +46,6 @@ datas = [
 if _version_file.is_file():
     datas.append((str(_version_file), "."))
 
-# Tray icon asset — desktop.py's _find_tray_icon() probes
-# <_MEIPASS>/assets/tray-icon.png first.
-_tray_icon = repo_root / "assets" / "tray-icon.png"
-if _tray_icon.is_file():
-    datas.append((str(_tray_icon), "assets"))
-
 # Audio + video I/O is handled entirely by PyAV (libav), which
 # ships its own libav binaries in its wheel — no external ffmpeg
 # needed anywhere in the app.
@@ -141,11 +135,6 @@ hiddenimports = [
     "Quartz",
     "AppKit",
     "Foundation",
-    # Tray icon (NSStatusItem on macOS). pystray's darwin backend
-    # pulls AppKit + pyobjc bridges via dynamic import.
-    "pystray",
-    "pystray._darwin",
-    "PIL.Image",
     # curl-cffi-backed transport for spotapi. Imported lazily inside
     # app.spotify_public._ensure_client; declare explicitly so
     # PyInstaller's static analysis picks it up regardless of whether
