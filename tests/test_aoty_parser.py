@@ -167,6 +167,72 @@ def test_parse_release_card_treats_zero_score_as_none():
     assert rows[0].score is None
 
 
+def test_parse_release_card_picks_user_score_over_critic():
+    """AOTY's release cards carry up to two `ratingRow` children: a
+    critic score (lower, smaller sample) and a user score (typically
+    higher, much larger sample). Tideway's other AOTY-driven
+    surfaces use the user score, so the New Releases row should too.
+    The fixture above only has the user row to keep that test focused
+    on shape; this one carries both, in production order (critic
+    first), and asserts the parser picks user."""
+    html = """
+<div class="albumBlock five small" data-type="">
+  <div class="image">
+    <a href="/album/1688844-american-football-american-football.php">
+      <img src="https://cdn2.albumoftheyear.org/200x0/album/1688844-american-football_140217.jpg" alt="American Football"/>
+    </a>
+  </div>
+  <a href="/artist/6846-american-football/"><div class="artistTitle">American Football</div></a>
+  <a href="/album/1688844-american-football-american-football.php"><div class="albumTitle">American Football</div></a>
+  <div class="ratingRowContainer">
+    <div class="ratingRow">
+      <div class="ratingBlock">
+        <div class="rating">74</div>
+      </div>
+      <div class="ratingText">critic score</div>
+      <div class="ratingText">(10)</div>
+    </div>
+    <div class="ratingRow">
+      <div class="ratingBlock">
+        <div class="rating">77</div>
+      </div>
+      <div class="ratingText">user score</div>
+      <div class="ratingText">(2,024)</div>
+    </div>
+  </div>
+</div>
+"""
+    rows = _parse_album_block_cards(html)
+    assert len(rows) == 1
+    a = rows[0]
+    assert a.score == 77, "expected user score (77), not critic (74)"
+    assert a.rating_count == 2024
+
+
+def test_parse_release_card_returns_none_when_only_critic_score():
+    """If a release has no user score yet (brand-new, nobody's rated),
+    we report None rather than falling back to the critic score —
+    consistent with the rest of the app showing user-driven scores."""
+    html = """
+<div class="albumBlock">
+  <div class="image"><a href="/x"><img src="https://x" alt="x"/></a></div>
+  <a href="/x"><div class="artistTitle">X</div></a>
+  <a href="/x"><div class="albumTitle">Y</div></a>
+  <div class="ratingRowContainer">
+    <div class="ratingRow">
+      <div class="ratingBlock"><div class="rating">88</div></div>
+      <div class="ratingText">critic score</div>
+      <div class="ratingText">(4)</div>
+    </div>
+  </div>
+</div>
+"""
+    rows = _parse_album_block_cards(html)
+    assert len(rows) == 1
+    assert rows[0].score is None
+    assert rows[0].rating_count is None
+
+
 def test_parse_release_card_handles_missing_cover():
     """Unreleased albums sometimes have a `noCover` block instead
     of an <img>. The parser should still emit the row with

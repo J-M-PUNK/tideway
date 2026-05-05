@@ -308,22 +308,43 @@ def _parse_album_block_cards(html: str) -> list[AotyAlbum]:
         if not artist or not title:
             continue
 
+        # AOTY's release cards carry up to two `.ratingRow` children:
+        # one labelled "critic score" and one labelled "user score".
+        # On `/releases/this-week/` both are present once a release has
+        # accumulated reviews, and they sit in that order — critic
+        # first, user second. We deliberately pick the user-score row
+        # to match the rest of the app: `Top albums of <year>` reads
+        # AOTY's user-rating chart, the album quality badges on detail
+        # pages reflect Tidal listener tags, etc. Showing a critic
+        # average on the New Releases row was a parser regression
+        # (the fixture for this test only carried the user row, so the
+        # `.rating` first-match selector worked there but pulled the
+        # critic average in production).
         score: Optional[int] = None
-        rating = block.select_one(".rating")
-        if rating is not None:
-            try:
-                value = int(rating.get_text(strip=True))
-                # AOTY shows "NR" or empty for no-rating yet; an
-                # explicit 0 is also "no real rating yet" rather
-                # than "literally 0/100", so surface that as None
-                # too.
-                score = value if value > 0 else None
-            except ValueError:
-                score = None
-
-        rating_count = _parse_rating_count(
-            block.select_one(".ratingText:nth-of-type(2)")
-        ) or _parse_rating_count(block.select_one(".ratingText + .ratingText"))
+        rating_count: Optional[int] = None
+        for row in block.select(".ratingRow"):
+            text_els = row.select(".ratingText")
+            label = (
+                text_els[0].get_text(strip=True).lower() if text_els else ""
+            )
+            if "user" not in label:
+                continue
+            rating = row.select_one(".rating")
+            if rating is not None:
+                try:
+                    value = int(rating.get_text(strip=True))
+                    # AOTY shows "NR" or empty for no-rating yet; an
+                    # explicit 0 is also "no real rating yet" rather
+                    # than "literally 0/100", so surface that as None
+                    # too.
+                    score = value if value > 0 else None
+                except ValueError:
+                    score = None
+            # The second `.ratingText` carries the count, e.g. "(304)"
+            # or "(2,024)".
+            if len(text_els) >= 2:
+                rating_count = _parse_rating_count(text_els[1])
+            break
 
         cover_url: Optional[str] = None
         img = block.select_one(".image img")
