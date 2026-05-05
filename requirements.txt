@@ -1,6 +1,6 @@
 tidalapi>=0.8.11
 mutagen>=1.47.0
-requests>=2.31.0
+requests>=2.33.1
 # TLS-impersonation HTTP client. We patch tidalapi's request_session to
 # use a curl-cffi Session whose ClientHello and HTTP/2 SETTINGS match a
 # real mobile-Chrome stack, so anti-abuse layers can't fingerprint us
