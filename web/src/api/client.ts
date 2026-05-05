@@ -923,7 +923,7 @@ export const api = {
         preamp: number | null;
         band_count: number;
         frequencies: number[];
-        presets: { index: number; name: string }[];
+        presets: { index: number; name: string; bands: number[] }[];
       }>("/api/player/eq"),
     setEq: (bands: number[], preamp: number | null) =>
       req<{
@@ -944,6 +944,174 @@ export const api = {
       req<{ ok: boolean; enabled: boolean }>("/api/player/eq/enabled", {
         method: "POST",
         body: JSON.stringify({ enabled }),
+      }),
+    /** AutoEQ headphone-profile endpoints (see
+     *  docs/autoeq-headphone-profiles-scope.md). The profile
+     *  catalog is bundled in the desktop app; the picker fetches
+     *  matches from the index built at server startup. */
+    autoEqList: (q: string, limit = 50) =>
+      req<{
+        total: number;
+        profiles: {
+          id: string;
+          brand: string;
+          model: string;
+          source: string;
+          preamp_db: number;
+          band_count: number;
+        }[];
+      }>(`/api/eq/profiles?q=${encodeURIComponent(q)}&limit=${limit}`),
+    autoEqState: () =>
+      req<{
+        mode: "off" | "manual" | "profile";
+        enabled: boolean;
+        bypass: boolean;
+        active_profile_id: string;
+        active_profile: {
+          id: string;
+          brand: string;
+          model: string;
+          source: string;
+          preamp_db: number;
+          band_count: number;
+        } | null;
+        manual_bands: number[];
+        manual_preamp_db: number | null;
+        profile_catalog_size: number;
+        tilt: {
+          preamp_offset_db: number;
+          bass_db: number;
+          treble_db: number;
+        };
+      }>("/api/eq/state"),
+    autoEqLoadProfile: (profileId: string) =>
+      req<{
+        ok: boolean;
+        mode: string;
+        active_profile_id: string;
+        active_profile: {
+          id: string;
+          brand: string;
+          model: string;
+          source: string;
+          preamp_db: number;
+          band_count: number;
+          bands: {
+            filter_type: string;
+            freq_hz: number;
+            gain_db: number;
+            q: number;
+          }[];
+        };
+      }>("/api/eq/load-profile", {
+        method: "POST",
+        body: JSON.stringify({ profile_id: profileId }),
+      }),
+    autoEqSetMode: (mode: "off" | "manual" | "profile") =>
+      req<{ ok: boolean; mode: string; enabled: boolean }>("/api/eq/mode", {
+        method: "POST",
+        body: JSON.stringify({ mode }),
+      }),
+    /** Phase 4 A/B bypass — momentary disable that preserves the
+     *  active profile / bands. Toggling back is instant. */
+    autoEqSetBypass: (bypass: boolean) =>
+      req<{ ok: boolean; bypass: boolean }>("/api/eq/bypass", {
+        method: "POST",
+        body: JSON.stringify({ bypass }),
+      }),
+    /** Import a PEQ.txt file from the user (or generated on
+     *  autoeq.app with a non-default target). Validates against the
+     *  same parser bundled / catalog profiles go through; surfaces
+     *  per-line parse errors so the user knows which line is wrong.
+     *  Lands under `User imported/<headphone>/...` in the cache. */
+    autoEqImportProfile: (
+      headphone_name: string,
+      content: string,
+      overwrite = false,
+    ) =>
+      req<{ ok: boolean; profile_id: string; headphone: string }>(
+        "/api/eq/import-profile",
+        {
+          method: "POST",
+          body: JSON.stringify({ headphone_name, content, overwrite }),
+        },
+      ),
+    /** Delete a user-imported profile. Refuses to delete bundled
+     *  profiles (those ship with the app and come back on reinstall).
+     *  If the deleted profile was active, the server clears the
+     *  active selection too. */
+    autoEqDeleteProfile: (profile_id: string) =>
+      req<{ ok: boolean; profile_id: string; cleared_active: boolean }>(
+        "/api/eq/delete-profile",
+        {
+          method: "POST",
+          body: JSON.stringify({ profile_id }),
+        },
+      ),
+    /** Phase 6 frequency-response data for the FR graph. Returns
+     *  three parallel arrays — raw measured curve, target curve,
+     *  predicted post-EQ — at log-spaced frequencies. Raw + target
+     *  may be null when the headphone's measurement CSV isn't
+     *  bundled. Computed against the player's current sample rate. */
+    autoEqResponse: (points = 512) =>
+      req<{
+        frequencies_hz: number[];
+        raw_db: number[] | null;
+        target_db: number[] | null;
+        post_eq_db: number[];
+        sample_rate_hz: number;
+        has_measurement: boolean;
+      }>(`/api/eq/response?points=${points}`),
+    /** Phase 5 user-tilt — bass / treble shelves + preamp offset
+     *  stacked on top of the profile. Each field is optional;
+     *  omitting one leaves it unchanged on the server. */
+    autoEqSetTilt: (tilt: {
+      preamp_offset_db?: number;
+      bass_db?: number;
+      treble_db?: number;
+    }) =>
+      req<{
+        ok: boolean;
+        tilt: {
+          preamp_offset_db: number;
+          bass_db: number;
+          treble_db: number;
+        };
+      }>("/api/eq/tilt", {
+        method: "POST",
+        body: JSON.stringify(tilt),
+      }),
+    /** AutoEQ per-device profile mapping (Phase 3). Returns the
+     *  list of seen output devices, each tagged with its mapped
+     *  profile id (or null = "EQ off for this device", or
+     *  unmapped = "use the fallback rule"). */
+    autoEqDevices: () =>
+      req<{
+        devices: {
+          fingerprint: string;
+          display_name: string;
+          kind: string;
+          first_seen: number;
+          last_seen: number;
+          mapped_profile_id: string | null;
+          unmapped?: boolean;
+        }[];
+        current_fingerprint: string;
+        fallback_when_unmapped: "bypass" | "use_last_profile";
+      }>("/api/eq/devices"),
+    autoEqSetDeviceMapping: (fingerprint: string, profileId: string | null) =>
+      req<{
+        ok: boolean;
+        fingerprint: string;
+        profile_id: string | null;
+      }>("/api/eq/device-mappings", {
+        method: "POST",
+        body: JSON.stringify({ fingerprint, profile_id: profileId }),
+      }),
+    autoEqForgetDevice: (fingerprint: string) =>
+      req<{ ok: boolean; removed: boolean }>("/api/eq/forget-device", {
+        method: "POST",
+        body: JSON.stringify({ fingerprint }),
       }),
     outputDevices: () =>
       req<{

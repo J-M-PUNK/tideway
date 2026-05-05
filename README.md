@@ -62,10 +62,23 @@ gapless. Transitions that change sample rate reopen the output
 stream and bridge across roughly fifty milliseconds, which is the
 same limitation Tidal desktop and foobar2000 have.
 
-A 10 band parametric equalizer is available with presets and a
-preamp. The output device picker lists every USB DAC, Bluetooth
-sink, and builtin option the OS exposes, and you can switch mid
-playback. Global media keys for play, pause, next, and previous
+A parametric equalizer runs in three modes. **Off** bypasses the
+EQ stage entirely, leaving the audio bit-perfect. **Manual** gives
+you a 10-band parametric EQ with presets (each shown with a tiny
+SVG curve preview so you can recognise the shape), a preamp, and
+shelf filters at the ends. **Profile** loads a per-headphone
+[AutoEQ](https://github.com/jaakkopasanen/AutoEq) correction file
+so your headphones target neutral, Harman, or B&K. Profiles are
+user-imported (`ParametricEQ.txt` from AutoEQ or `.txt` from
+Equalizer APO), with optional bass, treble, and preamp tilt
+sliders stacked on top, an A/B bypass to compare on the fly, a
+frequency-response graph that visualises the cumulative shape,
+and per-device profile mapping so different headphones plugged
+into different DACs each apply their own correction
+automatically. See [docs/eq-and-autoeq.md](docs/eq-and-autoeq.md)
+for the full guide. The output device picker lists every USB DAC,
+Bluetooth sink, and builtin option the OS exposes, and you can
+switch mid playback. Global media keys for play, pause, next, and previous
 work even when the window is minimized. A tray icon keeps playback
 running when you close the window, and there is an opt-in desktop
 notification on every track change.

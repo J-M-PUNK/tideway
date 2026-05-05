@@ -17,7 +17,8 @@ import {
   Sparkles,
 } from "lucide-react";
 import type { OnDownload } from "@/api/download";
-import type { CreditEntry, Lyrics } from "@/api/types";
+import type { CreditEntry, Lyrics, StreamInfo } from "@/api/types";
+import { useAutoEqState } from "@/hooks/useAutoEqState";
 import { useCoverColor } from "@/hooks/useCoverColor";
 import { useCredits } from "@/hooks/useCredits";
 import { useIsDownloaded } from "@/hooks/useDownloadedSet";
@@ -53,7 +54,8 @@ export function FullScreenPlayer({
   onClose: () => void;
   onDownload: OnDownload;
 }) {
-  const { track, playing, loading, shuffle, repeat, hasPrev } = usePlayerMeta();
+  const { track, playing, loading, shuffle, repeat, hasPrev, streamInfo } =
+    usePlayerMeta();
   const { currentTime, duration } = usePlayerTime();
   const actions = usePlayerActions();
 
@@ -184,6 +186,8 @@ export function FullScreenPlayer({
           {activeTab === "similar" && <SimilarPlaceholder />}
         </div>
       </div>
+
+      <SignalPathStrip open={open} streamInfo={streamInfo} />
 
       {/* Footer controls */}
       <div className="border-t border-white/10 bg-black/30 px-6 py-4 backdrop-blur-sm">
@@ -514,4 +518,91 @@ function useActiveLyric(lyrics: Lyrics | null, currentTime: number): number {
     }
     return idx;
   }, [lyrics, currentTime]);
+}
+
+/**
+ * One-line "what's actually happening to the audio" summary plus
+ * an A/B bypass button — Phase 4 of the AutoEQ scope. Reads
+ * stream codec / sample rate from the player snapshot and EQ
+ * mode / profile / bypass from the AutoEQ state endpoint.
+ *
+ * Hidden when the AutoEQ state endpoint isn't reachable (older
+ * server build) — the strip is purely informational and
+ * shouldn't take down the FullScreenPlayer if it can't load.
+ *
+ * Only fetches state while the player is open — no point
+ * polling the EQ state when the user can't see the strip.
+ */
+function SignalPathStrip({
+  open,
+  streamInfo,
+}: {
+  open: boolean;
+  streamInfo: StreamInfo | null;
+}) {
+  const { state, setBypass } = useAutoEqState(open);
+  if (state === null) return null;
+
+  const eqLabel =
+    state.mode === "off" || !state.enabled
+      ? "EQ off"
+      : state.mode === "profile" && state.active_profile
+        ? `${state.active_profile.brand} ${state.active_profile.model}`
+        : state.mode === "manual"
+          ? "Manual EQ"
+          : "EQ off";
+
+  // Only show the bypass button when an EQ is actually active —
+  // there's nothing to A/B compare when EQ is off / no profile.
+  const eqIsActive =
+    state.enabled &&
+    state.mode !== "off" &&
+    (state.mode === "manual" || state.active_profile !== null);
+
+  const formatLabel = streamInfo
+    ? `${streamInfo.codec || "?"}${
+        streamInfo.sample_rate_hz
+          ? ` ${(streamInfo.sample_rate_hz / 1000).toFixed(streamInfo.sample_rate_hz % 1000 === 0 ? 0 : 1)}kHz`
+          : ""
+      }${streamInfo.bit_depth ? ` / ${streamInfo.bit_depth}-bit` : ""}`
+    : null;
+
+  return (
+    <div className="flex flex-wrap items-center justify-center gap-3 border-t border-white/5 bg-black/20 px-6 py-2 text-[11px] text-foreground/60">
+      <div className="flex flex-wrap items-center gap-2 truncate font-mono">
+        {formatLabel && (
+          <>
+            <span>{formatLabel}</span>
+            <span className="text-foreground/30">→</span>
+          </>
+        )}
+        <span
+          className={cn(
+            state.bypass
+              ? "text-foreground/40 line-through"
+              : eqIsActive
+                ? "text-foreground/90"
+                : "text-foreground/60",
+          )}
+        >
+          {eqLabel}
+        </span>
+      </div>
+      {eqIsActive && (
+        <button
+          type="button"
+          onClick={() => void setBypass(!state.bypass)}
+          className={cn(
+            "rounded px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider transition-colors",
+            state.bypass
+              ? "bg-foreground/10 text-foreground/60 hover:bg-foreground/20"
+              : "bg-primary text-primary-foreground hover:bg-primary/80",
+          )}
+          title="Toggle EQ on / off for A/B comparison"
+        >
+          {state.bypass ? "EQ Bypassed" : "EQ On"}
+        </button>
+      )}
+    </div>
+  );
 }

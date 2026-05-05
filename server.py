@@ -526,6 +526,23 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     _cleanup_part_files(output_root)
     local_index.start_scan(output_root)
 
+    # Load the AutoEQ profile catalog from BOTH the bundled
+    # snapshot (~7 starter profiles) AND the user's cache dir
+    # populated by Phase 7's "Update profile catalog" button.
+    # Cache wins on conflict — if a downloaded version exists
+    # for a profile we also bundle, the downloaded one (likely
+    # newer) takes precedence. Missing dirs are silently
+    # skipped.
+    try:
+        from app.audio.autoeq.index import INDEX as _AUTOEQ_INDEX
+        from app.audio.autoeq.index import default_data_dir as _autoeq_data_dir
+        from app.audio.autoeq.updater import cache_dir as _autoeq_cache_dir
+        _AUTOEQ_INDEX.load_directories(
+            [_autoeq_data_dir(), _autoeq_cache_dir()]
+        )
+    except Exception as exc:
+        print(f"[autoeq] startup index load failed: {exc}", flush=True)
+
     # Start the global media-key listener. Publishes events to
     # _hotkey_bus → /api/hotkey/events SSE → frontend maps to
     # usePlayer actions. On macOS, pynput needs Accessibility
@@ -4228,10 +4245,66 @@ def _native_player() -> PCMPlayer:
     if not _player_bootstrapped:
         _player_bootstrapped = True
         try:
-            if settings.eq_enabled and settings.eq_bands:
+            # Rationalise eq_mode + eq_enabled. A hand-edited
+            # settings.json could leave them inconsistent (e.g.
+            # eq_mode="manual" with eq_enabled=False) which would
+            # render as "Manual mode selected" in the UI but no
+            # audible EQ — mode picker lying about reality. Force
+            # eq_enabled to track eq_mode here so the picker and
+            # the audio path agree.
+            if settings.eq_mode == "off" and settings.eq_enabled:
+                settings.eq_enabled = False
+            elif settings.eq_mode in ("manual", "profile") and not settings.eq_enabled:
+                # Don't auto-flip True — a False eq_enabled was the
+                # legacy way to disable EQ entirely. Honour it but
+                # also normalise the mode so the UI's mode picker
+                # shows what's actually happening.
+                settings.eq_mode = "off"
+            # Restore EQ. Profile mode takes priority over the
+            # legacy manual-bands path when both happen to be
+            # set.
+            if (
+                settings.eq_enabled
+                and settings.eq_mode == "profile"
+                and settings.eq_active_profile_id
+            ):
+                try:
+                    from app.audio.autoeq.index import INDEX
+                    profile = INDEX.get(settings.eq_active_profile_id)
+                    if profile is not None:
+                        _pcm_player_singleton.apply_equalizer_profile(profile)
+                except Exception:
+                    log = logging.getLogger("autoeq.bootstrap")
+                    log.exception("autoeq profile restore failed")
+            elif settings.eq_enabled and settings.eq_bands:
                 _pcm_player_singleton.apply_equalizer(
                     settings.eq_bands, preamp=settings.eq_preamp
                 )
+            # Restore A/B bypass flag (Phase 4) — `apply_equalizer`
+            # / `apply_equalizer_profile` above don't touch it, so
+            # the persisted bypass value gets re-applied on top.
+            if settings.eq_bypass:
+                _pcm_player_singleton.set_equalizer_bypass(True)
+            # Restore Phase 5 tilt. Setting it after the profile
+            # restore means the cascade rebuild includes the tilt
+            # shelves on the very first stream — user doesn't
+            # have to nudge a slider to "wake it up."
+            if (
+                settings.eq_tilt_preamp_offset_db
+                or settings.eq_tilt_bass_db
+                or settings.eq_tilt_treble_db
+            ):
+                try:
+                    from app.audio.autoeq.apply import TiltConfig
+                    tilt = TiltConfig(
+                        preamp_offset_db=settings.eq_tilt_preamp_offset_db,
+                        bass_db=settings.eq_tilt_bass_db,
+                        treble_db=settings.eq_tilt_treble_db,
+                    )
+                    _pcm_player_singleton.apply_equalizer_tilt(tilt)
+                except Exception:
+                    log = logging.getLogger("autoeq.bootstrap")
+                    log.exception("autoeq tilt restore failed")
             if settings.audio_output_device:
                 _pcm_player_singleton.set_output_device(
                     settings.audio_output_device
@@ -4746,6 +4819,729 @@ def player_eq_enabled(req: _PlayerEqEnabledRequest) -> dict:
     return {"ok": True, "enabled": settings.eq_enabled}
 
 
+# --- AutoEQ headphone profiles ---------------------------------------------
+# See docs/autoeq-headphone-profiles-scope.md. Phase 2 endpoints:
+# search/list profiles, fetch one, get current state, switch mode,
+# load a profile. Phase 3 (per-device mapping) and 4-6 (A/B,
+# graphs, tilt) are separate PRs.
+
+
+def _profile_summary_dict(profile) -> dict:
+    """Lightweight profile shape for list endpoints — no bands."""
+    return {
+        "id": profile.profile_id,
+        "brand": profile.brand,
+        "model": profile.model,
+        "source": profile.source,
+        "preamp_db": profile.preamp_db,
+        "band_count": len(profile.bands),
+    }
+
+
+def _profile_detail_dict(profile) -> dict:
+    """Full profile shape with band details."""
+    return {
+        **_profile_summary_dict(profile),
+        "bands": [
+            {
+                "filter_type": b.filter_type,
+                "freq_hz": b.freq_hz,
+                "gain_db": b.gain_db,
+                "q": b.q,
+            }
+            for b in profile.bands
+        ],
+    }
+
+
+@app.get("/api/eq/profiles")
+def autoeq_profiles_list(q: str = "", limit: int = 50) -> dict:
+    """Search the bundled AutoEQ catalog. Empty query returns
+    the first `limit` profiles alphabetically — useful for the
+    picker's first paint before the user types anything."""
+    _require_local_access()
+    from app.audio.autoeq.index import INDEX
+
+    limit = max(1, min(int(limit), 200))
+    matches = INDEX.search(q, limit=limit)
+    return {
+        "total": INDEX.count(),
+        "profiles": [_profile_summary_dict(p) for p in matches],
+    }
+
+
+@app.get("/api/eq/profiles/{profile_id:path}")
+def autoeq_profile_detail(profile_id: str) -> dict:
+    """Full profile details including band list. `:path` so IDs
+    with embedded slashes ("oratory1990/Sennheiser HD 600") round-
+    trip without manual URL escaping."""
+    _require_local_access()
+    from app.audio.autoeq.index import INDEX
+
+    profile = INDEX.get(profile_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail=f"profile not found: {profile_id}")
+    return _profile_detail_dict(profile)
+
+
+@app.get("/api/eq/state")
+def autoeq_state() -> dict:
+    """Current EQ state — what mode the user is in, what profile
+    (if any) is active, and the current manual bands. Frontend
+    reads this on mount + on every settings update so the EQ
+    panel reflects reality."""
+    _require_local_access()
+    from app.audio.autoeq.index import INDEX
+
+    active_profile = None
+    if settings.eq_active_profile_id:
+        p = INDEX.get(settings.eq_active_profile_id)
+        if p is not None:
+            active_profile = _profile_summary_dict(p)
+    return {
+        "mode": settings.eq_mode,
+        "enabled": settings.eq_enabled,
+        "bypass": settings.eq_bypass,
+        "active_profile_id": settings.eq_active_profile_id,
+        "active_profile": active_profile,
+        "manual_bands": list(settings.eq_bands),
+        "manual_preamp_db": settings.eq_preamp,
+        "profile_catalog_size": INDEX.count(),
+        "tilt": {
+            "preamp_offset_db": settings.eq_tilt_preamp_offset_db,
+            "bass_db": settings.eq_tilt_bass_db,
+            "treble_db": settings.eq_tilt_treble_db,
+        },
+    }
+
+
+# --- Phase 7 catalog updates -------------------------------------------------
+#
+# Update state (manifest cache + download progress) lives in
+# `app.audio.autoeq.updater` under one lock — server.py is a thin
+# adapter from HTTP to those module-level helpers. The earlier
+# duplicated-state setup made progress + manifest cache separate
+# locks, which was a race waiting to happen; the consolidation
+# fix is part of the deploy PR's pre-release cleanup.
+
+
+def _autoeq_data_dir_path():
+    """Bundled-data root. Imported lazily to keep the autoeq
+    package off server.py's startup import path."""
+    from app.audio.autoeq.index import default_data_dir
+    return default_data_dir()
+
+
+
+
+
+class _AutoEqImportRequest(BaseModel):
+    headphone_name: str  # used for both the directory name and the display name
+    content: str  # raw text of a `<headphone> ParametricEQ.txt` file
+    overwrite: bool = False  # opt-in replacement of an existing same-named import
+
+
+# Local-only namespace under which user-imported profiles live in the
+# cache dir. Mirrors AutoEQ's `<source>/<headphone>/` layout so the
+# index walker doesn't need a special case — the only thing it doesn't
+# match is anything in the upstream manifest, which is what makes
+# imports show up in the picker as a distinct group.
+_USER_IMPORTED_SOURCE = "User imported"
+
+
+class _AutoEqDeleteRequest(BaseModel):
+    profile_id: str
+
+
+@app.post("/api/eq/delete-profile")
+def autoeq_delete_profile(req: _AutoEqDeleteRequest) -> dict:
+    """Delete a user-imported profile from the cache. Refuses to
+    delete bundled profiles (the ones shipped under
+    `app/audio/autoeq/data/results/...`) — those live alongside
+    the source code and aren't user-removable through the UI; they
+    come back on next install anyway.
+
+    If the deleted profile was the active one, clears the active
+    selection and stops applying it. Caller's UI should refresh
+    the EQ state after this returns.
+    """
+    _require_local_access()
+    from app.audio.autoeq import updater
+    from app.audio.autoeq.index import INDEX, default_data_dir
+
+    pid = req.profile_id
+    if not pid.startswith(_USER_IMPORTED_SOURCE + "/"):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Only user-imported profiles can be deleted. Bundled "
+                "profiles ship with the app."
+            ),
+        )
+
+    parts = pid.split("/", 1)
+    if len(parts) != 2 or not parts[1]:
+        raise HTTPException(
+            status_code=400,
+            detail=f"profile_id has unexpected shape: {pid!r}",
+        )
+    headphone = parts[1]
+
+    profile_dir = updater.cache_dir() / _USER_IMPORTED_SOURCE / headphone
+    if not profile_dir.exists():
+        raise HTTPException(
+            status_code=404,
+            detail=f"profile {pid!r} not found on disk",
+        )
+
+    # Best-effort recursive remove. If something else (Finder,
+    # Spotlight) has a file open we may get an error — surface it
+    # rather than leaving a partial-delete state hidden.
+    import shutil
+    try:
+        shutil.rmtree(profile_dir)
+    except OSError as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"couldn't remove {profile_dir}: {exc}",
+        )
+
+    # If we just deleted the active profile, clear the active
+    # selection so the player doesn't keep referencing a stale id.
+    cleared_active = False
+    if settings.eq_active_profile_id == pid:
+        settings.eq_active_profile_id = ""
+        save_settings(settings)
+        try:
+            _native_player().apply_equalizer([])
+        except Exception:
+            log = logging.getLogger("autoeq.delete")
+            log.exception("apply_equalizer([]) after delete failed")
+        cleared_active = True
+
+    # Reload the index so the deleted profile drops out of the
+    # listing immediately (otherwise it'd stay until a separate
+    # action triggered the next reload).
+    try:
+        INDEX.load_directories([default_data_dir(), updater.cache_dir()])
+    except Exception:
+        log = logging.getLogger("autoeq.delete")
+        log.exception("post-delete index reload failed")
+
+    return {"ok": True, "profile_id": pid, "cleared_active": cleared_active}
+
+
+@app.post("/api/eq/import-profile")
+def autoeq_import_profile(req: _AutoEqImportRequest) -> dict:
+    """Import a PEQ.txt file from the user's filesystem (or generated
+    on autoeq.app with a non-default target curve) as a custom
+    profile. Lives under `User imported/<headphone>/...` in the
+    cache dir; AutoEQ's catalog manifest never produces that source
+    name so user imports stay distinct.
+
+    Validates by running the same parser the bundled / downloaded
+    profiles go through. If the file isn't a valid AutoEQ
+    ParametricEQ.txt, we surface the parse error verbatim so the
+    user knows which line is wrong rather than seeing a generic
+    "couldn't import" toast.
+    """
+    _require_local_access()
+    from app.audio.autoeq import updater
+    from app.audio.autoeq.index import INDEX, default_data_dir
+    from app.audio.autoeq.profiles import AutoEqParseError, parse_profile_text
+
+    name = req.headphone_name.strip()
+    if not name:
+        raise HTTPException(
+            status_code=400,
+            detail="headphone_name is required (e.g. 'Sennheiser HD 600 (custom Harman 2017)')",
+        )
+    # Reject path-traversal-ish characters so the filename can't
+    # break out of the user_imported/ dir.
+    if any(c in name for c in ("/", "\\", "..", "\x00")):
+        raise HTTPException(
+            status_code=400,
+            detail="headphone_name can't contain slashes, '..', or null bytes",
+        )
+
+    # Sanity cap on PEQ.txt size. Real AutoEQ files are 1-3 KB; we
+    # accept up to ~256 KB to leave headroom for hand-edited mega-
+    # curves and BOM / CRLF noise. Without a cap a misuse / DoS
+    # POST could push hundreds of MB through the parser before
+    # rejection.
+    _PEQ_MAX_BYTES = 256 * 1024
+    if len(req.content.encode("utf-8")) > _PEQ_MAX_BYTES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"PEQ file is larger than {_PEQ_MAX_BYTES // 1024} KB. "
+                f"Real AutoEQ profiles are a few kilobytes — this is "
+                f"almost certainly the wrong file."
+            ),
+        )
+
+    try:
+        parse_profile_text(req.content)
+    except AutoEqParseError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail=f"PEQ file isn't a valid AutoEQ ParametricEQ.txt: {exc}",
+        )
+
+    target_dir = updater.cache_dir() / _USER_IMPORTED_SOURCE / name
+    target_file = target_dir / f"{name} ParametricEQ.txt"
+
+    if target_file.exists() and not req.overwrite:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"A profile named {name!r} already exists. Pass overwrite=true "
+                f"to replace it."
+            ),
+        )
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+    # Atomic write so a crash mid-import doesn't leave half a file
+    # the parser would later choke on. The .part file gets a uuid
+    # suffix so concurrent imports of the same name don't fight
+    # over a shared tempfile path. Cleanup-on-failure keeps stale
+    # .part files from accumulating in the cache dir.
+    import uuid as _uuid
+    tmp = target_dir / f".{_uuid.uuid4().hex}.part"
+    try:
+        tmp.write_text(req.content)
+        tmp.replace(target_file)
+    except OSError as exc:
+        # Best-effort cleanup. If unlink also fails the user has
+        # bigger problems (disk full, permissions, etc.) and the
+        # error message will reflect the original write failure.
+        try:
+            if tmp.exists():
+                tmp.unlink()
+        except OSError:
+            pass
+        raise HTTPException(
+            status_code=500,
+            detail=f"couldn't write profile to disk: {exc}",
+        )
+
+    # Reload the in-memory index so the new profile is selectable
+    # immediately.
+    try:
+        INDEX.load_directories([default_data_dir(), updater.cache_dir()])
+    except Exception:
+        log = logging.getLogger("autoeq.import")
+        log.exception("post-import index reload failed")
+
+    return {
+        "ok": True,
+        "profile_id": f"{_USER_IMPORTED_SOURCE}/{name}",
+        "headphone": name,
+    }
+
+
+@app.get("/api/eq/response")
+def autoeq_response(points: int = 512) -> dict:
+    """Frequency-response curves for the Phase 6 graph.
+
+    Returns four parallel arrays at log-spaced frequencies from
+    20 Hz to 20 kHz: raw measured, target curve, and post-EQ
+    predicted (raw + active cascade). The frontend overlays
+    these so the user can see what their EQ is doing — Roon-tier
+    visualisation.
+
+    `points` clamps to [64, 2048]; the default 512 is plenty for
+    smooth lines without being a payload-size concern.
+
+    Computed against the **player's current sample rate**, not a
+    hard-coded one — the cascade response near the high end
+    differs slightly between 44.1 kHz and 96 kHz playback. The
+    graph reflects the audio path the user is actually hearing.
+    """
+    _require_local_access()
+    points = max(64, min(int(points), 2048))
+
+    from app.audio.autoeq.apply import TiltConfig
+    from app.audio.autoeq.index import INDEX, default_data_dir
+    from app.audio.autoeq.response import compute_response
+
+    profile = (
+        INDEX.get(settings.eq_active_profile_id)
+        if settings.eq_active_profile_id
+        else None
+    )
+    tilt = TiltConfig(
+        preamp_offset_db=settings.eq_tilt_preamp_offset_db,
+        bass_db=settings.eq_tilt_bass_db,
+        treble_db=settings.eq_tilt_treble_db,
+    )
+    # Player's current rate, falling back to 48 kHz when nothing's
+    # loaded yet — cascade coefficients are mildly rate-dependent
+    # but the difference is sub-perceptual at the graph's resolution.
+    sample_rate = 48_000
+    try:
+        player = _native_player()
+        rate = getattr(player, "_stream_sample_rate", None)
+        if isinstance(rate, int) and rate > 0:
+            sample_rate = rate
+    except Exception:
+        pass
+
+    response = compute_response(
+        profile=profile,
+        tilt=tilt,
+        sample_rate=sample_rate,
+        data_root=default_data_dir(),
+        points=points,
+    )
+    return {
+        "frequencies_hz": response.frequencies_hz,
+        "raw_db": response.raw_db,
+        "target_db": response.target_db,
+        "post_eq_db": response.post_eq_db,
+        "sample_rate_hz": sample_rate,
+        "has_measurement": response.raw_db is not None,
+    }
+
+
+class _AutoEqTiltRequest(BaseModel):
+    preamp_offset_db: Optional[float] = None
+    bass_db: Optional[float] = None
+    treble_db: Optional[float] = None
+
+
+_TILT_RANGE_DB = 12.0  # ±12 dB matches the slider in the UI.
+
+
+@app.post("/api/eq/tilt")
+def autoeq_set_tilt(req: _AutoEqTiltRequest) -> dict:
+    """Update one or more tilt parameters. Each is optional —
+    omitting a field leaves its current setting unchanged, so
+    the slider's onChange handler can ship a single field at a
+    time without round-tripping the others.
+
+    Values are clamped to ±12 dB. Tilt only audibly affects
+    playback when in profile mode with a profile loaded; in
+    manual / off mode the values still persist (so they're
+    there when the user switches back to profile mode) but the
+    audio path doesn't run them."""
+    _require_local_access()
+
+    def _clamp(v: float) -> float:
+        # Pydantic's `Optional[float]` accepts NaN and Infinity by
+        # default — which would propagate into the biquad math as
+        # NaN audio samples or DC scale-by-infinity. Reject them
+        # before clamping rather than silently mapping inf to ±12.
+        import math
+        if not math.isfinite(v):
+            raise HTTPException(
+                status_code=400,
+                detail=f"tilt value {v!r} must be a finite number",
+            )
+        return max(-_TILT_RANGE_DB, min(_TILT_RANGE_DB, float(v)))
+
+    if req.preamp_offset_db is not None:
+        settings.eq_tilt_preamp_offset_db = _clamp(req.preamp_offset_db)
+    if req.bass_db is not None:
+        settings.eq_tilt_bass_db = _clamp(req.bass_db)
+    if req.treble_db is not None:
+        settings.eq_tilt_treble_db = _clamp(req.treble_db)
+    save_settings(settings)
+
+    # Rebuild the active cascade so the tilt change is audible
+    # immediately. No-op when not in profile mode (player does
+    # the gate internally).
+    try:
+        from app.audio.autoeq.apply import TiltConfig
+
+        tilt = TiltConfig(
+            preamp_offset_db=settings.eq_tilt_preamp_offset_db,
+            bass_db=settings.eq_tilt_bass_db,
+            treble_db=settings.eq_tilt_treble_db,
+        )
+        _native_player().apply_equalizer_tilt(tilt)
+    except Exception:
+        log = logging.getLogger("autoeq.tilt")
+        log.exception("apply_equalizer_tilt failed")
+
+    return {
+        "ok": True,
+        "tilt": {
+            "preamp_offset_db": settings.eq_tilt_preamp_offset_db,
+            "bass_db": settings.eq_tilt_bass_db,
+            "treble_db": settings.eq_tilt_treble_db,
+        },
+    }
+
+
+class _AutoEqBypassRequest(BaseModel):
+    bypass: bool
+
+
+@app.post("/api/eq/bypass")
+def autoeq_set_bypass(req: _AutoEqBypassRequest) -> dict:
+    """A/B bypass toggle. Disables the EQ stage without touching
+    the active configuration — toggling back is instant. The
+    state persists across restarts (so a user listening through
+    a baseline can leave it bypassed and have that survive a
+    relaunch)."""
+    _require_local_access()
+    settings.eq_bypass = bool(req.bypass)
+    save_settings(settings)
+    try:
+        _native_player().set_equalizer_bypass(settings.eq_bypass)
+    except Exception:
+        log = logging.getLogger("autoeq.bypass")
+        log.exception("set_equalizer_bypass failed")
+    return {"ok": True, "bypass": settings.eq_bypass}
+
+
+class _AutoEqLoadProfileRequest(BaseModel):
+    profile_id: str
+
+
+@app.post("/api/eq/load-profile")
+def autoeq_load_profile(req: _AutoEqLoadProfileRequest) -> dict:
+    """Switch to profile mode and apply the named profile. The
+    profile compiles to an SOS at the player's current sample
+    rate; on stream reopen the same profile is recompiled at
+    the new rate so the curve survives cross-rate transitions.
+    Persists `eq_mode = "profile"` and `eq_active_profile_id` so
+    the choice survives restart."""
+    _require_local_access()
+    from app.audio.autoeq.index import INDEX
+
+    profile = INDEX.get(req.profile_id)
+    if profile is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"profile not found: {req.profile_id}",
+        )
+
+    settings.eq_mode = "profile"
+    settings.eq_active_profile_id = req.profile_id
+    settings.eq_enabled = True
+    save_settings(settings)
+
+    player = _native_player()
+    try:
+        player.apply_equalizer_profile(profile)
+    except Exception as exc:
+        # Don't roll back the persisted settings — the profile is
+        # valid (we just parsed it from the index), so a transient
+        # apply failure is the player's problem, not the user's.
+        # Surface as a 500 so the UI knows the visual state hasn't
+        # changed even though settings did.
+        raise HTTPException(
+            status_code=500, detail=f"failed to apply profile: {exc}"
+        )
+
+    return {
+        "ok": True,
+        "mode": settings.eq_mode,
+        "active_profile_id": settings.eq_active_profile_id,
+        "active_profile": _profile_detail_dict(profile),
+    }
+
+
+class _AutoEqDeviceMappingRequest(BaseModel):
+    fingerprint: str
+    profile_id: Optional[str] = None  # None = "no EQ for this device"
+
+
+class _AutoEqForgetDeviceRequest(BaseModel):
+    fingerprint: str
+
+
+@app.get("/api/eq/devices")
+def autoeq_devices() -> dict:
+    """Seen output devices + their currently-mapped profiles.
+    Powers the per-device profile picker in Settings → Playback.
+
+    Includes a `current_fingerprint` field so the picker can
+    highlight / pin the active device. The fingerprint is
+    derived the same way the resolver does it — by looking up
+    the active device's name in the live device list."""
+    _require_local_access()
+    from app.audio.autoeq.seen_devices import STORE as _SEEN_STORE
+
+    seen = _SEEN_STORE.list()
+    # Decorate each seen device with its current mapping (if any)
+    # so the picker can render checkboxes / dropdowns inline.
+    for entry in seen:
+        fp = entry.get("fingerprint", "")
+        if fp in settings.eq_device_mappings:
+            entry["mapped_profile_id"] = settings.eq_device_mappings[fp]
+        else:
+            entry["mapped_profile_id"] = None
+            entry["unmapped"] = True
+
+    # Active fingerprint — what's currently driving playback.
+    current_fingerprint = ""
+    try:
+        device_list = _native_player().list_output_devices()
+        for entry in device_list:
+            if entry.get("id") == settings.audio_output_device:
+                current_fingerprint = entry.get("name") or ""
+                break
+    except Exception:
+        pass
+
+    return {
+        "devices": seen,
+        "current_fingerprint": current_fingerprint,
+        "fallback_when_unmapped": settings.eq_fallback_when_unmapped,
+    }
+
+
+@app.post("/api/eq/device-mappings")
+def autoeq_set_device_mapping(req: _AutoEqDeviceMappingRequest) -> dict:
+    """Set (or clear) the AutoEQ profile mapped to a specific
+    output device. `profile_id=null` explicitly mutes the EQ for
+    this device. To remove the mapping entirely (so the device
+    falls back to `eq_fallback_when_unmapped`), use the
+    `/api/eq/device-mappings/clear` endpoint."""
+    _require_local_access()
+    from app.audio.autoeq.index import INDEX
+
+    # Empty fingerprint would silently become a fallback-for-
+    # unknown-device entry: `autoeq_devices` reports
+    # `current_fingerprint=""` for any device the live OS list
+    # didn't expose, and a "" key would then masquerade as the
+    # mapping for those phantom devices. Reject before write.
+    if not req.fingerprint.strip():
+        raise HTTPException(
+            status_code=400,
+            detail="fingerprint must be non-empty",
+        )
+    if req.profile_id is not None and INDEX.get(req.profile_id) is None:
+        raise HTTPException(
+            status_code=404, detail=f"profile not found: {req.profile_id}"
+        )
+
+    settings.eq_device_mappings[req.fingerprint] = req.profile_id
+
+    # If this is the currently-active device and we're in profile
+    # mode, apply the new mapping immediately so the user hears
+    # the result without having to switch away and back.
+    try:
+        player = _native_player()
+        device_list = player.list_output_devices()
+        active_fp = ""
+        for entry in device_list:
+            if entry.get("id") == settings.audio_output_device:
+                active_fp = entry.get("name") or ""
+                break
+        if active_fp == req.fingerprint and settings.eq_mode == "profile":
+            if req.profile_id is None:
+                player.apply_equalizer([])
+                settings.eq_active_profile_id = ""
+            else:
+                profile = INDEX.get(req.profile_id)
+                if profile is not None:
+                    player.apply_equalizer_profile(profile)
+                    settings.eq_active_profile_id = req.profile_id
+    except Exception:
+        log = logging.getLogger("autoeq.resolver")
+        log.exception("autoeq apply-on-set failed")
+
+    save_settings(settings)
+    return {
+        "ok": True,
+        "fingerprint": req.fingerprint,
+        "profile_id": req.profile_id,
+    }
+
+
+@app.post("/api/eq/forget-device")
+def autoeq_forget_device(req: _AutoEqForgetDeviceRequest) -> dict:
+    """Remove a device from the seen-list and drop any mapping
+    it had. Doesn't affect the active device or the active
+    profile — just cleans up clutter in the picker."""
+    _require_local_access()
+    from app.audio.autoeq.seen_devices import STORE as _SEEN_STORE
+
+    removed = _SEEN_STORE.forget(req.fingerprint)
+    settings.eq_device_mappings.pop(req.fingerprint, None)
+    save_settings(settings)
+    return {"ok": True, "removed": removed}
+
+
+class _AutoEqModeRequest(BaseModel):
+    mode: str  # "off" | "manual" | "profile"
+
+
+@app.post("/api/eq/mode")
+def autoeq_set_mode(req: _AutoEqModeRequest) -> dict:
+    """Switch the EQ mode. Doesn't destroy the other mode's
+    state — switching profile → manual → profile lands the user
+    back at the same profile they had before."""
+    _require_local_access()
+    valid = {"off", "manual", "profile"}
+    if req.mode not in valid:
+        raise HTTPException(
+            status_code=400,
+            detail=f"mode must be one of {sorted(valid)}",
+        )
+
+    # Apply to the player FIRST, then write settings only if the
+    # apply succeeded. Old order set settings.eq_mode then called
+    # apply_equalizer, which would leave settings half-written if
+    # the player threw — disk would have the old mode but in-
+    # memory settings would have the new one, and the next request
+    # would see inconsistent state.
+    player = _native_player()
+    new_enabled: bool
+    try:
+        if req.mode == "off":
+            new_enabled = False
+            player.apply_equalizer([])
+        elif req.mode == "manual":
+            new_enabled = True
+            if settings.eq_bands:
+                player.apply_equalizer(
+                    settings.eq_bands, preamp=settings.eq_preamp
+                )
+            else:
+                player.apply_equalizer([])
+        elif req.mode == "profile":
+            from app.audio.autoeq.index import INDEX
+
+            new_enabled = True
+            if settings.eq_active_profile_id:
+                p = INDEX.get(settings.eq_active_profile_id)
+                if p is not None:
+                    player.apply_equalizer_profile(p)
+                else:
+                    # Profile previously selected was removed/renamed.
+                    # Bypass rather than crash; user picks a new one.
+                    player.apply_equalizer([])
+            else:
+                player.apply_equalizer([])
+        else:
+            # Belt-and-suspenders; we already validated `req.mode`
+            # against the {off, manual, profile} set at the top.
+            raise HTTPException(
+                status_code=400, detail=f"unhandled mode: {req.mode!r}"
+            )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=500,
+            detail=f"player.apply_equalizer failed for mode {req.mode!r}: {exc}",
+        )
+
+    settings.eq_mode = req.mode
+    settings.eq_enabled = new_enabled
+    save_settings(settings)
+    return {
+        "ok": True,
+        "mode": settings.eq_mode,
+        "enabled": settings.eq_enabled,
+    }
+
+
 @app.get("/api/player/output-devices")
 def player_output_devices() -> dict:
     _require_local_access()
@@ -4759,10 +5555,71 @@ def player_output_devices() -> dict:
 @app.post("/api/player/output-device")
 def player_set_output_device(req: _PlayerOutputDeviceRequest) -> dict:
     _require_local_access()
-    _native_player().set_output_device(req.device_id)
+    player = _native_player()
+    player.set_output_device(req.device_id)
     settings.audio_output_device = req.device_id
+
+    # Track this device in the seen-list so the user can map a
+    # profile to it later, and run the AutoEQ resolver to apply
+    # the matching profile (or fallback) if the user is in
+    # profile mode. No-op when in manual / off mode.
+    _autoeq_on_device_change(req.device_id)
+
     save_settings(settings)
     return {"ok": True, "device_id": settings.audio_output_device}
+
+
+def _autoeq_on_device_change(device_id: str) -> None:
+    """Bridge between an output-device change and the AutoEQ
+    per-device resolver. Resolves the device's fingerprint from
+    the active device list, upserts it into the seen-devices
+    store, then applies the resolver's decision to the player and
+    persists `eq_active_profile_id` if the resolver picked or
+    cleared a profile.
+
+    Failures here are logged + swallowed — a bug in the resolver
+    must not prevent the audio device switch from completing.
+    """
+    if settings.eq_mode != "profile":
+        return
+
+    try:
+        from app.audio.autoeq.index import INDEX
+        from app.audio.autoeq.resolver import resolve_for_device
+        from app.audio.autoeq.seen_devices import STORE as _SEEN_STORE
+
+        # Look up the human-readable device name (the fingerprint)
+        # from the active device list. The empty id == "system
+        # default" — we still upsert it so users with one device
+        # can map it.
+        player = _native_player()
+        device_list = player.list_output_devices()
+        fingerprint = ""
+        for entry in device_list:
+            if entry.get("id") == device_id:
+                fingerprint = entry.get("name") or ""
+                break
+        if not fingerprint:
+            return
+
+        _SEEN_STORE.upsert(fingerprint)
+
+        decision = resolve_for_device(
+            fingerprint,
+            device_mappings=dict(settings.eq_device_mappings),
+            fallback=settings.eq_fallback_when_unmapped,
+            current_active_profile_id=settings.eq_active_profile_id,
+            index=INDEX,
+        )
+
+        settings.eq_active_profile_id = decision.active_profile_id
+        if decision.profile is not None:
+            player.apply_equalizer_profile(decision.profile)
+        else:
+            player.apply_equalizer([])
+    except Exception:
+        log = logging.getLogger("autoeq.resolver")
+        log.exception("autoeq device-change resolver failed")
 
 
 # ---------------------------------------------------------------------------
@@ -7755,6 +8612,19 @@ class SettingsPayload(BaseModel):
     start_minimized: Optional[bool] = None
     explicit_content_preference: Optional[str] = None
     download_rate_limit_mbps: Optional[int] = None
+    eq_mode: Optional[str] = None
+    eq_active_profile_id: Optional[str] = None
+    eq_bypass: Optional[bool] = None
+    # `dict[str, Optional[str]]` matches the Settings field
+    # exactly: device fingerprint (string) → profile id (string)
+    # or `None` to mute the EQ for that device. The previous
+    # `Optional[dict]` would accept arbitrary nested structures
+    # via PUT /api/settings.
+    eq_device_mappings: Optional[dict[str, Optional[str]]] = None
+    eq_fallback_when_unmapped: Optional[str] = None
+    eq_tilt_preamp_offset_db: Optional[float] = None
+    eq_tilt_bass_db: Optional[float] = None
+    eq_tilt_treble_db: Optional[float] = None
 
 
 @app.get("/api/settings")
