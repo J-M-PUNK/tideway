@@ -217,6 +217,28 @@ class DiscoveredDevice:
 # against tidalapi's refresh path.
 TokenProvider = Callable[[], Optional[str]]
 
+# Silencer callback. Called with True when a TC session opens, False
+# when it closes. Tideway's PCMPlayer wires this to its
+# external-output flag so the local sounddevice output goes silent
+# while audio is being directed at the TC device. Mirrors the same
+# pattern Cast / OpenHome / DLNA use.
+LocalSilencer = Callable[[bool], None]
+
+# Track URL resolver. Tideway hands a Tidal track id to this and gets
+# back the full MediaInfo dict the device needs (signed stream URL +
+# metadata). The shape mirrors tidalConnect/mediaInfo.js in the
+# desktop client:
+#   {
+#     "itemId": str, "mediaId": str, "srcUrl": str,
+#     "streamType": str,            # "FLAC" / "DASH" / "HLS" / etc
+#     "metadata": {"title": str, "albumTitle": str,
+#                  "artists": list, "duration": int,
+#                  "images": list},
+#   }
+# Lives in server.py (it needs tidalapi); the manager just passes it
+# through to the connection's loadMediaInfo command.
+TrackUrlResolver = Callable[[int], dict]
+
 # Notification callback. Fires for every server-side notification
 # (`notifyPlayerStatusChanged`, `notifyMediaInfoChanged`, etc).
 # Receiving frame is the parsed JSON dict; the manager forwards
@@ -477,6 +499,82 @@ class TidalConnectRealManager:
     _loop_thread: Optional[threading.Thread] = field(default=None, init=False)
     _zeroconf: Any = field(default=None, init=False)
     _browser: Any = field(default=None, init=False)
+    _local_silencer: Optional[LocalSilencer] = field(default=None, init=False)
+    _track_url_resolver: Optional[TrackUrlResolver] = field(default=None, init=False)
+    # Snapshot of the device's last-reported state. Updated by the
+    # notification tap below. Fields mirror the player snapshot the
+    # frontend reads, so the status endpoint can serve from here
+    # without the UI branching on engine.
+    _remote_state: dict = field(default_factory=lambda: {
+        "player_state": "IDLE",   # device's notifyPlayerStatusChanged value
+        "position_ms": 0,
+        "duration_ms": 0,
+        "volume": 100,
+        "muted": False,
+        "media_info": None,        # last notifyMediaInfoChanged payload
+        "session_id": None,
+        "device_id": None,
+    }, init=False)
+    _remote_state_lock: threading.Lock = field(default_factory=threading.Lock, init=False)
+
+    def set_local_silencer(self, fn: LocalSilencer) -> None:
+        """Register the PCMPlayer external-output flag setter. Called
+        with True when a session opens, False when it closes."""
+        self._local_silencer = fn
+
+    def set_track_url_resolver(self, fn: TrackUrlResolver) -> None:
+        """Register a callable that turns a Tidal track id into a
+        MediaInfo dict. Owned by server.py because it needs tidalapi
+        for stream URL minting."""
+        self._track_url_resolver = fn
+
+    def remote_state(self) -> dict:
+        """Snapshot of the device's last-reported state. Safe to call
+        from any thread."""
+        with self._remote_state_lock:
+            return dict(self._remote_state)
+
+    def _record_notification(self, frame: dict) -> None:
+        """Tap that updates the manager's remote_state from the
+        device's notification frames before forwarding to the user
+        callback. Tracks playerState, position, volume, mute, media,
+        session id."""
+        with self._remote_state_lock:
+            cmd = frame.get("command")
+            if cmd == "notifyPlayerStatusChanged":
+                ps = frame.get("playerState")
+                if isinstance(ps, str):
+                    self._remote_state["player_state"] = ps
+                pos = frame.get("position")
+                if isinstance(pos, (int, float)):
+                    self._remote_state["position_ms"] = int(pos)
+            elif cmd == "notifyDeviceStatusChanged":
+                vol = frame.get("volume")
+                if isinstance(vol, (int, float)):
+                    self._remote_state["volume"] = int(vol)
+                mute = frame.get("mute")
+                if isinstance(mute, bool):
+                    self._remote_state["muted"] = mute
+            elif cmd == "notifyMediaInfoChanged":
+                self._remote_state["media_info"] = frame.get("mediaInfo")
+                meta = (frame.get("mediaInfo") or {}).get("metadata") or {}
+                duration = meta.get("duration")
+                if isinstance(duration, (int, float)):
+                    # Spec says metadata.duration is seconds.
+                    self._remote_state["duration_ms"] = int(duration * 1000)
+            elif cmd == "notifySessionStarted":
+                self._remote_state["session_id"] = frame.get("sessionId")
+
+    def _toggle_silencer(self, active: bool) -> None:
+        if self._local_silencer is None:
+            return
+        try:
+            self._local_silencer(active)
+        except Exception as exc:
+            log.warning(
+                "tidal_connect_real: silencer raised on active=%s: %s",
+                active, exc,
+            )
 
     def start(self) -> None:
         """Begin mDNS discovery in the background. Idempotent."""
@@ -537,19 +635,35 @@ class TidalConnectRealManager:
         if device is None:
             raise KeyError(f"unknown device: {device_id}")
 
+        # Notification wrapper: record into remote_state first, then
+        # forward to the user-supplied callback. The wrapper is what
+        # the connection sees, so internal state stays current even
+        # if the user's callback is lazy / no-op.
+        def _tap(frame: dict) -> None:
+            self._record_notification(frame)
+            try:
+                self.on_notification(frame)
+            except Exception as exc:
+                log.warning(
+                    "tidal_connect_real: on_notification raised: %s", exc,
+                )
+
         async def _do_connect() -> None:
             if self._connection is not None:
                 await self._connection.close()
             conn = TidalConnectConnection(
                 device=device,
                 token_provider=self.token_provider,
-                on_notification=self.on_notification,
+                on_notification=_tap,
             )
             await conn.open()
             self._connection = conn
 
         future = asyncio.run_coroutine_threadsafe(_do_connect(), self._loop)
         future.result(timeout=15.0)
+        with self._remote_state_lock:
+            self._remote_state["device_id"] = device.id
+        self._toggle_silencer(True)
 
     def disconnect(self) -> None:
         if self._loop is None or self._connection is None:
@@ -562,6 +676,18 @@ class TidalConnectRealManager:
         except Exception:
             pass
         self._connection = None
+        self._toggle_silencer(False)
+        with self._remote_state_lock:
+            # Reset remote-state so the snapshot endpoint reports
+            # idle once the session is gone.
+            self._remote_state.update({
+                "player_state": "IDLE",
+                "position_ms": 0,
+                "duration_ms": 0,
+                "media_info": None,
+                "session_id": None,
+                "device_id": None,
+            })
 
     def get_connection(self) -> Optional[TidalConnectConnection]:
         """Returns the current connection so the player can call
@@ -570,6 +696,59 @@ class TidalConnectRealManager:
 
     def is_active(self) -> bool:
         return self._connection is not None
+
+    # -- sync command wrappers -----------------------------------------------
+    # Each dispatches the connection's async method onto the manager's
+    # event-loop thread and waits for the result. Times out at 5s — the
+    # device should ack a command within a couple hundred ms; anything
+    # beyond that means a wedged WSS, and we'd rather raise than hang
+    # the request thread indefinitely.
+
+    def _call(self, coro_factory: Callable[[], Any], timeout: float = 5.0) -> dict:
+        if self._loop is None:
+            raise RuntimeError("manager not started")
+        if self._connection is None:
+            raise RuntimeError("no active TC session")
+        future = asyncio.run_coroutine_threadsafe(coro_factory(), self._loop)
+        return future.result(timeout=timeout)
+
+    def play(self) -> dict:
+        return self._call(lambda: self._connection.play())  # type: ignore[union-attr]
+
+    def pause(self) -> dict:
+        return self._call(lambda: self._connection.pause())  # type: ignore[union-attr]
+
+    def stop(self) -> dict:
+        return self._call(lambda: self._connection.stop())  # type: ignore[union-attr]
+
+    def next_track(self) -> dict:
+        return self._call(lambda: self._connection.next_track())  # type: ignore[union-attr]
+
+    def previous_track(self) -> dict:
+        return self._call(lambda: self._connection.previous_track())  # type: ignore[union-attr]
+
+    def seek(self, position_ms: int) -> dict:
+        return self._call(lambda: self._connection.seek(int(position_ms)))  # type: ignore[union-attr]
+
+    def set_volume(self, level: int) -> dict:
+        return self._call(lambda: self._connection.set_volume(int(level)))  # type: ignore[union-attr]
+
+    def set_mute(self, mute: bool) -> dict:
+        return self._call(lambda: self._connection.set_mute(bool(mute)))  # type: ignore[union-attr]
+
+    def load_track(self, track_id: int) -> dict:
+        """Resolve `track_id` via the URL resolver and send `loadMediaInfo`
+        to the device. Raises if no resolver is registered or the
+        resolver can't produce a stream URL."""
+        if self._track_url_resolver is None:
+            raise RuntimeError(
+                "no track URL resolver registered; "
+                "call set_track_url_resolver at startup"
+            )
+        media_info = self._track_url_resolver(int(track_id))
+        return self._call(
+            lambda: self._connection.load_media(media_info)  # type: ignore[union-attr]
+        )
 
     # -- discovery ----------------------------------------------------------
 

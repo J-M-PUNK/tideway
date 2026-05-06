@@ -1246,6 +1246,35 @@ export const api = {
         method: "POST",
       }),
   },
+  // Real Tidal Connect — talks the actual WSS protocol via
+  // app/audio/tidal_connect_real.py. Parallel to tidalConnect (which
+  // is the OpenHome-mimic path). Discovery is continuous (mDNS), so
+  // devices() just returns the cached snapshot without an active
+  // refresh.
+  tidalConnectReal: {
+    devices: () =>
+      req<{
+        devices: {
+          id: string;
+          name: string;
+          address: string;
+          port: number;
+        }[];
+        active_device_id: string | null;
+      }>("/api/tidal-connect-real/devices"),
+    connect: (deviceId: string) =>
+      req<{
+        ok: boolean;
+        device: { id: string; name: string; address: string; port: number };
+      }>("/api/tidal-connect-real/connect", {
+        method: "POST",
+        body: JSON.stringify({ device_id: deviceId }),
+      }),
+    disconnect: () =>
+      req<{ ok: boolean }>("/api/tidal-connect-real/disconnect", {
+        method: "POST",
+      }),
+  },
   dlna: {
     // Returns the cached device list without triggering a fresh
     // SSDP scan. Cheap and safe to poll. Use refresh() when the

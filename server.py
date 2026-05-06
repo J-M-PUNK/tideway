@@ -670,6 +670,120 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     except Exception as exc:
         print(f"[tidal-connect] startup wiring failed: {exc}", flush=True)
 
+    # Wire the real Tidal Connect controller. Sister of the OpenHome
+    # `tidal_connect` block above. Once verified against hardware,
+    # this supersedes the OpenHome path for any device discovered
+    # under `_tidalconnect._tcp.local`. See
+    # private/features/tidal-connect-real-spec.md for the migration
+    # plan.
+    #
+    # Phase A: just lifecycle. mDNS discovery runs in the background,
+    # but no UI surface yet, nothing routes commands to it, the
+    # local-output silencer isn't wired, and no URL resolver. Later
+    # phases add those.
+    #
+    # token_provider returns the Tidal user id as a string — that's
+    # the exact `sessionCredential` the official desktop client
+    # ships on `startSession` (verified against a fake-receiver rig;
+    # see private/tools/tidal-connect-capture/).
+    try:
+        from app.audio import tidal_connect_real as _tcr
+
+        def _tcr_user_id() -> Optional[str]:
+            try:
+                sess = getattr(tidal, "session", None)
+                user = getattr(sess, "user", None) if sess is not None else None
+                uid = getattr(user, "id", None) if user is not None else None
+                return str(uid) if uid is not None else None
+            except Exception:
+                return None
+
+        _tcr_mgr = _tcr.start_manager(
+            token_provider=_tcr_user_id,
+            on_notification=lambda _: None,
+        )
+        # Silencer mutes the local sounddevice output while a real-TC
+        # session is open, same flag Cast / OpenHome / DLNA all use.
+        # Audio still streams to its destination — this only gates
+        # the local playback path so the user doesn't hear two
+        # simultaneous outputs.
+        _tcr_mgr.set_local_silencer(
+            _native_player().set_external_output_active
+        )
+
+        def _tcr_url_resolver(track_id: int) -> dict:
+            """Tidal track id → MediaInfo dict for `loadMediaInfo`.
+
+            Mirrors the OpenHome resolver above but produces the
+            shape `tidalConnect/mediaInfo.js` documents:
+            {itemId, mediaId, srcUrl, streamType, metadata}. Same
+            tidalapi path as the OpenHome resolver — picks the
+            manifest's first URL as the stream URL and stamps
+            metadata for on-device display.
+
+            streamType: derived from the manifest's codec. Tidal's
+            FLAC paths come back as DASH; we only flag "FLAC" when
+            the codec string explicitly says so. Unknown codec ⇒
+            empty string and let the device infer."""
+            track = tidal.session.track(int(track_id))
+            stream = track.get_stream()
+            manifest = stream.get_stream_manifest()
+            urls = list(getattr(manifest, "urls", []) or [])
+            if not urls:
+                raise RuntimeError(
+                    f"track {track_id}: manifest has no URLs"
+                )
+            stream_url = urls[0]
+            artists_attr = getattr(track, "artists", None) or []
+            artists = [
+                {
+                    "id": int(getattr(a, "id", 0) or 0),
+                    "name": str(getattr(a, "name", "") or ""),
+                }
+                for a in artists_attr
+            ]
+            album = getattr(track, "album", None)
+            album_name = str(getattr(album, "name", "") or "") if album else ""
+            cover_id = getattr(album, "cover", None) if album else None
+            images: list[dict] = []
+            if cover_id:
+                base = (
+                    f"https://resources.tidal.com/images/"
+                    f"{str(cover_id).replace('-', '/')}"
+                )
+                images = [
+                    {"url": f"{base}/640x640.jpg", "width": 640, "height": 640},
+                    {"url": f"{base}/320x320.jpg", "width": 320, "height": 320},
+                ]
+            duration_s = int(getattr(track, "duration", 0) or 0)
+            codec = (
+                getattr(manifest, "codecs", None)
+                or getattr(manifest, "get_codecs", lambda: None)()
+                or ""
+            )
+            stream_type = (
+                "FLAC" if "flac" in str(codec).lower()
+                else str(codec).upper() if codec
+                else ""
+            )
+            return {
+                "itemId": str(track_id),
+                "mediaId": str(track_id),
+                "srcUrl": stream_url,
+                "streamType": stream_type,
+                "metadata": {
+                    "title": str(getattr(track, "name", "") or ""),
+                    "albumTitle": album_name,
+                    "artists": artists,
+                    "duration": duration_s,
+                    "images": images,
+                },
+            }
+
+        _tcr_mgr.set_track_url_resolver(_tcr_url_resolver)
+    except Exception as exc:
+        print(f"[tidal-connect-real] startup failed: {exc}", flush=True)
+
     # Wire the DLNA / UPnP renderer manager. Same silencer pattern
     # Cast and Tidal Connect use. When the user sends audio to a
     # DLNA target the local sounddevice output goes silent so the
@@ -769,6 +883,14 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         try:
             from app.audio.tidal_connect import get_manager as _tc_get_manager
             _tc_get_manager().disconnect()
+        except Exception:
+            pass
+        # Tear down the real Tidal Connect manager. Closes any active
+        # session so the device doesn't keep playing whatever was
+        # loaded, and stops the mDNS browser cleanly.
+        try:
+            from app.audio.tidal_connect_real import stop_manager as _tcr_stop
+            _tcr_stop()
         except Exception:
             pass
         if stop_hotkeys is not None:
@@ -4549,6 +4671,64 @@ def _tc_active() -> bool:
         return False
 
 
+def _tcr_active() -> bool:
+    """True if a real Tidal Connect (WSS) session is open. Checked
+    BEFORE `_tc_active()` in every divert: real-TC supersedes the
+    OpenHome path per the migration plan in
+    private/features/tidal-connect-real-spec.md."""
+    try:
+        from app.audio.tidal_connect_real import get_manager
+        mgr = get_manager()
+        return mgr is not None and mgr.is_active()
+    except Exception:
+        return False
+
+
+def _tcr_snapshot(track_id: Optional[str] = None) -> dict:
+    """Player-snapshot-shaped dict from real-TC remote_state. Reads
+    the device's last-reported notification state — frontend doesn't
+    branch on which engine is active, both produce the same shape."""
+    from app.audio.tidal_connect_real import get_manager
+
+    mgr = get_manager()
+    if mgr is None:
+        return {
+            "state": "idle",
+            "track_id": None,
+            "position_ms": 0,
+            "duration_ms": 0,
+            "volume": 100,
+            "muted": False,
+            "error": None,
+            "seq": 0,
+            "stream_info": None,
+            "force_volume": False,
+        }
+    rs = mgr.remote_state()
+    # Map device's PLAYING / PAUSED / STOPPED / IDLE to the local
+    # player_state vocab (playing / paused / idle / ended). The
+    # frontend matches on "playing" / "paused" exactly; everything
+    # else collapses to "idle".
+    ps = rs.get("player_state", "IDLE")
+    state = (
+        "playing" if ps == "PLAYING"
+        else "paused" if ps == "PAUSED"
+        else "idle"
+    )
+    return {
+        "state": state,
+        "track_id": track_id,
+        "position_ms": int(rs.get("position_ms") or 0),
+        "duration_ms": int(rs.get("duration_ms") or 0),
+        "volume": int(rs.get("volume") or 100),
+        "muted": bool(rs.get("muted")),
+        "error": None,
+        "seq": 0,
+        "stream_info": None,
+        "force_volume": False,
+    }
+
+
 def _dlna_active() -> bool:
     """True if a DLNA session is currently open. The diversion in
     `player_play` / `player_pause` / `player_resume` / `player_stop`
@@ -4757,6 +4937,16 @@ def player_play_track(req: _PlayerLoadRequest) -> dict:
     device resumes pulling instead of letting new FLAC frames pile
     up in the ring buffer behind a still-paused renderer."""
     _require_local_access()
+    if _tcr_active():
+        from app.audio.tidal_connect_real import get_manager as _tcr_get
+        try:
+            _tcr_get().load_track(int(req.track_id))  # type: ignore[union-attr]
+            _tcr_get().play()  # type: ignore[union-attr]
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502, detail=f"Tidal Connect: {exc}"
+            ) from exc
+        return _tcr_snapshot(track_id=str(req.track_id))
     if _tc_active():
         from app.audio.tidal_connect import get_manager
         try:
@@ -4883,6 +5073,15 @@ def _dlna_send(action: str) -> None:
 @app.post("/api/player/play")
 def player_play() -> dict:
     _require_local_access()
+    if _tcr_active():
+        from app.audio.tidal_connect_real import get_manager as _tcr_get
+        try:
+            _tcr_get().play()  # type: ignore[union-attr]
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502, detail=f"Tidal Connect: {exc}"
+            ) from exc
+        return _tcr_snapshot()
     if _tc_active():
         from app.audio.tidal_connect import get_manager
         try:
@@ -4900,6 +5099,15 @@ def player_play() -> dict:
 @app.post("/api/player/pause")
 def player_pause() -> dict:
     _require_local_access()
+    if _tcr_active():
+        from app.audio.tidal_connect_real import get_manager as _tcr_get
+        try:
+            _tcr_get().pause()  # type: ignore[union-attr]
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502, detail=f"Tidal Connect: {exc}"
+            ) from exc
+        return _tcr_snapshot()
     if _tc_active():
         from app.audio.tidal_connect import get_manager
         try:
@@ -4917,6 +5125,15 @@ def player_pause() -> dict:
 @app.post("/api/player/resume")
 def player_resume() -> dict:
     _require_local_access()
+    if _tcr_active():
+        from app.audio.tidal_connect_real import get_manager as _tcr_get
+        try:
+            _tcr_get().play()  # type: ignore[union-attr]
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502, detail=f"Tidal Connect: {exc}"
+            ) from exc
+        return _tcr_snapshot()
     if _tc_active():
         from app.audio.tidal_connect import get_manager
         try:
@@ -4934,6 +5151,19 @@ def player_resume() -> dict:
 @app.post("/api/player/stop")
 def player_stop() -> dict:
     _require_local_access()
+    if _tcr_active():
+        # Real-TC: pause the device. Same logic as the OpenHome
+        # branch — stop is a per-track action, not a session
+        # teardown. Disconnect is what the picker does for full
+        # teardown.
+        from app.audio.tidal_connect_real import get_manager as _tcr_get
+        try:
+            _tcr_get().pause()  # type: ignore[union-attr]
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502, detail=f"Tidal Connect: {exc}"
+            ) from exc
+        return _tcr_snapshot()
     if _tc_active():
         # Stop on Tidal Connect just clears the queue + pauses the
         # device. Disconnecting is a separate user action through
@@ -4958,6 +5188,22 @@ def player_stop() -> dict:
 @app.post("/api/player/seek")
 def player_seek(req: _PlayerSeekRequest) -> dict:
     _require_local_access()
+    if _tcr_active():
+        from app.audio.tidal_connect_real import get_manager as _tcr_get
+        # Real-TC takes seek in MILLISECONDS (not seconds like the
+        # OpenHome path). Resolve the fractional position from the
+        # last device-reported duration.
+        mgr = _tcr_get()
+        rs = mgr.remote_state() if mgr is not None else {}
+        duration_ms = int(rs.get("duration_ms") or 0)
+        position_ms = int(max(0.0, min(req.fraction, 1.0)) * duration_ms)
+        try:
+            mgr.seek(position_ms)  # type: ignore[union-attr]
+        except Exception as exc:
+            raise HTTPException(
+                status_code=502, detail=f"Tidal Connect: {exc}"
+            ) from exc
+        return _tcr_snapshot()
     if _tc_active():
         from app.audio.tidal_connect import get_manager
         # Resolve the fractional position into seconds using the
@@ -6202,6 +6448,99 @@ def tidal_connect_disconnect() -> dict:
     from app.audio.tidal_connect import get_manager  # noqa: WPS433
 
     get_manager().disconnect()
+    return {"ok": True}
+
+
+# --- Real Tidal Connect ----------------------------------------------------
+# Parallel to the OpenHome /api/tidal-connect/* surface above. These talk
+# the actual Tidal Connect WSS protocol via app/audio/tidal_connect_real.py
+# (which uses the captured `sessionCredential = user_id` finding). Once the
+# real path is verified against hardware, the migration plan calls for the
+# picker to merge both device lists with real-TC winning conflicts; until
+# then they're separate endpoints so the OpenHome path keeps working
+# untouched. See private/features/tidal-connect-real-spec.md.
+
+
+@app.get("/api/tidal-connect-real/devices")
+def tidal_connect_real_devices() -> dict:
+    """Snapshot of devices visible on `_tidalconnect._tcp.local`.
+
+    Discovery runs continuously in the background via mDNS (started in
+    the lifespan), so this returns the cached set immediately. No active
+    refresh — the mDNS browser is already pushing updates."""
+    _require_local_access()
+    from app.audio.tidal_connect_real import get_manager  # noqa: WPS433
+
+    mgr = get_manager()
+    if mgr is None:
+        return {"devices": [], "active_device_id": None}
+    conn = mgr.get_connection()
+    active_id = conn.device.id if conn is not None else None
+    return {
+        "devices": [
+            {
+                "id": d.id,
+                "name": d.name,
+                "address": d.address,
+                "port": d.port,
+            }
+            for d in mgr.list_devices()
+        ],
+        "active_device_id": active_id,
+    }
+
+
+class _TidalConnectRealConnectRequest(BaseModel):
+    device_id: str
+
+
+@app.post("/api/tidal-connect-real/connect")
+def tidal_connect_real_connect(req: _TidalConnectRealConnectRequest) -> dict:
+    """Open a session to a real Tidal Connect device.
+
+    Status codes:
+      200  session opened
+      404  device id isn't in the discovery cache
+      503  manager not running (lifespan didn't start it)
+      502  WSS handshake failed or the device rejected `startSession`
+    """
+    _require_local_access()
+    from app.audio.tidal_connect_real import get_manager  # noqa: WPS433
+
+    mgr = get_manager()
+    if mgr is None:
+        raise HTTPException(status_code=503, detail="manager not running")
+    try:
+        mgr.connect(req.device_id)
+    except KeyError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except (RuntimeError, OSError) as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    conn = mgr.get_connection()
+    if conn is None:
+        raise HTTPException(
+            status_code=502, detail="connect returned but no active connection"
+        )
+    return {
+        "ok": True,
+        "device": {
+            "id": conn.device.id,
+            "name": conn.device.name,
+            "address": conn.device.address,
+            "port": conn.device.port,
+        },
+    }
+
+
+@app.post("/api/tidal-connect-real/disconnect")
+def tidal_connect_real_disconnect() -> dict:
+    """Tear down the active real-TC session. Idempotent."""
+    _require_local_access()
+    from app.audio.tidal_connect_real import get_manager  # noqa: WPS433
+
+    mgr = get_manager()
+    if mgr is not None:
+        mgr.disconnect()
     return {"ok": True}
 
 

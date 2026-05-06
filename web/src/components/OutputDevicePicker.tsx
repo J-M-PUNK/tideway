@@ -86,6 +86,18 @@ type TidalConnectDevicesResponse = {
   devices: TidalConnectDeviceSummary[];
 };
 
+type TidalConnectRealDeviceSummary = {
+  id: string;
+  name: string;
+  address: string;
+  port: number;
+};
+
+type TidalConnectRealDevicesResponse = {
+  devices: TidalConnectRealDeviceSummary[];
+  active_device_id: string | null;
+};
+
 type DlnaDeviceSummary = {
   id: string;
   name: string;
@@ -108,6 +120,7 @@ type DlnaDevicesResponse = {
 const LOCAL_PREFIX = "local:";
 const CAST_PREFIX = "cast:";
 const TC_PREFIX = "tc:";
+const TCR_PREFIX = "tcr:";
 const DLNA_PREFIX = "dlna:";
 
 export function OutputDevicePicker() {
@@ -115,6 +128,7 @@ export function OutputDevicePicker() {
   const opts = useAudioOptions();
   const [cast, setCast] = useState<CastDevicesResponse | null>(null);
   const [tc, setTc] = useState<TidalConnectDevicesResponse | null>(null);
+  const [tcr, setTcr] = useState<TidalConnectRealDevicesResponse | null>(null);
   const [dlna, setDlna] = useState<DlnaDevicesResponse | null>(null);
   const [busy, setBusy] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
@@ -125,6 +139,11 @@ export function OutputDevicePicker() {
   // users get a heads-up about what they're testing.
   const [pendingTcDevice, setPendingTcDevice] =
     useState<TidalConnectDeviceSummary | null>(null);
+  // Same dialog flow for the real-TC path. The two device shapes
+  // differ enough (real-TC has no manufacturer/model) that two
+  // states is cleaner than one merged "tc-pending" with a tag.
+  const [pendingTcrDevice, setPendingTcrDevice] =
+    useState<TidalConnectRealDeviceSummary | null>(null);
 
   // Light Cast polling so the picker reflects mDNS arrivals /
   // departures and detects backend-initiated disconnects (Cast
@@ -165,6 +184,14 @@ export function OutputDevicePicker() {
         .devices()
         .then((res) => setTc(res))
         .catch(() => {}),
+      // Real Tidal Connect uses mDNS, which is continuous in the
+      // background (zero-cost cached read on this endpoint), so we
+      // can refresh on every dropdown open without an SSDP-style
+      // 5s scan stall.
+      api.tidalConnectReal
+        .devices()
+        .then((res) => setTcr(res))
+        .catch(() => {}),
       // DLNA also uses SSDP. /api/dlna/refresh blocks for the
       // scan timeout (default 5s) and returns the fresh list; the
       // dropdown waits on this so the user sees populated devices
@@ -186,14 +213,17 @@ export function OutputDevicePicker() {
   // correctness.
   const castConnectedId = cast?.status.connected_id ?? null;
   const tcConnectedId = tc?.status.connected_id ?? null;
+  const tcrConnectedId = tcr?.active_device_id ?? null;
   const dlnaConnectedId = dlna?.status.connected_id ?? null;
   const selectedValue = castConnectedId
     ? `${CAST_PREFIX}${castConnectedId}`
-    : tcConnectedId
-      ? `${TC_PREFIX}${tcConnectedId}`
-      : dlnaConnectedId
-        ? `${DLNA_PREFIX}${dlnaConnectedId}`
-        : `${LOCAL_PREFIX}${opts.current}`;
+    : tcrConnectedId
+      ? `${TCR_PREFIX}${tcrConnectedId}`
+      : tcConnectedId
+        ? `${TC_PREFIX}${tcConnectedId}`
+        : dlnaConnectedId
+          ? `${DLNA_PREFIX}${dlnaConnectedId}`
+          : `${LOCAL_PREFIX}${opts.current}`;
 
   const showCastSection =
     cast !== null &&
@@ -204,6 +234,9 @@ export function OutputDevicePicker() {
     tc !== null &&
     tc.status.available &&
     (tc.devices.length > 0 || tcConnectedId !== null);
+
+  const showTcrSection =
+    tcr !== null && (tcr.devices.length > 0 || tcrConnectedId !== null);
 
   const showDlnaSection =
     dlna !== null &&
@@ -217,6 +250,7 @@ export function OutputDevicePicker() {
     // returning to local; otherwise the audio engine briefly
     // feeds two destinations and produces a stutter.
     if (castConnectedId !== null) await api.cast.disconnect();
+    if (tcrConnectedId !== null) await api.tidalConnectReal.disconnect();
     if (tcConnectedId !== null) await api.tidalConnect.disconnect();
     if (dlnaConnectedId !== null) await api.dlna.disconnect();
   };
@@ -233,6 +267,14 @@ export function OutputDevicePicker() {
       const device = tc?.devices.find((d) => d.id === deviceId);
       if (device) {
         setPendingTcDevice(device);
+        return;
+      }
+    }
+    if (value.startsWith(TCR_PREFIX)) {
+      const deviceId = value.slice(TCR_PREFIX.length);
+      const device = tcr?.devices.find((d) => d.id === deviceId);
+      if (device) {
+        setPendingTcrDevice(device);
         return;
       }
     }
@@ -307,6 +349,35 @@ export function OutputDevicePicker() {
     }
   };
 
+  const confirmConnectTcr = async () => {
+    if (!pendingTcrDevice) return;
+    const device = pendingTcrDevice;
+    setPendingTcrDevice(null);
+    setBusy(true);
+    try {
+      await switchAwayFromRemoteIfActive();
+      const result = await api.tidalConnectReal.connect(device.id);
+      toast.show({
+        kind: "success",
+        title: `Connected to ${result.device.name}`,
+        description:
+          "Real Tidal Connect (WSS protocol). Untested against " +
+          "hardware — picking a track should now play on the " +
+          "device. Please report what works and what doesn't.",
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      toast.show({
+        kind: "error",
+        title: "Tidal Connect (Real) failed",
+        description: message,
+      });
+    } finally {
+      setBusy(false);
+      await refreshAll();
+    }
+  };
+
   const flipExclusive = async (v: boolean) => {
     try {
       await opts.setExclusiveMode(v);
@@ -338,17 +409,22 @@ export function OutputDevicePicker() {
   const triggerHighlight =
     castConnectedId !== null ||
     tcConnectedId !== null ||
+    tcrConnectedId !== null ||
     dlnaConnectedId !== null ||
     opts.exclusiveMode;
   const currentLocalName =
     opts.devices.find((d) => d.id === opts.current)?.name ?? "System default";
+  const tcrConnectedName =
+    tcr?.devices.find((d) => d.id === tcrConnectedId)?.name ?? "device";
   const triggerTitle = castConnectedId
     ? `Casting to ${cast?.status.connected_name ?? "device"}`
-    : tcConnectedId
-      ? `Tidal Connect: ${tc?.status.connected_name ?? "device"}`
-      : dlnaConnectedId
-        ? `Streaming to ${dlna?.status.connected_name ?? "device"}`
-        : `Output: ${currentLocalName}`;
+    : tcrConnectedId
+      ? `Tidal Connect: ${tcrConnectedName}`
+      : tcConnectedId
+        ? `Tidal Connect: ${tc?.status.connected_name ?? "device"}`
+        : dlnaConnectedId
+          ? `Streaming to ${dlna?.status.connected_name ?? "device"}`
+          : `Output: ${currentLocalName}`;
 
   return (
     <>
@@ -449,7 +525,7 @@ export function OutputDevicePicker() {
               </>
             )}
 
-            {showTcSection && (
+            {showTcrSection && (
               <>
                 <DropdownMenuSeparator />
                 <DropdownMenuLabel className="flex items-center gap-2 text-muted-foreground">
@@ -458,10 +534,45 @@ export function OutputDevicePicker() {
                     Experimental
                   </span>
                 </DropdownMenuLabel>
+                {tcr.devices.length === 0 ? (
+                  <div className="px-2 py-1.5 text-xs text-muted-foreground">
+                    No Tidal Connect devices visible. mDNS discovery is
+                    continuous in the background.
+                  </div>
+                ) : (
+                  tcr.devices.map((d) => (
+                    <DropdownMenuRadioItem
+                      key={d.id}
+                      value={`${TCR_PREFIX}${d.id}`}
+                      onSelect={(e) => e.preventDefault()}
+                      className="text-sm"
+                      disabled={busy}
+                    >
+                      <div className="flex flex-col">
+                        <span>{d.name}</span>
+                        <span className="text-[11px] text-muted-foreground">
+                          {`${d.address}:${d.port}`}
+                        </span>
+                      </div>
+                    </DropdownMenuRadioItem>
+                  ))
+                )}
+              </>
+            )}
+
+            {showTcSection && (
+              <>
+                <DropdownMenuSeparator />
+                <DropdownMenuLabel className="flex items-center gap-2 text-muted-foreground">
+                  <span>Tidal Connect (OpenHome)</span>
+                  <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-amber-500">
+                    Experimental
+                  </span>
+                </DropdownMenuLabel>
                 {tc.devices.length === 0 ? (
                   <div className="px-2 py-1.5 text-xs text-muted-foreground">
-                    No Tidal Connect devices visible. Open the dropdown to
-                    re-scan; SSDP discovery takes a few seconds.
+                    No OpenHome devices visible. Open the dropdown to re-scan;
+                    SSDP discovery takes a few seconds.
                   </div>
                 ) : (
                   tc.devices.map((d) => (
@@ -557,6 +668,12 @@ export function OutputDevicePicker() {
         onCancel={() => setPendingTcDevice(null)}
         onConfirm={confirmConnectTc}
       />
+
+      <TidalConnectRealExperimentalDialog
+        device={pendingTcrDevice}
+        onCancel={() => setPendingTcrDevice(null)}
+        onConfirm={confirmConnectTcr}
+      />
     </>
   );
 }
@@ -611,6 +728,66 @@ function TidalConnectExperimentalDialog({
             and report what you see (device model + the error in the toast).
             That feedback tells us whether shipping this as a real feature is
             even possible.
+          </p>
+        </div>
+        <div className="flex justify-end gap-2 pt-3">
+          <Button variant="ghost" size="sm" onClick={onCancel}>
+            Cancel
+          </Button>
+          <Button size="sm" onClick={onConfirm}>
+            Connect
+          </Button>
+        </div>
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+/**
+ * Confirmation dialog for the real-Tidal-Connect path. Same role
+ * as TidalConnectExperimentalDialog, different copy: the real-TC
+ * controller speaks Tidal's actual WSS protocol (decoded from the
+ * desktop client's bundled JS), but hasn't been validated against
+ * a real Bluesound / Linn / NAD on the LAN. Users opting into this
+ * are testing whether the wire shape we send matches what real
+ * receivers accept.
+ */
+function TidalConnectRealExperimentalDialog({
+  device,
+  onCancel,
+  onConfirm,
+}: {
+  device: TidalConnectRealDeviceSummary | null;
+  onCancel: () => void;
+  onConfirm: () => void;
+}) {
+  return (
+    <Dialog
+      open={device !== null}
+      onOpenChange={(open) => {
+        if (!open) onCancel();
+      }}
+    >
+      <DialogContent className="sm:max-w-md">
+        <DialogHeader>
+          <DialogTitle>
+            Connect to {device?.name ?? "Tidal Connect device"}?
+          </DialogTitle>
+          <DialogDescription>
+            Experimental — real WSS protocol.
+          </DialogDescription>
+        </DialogHeader>
+        <div className="flex flex-col gap-3 pt-2 text-sm text-foreground">
+          <p>
+            This is the real Tidal Connect protocol — the same WSS-based session
+            the official Tidal desktop client uses. The wire shape was decoded
+            from Tidal's bundled JavaScript and the credential format captured
+            against a fake-receiver rig. Untested against actual hardware.
+          </p>
+          <p className="text-muted-foreground">
+            If audio doesn't play after you select a track, please disconnect
+            and report the device model + the error in the toast. That feedback
+            tells us whether the protocol implementation needs adjustment.
           </p>
         </div>
         <div className="flex justify-end gap-2 pt-3">
