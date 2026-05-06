@@ -22,10 +22,9 @@ This module is a structural skeleton. The wire-level pieces
 (TLS context, command builders, mDNS service constant, frame
 correlation) are correct per the spec. What's missing:
 
-  - The exact serialization of `sessionCredential` on `startSession`.
-    The desktop client builds it via `setCredentials(string)` from
-    outside the tidalConnect module; we haven't traced that yet.
-    Marked TODO(session-credential).
+  - (Resolved.) `sessionCredential` is the user's Tidal user id as
+    a decimal string. The token_provider hands back the user id;
+    we stringify and ship.
   - Validation against a real device. The desktop client's source
     is the source of truth, but a Bluesound / Linn / NAD on the LAN
     is the only way to confirm the round trip works.
@@ -83,8 +82,13 @@ TIDAL_CONNECT_SERVICE = "_tidalconnect._tcp.local."
 # Both fields are honoured by the device but not validated against
 # any registry, so we can choose freely. Pick a stable identifier
 # so log lines on the device's side stay correlated across sessions.
-DEFAULT_APP_ID = "com.tideway.player"
-DEFAULT_APP_NAME = "Tideway"
+# The official Tidal desktop client identifies as "tidal" / "tidal"
+# on startSession. Verified by capturing a real session against a
+# faked-receiver rig (see private/tools/tidal-connect-capture/).
+# Receivers may match against a whitelist; using the same string the
+# desktop client uses is the safest bet.
+DEFAULT_APP_ID = "tidal"
+DEFAULT_APP_NAME = "tidal"
 
 # Reconnect schedule. Doubles each consecutive failure, capped so
 # we don't drift into multi-minute holes during outages.
@@ -375,19 +379,20 @@ class TidalConnectConnection:
 
     async def _start_session(self) -> None:
         """Open a fresh session on the device. Captures session id
-        from the notifySessionStarted response."""
-        token = self._token_provider()
-        # TODO(session-credential): the desktop client passes a
-        # `setCredentials(string)` payload. We haven't traced what
-        # that string actually is. The most likely candidates are:
-        #   1. Bare bearer token (`token`)
-        #   2. Whole AuthInfo struct as JSON
-        #   3. Base64-wrapped JSON of the AuthInfo struct
-        # Once we have hardware to test against, send each variant
-        # and see which one the device accepts. For now, send the
-        # bearer token directly and let the device error if it
-        # wants something different.
-        session_credential = token or ""
+        from the notifySessionStarted response.
+
+        sessionCredential is the user's Tidal user id as a decimal
+        string (not a JWT, not a bearer token, not a JSON struct).
+        Verified empirically by capturing a real desktop-client
+        session against the fake-receiver rig in
+        private/tools/tidal-connect-capture/. The device uses this
+        id along with its own embedded partner cert and the OAuth
+        `grant_type: 'switch_client'` exchange to fetch the user's
+        actual session from Tidal's servers — we don't hand it any
+        OAuth tokens directly. The token_provider returns the user
+        id; despite the name it is not a token."""
+        user_id = self._token_provider() or ""
+        session_credential = str(user_id)
 
         frame = {
             "appId": DEFAULT_APP_ID,
