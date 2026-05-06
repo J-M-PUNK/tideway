@@ -868,11 +868,20 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             # the cost on first navigation, same as today.
             pass
 
-    threading.Thread(
-        target=_prewarm_aoty,
-        name="aoty-prewarm",
-        daemon=True,
-    ).start()
+    # Skip the pre-warm thread under pytest. The daemon thread runs
+    # against `server.tidal` and `server.album_to_dict`; if a different
+    # test later swaps those out via monkeypatch, the still-running
+    # pre-warm thread silently lands extra calls on the stubbed
+    # versions and breaks any test that asserts on call counts
+    # (test_aoty_resolver.test_cache_hit_short_circuits_search). The
+    # pre-warm has zero value during tests anyway since they tear down
+    # the app before any frontend request lands.
+    if "pytest" not in sys.modules:
+        threading.Thread(
+            target=_prewarm_aoty,
+            name="aoty-prewarm",
+            daemon=True,
+        ).start()
 
     try:
         yield
