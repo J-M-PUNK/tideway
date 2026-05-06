@@ -1,4 +1,4 @@
-"""Real Tidal Connect controller — JSON-over-WSS.
+"""Real Tidal Connect controller. JSON-over-WSS.
 
 This is the actual Tidal Connect protocol controller, decoded from
 the official Tidal desktop client's bundled source. Sister module
@@ -109,7 +109,7 @@ _BACKOFF_MAX_SEC = 60.0
 # reachable until we ship an update.
 #
 # Tideway extracts these from /Applications/TIDAL.app at build
-# time? No — we just inline them. They're not secret; the desktop
+# time? No, we just inline them. They're not secret; the desktop
 # client ships them in the clear, and any device firmware that
 # implements Tidal Connect carries the same chain.
 _TIDAL_CA_BUNDLE_PEM = """\
@@ -410,7 +410,7 @@ class TidalConnectConnection:
         private/tools/tidal-connect-capture/. The device uses this
         id along with its own embedded partner cert and the OAuth
         `grant_type: 'switch_client'` exchange to fetch the user's
-        actual session from Tidal's servers — we don't hand it any
+        actual session from Tidal's servers. We don't hand it any
         OAuth tokens directly. The token_provider returns the user
         id; despite the name it is not a token."""
         user_id = self._token_provider() or ""
@@ -465,10 +465,11 @@ class TidalConnectConnection:
         return await self._send({"command": "setShuffle", "shuffle": bool(shuffle)})
 
     async def load_media(self, media_info: dict) -> dict:
-        """Load a single track. media_info is the MediaInfo struct
-        the desktop client builds via `TidalConnectMediaInfo()`. The
-        exact field set is in `app/main/tidalConnect/mediaInfo.js`
-        (TODO(media-info-shape): document)."""
+        """Load a single track. media_info has the shape
+        `tidalConnect/mediaInfo.js` documents: itemId, mediaId,
+        srcUrl, streamType, and a metadata dict with title,
+        albumTitle, artists, duration (seconds), images. server.py's
+        `_tcr_url_resolver` builds it from a tidalapi track."""
         return await self._send(
             {"command": "loadMediaInfo", "mediaInfo": media_info}
         )
@@ -514,6 +515,12 @@ class TidalConnectRealManager:
         "media_info": None,        # last notifyMediaInfoChanged payload
         "session_id": None,
         "device_id": None,
+        # Bumps on every notification frame the device sends. The
+        # frontend's polling diff uses this to detect "something
+        # changed" without inspecting every field; needs to advance
+        # whenever the device's state moves, even if our parser
+        # doesn't pull anything out of the frame.
+        "seq": 0,
     }, init=False)
     _remote_state_lock: threading.Lock = field(default_factory=threading.Lock, init=False)
 
@@ -540,6 +547,7 @@ class TidalConnectRealManager:
         callback. Tracks playerState, position, volume, mute, media,
         session id."""
         with self._remote_state_lock:
+            self._remote_state["seq"] = self._remote_state.get("seq", 0) + 1
             cmd = frame.get("command")
             if cmd == "notifyPlayerStatusChanged":
                 ps = frame.get("playerState")
@@ -601,9 +609,18 @@ class TidalConnectRealManager:
     def stop(self) -> None:
         """Tear down discovery + any active connection. Idempotent."""
         if self._connection is not None and self._loop is not None:
-            asyncio.run_coroutine_threadsafe(
+            # Await the close round-trip before stopping the loop.
+            # Without this, the loop can stop before the WSS close
+            # frame is sent, leaving the device's session dangling.
+            future = asyncio.run_coroutine_threadsafe(
                 self._connection.close(), self._loop
             )
+            try:
+                future.result(timeout=5.0)
+            except Exception as exc:
+                log.warning(
+                    "tidal_connect_real: stop close raised: %s", exc,
+                )
             self._connection = None
         if self._browser is not None:
             try:
@@ -699,8 +716,8 @@ class TidalConnectRealManager:
 
     # -- sync command wrappers -----------------------------------------------
     # Each dispatches the connection's async method onto the manager's
-    # event-loop thread and waits for the result. Times out at 5s — the
-    # device should ack a command within a couple hundred ms; anything
+    # event-loop thread and waits for the result. Times out at 5s; the
+    # device should ack a command within a couple hundred ms. Anything
     # beyond that means a wedged WSS, and we'd rather raise than hang
     # the request thread indefinitely.
 

@@ -332,7 +332,7 @@ export function OutputDevicePicker() {
         kind: "success",
         title: `Connected to ${result.device.friendly_name}`,
         description:
-          "Tidal Connect is experimental. Picking a track from " +
+          "OpenHome streaming is experimental. Picking a track from " +
           "Tideway should now play on the device. Please report " +
           "what works and what doesn't.",
       });
@@ -340,7 +340,7 @@ export function OutputDevicePicker() {
       const message = err instanceof Error ? err.message : String(err);
       toast.show({
         kind: "error",
-        title: "Tidal Connect failed",
+        title: "OpenHome connect failed",
         description: message,
       });
     } finally {
@@ -362,7 +362,7 @@ export function OutputDevicePicker() {
         title: `Connected to ${result.device.name}`,
         description:
           "Real Tidal Connect (WSS protocol). Untested against " +
-          "hardware — picking a track should now play on the " +
+          "hardware. Picking a track should now play on the " +
           "device. Please report what works and what doesn't.",
       });
     } catch (err) {
@@ -421,7 +421,7 @@ export function OutputDevicePicker() {
     : tcrConnectedId
       ? `Tidal Connect: ${tcrConnectedName}`
       : tcConnectedId
-        ? `Tidal Connect: ${tc?.status.connected_name ?? "device"}`
+        ? `OpenHome: ${tc?.status.connected_name ?? "device"}`
         : dlnaConnectedId
           ? `Streaming to ${dlna?.status.connected_name ?? "device"}`
           : `Output: ${currentLocalName}`;
@@ -564,7 +564,7 @@ export function OutputDevicePicker() {
               <>
                 <DropdownMenuSeparator />
                 <DropdownMenuLabel className="flex items-center gap-2 text-muted-foreground">
-                  <span>Tidal Connect (OpenHome)</span>
+                  <span>OpenHome</span>
                   <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider text-amber-500">
                     Experimental
                   </span>
@@ -711,23 +711,22 @@ function TidalConnectExperimentalDialog({
       <DialogContent className="sm:max-w-md">
         <DialogHeader>
           <DialogTitle>
-            Connect to {device?.friendly_name ?? "Tidal Connect device"}?
+            Connect to {device?.friendly_name ?? "OpenHome device"}?
           </DialogTitle>
           <DialogDescription>Experimental feature.</DialogDescription>
         </DialogHeader>
         <div className="flex flex-col gap-3 pt-2 text-sm text-foreground">
           <p>
-            Tidal Connect support in Tideway is built against the published
-            OpenHome / UPnP-AV spec but hasn't been verified against real
-            hardware. We don't know yet whether a real Tidal Connect device will
-            accept stream URLs from a non-Tidal client — recent research into
-            Tidal's auth model suggests it might not.
+            This device speaks OpenHome / UPnP-AV. Tideway sends Tidal stream
+            URLs to it via DIDL-Lite metadata, which works on Linn, Lumin, and
+            Auralic streamers but isn't the same protocol as Tidal Connect.
+            Whether your specific device accepts the stream is what's untested.
           </p>
           <p className="text-muted-foreground">
             If audio doesn't play after you select a track, please disconnect
-            and report what you see (device model + the error in the toast).
-            That feedback tells us whether shipping this as a real feature is
-            even possible.
+            and report what you see (device model and the error in the toast).
+            For devices that support actual Tidal Connect, use that section
+            instead.
           </p>
         </div>
         <div className="flex justify-end gap-2 pt-3">
@@ -774,12 +773,12 @@ function TidalConnectRealExperimentalDialog({
             Connect to {device?.name ?? "Tidal Connect device"}?
           </DialogTitle>
           <DialogDescription>
-            Experimental — real WSS protocol.
+            Experimental. Real WSS protocol.
           </DialogDescription>
         </DialogHeader>
         <div className="flex flex-col gap-3 pt-2 text-sm text-foreground">
           <p>
-            This is the real Tidal Connect protocol — the same WSS-based session
+            This is the real Tidal Connect protocol, the same WSS-based session
             the official Tidal desktop client uses. The wire shape was decoded
             from Tidal's bundled JavaScript and the credential format captured
             against a fake-receiver rig. Untested against actual hardware.

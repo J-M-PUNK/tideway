@@ -682,7 +682,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # local-output silencer isn't wired, and no URL resolver. Later
     # phases add those.
     #
-    # token_provider returns the Tidal user id as a string — that's
+    # token_provider returns the Tidal user id as a string. That's
     # the exact `sessionCredential` the official desktop client
     # ships on `startSession` (verified against a fake-receiver rig;
     # see private/tools/tidal-connect-capture/).
@@ -704,7 +704,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         )
         # Silencer mutes the local sounddevice output while a real-TC
         # session is open, same flag Cast / OpenHome / DLNA all use.
-        # Audio still streams to its destination — this only gates
+        # Audio still streams to its destination. This only gates
         # the local playback path so the user doesn't hear two
         # simultaneous outputs.
         _tcr_mgr.set_local_silencer(
@@ -717,7 +717,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             Mirrors the OpenHome resolver above but produces the
             shape `tidalConnect/mediaInfo.js` documents:
             {itemId, mediaId, srcUrl, streamType, metadata}. Same
-            tidalapi path as the OpenHome resolver — picks the
+            tidalapi path as the OpenHome resolver. Picks the
             manifest's first URL as the stream URL and stamps
             metadata for on-device display.
 
@@ -4686,7 +4686,7 @@ def _tcr_active() -> bool:
 
 def _tcr_snapshot(track_id: Optional[str] = None) -> dict:
     """Player-snapshot-shaped dict from real-TC remote_state. Reads
-    the device's last-reported notification state — frontend doesn't
+    the device's last-reported notification state. The frontend doesn't
     branch on which engine is active, both produce the same shape."""
     from app.audio.tidal_connect_real import get_manager
 
@@ -4723,7 +4723,7 @@ def _tcr_snapshot(track_id: Optional[str] = None) -> dict:
         "volume": int(rs.get("volume") or 100),
         "muted": bool(rs.get("muted")),
         "error": None,
-        "seq": 0,
+        "seq": int(rs.get("seq") or 0),
         "stream_info": None,
         "force_volume": False,
     }
@@ -5153,7 +5153,7 @@ def player_stop() -> dict:
     _require_local_access()
     if _tcr_active():
         # Real-TC: pause the device. Same logic as the OpenHome
-        # branch — stop is a per-track action, not a session
+        # branch. Stop is a per-track action, not a session
         # teardown. Disconnect is what the picker does for full
         # teardown.
         from app.audio.tidal_connect_real import get_manager as _tcr_get
@@ -6467,7 +6467,7 @@ def tidal_connect_real_devices() -> dict:
 
     Discovery runs continuously in the background via mDNS (started in
     the lifespan), so this returns the cached set immediately. No active
-    refresh — the mDNS browser is already pushing updates."""
+    refresh. The mDNS browser is already pushing updates."""
     _require_local_access()
     from app.audio.tidal_connect_real import get_manager  # noqa: WPS433
 

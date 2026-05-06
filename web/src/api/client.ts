@@ -1246,7 +1246,7 @@ export const api = {
         method: "POST",
       }),
   },
-  // Real Tidal Connect — talks the actual WSS protocol via
+  // Real Tidal Connect. Talks the actual WSS protocol via
   // app/audio/tidal_connect_real.py. Parallel to tidalConnect (which
   // is the OpenHome-mimic path). Discovery is continuous (mDNS), so
   // devices() just returns the cached snapshot without an active
