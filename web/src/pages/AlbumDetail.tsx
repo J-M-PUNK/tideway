@@ -284,7 +284,7 @@ function SingleRowSection({
         <h2 className="text-xl font-bold tracking-tight">{title}</h2>
         {viewAllHref && <ViewMoreLink to={viewAllHref} />}
       </div>
-      <div className="grid gap-4 grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 2xl:grid-cols-6">
+      <div className="grid gap-4 grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 2xl:grid-cols-6 min-[1920px]:grid-cols-7 min-[2400px]:grid-cols-8">
         {items.slice(0, 6).map((it, i) => (
           // Hide items past the current breakpoint's column count so
           // the section is always exactly one row — previously the

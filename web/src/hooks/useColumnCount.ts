@@ -10,12 +10,16 @@ import { useEffect, useState } from "react";
  * this hook exists to prevent.
  *
  * Grid's classes: `grid-cols-2 sm:grid-cols-3 lg:grid-cols-4
- *                  xl:grid-cols-5 2xl:grid-cols-6`. That means:
- *   base  < 640   → 2
- *   sm   >= 640   → 3
- *   lg   >= 1024  → 4
- *   xl   >= 1280  → 5
- *   2xl  >= 1536  → 6
+ *                  xl:grid-cols-5 2xl:grid-cols-6
+ *                  min-[1920px]:grid-cols-7 min-[2400px]:grid-cols-8`.
+ * That means:
+ *   base       < 640   → 2
+ *   sm        >= 640   → 3
+ *   lg        >= 1024  → 4
+ *   xl        >= 1280  → 5
+ *   2xl       >= 1536  → 6
+ *   ultrawide >= 1920  → 7
+ *   4k+       >= 2400  → 8
  */
 export function useColumnCount(): number {
   const [cols, setCols] = useState(() => compute(safeWindowWidth()));
@@ -36,6 +40,8 @@ function safeWindowWidth(): number {
 }
 
 function compute(width: number): number {
+  if (width >= 2400) return 8;
+  if (width >= 1920) return 7;
   if (width >= 1536) return 6;
   if (width >= 1280) return 5;
   if (width >= 1024) return 4;
