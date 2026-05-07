@@ -42,6 +42,7 @@ import sounddevice as sd  # type: ignore
 import tidalapi
 
 from app.audio.decoder import Decoder
+from app.audio.crossfeed import Crossfeed
 from app.audio.eq import (
     BAND_FREQUENCIES_HZ as EQ_BAND_FREQUENCIES,
     Equalizer,
@@ -285,6 +286,14 @@ class PCMPlayer:
         # profile is one rebuild. None = no tilt set yet (treat
         # as flat); a TiltConfig with all-zero gains is also flat.
         self._eq_tilt = None  # type: ignore[var-annotated]
+        # Bauer-style crossfeed for headphones — bleeds the low
+        # frequencies of each channel into the opposite ear so hard-
+        # panned mixes don't sound aggressive on cans. One instance
+        # per output stream, rebuilt alongside the EQ on cross-rate
+        # bridges. `_crossfeed_amount` (0-100 percent) is the user
+        # setting we re-apply to a freshly-built filter.
+        self._crossfeed: Optional[Crossfeed] = None
+        self._crossfeed_amount: int = 0
 
         # Audio-callback diagnostics. Each pair is (count, last-print
         # time) for a different rate-limited stderr message:
@@ -1043,6 +1052,29 @@ class PCMPlayer:
         with self._lock:
             self._eq_bypass = bool(bypassed)
 
+    def set_crossfeed_amount(self, amount_pct: int) -> None:
+        """Set the Bauer crossfeed strength (0-100 percent). 0
+        disables the stage entirely; non-zero values install /
+        update the low-pass that bleeds bass between channels.
+        Surface for the Settings page slider."""
+        clamped = max(0, min(100, int(amount_pct)))
+        with self._lock:
+            self._crossfeed_amount = clamped
+            if self._crossfeed is not None:
+                if clamped > 0:
+                    try:
+                        self._crossfeed.set_amount(clamped)
+                    except Exception:
+                        log.exception("crossfeed coefficient build failed")
+                        self._crossfeed.clear()
+                else:
+                    self._crossfeed.clear()
+
+    def crossfeed_amount(self) -> int:
+        """Current crossfeed setting in percent. 0 means bypassed."""
+        with self._lock:
+            return self._crossfeed_amount
+
     def equalizer_bypass(self) -> bool:
         """Read the current bypass flag — server uses it to expose
         the value via /api/eq/state."""
@@ -1745,6 +1777,19 @@ class PCMPlayer:
                 log.exception("eq coefficient build failed")
                 self._eq.clear()
 
+        # Crossfeed coefficients depend on the active sample rate, so
+        # rebuild it here too. The user setting (`_crossfeed_amount`)
+        # survives the rebuild — same pattern as EQ.
+        self._crossfeed = Crossfeed(
+            sample_rate=sample_rate, channels=channels
+        )
+        if self._crossfeed_amount > 0:
+            try:
+                self._crossfeed.set_amount(self._crossfeed_amount)
+            except Exception:
+                log.exception("crossfeed coefficient build failed")
+                self._crossfeed.clear()
+
     @staticmethod
     def _query_device_mixer_rate(device: Optional[int], fallback: int) -> int:
         """Look up the rate the OS will mix at for `device` in shared
@@ -2041,19 +2086,32 @@ class PCMPlayer:
                 self._seq_bump_counter = 0
             return
 
-        # EQ (10-band biquad). Active only when the user has a
-        # non-flat curve set — when disabled, `apply()` is an early
-        # return and doesn't touch `outdata`, so bit-perfect
-        # pass-through is preserved at flat EQ + full volume + not
-        # muted. Filtering requires float32; we round-trip through
-        # float32 when the output dtype is int16/int32.
-        if (
+        # DSP stages: EQ (10-band biquad / AutoEQ) followed by
+        # crossfeed (Bauer-style stereo imaging). Both require
+        # float32 input, so when either is active we round-trip
+        # through a single float32 buffer instead of paying the
+        # int↔float conversion twice. Bit-perfect pass-through
+        # holds when both stages are inactive (or bypassed) and
+        # we never enter this block.
+        eq_active = (
             self._eq is not None
             and self._eq.is_active()
             and not self._eq_bypass
-        ):
+        )
+        # Crossfeed only makes sense for stereo; mono / 5.1 pay
+        # nothing for the feature being on.
+        crossfeed_active = (
+            self._crossfeed is not None
+            and self._crossfeed.is_active()
+            and outdata.ndim == 2
+            and outdata.shape[1] == 2
+        )
+        if eq_active or crossfeed_active:
             if outdata.dtype == np.float32:
-                self._eq.apply(outdata)
+                if eq_active:
+                    self._eq.apply(outdata)
+                if crossfeed_active:
+                    self._crossfeed.apply(outdata)
             else:
                 # Scale to float32 in the range [-1, 1], filter,
                 # scale back. int range constants chosen so the
@@ -2062,7 +2120,10 @@ class PCMPlayer:
                     32768.0 if outdata.dtype == np.int16 else 2_147_483_648.0
                 )
                 buf = outdata.astype(np.float32, copy=True) / scale_in
-                self._eq.apply(buf)
+                if eq_active:
+                    self._eq.apply(buf)
+                if crossfeed_active:
+                    self._crossfeed.apply(buf)
                 np.clip(buf * scale_in, -scale_in, scale_in - 1.0, out=buf)
                 # np.rint rounds to nearest (banker's); plain astype
                 # would truncate toward zero and bias samples slightly

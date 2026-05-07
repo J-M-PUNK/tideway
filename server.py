@@ -4644,6 +4644,10 @@ def _native_player() -> PCMPlayer:
                 _pcm_player_singleton.set_exclusive_mode(True)
             if getattr(settings, "force_volume", False):
                 _pcm_player_singleton.set_force_volume(True)
+            if getattr(settings, "crossfeed_amount", 0) > 0:
+                _pcm_player_singleton.set_crossfeed_amount(
+                    settings.crossfeed_amount
+                )
         except Exception as exc:
             print(f"[player] bootstrap failed: {exc}", flush=True)
     return _pcm_player_singleton
@@ -9368,6 +9372,7 @@ class SettingsPayload(BaseModel):
     eq_tilt_preamp_offset_db: Optional[float] = None
     eq_tilt_bass_db: Optional[float] = None
     eq_tilt_treble_db: Optional[float] = None
+    crossfeed_amount: Optional[int] = None
 
 
 @app.get("/api/settings")
@@ -9460,6 +9465,13 @@ def update_settings(payload: SettingsPayload) -> dict:
             _native_player().set_force_volume(new_settings.force_volume)
         except Exception as exc:
             logger.warning("force-volume toggle failed: %s", exc)
+    if "crossfeed_amount" in patch:
+        try:
+            _native_player().set_crossfeed_amount(
+                new_settings.crossfeed_amount
+            )
+        except Exception as exc:
+            logger.warning("crossfeed amount toggle failed: %s", exc)
     return asdict(new_settings)
 
 
