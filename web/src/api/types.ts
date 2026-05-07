@@ -327,6 +327,10 @@ export interface Settings {
   eq_tilt_bass_db: number;
   /** High-shelf boost / cut at 8 kHz, layered after the profile bands. */
   eq_tilt_treble_db: number;
+  /** Bauer-style crossfeed strength as a percent (0-100). 0 disables;
+   *  20-40 is the typical taste range for hard-panned mixes on
+   *  headphones. */
+  crossfeed_amount: number;
 }
 
 export interface AuthStatus {
