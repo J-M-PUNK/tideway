@@ -2,6 +2,7 @@ import { Link } from "react-router-dom";
 import { Sparkles } from "lucide-react";
 import { api } from "@/api/client";
 import { useApi } from "@/hooks/useApi";
+import { queryKeys } from "@/api/queryKeys";
 import { ErrorView } from "@/components/ErrorView";
 import { GridSkeleton } from "@/components/Skeletons";
 import { imageProxy } from "@/lib/utils";
@@ -11,7 +12,9 @@ import { imageProxy } from "@/lib/utils";
  * etc.). Home shows a single row + "View more" link that lands here.
  */
 export function MixesPage() {
-  const { data: mixes, loading, error } = useApi(() => api.mixes(), []);
+  const { data: mixes, loading, error } = useApi(() => api.mixes(), [], {
+    cacheKey: queryKeys.mixes,
+  });
 
   if (loading) {
     return (

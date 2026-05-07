@@ -4,6 +4,7 @@ import { Loader2, MoreHorizontal, Music, Play } from "lucide-react";
 import { api } from "@/api/client";
 import type { OnDownload } from "@/api/download";
 import { useApi } from "@/hooks/useApi";
+import { queryKeys } from "@/api/queryKeys";
 import { usePlayerActions, usePlayerMeta } from "@/hooks/PlayerContext";
 import { ViewMoreLink } from "@/components/Grid";
 import { PageView } from "@/components/PageView";
@@ -631,7 +632,9 @@ function PillCover({ cover }: { cover: string | null }) {
 }
 
 export function Home({ onDownload }: { onDownload: OnDownload }) {
-  const { data, loading, error } = useApi(() => api.page("home"), []);
+  const { data, loading, error } = useApi(() => api.page("home"), [], {
+    cacheKey: queryKeys.pageHome,
+  });
 
   if (loading) {
     return (

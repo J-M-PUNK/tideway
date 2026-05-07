@@ -5,6 +5,7 @@ import { api } from "@/api/client";
 import type { Album, Artist, Track, Video } from "@/api/types";
 import type { OnDownload } from "@/api/download";
 import { useApi } from "@/hooks/useApi";
+import { queryKeys } from "@/api/queryKeys";
 import { useColumnCount } from "@/hooks/useColumnCount";
 import { useLikedByArtist } from "@/hooks/useLikedByArtist";
 import { useSpotifyTrackPlaycountBatch } from "@/hooks/useSpotifyEnrichment";
@@ -29,7 +30,9 @@ export function ArtistDetail({ onDownload }: { onDownload: OnDownload }) {
   // calls it needs and bundles credits + videos into the response,
   // so the frontend doesn't waterfall three separate fetches on
   // mount like it used to.
-  const { data: artist, loading, error } = useApi(() => api.artist(id), [id]);
+  const { data: artist, loading, error } = useApi(() => api.artist(id), [id], {
+    cacheKey: queryKeys.artist(id),
+  });
   const [popularExpanded, setPopularExpanded] = useState(false);
   // The user's liked tracks + albums credited to this artist. Spotify
   // renders a "You Liked" summary card above Albums; clicking it
