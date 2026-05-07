@@ -103,7 +103,7 @@ function ArtistsList({ period }: { period: LastFmPeriod }) {
     );
   }
   return (
-    <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6">
+    <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6 min-[1920px]:grid-cols-7 min-[2400px]:grid-cols-8">
       {data.map((a, i) => (
         <ArtistCard key={`${a.name}-${i}`} rank={i + 1} artist={a} />
       ))}
@@ -171,7 +171,7 @@ function AlbumsList({ period }: { period: LastFmPeriod }) {
     );
   }
   return (
-    <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6">
+    <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6 min-[1920px]:grid-cols-7 min-[2400px]:grid-cols-8">
       {data.map((a, i) => (
         <AlbumCard key={`${a.name}-${a.artist}-${i}`} rank={i + 1} album={a} />
       ))}
@@ -215,7 +215,7 @@ function LovedList() {
 
 function GridSkeleton() {
   return (
-    <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6">
+    <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6 min-[1920px]:grid-cols-7 min-[2400px]:grid-cols-8">
       {Array.from({ length: 18 }).map((_, i) => (
         <Skeleton key={i} className="aspect-square w-full" />
       ))}

@@ -137,7 +137,7 @@ function Section({
     return (
       <div>
         {title && <SectionHeader title={title} subtitle={subtitle} />}
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6">
+        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 min-[1920px]:grid-cols-7 min-[2400px]:grid-cols-8">
           {links.map((l) => (
             <PageLinkTile key={l.path} link={l} />
           ))}
@@ -153,11 +153,13 @@ function Section({
   // sections is quick; the only cost is some rows lose their "view
   // more" affordance when Tidal didn't send a viewAllPath for them.
   const singleRow = forceSingleRow || Boolean(context || viewAllPath);
-  // Cap single rows at whichever is smaller: five (matches Tidal's
-  // homepage density) or the actual visible column count. Without the
-  // second cap a narrower viewport renders 4 cards then an orphaned
+  // Cap single rows at whichever is smaller: the row-cap or the actual
+  // visible column count. The cap matches the maximum useColumnCount
+  // produces (8 at 2400px+) so wide displays render a full row of
+  // cards rather than padding empty space. Without the columnCount
+  // floor a narrower viewport renders e.g. 4 cards then an orphaned
   // 5th on a partial second row.
-  const ROW_CAP = 5;
+  const ROW_CAP = 8;
   const visible = singleRow
     ? items.slice(0, Math.min(ROW_CAP, columnCount))
     : items;
@@ -178,8 +180,8 @@ function Section({
         className={cn(
           "grid gap-4",
           singleRow
-            ? "grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5"
-            : "grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6",
+            ? "grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 min-[1920px]:grid-cols-7 min-[2400px]:grid-cols-8"
+            : "grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6 min-[1920px]:grid-cols-7 min-[2400px]:grid-cols-8",
         )}
       >
         {visible.map((it, idx) => (
