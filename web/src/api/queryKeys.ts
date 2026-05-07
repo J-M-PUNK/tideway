@@ -30,6 +30,7 @@ export const queryKeys = {
   album: (id: string) => `album:${id}`,
   artist: (id: string) => `artist:${id}`,
   mix: (id: string) => `mix:${id}`,
+  profile: (id: string) => `profile:${id}`,
 } as const;
 
 /**

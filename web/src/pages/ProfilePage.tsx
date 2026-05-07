@@ -5,6 +5,7 @@ import { api } from "@/api/client";
 import type { OnDownload } from "@/api/download";
 import type { Playlist } from "@/api/types";
 import { useApi } from "@/hooks/useApi";
+import { queryKeys } from "@/api/queryKeys";
 import { useAuth } from "@/hooks/useAuth";
 import { DetailHero } from "@/components/DetailHero";
 import { FollowButton } from "@/components/FollowButton";
@@ -28,7 +29,9 @@ export function ProfilePage({ onDownload }: { onDownload: OnDownload }) {
     data: user,
     loading,
     error,
-  } = useApi(() => api.user.profile(id), [id]);
+  } = useApi(() => api.user.profile(id), [id], {
+    cacheKey: queryKeys.profile(id),
+  });
   const [playlists, setPlaylists] = useState<Playlist[] | null>(null);
   const [counts, setCounts] = useState<{
     followers: number;
