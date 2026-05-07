@@ -728,10 +728,36 @@ def _install_drag_monitor(nswindow) -> None:
                 return event
             if location.x > (window_width - float(_CORNER_RESIZE_ZONE_PT)):
                 return event
-            # In the titlebar zone — start a native window drag.
-            # The OS's drag loop tracks mouseUp on its own and
-            # decides drag vs double-click-zoom based on movement
-            # within its threshold.
+            # In the titlebar zone. Two paths from here:
+            #
+            #   1. Double-click. The standard macOS title-bar action
+            #      depending on System Settings > Desktop & Dock >
+            #      "Double-click a window's title bar to" (Maximize,
+            #      Minimize, or do nothing). performWindowDragWithEvent_
+            #      doesn't handle this on its own despite what its docs
+            #      imply, so detect it explicitly via clickCount and
+            #      call the matching NSWindow action.
+            #
+            #   2. Single click. Start a native window drag. The OS's
+            #      drag loop tracks mouseUp on its own.
+            if event.clickCount() >= 2:
+                pref = "Maximize"
+                try:
+                    defaults = AppKit.NSUserDefaults.standardUserDefaults()
+                    user_pref = defaults.stringForKey_("AppleActionOnDoubleClick")
+                    if isinstance(user_pref, str) and user_pref:
+                        pref = user_pref
+                except Exception:
+                    pass
+                try:
+                    if pref == "Minimize":
+                        nswindow.performMiniaturize_(None)
+                    elif pref == "Maximize":
+                        nswindow.zoom_(None)
+                    # "None" pref: deliberately do nothing.
+                except Exception:
+                    return event
+                return None
             try:
                 nswindow.performWindowDragWithEvent_(event)
             except Exception:
@@ -742,8 +768,6 @@ def _install_drag_monitor(nswindow) -> None:
                 # crash.
                 return event
             # Consume the event so WKWebView doesn't ALSO see it.
-            # NSWindow.performWindowDragWithEvent_ handles the
-            # entire interaction internally.
             return None
         except Exception:
             log.exception(
@@ -757,6 +781,65 @@ def _install_drag_monitor(nswindow) -> None:
     )
     if monitor is not None:
         _drag_monitors[window_id] = monitor
+
+
+# Observer kept alive for the lifetime of the process. NSNotificationCenter
+# holds a weak reference to the observer, so a local that goes out of scope
+# stops receiving notifications.
+_dock_reopen_observer = None
+
+
+def install_macos_dock_reopen(show_callback) -> None:
+    """Re-show the hidden main window when the user clicks the dock icon.
+
+    On macOS the X button hides the window (see the closing handler in
+    desktop.py); the dock icon brings it back. NSApplication's default
+    behaviour reopens the main window only when applicationShouldHandleReopen
+    returns YES, but pywebview's app delegate doesn't implement that
+    method. Rather than swizzle pywebview's delegate (fragile across
+    pywebview versions), observe NSApplicationDidBecomeActiveNotification
+    and call the show callback. The callback is idempotent: showing an
+    already-visible window is a no-op orderFront, and showing a hidden
+    one brings it back, which is what we want in both cases.
+
+    Idempotent. Re-calling replaces the existing observer."""
+    global _dock_reopen_observer
+    if sys.platform != "darwin":
+        return
+
+    try:
+        import AppKit  # type: ignore
+        from Foundation import NSObject, NSNotificationCenter  # type: ignore
+    except Exception as exc:
+        log.warning("window_chrome: dock-reopen observer requires PyObjC: %s", exc)
+        return
+
+    if _dock_reopen_observer is not None:
+        try:
+            NSNotificationCenter.defaultCenter().removeObserver_(
+                _dock_reopen_observer
+            )
+        except Exception:
+            pass
+        _dock_reopen_observer = None
+
+    class _DockReopenObserver(NSObject):  # type: ignore[misc]
+        def applicationDidBecomeActive_(self, _notification):  # noqa: N802
+            try:
+                show_callback()
+            except Exception:
+                log.exception(
+                    "window_chrome: dock-reopen show callback raised"
+                )
+
+    observer = _DockReopenObserver.alloc().init()
+    NSNotificationCenter.defaultCenter().addObserver_selector_name_object_(
+        observer,
+        b"applicationDidBecomeActive:",
+        AppKit.NSApplicationDidBecomeActiveNotification,
+        None,
+    )
+    _dock_reopen_observer = observer
 
 
 # ---------------------------------------------------------------------------
