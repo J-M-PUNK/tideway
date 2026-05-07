@@ -32,6 +32,12 @@ export interface UseApiOptions {
    *  as the initial render. Older than this and we show the loading
    *  state until the revalidate completes. */
   ttlMs?: number;
+  /** When true the hook skips the fetch entirely and returns
+   *  `{ data: null, loading: false, error: null }`. Use for queries
+   *  that are conditional on user input — e.g. Search before any
+   *  query has been entered. The hook re-evaluates skip whenever
+   *  `deps` change, so flipping this off triggers a fresh fetch. */
+  skip?: boolean;
 }
 
 /**
@@ -56,10 +62,12 @@ export function useApi<T>(
 ): State<T> {
   const cacheKey = options?.cacheKey;
   const ttlMs = options?.ttlMs ?? DEFAULT_TTL_MS;
+  const skip = options?.skip ?? false;
 
   // Initial state pulls from cache synchronously so the very first
   // render of a revisited page already has data — no spinner flash.
   const [state, setState] = useState<State<T>>(() => {
+    if (skip) return { data: null, loading: false, error: null };
     if (cacheKey) {
       const entry = cache.get(cacheKey) as CacheEntry<T> | undefined;
       if (entry && Date.now() - entry.timestamp < ttlMs) {
@@ -70,6 +78,15 @@ export function useApi<T>(
   });
 
   useEffect(() => {
+    if (skip) {
+      // Idle — caller hasn't supplied the input the fetcher needs
+      // (e.g. an empty search query). Reset to a clean idle state
+      // so a previous query's data doesn't linger after the input
+      // is cleared.
+      setState({ data: null, loading: false, error: null });
+      return;
+    }
+
     let cancelled = false;
 
     // Adjust visible loading state based on whether we have a fresh
@@ -127,8 +144,10 @@ export function useApi<T>(
     return () => {
       cancelled = true;
     };
+    // skip is included so toggling it on/off re-evaluates the effect
+    // even if the caller didn't put their skip predicate in deps.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, deps);
+  }, [skip, ...deps]);
 
   return state;
 }
