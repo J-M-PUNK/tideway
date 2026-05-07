@@ -5,6 +5,7 @@ import { api } from "@/api/client";
 import type { Album } from "@/api/types";
 import type { OnDownload } from "@/api/download";
 import { useApi } from "@/hooks/useApi";
+import { queryKeys } from "@/api/queryKeys";
 import { markFeedSeen } from "@/hooks/useFeedUnread";
 import { Button } from "@/components/ui/button";
 import { DownloadButton } from "@/components/DownloadButton";
@@ -22,7 +23,9 @@ type FeedItem = Album & { released_at: string };
  * for a download client: album tiles sorted by release date.
  */
 export function FeedPage({ onDownload }: { onDownload: OnDownload }) {
-  const { data, loading, error } = useApi(() => api.feed(), []);
+  const { data, loading, error } = useApi(() => api.feed(), [], {
+    cacheKey: queryKeys.feed,
+  });
 
   // Landing on the feed = the user has "seen" everything through now.
   // Clear the sidebar badge. We do this on successful load so a failed

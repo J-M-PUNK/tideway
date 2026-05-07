@@ -2,6 +2,7 @@ import { useParams } from "react-router-dom";
 import { api } from "@/api/client";
 import type { OnDownload } from "@/api/download";
 import { useApi } from "@/hooks/useApi";
+import { queryKeys } from "@/api/queryKeys";
 import { PageView } from "@/components/PageView";
 import { ErrorView } from "@/components/ErrorView";
 import { GridSkeleton } from "@/components/Skeletons";
@@ -25,6 +26,7 @@ export function BrowsePage({ onDownload }: { onDownload: OnDownload }) {
   const { data, loading, error } = useApi(
     () => api.pagePath(decoded),
     [decoded],
+    { cacheKey: queryKeys.pagePath(decoded) },
   );
 
   // Prefer the title Tidal gives us in the response; fall back to a

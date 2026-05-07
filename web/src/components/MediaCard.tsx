@@ -7,6 +7,7 @@ import { useFavorites } from "@/hooks/useFavorites";
 import { useHeartPop } from "@/components/HeartButton";
 import { cn, imageProxy } from "@/lib/utils";
 import { PlayMediaButton } from "@/components/PlayMediaButton";
+import { prefetch } from "@/api/queryKeys";
 
 type Item = Album | Artist | Playlist;
 
@@ -30,6 +31,15 @@ export function MediaCard({
         ? `/artist/${item.id}`
         : `/playlist/${item.id}`;
 
+  // Hover-warm the detail-page payload so clicking the card lands
+  // on rendered content instead of a spinner. No-op when the cache
+  // already has a fresh entry. Playlists aren't cached (mutation-
+  // driven edits invalidate them), so skip the prefetch there.
+  const warm = () => {
+    if (item.kind === "album") prefetch.album(item.id);
+    else if (item.kind === "artist") prefetch.artist(item.id);
+  };
+
   const cover = imageProxy(item.kind === "artist" ? item.picture : item.cover);
   const rounded = item.kind === "artist" ? "rounded-full" : "rounded-md";
   const showHoverActions = item.kind !== "artist";
@@ -45,6 +55,7 @@ export function MediaCard({
   return (
     <Link
       to={href}
+      onMouseEnter={warm}
       className="group relative flex flex-col gap-3 rounded-lg bg-card p-4 transition-colors duration-200 ease-out hover:bg-accent"
     >
       <div

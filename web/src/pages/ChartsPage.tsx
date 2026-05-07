@@ -4,6 +4,7 @@ import type { LucideIcon } from "lucide-react";
 import { api } from "@/api/client";
 import type { OnDownload } from "@/api/download";
 import { useApi } from "@/hooks/useApi";
+import { queryKeys } from "@/api/queryKeys";
 import { PageView } from "@/components/PageView";
 import { ChartsNav } from "@/components/ChartsNav";
 import { ErrorView } from "@/components/ErrorView";
@@ -46,6 +47,7 @@ export function ChartsPage({ onDownload }: { onDownload: OnDownload }) {
   const { data, loading, error } = useApi(
     () => api.pagePath(spec.path),
     [spec.path],
+    { cacheKey: queryKeys.charts(spec.path) },
   );
 
   // New Releases stays standalone; only Top and Rising share the
