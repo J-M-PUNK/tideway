@@ -1402,10 +1402,11 @@ class PCMPlayer:
             except Exception:
                 pass
 
-        # Cache hit path: skip the three serial Tidal round-trips
-        # (track → stream → manifest) when a recent prefetch or play
-        # already resolved this (track_id, quality) pair. 3-minute
-        # TTL stays well inside Tidal's signed-URL expiry window.
+        # Cache hit path: skip the two parallel Tidal round-trips
+        # (track metadata + playbackinfo) plus the local manifest
+        # parse when a recent prefetch or play already resolved this
+        # (track_id, quality) pair. 3-minute TTL stays well inside
+        # Tidal's signed-URL expiry window.
         cache_key = (track_id, quality)
         t0 = time.monotonic()
         cached_urls_info = self._manifest_cache.lookup(cache_key)
@@ -1430,13 +1431,24 @@ class PCMPlayer:
         if override is not None:
             session.config.quality = override
         try:
-            # Per-phase timings so we can see which of the three
-            # Tidal round-trips is the slow one on any given play.
-            t_track = time.monotonic()
-            track = session.track(int(track_id))
-            t_stream = time.monotonic()
-            stream = track.get_stream()
-            t_manifest = time.monotonic()
+            # The metadata fetch (`session.track`) and the playback-info
+            # fetch (`track.get_stream`) are two independent Tidal
+            # round-trips: get_stream only uses the track id, not any
+            # parsed metadata. Run them in parallel so total wall-clock
+            # is max() instead of sum() — saves ~50-150 ms per cache
+            # miss on a click. The third historical "phase",
+            # `stream.get_stream_manifest()`, is a local base64 +
+            # parse, not a network call.
+            tid = int(track_id)
+            t_start = time.monotonic()
+            with ThreadPoolExecutor(max_workers=2) as ex:
+                track_future = ex.submit(session.track, tid)
+                stream_holder = tidalapi.Track(session)
+                stream_holder.id = tid
+                stream_future = ex.submit(stream_holder.get_stream)
+                track = track_future.result()
+                stream = stream_future.result()
+            t_after_network = time.monotonic()
             manifest = stream.get_stream_manifest()
             t_end = time.monotonic()
             if getattr(manifest, "is_encrypted", False):
@@ -1466,9 +1478,8 @@ class PCMPlayer:
             print(
                 f"[perf] resolve track={track_id} quality={quality} cache=MISS "
                 f"total={(t_end - t0) * 1000.0:.0f}ms "
-                f"track={(t_stream - t_track) * 1000.0:.0f}ms "
-                f"stream={(t_manifest - t_stream) * 1000.0:.0f}ms "
-                f"manifest={(t_end - t_manifest) * 1000.0:.0f}ms "
+                f"network_parallel={(t_after_network - t_start) * 1000.0:.0f}ms "
+                f"manifest_parse={(t_end - t_after_network) * 1000.0:.0f}ms "
                 f"segments={len(urls)}",
                 file=sys.stderr,
                 flush=True,
@@ -1500,16 +1511,17 @@ class PCMPlayer:
 
         Jitters 50-200ms before the first Tidal request. Album-mount
         prefetch fans out via a ThreadPoolExecutor: without jitter, all
-        N workers hit `session.track(...)` within the same few ms, and
-        each one then runs three sequential Tidal API calls (track ->
-        get_stream -> get_stream_manifest). That stack of N*3 requests
-        inside one second is exactly the burst pattern Tidal's anti-
-        abuse layer flags as a 429 (with longer 403/`abuse_detected`
-        escalations from there). The jitter is per-worker, so the first
-        request from each worker spreads across a 150 ms window before
-        the sequential chain even starts. Foreground play is
-        unaffected: `_resolve_source` is unchanged, and the
-        `play_track` path doesn't go through `prefetch`.
+        N workers hit `_resolve_source` within the same few ms, and
+        each one then issues two parallel Tidal API calls (track
+        metadata + playbackinfo). That stack of N*2 requests inside
+        one second is exactly the burst pattern Tidal's anti-abuse
+        layer flags as a 429 (with longer 403/`abuse_detected`
+        escalations from there). The jitter is per-worker, so the
+        first request from each worker spreads across a 150 ms window
+        before the parallel pair even starts. Foreground play goes
+        through the same `_resolve_source` path so it benefits from
+        the parallelization too, but doesn't go through this jitter
+        wrapper since there's only one foreground request at a time.
 
         No-ops when prefetch is disabled by the caller — the endpoint
         layer bails out on offline_mode before ever reaching this
