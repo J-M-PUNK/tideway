@@ -92,16 +92,19 @@ export function useApi<T>(
     // Adjust visible loading state based on whether we have a fresh
     // cached value: stale-while-revalidate keeps loading=false while
     // the background fetch runs, full cold load shows the spinner.
+    // On a cold key (no fresh cache hit), data is cleared too — the
+    // previous render's data is for a different query, so showing it
+    // beneath the spinner would flash mismatched content.
     if (cacheKey) {
       const entry = cache.get(cacheKey) as CacheEntry<T> | undefined;
       const fresh = entry && Date.now() - entry.timestamp < ttlMs;
       if (fresh) {
         setState({ data: entry.data, loading: false, error: null });
       } else {
-        setState((s) => ({ ...s, loading: true, error: null }));
+        setState({ data: null, loading: true, error: null });
       }
     } else {
-      setState((s) => ({ ...s, loading: true, error: null }));
+      setState({ data: null, loading: true, error: null });
     }
 
     const promise = (() => {

@@ -1,4 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
+import { useApi } from "@/hooks/useApi";
+import { queryKeys } from "@/api/queryKeys";
 import {
   Disc3,
   Download,
@@ -113,9 +115,7 @@ export function Library({ onDownload }: { onDownload: OnDownload }) {
   const type = section as Section;
   const { title, emptyHint } = META[type];
 
-  const [data, setData] = useState<LibraryItem[] | null>(null);
   const [folders, setFolders] = useState<PlaylistFolder[]>([]);
-  const [loadError, setLoadError] = useState<Error | null>(null);
   const [filter, setFilter] = useState("");
   const [sort, setSort] = useState<Sort>("recent");
   const [view, setView] = useState<View>(() => loadView(type));
@@ -139,37 +139,58 @@ export function Library({ onDownload }: { onDownload: OnDownload }) {
     saveView(type, v);
   };
 
+  // Library content goes through the SWR cache with a short 30s TTL —
+  // long enough that tab-switching between sections feels instant, short
+  // enough that a like/unlike from elsewhere in the app shows up on the
+  // next tab visit instead of sitting stale for the default 5 minutes.
+  // Each section has its own cache lane keyed by the type.
+  const itemsCacheKey =
+    type === "albums"
+      ? queryKeys.libraryAlbums
+      : type === "artists"
+        ? queryKeys.libraryArtists
+        : type === "playlists"
+          ? queryKeys.libraryPlaylists
+          : queryKeys.libraryTracks;
+  const itemsFetcher = (): Promise<LibraryItem[]> =>
+    type === "albums"
+      ? api.library.albums()
+      : type === "artists"
+        ? api.library.artists()
+        : type === "playlists"
+          ? api.library.playlists()
+          : api.library.tracks();
+  const { data, error: loadError } = useApi<LibraryItem[]>(
+    itemsFetcher,
+    [type],
+    { cacheKey: itemsCacheKey, ttlMs: 30 * 1000 },
+  );
+
+  // Reset transient UI state when the section changes — these don't
+  // come from the SWR cache, they're per-mount UI choices.
   useEffect(() => {
-    setData(null);
-    setFolders([]);
-    setLoadError(null);
     setFilter("");
+  }, [type]);
+
+  // Folders are only relevant on /library/playlists. Small payload +
+  // mutation-coupled (CreateFolderDialog calls `refreshFolders` after
+  // an add), so we leave them on a raw fetch instead of routing them
+  // through the SWR cache. The Library page is the only consumer, so
+  // a stale entry isn't worth designing invalidation around.
+  useEffect(() => {
+    if (type !== "playlists") {
+      setFolders([]);
+      return;
+    }
     let cancelled = false;
-    (async () => {
-      try {
-        const items = await (type === "albums"
-          ? api.library.albums()
-          : type === "artists"
-            ? api.library.artists()
-            : type === "playlists"
-              ? api.library.playlists()
-              : api.library.tracks());
-        if (!cancelled) setData(items);
-        if (!cancelled && type === "playlists") {
-          // Folders live alongside playlists. Fetch them in parallel so
-          // the main grid doesn't block on folder load.
-          try {
-            const f = await api.library.folders.list("root");
-            if (!cancelled) setFolders(f);
-          } catch {
-            /* folders optional — silent */
-          }
-        }
-      } catch (err) {
-        if (!cancelled)
-          setLoadError(err instanceof Error ? err : new Error(String(err)));
-      }
-    })();
+    api.library.folders
+      .list("root")
+      .then((f) => {
+        if (!cancelled) setFolders(f);
+      })
+      .catch(() => {
+        /* folders are optional — silent */
+      });
     return () => {
       cancelled = true;
     };
