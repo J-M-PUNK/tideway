@@ -1,7 +1,8 @@
-import { useEffect, useState } from "react";
 import { useParams, useSearchParams } from "react-router-dom";
 import { Heart, Music, User as UserIcon } from "lucide-react";
 import { api } from "@/api/client";
+import { queryKeys } from "@/api/queryKeys";
+import { useApi } from "@/hooks/useApi";
 import type {
   LastFmLovedTrack,
   LastFmPeriod,
@@ -78,20 +79,11 @@ const TITLES: Record<string, string> = {
 };
 
 function ArtistsList({ period }: { period: LastFmPeriod }) {
-  const [data, setData] = useState<LastFmTopArtist[] | null>(null);
-  const [loading, setLoading] = useState(false);
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    api.lastfm
-      .topArtists(period, 200)
-      .then((rows) => !cancelled && setData(rows))
-      .catch(() => !cancelled && setData([]))
-      .finally(() => !cancelled && setLoading(false));
-    return () => {
-      cancelled = true;
-    };
-  }, [period]);
+  const { data, loading } = useApi<LastFmTopArtist[]>(
+    () => api.lastfm.topArtists(period, 200),
+    [period],
+    { cacheKey: queryKeys.statsTopArtists(period, 200) },
+  );
   if (loading && !data) return <GridSkeleton />;
   if (!data || data.length === 0) {
     return (
@@ -112,20 +104,11 @@ function ArtistsList({ period }: { period: LastFmPeriod }) {
 }
 
 function TracksList({ period }: { period: LastFmPeriod }) {
-  const [data, setData] = useState<LastFmTopTrack[] | null>(null);
-  const [loading, setLoading] = useState(false);
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    api.lastfm
-      .topTracks(period, 200)
-      .then((rows) => !cancelled && setData(rows))
-      .catch(() => !cancelled && setData([]))
-      .finally(() => !cancelled && setLoading(false));
-    return () => {
-      cancelled = true;
-    };
-  }, [period]);
+  const { data, loading } = useApi<LastFmTopTrack[]>(
+    () => api.lastfm.topTracks(period, 200),
+    [period],
+    { cacheKey: queryKeys.statsTopTracks(period, 200) },
+  );
   if (loading && !data) return <ListSkeleton />;
   if (!data || data.length === 0) {
     return (
@@ -146,20 +129,11 @@ function TracksList({ period }: { period: LastFmPeriod }) {
 }
 
 function AlbumsList({ period }: { period: LastFmPeriod }) {
-  const [data, setData] = useState<LastFmTopAlbum[] | null>(null);
-  const [loading, setLoading] = useState(false);
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    api.lastfm
-      .topAlbums(period, 200)
-      .then((rows) => !cancelled && setData(rows))
-      .catch(() => !cancelled && setData([]))
-      .finally(() => !cancelled && setLoading(false));
-    return () => {
-      cancelled = true;
-    };
-  }, [period]);
+  const { data, loading } = useApi<LastFmTopAlbum[]>(
+    () => api.lastfm.topAlbums(period, 200),
+    [period],
+    { cacheKey: queryKeys.statsTopAlbums(period, 200) },
+  );
   if (loading && !data) return <GridSkeleton />;
   if (!data || data.length === 0) {
     return (
@@ -180,20 +154,11 @@ function AlbumsList({ period }: { period: LastFmPeriod }) {
 }
 
 function LovedList() {
-  const [data, setData] = useState<LastFmLovedTrack[] | null>(null);
-  const [loading, setLoading] = useState(false);
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    api.lastfm
-      .lovedTracks(500)
-      .then((rows) => !cancelled && setData(rows))
-      .catch(() => !cancelled && setData([]))
-      .finally(() => !cancelled && setLoading(false));
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  const { data, loading } = useApi<LastFmLovedTrack[]>(
+    () => api.lastfm.lovedTracks(500),
+    [],
+    { cacheKey: queryKeys.statsLoved(500) },
+  );
   if (loading && !data) return <ListSkeleton />;
   if (!data || data.length === 0) {
     return (
