@@ -382,17 +382,22 @@ def main(argv: Optional[list[str]] = None) -> int:
         easy_drag=False,
     )
 
-    # Close behavior: clicking the X (or Cmd+Q on macOS, or any
-    # other native close path) destroys the window and exits the
-    # process. There is no hide-to-tray; the tray icon was removed
-    # in v1.5.2 because the hide-on-close behavior was unexpected
-    # and the tray's only documented purpose was to give the user
-    # a way back from the hidden state.
+    # Close behavior. On Windows / Linux the X destroys the window and
+    # the process exits. On macOS we follow the platform convention:
+    # the X hides the window without quitting, and the dock icon
+    # brings it back. Cmd+Q still quits because that goes through
+    # NSApplication.terminate, a separate code path that doesn't
+    # fire pywebview's `closing` event. Same for the in-app Quit
+    # menu's `_quit_app` below, which calls window.destroy() directly.
+    #
+    # We removed the Windows tray icon in v1.5.2 because hide-to-tray
+    # was unexpected and the tray's only purpose was to bring the
+    # window back. macOS has the dock for that, so it's not unexpected.
 
     def _show_window() -> None:
-        # Used by the focus callback for second-instance launches:
-        # bring the existing window to front instead of spawning a
-        # second one.
+        # Used by the focus callback for second-instance launches and
+        # by the dock-icon reopen handler on macOS: bring the existing
+        # window to front instead of spawning a second one.
         try:
             window.show()
         except Exception:
@@ -404,10 +409,45 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     def _quit_app() -> None:
         # Used by the in-app Quit menu's /api/_internal/quit
-        # endpoint. Equivalent to clicking the OS close button
-        # now that there's no hide-to-tray interception.
+        # endpoint. Bypasses the closing-to-hide path on macOS by
+        # calling destroy directly.
         try:
             window.destroy()
+        except Exception:
+            pass
+
+    if sys.platform == "darwin":
+        def _on_closing_macos() -> bool:
+            """Cancel the X-button close path and hide instead.
+
+            Returning False from `closing` tells pywebview to keep the
+            window alive. Cmd+Q and the in-app Quit menu both bypass
+            this handler (they go through NSApp.terminate / window
+            .destroy respectively), so the user can still quit; only
+            the X click is intercepted."""
+            try:
+                window.hide()
+            except Exception:
+                pass
+            return False
+
+        try:
+            window.events.closing += _on_closing_macos
+        except Exception:
+            pass
+
+        # Re-show the hidden window when the user clicks the dock icon.
+        # Wired AFTER webview.start() so NSApp is up; we hook this from
+        # the `shown` event below rather than registering at create time.
+        def _install_dock_reopen() -> None:
+            try:
+                from app import window_chrome as _window_chrome
+                _window_chrome.install_macos_dock_reopen(_show_window)
+            except Exception:
+                pass
+
+        try:
+            window.events.shown += _install_dock_reopen
         except Exception:
             pass
 
