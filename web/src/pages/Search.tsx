@@ -69,10 +69,16 @@ export function Search({ onDownload }: { onDownload: OnDownload }) {
   // request — wait 300 ms after typing stops, then search. The
   // debounced value drives the useApi cache key, so the SWR layer
   // keys each unique query separately and a re-typed query renders
-  // instantly from cache.
+  // instantly from cache. Clearing the input bypasses the debounce
+  // and propagates "" immediately so the results disappear the
+  // moment the field empties — no 300ms ghost-results window.
   const trimmedQ = q.trim();
   const [debouncedQ, setDebouncedQ] = useState(trimmedQ);
   useEffect(() => {
+    if (!trimmedQ) {
+      setDebouncedQ("");
+      return;
+    }
     const t = window.setTimeout(() => setDebouncedQ(trimmedQ), 300);
     return () => window.clearTimeout(t);
   }, [trimmedQ]);
