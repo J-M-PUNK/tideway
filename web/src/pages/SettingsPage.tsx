@@ -791,7 +791,108 @@ function AudioEngineFields() {
 
       <EqField />
       <CrossfeedField />
+      <ReplayGainField />
     </>
+  );
+}
+
+/**
+ * ReplayGain loudness leveling. Three modes (off / track / album)
+ * + a preamp slider + a clipping-prevention toggle. Self-contained
+ * on settings.get/put, same pattern as CrossfeedField.
+ *
+ * The mode picker sits at the top because it's the only control
+ * that determines whether the rest of the section even matters —
+ * with mode=off, preamp and clipping prevention are inert.
+ */
+function ReplayGainField() {
+  const [state, setState] = useState<{
+    mode: "off" | "track" | "album";
+    preamp: number;
+    preventClipping: boolean;
+  } | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.settings
+      .get()
+      .then((s) => {
+        if (cancelled) return;
+        setState({
+          mode: s.replaygain_mode ?? "off",
+          preamp: s.replaygain_preamp_db ?? 0,
+          preventClipping: s.replaygain_prevent_clipping ?? true,
+        });
+      })
+      .catch(() => {
+        if (!cancelled)
+          setState({ mode: "off", preamp: 0, preventClipping: true });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (!state) return null;
+
+  const setMode = (mode: "off" | "track" | "album") => {
+    setState({ ...state, mode });
+    void api.settings.put({ replaygain_mode: mode }).catch(() => {});
+  };
+  const setPreamp = (preamp: number) => {
+    setState({ ...state, preamp });
+    void api.settings.put({ replaygain_preamp_db: preamp }).catch(() => {});
+  };
+  const setPreventClipping = (preventClipping: boolean) => {
+    setState({ ...state, preventClipping });
+    void api.settings
+      .put({ replaygain_prevent_clipping: preventClipping })
+      .catch(() => {});
+  };
+
+  return (
+    <Field
+      label="ReplayGain"
+      hint="Loudness leveling — Tidal masters carry per-track and per-album gain offsets relative to the EBU R128 reference. Track mode is best for shuffle; album mode preserves the artist's intended loudness relationships within an album. Off keeps the audio path bit-perfect."
+    >
+      <div className="flex flex-col gap-3">
+        <select
+          value={state.mode}
+          onChange={(e) => setMode(e.target.value as "off" | "track" | "album")}
+          className="h-10 rounded-md border border-input bg-secondary px-3 text-sm"
+        >
+          <option value="off">Off — bit-perfect</option>
+          <option value="track">Track — per-track gain</option>
+          <option value="album">Album — album-wide gain</option>
+        </select>
+        {state.mode !== "off" && (
+          <>
+            <div>
+              <div className="mb-1 text-xs text-muted-foreground">
+                {state.preamp >= 0 ? "+" : ""}
+                {state.preamp.toFixed(1)} dB preamp offset
+              </div>
+              <input
+                type="range"
+                min={-10}
+                max={10}
+                step={0.5}
+                value={state.preamp}
+                onChange={(e) => setPreamp(Number(e.target.value))}
+                className="h-2 w-full cursor-pointer appearance-none rounded-full bg-secondary accent-primary"
+                aria-label="ReplayGain preamp offset"
+              />
+            </div>
+            <Toggle
+              checked={state.preventClipping}
+              onChange={setPreventClipping}
+              label="Prevent clipping"
+              hint="Clamp the applied gain so peak * gain ≤ 1.0. Off lets you push past the limit at your own risk for masters that won't actually clip."
+            />
+          </>
+        )}
+      </div>
+    </Field>
   );
 }
 
