@@ -345,6 +345,44 @@ export interface Settings {
   replaygain_prevent_clipping: boolean;
 }
 
+/** Snapshot of every stage in the audio DSP chain — drives the
+ *  "Signal path" panel users open from the now-playing pill to
+ *  confirm what's actually happening to the bits. */
+export interface SignalPath {
+  /** True only when no DSP stage is active AND exclusive mode is on
+   *  (i.e. samples are literally going to the DAC unchanged). */
+  bit_perfect: boolean;
+  source: {
+    codec: string | null;
+    sample_rate_hz: number | null;
+    bit_depth: number | null;
+    audio_quality: string | null;
+  };
+  replaygain: {
+    mode: "off" | "track" | "album";
+    applied_db: number;
+    preamp_db: number;
+    prevent_clipping: boolean;
+    tags_present: boolean;
+    active: boolean;
+  };
+  eq: {
+    mode: "off" | "manual" | "profile";
+    bypass: boolean;
+    profile_id: string | null;
+    manual_enabled: boolean;
+    active: boolean;
+  };
+  crossfeed: {
+    amount: number;
+    active: boolean;
+  };
+  output: {
+    exclusive_mode: boolean;
+    force_volume: boolean;
+  };
+}
+
 export interface AuthStatus {
   logged_in: boolean;
   username: string | null;
