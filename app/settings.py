@@ -140,6 +140,26 @@ class Settings:
     # listening fix for hard-panned mixes. Off by default; user opts
     # in via the Settings → Playback slider.
     crossfeed_amount: int = 0
+    # ReplayGain loudness leveling. Off by default to preserve
+    # bit-perfect output for users who haven't asked for leveling.
+    #   "off"   — bypass; audio plays at the source's native level.
+    #   "track" — apply per-track gain. Best for shuffle / mixed
+    #             playback where each track's loudness is
+    #             independent.
+    #   "album" — apply album-wide gain. Best for listening to whole
+    #             albums; preserves the artist's intended loudness
+    #             relationships between tracks within the album.
+    replaygain_mode: str = "off"
+    # User offset in dB on top of the ReplayGain value. Useful when
+    # the EBU R128 reference is too quiet for a particular setup
+    # (low-output DAC + high-impedance headphones). Range -10..+10
+    # enforced at the API layer; raw float persisted here.
+    replaygain_preamp_db: float = 0.0
+    # When on, the gain is clamped so the peak * gain ≤ 1.0 to
+    # prevent clipping. Off lets the user push past that for
+    # quieter masters that won't actually clip with the chosen
+    # preamp, at the cost of risk if the math is off.
+    replaygain_prevent_clipping: bool = True
     # sounddevice output-device index (stringified, matches what
     # /api/player/output-devices returns). Empty string means "use
     # the system default". Persisted so USB DAC / Bluetooth
