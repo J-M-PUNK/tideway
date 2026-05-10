@@ -248,6 +248,20 @@ _PAGE_CACHE_TTL = 60.0
 _page_cache: dict[str, tuple[float, dict]] = {}
 _page_cache_lock = threading.Lock()
 
+# Detail-page cache for the /api/album/{id}, /api/mix/{id}, and
+# /api/playlist/{id} endpoints. Each blocks on multiple synchronous
+# Tidal API calls (album fans out 5 parallel; playlist hits track
+# list + metadata; mix grabs items). Keyed by "kind:id". 5-minute
+# TTL — album / mix / playlist payloads don't churn minute-to-
+# minute, and any in-app mutation invalidates the affected entry
+# explicitly via `_invalidate_detail_cache_entry`.
+#
+# Note: artist detail keeps its own cache below — predates this
+# generic one and works fine, no need to migrate.
+_DETAIL_CACHE_TTL = 300.0
+_detail_cache: dict[str, tuple[float, dict]] = {}
+_detail_cache_lock = threading.Lock()
+
 
 def _evict_expired_stream_files(now: float) -> None:
     """Drop and unlink any cached temp files past TTL. Called lazily on
@@ -346,6 +360,40 @@ def _store_page_cache(key: str, value: dict) -> None:
 def _invalidate_page_cache() -> None:
     with _page_cache_lock:
         _page_cache.clear()
+
+
+def _lookup_detail_cache(key: str) -> Optional[dict]:
+    now = time.monotonic()
+    with _detail_cache_lock:
+        entry = _detail_cache.get(key)
+        if entry is None:
+            return None
+        ts, value = entry
+        if now - ts > _DETAIL_CACHE_TTL:
+            del _detail_cache[key]
+            return None
+        return value
+
+
+def _store_detail_cache(key: str, value: dict) -> None:
+    now = time.monotonic()
+    with _detail_cache_lock:
+        _detail_cache[key] = (now, value)
+
+
+def _invalidate_detail_cache_entry(key: str) -> None:
+    """Drop a single `kind:id` entry. Used by mutation endpoints
+    (playlist edit / add / remove / move) so a follow-up GET sees
+    the post-mutation state instead of the pre-mutation cached
+    payload."""
+    with _detail_cache_lock:
+        _detail_cache.pop(key, None)
+
+
+def _invalidate_detail_cache() -> None:
+    """Drop every entry — used on auth-state changes."""
+    with _detail_cache_lock:
+        _detail_cache.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -2760,6 +2808,7 @@ def auth_login_start() -> dict:
             _invalidate_auth_cache()
             _invalidate_preview_cache()
             _invalidate_page_cache()
+            _invalidate_detail_cache()
 
     threading.Thread(target=_wait_and_save, daemon=True).start()
     return {"url": url, "user_code": user_code}
@@ -2782,9 +2831,11 @@ def auth_login_poll() -> dict:
     _invalidate_auth_cache()
     if logged_in:
         # New login may be a different user / refreshed tokens; old signed
-        # preview URLs and editorial pages are no longer trustworthy.
+        # preview URLs, editorial pages, and previously cached library
+        # detail pages are no longer trustworthy.
         _invalidate_preview_cache()
         _invalidate_page_cache()
+        _invalidate_detail_cache()
         return {"status": "ok", "username": tidal.get_user_info()}
     return {"status": "failed"}
 
@@ -2935,6 +2986,7 @@ def auth_pkce_complete(req: PkceCompleteRequest) -> dict:
     _invalidate_auth_cache()
     _invalidate_preview_cache()
     _invalidate_page_cache()
+    _invalidate_detail_cache()
     return {"status": "ok", "username": tidal.get_user_info()}
 
 
@@ -4108,6 +4160,7 @@ def auth_logout() -> dict:
     _invalidate_auth_cache()
     _invalidate_preview_cache()
     _invalidate_page_cache()
+    _invalidate_detail_cache()
     # Drop the persisted download queue too — it's keyed to the now-
     # logged-out account and a different user signing in next should
     # NOT inherit someone else's pending queue. The in-memory broker
@@ -7402,6 +7455,10 @@ def _normalize_album_title(title: str) -> str:
 @app.get("/api/album/{album_id}")
 def album_detail(album_id: int) -> dict:
     _require_auth()
+    cache_key = f"album:{album_id}"
+    cached = _lookup_detail_cache(cache_key)
+    if cached is not None:
+        return cached
     try:
         album = tidal.session.album(album_id)
     except Exception as exc:
@@ -7485,7 +7542,7 @@ def album_detail(album_id: int) -> dict:
         f_more_by = pool.submit(_more_by)
         f_related = pool.submit(_related_artists)
 
-    return {
+    result = {
         **album_to_dict(album),
         "tracks": f_tracks.result(),
         "similar": f_similar.result(),
@@ -7493,6 +7550,8 @@ def album_detail(album_id: int) -> dict:
         "more_by_artist": f_more_by.result(),
         "related_artists": f_related.result(),
     }
+    _store_detail_cache(cache_key, result)
+    return result
 
 
 _artist_detail_cache: dict[str, tuple[float, dict]] = {}
@@ -8389,6 +8448,10 @@ def my_mixes() -> list[dict]:
 def mix_detail(mix_id: str) -> dict:
     """Return a Tidal mix (playlist-like collection) with its tracks."""
     _require_auth()
+    cache_key = f"mix:{mix_id}"
+    cached = _lookup_detail_cache(cache_key)
+    if cached is not None:
+        return cached
     try:
         mix = tidal.session.mix(mix_id)
     except Exception as exc:
@@ -8398,7 +8461,7 @@ def mix_detail(mix_id: str) -> dict:
     except Exception:
         items = []
     tracks = [track_to_dict(t) for t in items if type(t).__name__ == "Track"]
-    return {
+    result = {
         "kind": "mix",
         "id": mix_id,
         "name": getattr(mix, "title", None) or "",
@@ -8406,11 +8469,17 @@ def mix_detail(mix_id: str) -> dict:
         "cover": _first(lambda: mix.image(640)) or _first(lambda: mix.image(480)),
         "tracks": tracks,
     }
+    _store_detail_cache(cache_key, result)
+    return result
 
 
 @app.get("/api/playlist/{playlist_id}")
 def playlist_detail(playlist_id: str) -> dict:
     _require_auth()
+    cache_key = f"playlist:{playlist_id}"
+    cached = _lookup_detail_cache(cache_key)
+    if cached is not None:
+        return cached
     try:
         playlist = tidal.session.playlist(playlist_id)
     except Exception as exc:
@@ -8419,10 +8488,12 @@ def playlist_detail(playlist_id: str) -> dict:
         tracks = list(playlist.tracks())
     except Exception:
         tracks = []
-    return {
+    result = {
         **playlist_to_dict(playlist),
         "tracks": [track_to_dict(t) for t in tracks],
     }
+    _store_detail_cache(cache_key, result)
+    return result
 
 
 # ---------------------------------------------------------------------------
@@ -10278,6 +10349,7 @@ def delete_playlist(playlist_id: str) -> dict:
         playlist.delete()
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc))
+    _invalidate_detail_cache_entry(f"playlist:{playlist_id}")
     return {"ok": True}
 
 
@@ -10302,6 +10374,7 @@ def edit_playlist(playlist_id: str, req: EditPlaylistRequest) -> dict:
         )
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc))
+    _invalidate_detail_cache_entry(f"playlist:{playlist_id}")
     # Re-fetch so the response carries the persisted values.
     try:
         fresh = tidal.session.playlist(playlist_id)
@@ -10322,6 +10395,7 @@ def add_tracks_to_playlist(playlist_id: str, req: AddTracksRequest) -> dict:
         playlist.add(ids)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc))
+    _invalidate_detail_cache_entry(f"playlist:{playlist_id}")
     return {"ok": True, "added": len(ids)}
 
 
@@ -10333,6 +10407,7 @@ def remove_track_from_playlist(playlist_id: str, index: int) -> dict:
         playlist.remove_by_index(index)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc))
+    _invalidate_detail_cache_entry(f"playlist:{playlist_id}")
     return {"ok": True}
 
 
@@ -10559,6 +10634,7 @@ def move_track_in_playlist(playlist_id: str, req: MoveTrackRequest) -> dict:
         playlist.move_by_id(req.media_id, req.position)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc))
+    _invalidate_detail_cache_entry(f"playlist:{playlist_id}")
     return {"ok": True}
 
 
