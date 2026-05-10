@@ -22,13 +22,30 @@ import { CreatePlaylistDialog } from "@/components/CreatePlaylistDialog";
 import { useFeedUnreadCount } from "@/hooks/useFeedUnread";
 import { useUiPreferences } from "@/hooks/useUiPreferences";
 import { cn } from "@/lib/utils";
+import { prefetch } from "@/api/queryKeys";
 
 // Charts (Popular, Top, Rising, New Releases) live behind a single
 // entry — the destination renders a tab strip so the sidebar doesn't
 // have to. Popular is the default since that's the first tab.
-const primary = [
-  { to: "/", label: "Home", icon: Home, end: true },
-  { to: "/feed", label: "Feed", icon: Rss },
+//
+// `prefetch` fires on hover so the page's data is already in the
+// useApi cache by the time the click lands. No-op when the cache
+// is already fresh — see web/src/hooks/useApi.ts.
+const primary: Array<{
+  to: string;
+  label: string;
+  icon: typeof Home;
+  end?: boolean;
+  prefetch?: () => void;
+}> = [
+  {
+    to: "/",
+    label: "Home",
+    icon: Home,
+    end: true,
+    prefetch: prefetch.pageHome,
+  },
+  { to: "/feed", label: "Feed", icon: Rss, prefetch: prefetch.feed },
   { to: "/popular", label: "Charts", icon: TrendingUp },
 ];
 
@@ -110,6 +127,7 @@ export function Sidebar({
         end
         aria-label="Home"
         title="Home"
+        onMouseEnter={prefetch.pageHome}
         className="ml-[10px] inline-flex h-10 w-10 items-center justify-center transition-transform duration-150 hover:scale-105"
       >
         <img src="/app-icon.svg" alt="" className="h-10 w-10 shrink-0" />
@@ -117,13 +135,14 @@ export function Sidebar({
 
       {!offline && (
         <nav className="rounded-lg bg-card p-2">
-          {primary.map(({ to, label, icon: Icon, end }) => {
+          {primary.map(({ to, label, icon: Icon, end, prefetch: warm }) => {
             const badge = to === "/feed" && feedUnread > 0 ? feedUnread : 0;
             return (
               <NavLink
                 key={to}
                 to={to}
                 end={end}
+                onMouseEnter={warm}
                 className={({ isActive }) => navItemClass(isActive)}
               >
                 <Icon className="h-5 w-5" />

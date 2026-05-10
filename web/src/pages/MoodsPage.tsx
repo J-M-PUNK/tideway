@@ -2,12 +2,15 @@ import { Smile } from "lucide-react";
 import { api } from "@/api/client";
 import type { OnDownload } from "@/api/download";
 import { useApi } from "@/hooks/useApi";
+import { queryKeys } from "@/api/queryKeys";
 import { PageView } from "@/components/PageView";
 import { ErrorView } from "@/components/ErrorView";
 import { GridSkeleton } from "@/components/Skeletons";
 
 export function MoodsPage({ onDownload }: { onDownload: OnDownload }) {
-  const { data, loading, error } = useApi(() => api.page("moods"), []);
+  const { data, loading, error } = useApi(() => api.page("moods"), [], {
+    cacheKey: queryKeys.pageMoods,
+  });
 
   if (loading) {
     return (
