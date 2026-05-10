@@ -50,6 +50,7 @@ import { useLastfmScrobbler } from "@/hooks/useLastfmScrobbler";
 import { useMediaSession } from "@/hooks/useMediaSession";
 import { useTidalPlayReporter } from "@/hooks/useTidalPlayReporter";
 import { api } from "@/api/client";
+import { prefetch } from "@/api/queryKeys";
 import type { OnDownload } from "@/api/download";
 // Route components load on demand. Each entry becomes its own chunk
 // in the Vite build — the initial bundle ships only the scaffolding
@@ -208,6 +209,20 @@ export default function App() {
 function AppInner() {
   const auth = useAuth();
   const { offline } = useOfflineMode();
+
+  // Warm the Home page cache as soon as auth resolves. The Home
+  // component is the default route and it lazy-loads its chunk
+  // through React.lazy; firing the network request here lets the
+  // Tidal round-trip overlap with the chunk download instead of
+  // running back-to-back. By the time Home actually mounts and
+  // calls useApi, the response is usually already in the cache
+  // (or in-flight, in which case useApi dedupes onto the same
+  // promise) and renders without the spinner flash.
+  useEffect(() => {
+    if (auth.logged_in && !offline) {
+      prefetch.pageHome();
+    }
+  }, [auth.logged_in, offline]);
 
   // Hold the spinner until both probes resolve — rendering Login
   // prematurely would flash the sign-in screen for users who'd land
