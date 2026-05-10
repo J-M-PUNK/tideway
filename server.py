@@ -234,6 +234,20 @@ _manifest_cache: dict[
 ] = {}
 _manifest_cache_lock = threading.Lock()
 
+# Editorial page cache. `tidal.session.home()` and friends each block on
+# a synchronous Tidal API call (200-800 ms typical). The frontend already
+# has its own SWR cache so a *single* user session reuses payloads, but
+# this server-side cache covers two cases the client cache can't:
+#   - First-ever cold load after the app starts (client cache empty).
+#   - Two browser windows / page reloads pointed at the same local
+#     server, where each gets its own client cache.
+# 60s is short enough that an editorial row reorder during a multi-
+# minute browsing session won't read as broken, and long enough that
+# back/forward navigation between Home and detail pages is instant.
+_PAGE_CACHE_TTL = 60.0
+_page_cache: dict[str, tuple[float, dict]] = {}
+_page_cache_lock = threading.Lock()
+
 
 def _evict_expired_stream_files(now: float) -> None:
     """Drop and unlink any cached temp files past TTL. Called lazily on
@@ -308,6 +322,30 @@ def _invalidate_auth_cache() -> None:
 def _invalidate_preview_cache() -> None:
     with _preview_cache_lock:
         _preview_cache.clear()
+
+
+def _lookup_page_cache(key: str) -> Optional[dict]:
+    now = time.monotonic()
+    with _page_cache_lock:
+        entry = _page_cache.get(key)
+        if entry is None:
+            return None
+        ts, value = entry
+        if now - ts > _PAGE_CACHE_TTL:
+            del _page_cache[key]
+            return None
+        return value
+
+
+def _store_page_cache(key: str, value: dict) -> None:
+    now = time.monotonic()
+    with _page_cache_lock:
+        _page_cache[key] = (now, value)
+
+
+def _invalidate_page_cache() -> None:
+    with _page_cache_lock:
+        _page_cache.clear()
 
 
 # ---------------------------------------------------------------------------
@@ -2721,6 +2759,7 @@ def auth_login_start() -> dict:
             # data from the prior session.
             _invalidate_auth_cache()
             _invalidate_preview_cache()
+            _invalidate_page_cache()
 
     threading.Thread(target=_wait_and_save, daemon=True).start()
     return {"url": url, "user_code": user_code}
@@ -2743,8 +2782,9 @@ def auth_login_poll() -> dict:
     _invalidate_auth_cache()
     if logged_in:
         # New login may be a different user / refreshed tokens; old signed
-        # preview URLs are no longer trustworthy.
+        # preview URLs and editorial pages are no longer trustworthy.
         _invalidate_preview_cache()
+        _invalidate_page_cache()
         return {"status": "ok", "username": tidal.get_user_info()}
     return {"status": "failed"}
 
@@ -2894,6 +2934,7 @@ def auth_pkce_complete(req: PkceCompleteRequest) -> dict:
         )
     _invalidate_auth_cache()
     _invalidate_preview_cache()
+    _invalidate_page_cache()
     return {"status": "ok", "username": tidal.get_user_info()}
 
 
@@ -4066,6 +4107,7 @@ def auth_logout() -> dict:
     tidal.logout()
     _invalidate_auth_cache()
     _invalidate_preview_cache()
+    _invalidate_page_cache()
     # Drop the persisted download queue too — it's keyed to the now-
     # logged-out account and a different user signing in next should
     # NOT inherit someone else's pending queue. The in-memory broker
@@ -10023,11 +10065,17 @@ def editorial_page(name: str) -> dict:
     loader = _KNOWN_PAGES.get(name)
     if loader is None:
         raise HTTPException(status_code=404, detail=f"Unknown page: {name}")
+    cache_key = f"name:{name}"
+    cached = _lookup_page_cache(cache_key)
+    if cached is not None:
+        return cached
     try:
         page = loader()
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc))
-    return _serialize_page(page)
+    result = _serialize_page(page)
+    _store_page_cache(cache_key, result)
+    return result
 
 
 class PagePathRequest(BaseModel):
@@ -10056,13 +10104,19 @@ def resolve_page(req: PagePathRequest) -> dict:
         raise HTTPException(status_code=400, detail="path is required")
     if "://" in path:
         raise HTTPException(status_code=400, detail="path must be a relative api_path")
+    cache_key = f"path:{path}"
+    cached = _lookup_page_cache(cache_key)
+    if cached is not None:
+        return cached
     try:
         if path.startswith("pages/"):
             page = tidal.session.page.get(path)
         else:
             # V2 view-all path — returns a JSON dict directly, no Page
             # object to serialize.
-            return _fetch_v2_view_all(path)
+            result = _fetch_v2_view_all(path)
+            _store_page_cache(cache_key, result)
+            return result
     except Exception as exc:  # noqa: BLE001 — need a catch-all to log body
         body = ""
         try:
@@ -10081,7 +10135,9 @@ def resolve_page(req: PagePathRequest) -> dict:
         # V1 page returned but every row was filtered out during
         # serialization — usually because tidalapi handed back a class
         # name _serialize_page_item doesn't recognise. Log a preview so
-        # we can see which types went missing.
+        # we can see which types went missing. Don't cache the empty
+        # result — caching it would mask transient parser regressions
+        # for the full TTL window.
         preview = []
         for cat in getattr(page, "categories", []) or []:
             raw_items = list(getattr(cat, "items", []) or [])
@@ -10096,6 +10152,8 @@ def resolve_page(req: PagePathRequest) -> dict:
             f"for path={path!r}; raw rows: {preview}",
             flush=True,
         )
+        return result
+    _store_page_cache(cache_key, result)
     return result
 
 
