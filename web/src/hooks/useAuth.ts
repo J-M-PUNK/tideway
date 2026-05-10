@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "@/api/client";
+import { clearApiCache } from "@/hooks/useApi";
 import type { AuthStatus } from "@/api/types";
 
 export function useAuth() {
@@ -40,6 +41,10 @@ export function useAuth() {
     } catch {
       /* swallow — refresh() below will surface the real state */
     } finally {
+      // Wipe the SWR cache so a subsequent login doesn't render
+      // the previous user's pages from memory before fresh data
+      // arrives.
+      clearApiCache();
       await refresh();
     }
   }, [refresh]);

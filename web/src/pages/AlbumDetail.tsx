@@ -4,6 +4,7 @@ import { api } from "@/api/client";
 import type { Album, Artist } from "@/api/types";
 import type { OnDownload } from "@/api/download";
 import { useApi } from "@/hooks/useApi";
+import { queryKeys } from "@/api/queryKeys";
 import { useTrackPrefetch } from "@/hooks/useTrackPrefetch";
 import { AddToLibraryButton } from "@/components/AddToLibraryButton";
 import { AlbumCreditsButton } from "@/components/AlbumCreditsButton";
@@ -29,7 +30,9 @@ import { cn, formatDuration, imageProxy } from "@/lib/utils";
 
 export function AlbumDetail({ onDownload }: { onDownload: OnDownload }) {
   const { id = "" } = useParams();
-  const { data: album, loading, error } = useApi(() => api.album(id), [id]);
+  const { data: album, loading, error } = useApi(() => api.album(id), [id], {
+    cacheKey: queryKeys.album(id),
+  });
   // Warm the stream-manifest cache for every track on this album as
   // soon as the tracklist arrives. Makes clicking any row on an
   // opened album effectively click-to-play because the backend
