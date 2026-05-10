@@ -12,6 +12,8 @@ import {
   User as UserIcon,
 } from "lucide-react";
 import { api } from "@/api/client";
+import { queryKeys } from "@/api/queryKeys";
+import { useApi } from "@/hooks/useApi";
 import type {
   LastFmLovedTrack,
   LastFmPeriod,
@@ -287,21 +289,12 @@ function useGridCols(): number {
 }
 
 function TopArtistsSection({ period }: { period: LastFmPeriod }) {
-  const [data, setData] = useState<LastFmTopArtist[] | null>(null);
-  const [loading, setLoading] = useState(false);
   const cols = useGridCols();
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    api.lastfm
-      .topArtists(period, 30)
-      .then((rows) => !cancelled && setData(rows))
-      .catch(() => !cancelled && setData([]))
-      .finally(() => !cancelled && setLoading(false));
-    return () => {
-      cancelled = true;
-    };
-  }, [period]);
+  const { data, loading } = useApi<LastFmTopArtist[]>(
+    () => api.lastfm.topArtists(period, 30),
+    [period],
+    { cacheKey: queryKeys.statsTopArtists(period, 30) },
+  );
   const shown = data ? data.slice(0, cols) : [];
   const hasData = !!data && data.length > 0;
   return (
@@ -334,20 +327,11 @@ function TopArtistsSection({ period }: { period: LastFmPeriod }) {
 }
 
 function TopTracksSection({ period }: { period: LastFmPeriod }) {
-  const [data, setData] = useState<LastFmTopTrack[] | null>(null);
-  const [loading, setLoading] = useState(false);
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    api.lastfm
-      .topTracks(period, 50)
-      .then((rows) => !cancelled && setData(rows))
-      .catch(() => !cancelled && setData([]))
-      .finally(() => !cancelled && setLoading(false));
-    return () => {
-      cancelled = true;
-    };
-  }, [period]);
+  const { data, loading } = useApi<LastFmTopTrack[]>(
+    () => api.lastfm.topTracks(period, 50),
+    [period],
+    { cacheKey: queryKeys.statsTopTracks(period, 50) },
+  );
   const shown = data ? data.slice(0, LIST_COLLAPSED_COUNT) : [];
   const hasData = !!data && data.length > 0;
   return (
@@ -384,21 +368,12 @@ function TopTracksSection({ period }: { period: LastFmPeriod }) {
 }
 
 function TopAlbumsSection({ period }: { period: LastFmPeriod }) {
-  const [data, setData] = useState<LastFmTopAlbum[] | null>(null);
-  const [loading, setLoading] = useState(false);
   const cols = useGridCols();
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    api.lastfm
-      .topAlbums(period, 30)
-      .then((rows) => !cancelled && setData(rows))
-      .catch(() => !cancelled && setData([]))
-      .finally(() => !cancelled && setLoading(false));
-    return () => {
-      cancelled = true;
-    };
-  }, [period]);
+  const { data, loading } = useApi<LastFmTopAlbum[]>(
+    () => api.lastfm.topAlbums(period, 30),
+    [period],
+    { cacheKey: queryKeys.statsTopAlbums(period, 30) },
+  );
   const shown = data ? data.slice(0, cols) : [];
   const hasData = !!data && data.length > 0;
   return (
@@ -435,20 +410,11 @@ function TopAlbumsSection({ period }: { period: LastFmPeriod }) {
 }
 
 function LovedTracksSection() {
-  const [data, setData] = useState<LastFmLovedTrack[] | null>(null);
-  const [loading, setLoading] = useState(false);
-  useEffect(() => {
-    let cancelled = false;
-    setLoading(true);
-    api.lastfm
-      .lovedTracks(30)
-      .then((rows) => !cancelled && setData(rows))
-      .catch(() => !cancelled && setData([]))
-      .finally(() => !cancelled && setLoading(false));
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  const { data, loading } = useApi<LastFmLovedTrack[]>(
+    () => api.lastfm.lovedTracks(30),
+    [],
+    { cacheKey: queryKeys.statsLoved(30) },
+  );
   // Suppress the section entirely when the user has never loved a
   // track — empty Loved lists are the norm, not a "no data" state
   // worth flagging.
