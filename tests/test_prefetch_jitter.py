@@ -1,15 +1,16 @@
 """Tests for the album-mount prefetch fan-out fix.
 
 The prefetch endpoint runs N tracks through a ThreadPoolExecutor; each
-track triggers three sequential Tidal API calls inside `_resolve_source`
-(track, get_stream, get_stream_manifest). Without per-worker jitter,
-all N workers fire their first call within a few ms of each other and
-the resulting burst is exactly the shape Tidal's anti-abuse layer
-reads as "client is scraping": first 429, then 403/`abuse_detected`,
-then the longer escalation. Putting `tidal_jitter_sleep()` at the top
-of `player.prefetch` spreads the lead-in across a 50-200 ms window per
-worker, so the first request from each worker lands at a different
-moment before each one's three-call chain begins.
+track triggers two parallel Tidal API calls inside `_resolve_source`
+(track metadata + playbackinfo) followed by a local manifest parse.
+Without per-worker jitter, all N workers fire their first call within
+a few ms of each other and the resulting burst is exactly the shape
+Tidal's anti-abuse layer reads as "client is scraping": first 429,
+then 403/`abuse_detected`, then the longer escalation. Putting
+`tidal_jitter_sleep()` at the top of `player.prefetch` spreads the
+lead-in across a 50-200 ms window per worker, so the first request
+from each worker lands at a different moment before the parallel
+pair fires.
 
 These tests pin both halves of that contract:
 - `prefetch` calls `tidal_jitter_sleep` before resolving (so
