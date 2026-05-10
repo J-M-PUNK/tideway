@@ -59,11 +59,36 @@ const primary: Array<{
 // (local files, history, stats). `ListMusic` — not `Library` — for
 // Playlists because the section header already uses the `Library`
 // icon; two rows with the same glyph looks like a bug at a glance.
-const library = [
-  { to: "/library/tracks", label: "Liked Songs", icon: Heart },
-  { to: "/library/albums", label: "Albums", icon: Disc3 },
-  { to: "/library/artists", label: "Artists", icon: User },
-  { to: "/library/playlists", label: "Playlists", icon: ListMusic },
+const library: Array<{
+  to: string;
+  label: string;
+  icon: typeof Home;
+  prefetch?: () => void;
+}> = [
+  {
+    to: "/library/tracks",
+    label: "Liked Songs",
+    icon: Heart,
+    prefetch: prefetch.libraryTracks,
+  },
+  {
+    to: "/library/albums",
+    label: "Albums",
+    icon: Disc3,
+    prefetch: prefetch.libraryAlbums,
+  },
+  {
+    to: "/library/artists",
+    label: "Artists",
+    icon: User,
+    prefetch: prefetch.libraryArtists,
+  },
+  {
+    to: "/library/playlists",
+    label: "Playlists",
+    icon: ListMusic,
+    prefetch: prefetch.libraryPlaylists,
+  },
   { to: "/library/local", label: "On this device", icon: HardDrive },
   { to: "/history", label: "History", icon: History },
   { to: "/stats", label: "Stats", icon: BarChart3 },
@@ -71,7 +96,7 @@ const library = [
 
 // In offline mode the only link we keep in the "Your Library" section
 // is the local file list — everything else is Tidal-session-dependent.
-const offlineLibrary = [
+const offlineLibrary: typeof library = [
   { to: "/library/local", label: "On this device", icon: HardDrive },
 ];
 
@@ -190,10 +215,11 @@ export function Sidebar({
           )}
         </div>
         <div className="mt-1 flex flex-col gap-px overflow-y-auto scrollbar-thin">
-          {libraryLinks.map(({ to, label, icon: Icon }) => (
+          {libraryLinks.map(({ to, label, icon: Icon, prefetch: warm }) => (
             <NavLink
               key={to}
               to={to}
+              onMouseEnter={warm}
               className={({ isActive }) =>
                 cn(
                   navItemClass(isActive),

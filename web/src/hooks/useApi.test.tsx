@@ -204,6 +204,55 @@ describe("useApi caching", () => {
     expect(fetcher).toHaveBeenCalledTimes(2);
   });
 
+  it("clears data via the effect when deps change to a key with no fresh cache", async () => {
+    // Pin behavior added during the Library refactor: switching
+    // sections (Albums → Artists) must reset data to null between
+    // the dep change and the new fetch, not leave the previous
+    // query's items rendered beneath the loading state for the
+    // entire duration of the new fetch. React's render-then-effect
+    // ordering guarantees a single transient render with the prior
+    // state before the effect re-runs; what we're asserting is that
+    // the effect-driven render IS reached (data clears to null) and
+    // the eventual state is the new key's data.
+    const fetcher = vi
+      .fn<(key: string) => Promise<string>>()
+      .mockImplementation((key) => Promise.resolve(`data-for-${key}`));
+    const seen: State<string>[] = [];
+    const handle: { setKey?: (k: string) => void } = {};
+
+    function Probe4() {
+      const reactMod: typeof import("react") = require("react");
+      const [key, setKey] = reactMod.useState<string>("k1");
+      handle.setKey = setKey;
+      const s = useApi<string>(() => fetcher(key), [key], { cacheKey: key });
+      seen.push(s);
+      return null;
+    }
+
+    await act(async () => {
+      root.render(<Probe4 />);
+    });
+    await act(async () => {
+      await flush();
+    });
+    expect(seen[seen.length - 1].data).toBe("data-for-k1");
+
+    seen.length = 0;
+    await act(async () => {
+      handle.setKey?.("k2");
+    });
+    // The effect fires inside this act() and pushes the data:null
+    // loading:true state into seen. Without the cold-transition
+    // clear, we'd observe data="data-for-k1" + loading:true here
+    // instead.
+    expect(seen.some((s) => s.loading && s.data === null)).toBe(true);
+
+    await act(async () => {
+      await flush();
+    });
+    expect(seen[seen.length - 1].data).toBe("data-for-k2");
+  });
+
   it("revalidate failure keeps stale data and surfaces the error", async () => {
     const fetcher = vi
       .fn()
