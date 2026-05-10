@@ -46,7 +46,12 @@ const primary: Array<{
     prefetch: prefetch.pageHome,
   },
   { to: "/feed", label: "Feed", icon: Rss, prefetch: prefetch.feed },
-  { to: "/popular", label: "Charts", icon: TrendingUp },
+  {
+    to: "/popular",
+    label: "Charts",
+    icon: TrendingUp,
+    prefetch: prefetch.popularArtists,
+  },
 ];
 
 // Library order: the things the user curates (Liked Songs → Albums →

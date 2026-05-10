@@ -19,6 +19,8 @@ export const queryKeys = {
   mixes: "page:mixes",
   charts: (path: string) => `page:charts:${path}`,
   pagePath: (path: string) => `page:path:${path}`,
+  popularArtists: "page:popular:artists",
+  popularTracks: "page:popular:tracks",
   album: (id: string) => `album:${id}`,
   artist: (id: string) => `artist:${id}`,
   mix: (id: string) => `mix:${id}`,
@@ -33,6 +35,12 @@ export const queryKeys = {
 export const prefetch = {
   pageHome: () => prefetchApi(queryKeys.pageHome, () => api.page("home")),
   feed: () => prefetchApi(queryKeys.feed, () => api.feed()),
+  popularArtists: () =>
+    prefetchApi(queryKeys.popularArtists, () => api.lastfm.chartTopArtists(50)),
+  popularTracks: () =>
+    prefetchApi(queryKeys.popularTracks, () =>
+      api.lastfm.chartTopTracksResolved(50),
+    ),
   album: (id: string) => prefetchApi(queryKeys.album(id), () => api.album(id)),
   artist: (id: string) =>
     prefetchApi(queryKeys.artist(id), () => api.artist(id)),
