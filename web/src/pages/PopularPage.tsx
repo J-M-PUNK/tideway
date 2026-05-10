@@ -7,8 +7,10 @@ import {
   User as UserIcon,
 } from "lucide-react";
 import { api } from "@/api/client";
-import type { LastFmChartArtist, Track } from "@/api/types";
+import { queryKeys } from "@/api/queryKeys";
+import type { LastFmChartArtist } from "@/api/types";
 import type { OnDownload } from "@/api/download";
+import { useApi } from "@/hooks/useApi";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/EmptyState";
 import { Skeleton, TrackListSkeleton } from "@/components/Skeletons";
@@ -141,19 +143,11 @@ function TabButton({
 // ---------------------------------------------------------------------------
 
 function ChartArtists() {
-  const [data, setData] = useState<LastFmChartArtist[] | null>(null);
-  useEffect(() => {
-    let cancelled = false;
-    api.lastfm
-      .chartTopArtists(50)
-      .then((rows) => !cancelled && setData(rows))
-      .catch(() => !cancelled && setData([]));
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-  if (!data) return <ArtistGridSkeleton />;
-  if (data.length === 0) {
+  const { data, loading } = useApi(() => api.lastfm.chartTopArtists(50), [], {
+    cacheKey: queryKeys.popularArtists,
+  });
+  if (loading && !data) return <ArtistGridSkeleton />;
+  if (!data || data.length === 0) {
     return (
       <EmptyState
         icon={UserIcon}
@@ -254,52 +248,49 @@ function ArtistChartCard({
 // ---------------------------------------------------------------------------
 
 function ChartTracks({ onDownload }: { onDownload: OnDownload }) {
-  const [data, setData] = useState<Track[] | null>(null);
+  const { data, loading } = useApi(
+    () => api.lastfm.chartTopTracksResolved(50),
+    [],
+    { cacheKey: queryKeys.popularTracks },
+  );
+
+  // Preseed Spotify playcounts in one bounded-pool server call so the
+  // 50 per-row hooks don't each fire a browser request and hit
+  // Spotify's throttle. We send title + primary artist alongside the
+  // ISRC so the server can fall back to a fuzzy search when Spotify
+  // doesn't have the exact ISRC (covers feature-version ISRCs and
+  // fresh releases). Re-runs whenever data identity changes so an
+  // SWR revalidate that brings new chart tracks gets fresh
+  // playcounts too.
   useEffect(() => {
+    if (!data || data.length === 0) return;
     let cancelled = false;
-    (async () => {
-      try {
-        const rows = await api.lastfm.chartTopTracksResolved(50);
-        if (cancelled) return;
-        setData(rows);
-        // Preseed Spotify playcounts in one bounded-pool server call
-        // so the 50 per-row hooks don't each fire a browser request
-        // and hit Spotify's throttle. We send title + primary artist
-        // alongside the ISRC so the server can fall back to a fuzzy
-        // search when Spotify doesn't have the exact ISRC (covers
-        // feature-version ISRCs and fresh releases).
-        const lookup = rows
-          .filter((t) => !!t.isrc)
-          .map((t) => ({
-            isrc: t.isrc as string,
-            title: t.name,
-            artist: t.artists[0]?.name ?? "",
-          }));
-        if (lookup.length > 0) {
-          try {
-            // `refresh: true` drops stale null/zero cache entries so
-            // chart tracks that missed their playcount on an earlier
-            // visit (Spotify throttle, release-week zero) get a retry
-            // instead of sitting dark.
-            const { playcounts } = await api.spotify.trackPlaycounts(lookup, {
-              refresh: true,
-            });
-            if (!cancelled) preseedSpotifyPlaycounts(playcounts);
-          } catch {
-            /* fine — per-row hooks will fall back to their own fetch */
-          }
-        }
-      } catch {
-        if (!cancelled) setData([]);
-      }
-    })();
+    const lookup = data
+      .filter((t) => !!t.isrc)
+      .map((t) => ({
+        isrc: t.isrc as string,
+        title: t.name,
+        artist: t.artists[0]?.name ?? "",
+      }));
+    if (lookup.length === 0) return;
+    // `refresh: true` drops stale null/zero cache entries so chart
+    // tracks that missed their playcount on an earlier visit (Spotify
+    // throttle, release-week zero) get a retry instead of sitting dark.
+    api.spotify
+      .trackPlaycounts(lookup, { refresh: true })
+      .then(({ playcounts }) => {
+        if (!cancelled) preseedSpotifyPlaycounts(playcounts);
+      })
+      .catch(() => {
+        /* fine — per-row hooks will fall back to their own fetch */
+      });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [data]);
 
-  if (!data) return <TrackListSkeleton />;
-  if (data.length === 0) {
+  if (loading && !data) return <TrackListSkeleton />;
+  if (!data || data.length === 0) {
     return (
       <EmptyState
         icon={Music}
