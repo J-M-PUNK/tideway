@@ -21,6 +21,7 @@ export const queryKeys = {
   pagePath: (path: string) => `page:path:${path}`,
   popularArtists: "page:popular:artists",
   popularTracks: "page:popular:tracks",
+  search: (query: string) => `search:${query.toLowerCase()}`,
   album: (id: string) => `album:${id}`,
   artist: (id: string) => `artist:${id}`,
   mix: (id: string) => `mix:${id}`,
