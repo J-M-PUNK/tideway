@@ -22,6 +22,11 @@ export const queryKeys = {
   popularArtists: "page:popular:artists",
   popularTracks: "page:popular:tracks",
   search: (query: string) => `search:${query.toLowerCase()}`,
+  libraryAlbums: "library:albums",
+  libraryArtists: "library:artists",
+  libraryPlaylists: "library:playlists",
+  libraryTracks: "library:tracks",
+  libraryFolders: "library:folders",
   album: (id: string) => `album:${id}`,
   artist: (id: string) => `artist:${id}`,
   mix: (id: string) => `mix:${id}`,
@@ -33,6 +38,11 @@ export const queryKeys = {
  * so callers can fire on every mouseenter without worrying about
  * flooding the backend.
  */
+// Library entries get a 30s TTL just like the page-side useApi calls
+// so the prefetch and the subsequent useApi mount agree on what
+// counts as fresh.
+const LIBRARY_PREFETCH_TTL_MS = 30 * 1000;
+
 export const prefetch = {
   pageHome: () => prefetchApi(queryKeys.pageHome, () => api.page("home")),
   feed: () => prefetchApi(queryKeys.feed, () => api.feed()),
@@ -41,6 +51,30 @@ export const prefetch = {
   popularTracks: () =>
     prefetchApi(queryKeys.popularTracks, () =>
       api.lastfm.chartTopTracksResolved(50),
+    ),
+  libraryAlbums: () =>
+    prefetchApi(
+      queryKeys.libraryAlbums,
+      () => api.library.albums(),
+      LIBRARY_PREFETCH_TTL_MS,
+    ),
+  libraryArtists: () =>
+    prefetchApi(
+      queryKeys.libraryArtists,
+      () => api.library.artists(),
+      LIBRARY_PREFETCH_TTL_MS,
+    ),
+  libraryPlaylists: () =>
+    prefetchApi(
+      queryKeys.libraryPlaylists,
+      () => api.library.playlists(),
+      LIBRARY_PREFETCH_TTL_MS,
+    ),
+  libraryTracks: () =>
+    prefetchApi(
+      queryKeys.libraryTracks,
+      () => api.library.tracks(),
+      LIBRARY_PREFETCH_TTL_MS,
     ),
   album: (id: string) => prefetchApi(queryKeys.album(id), () => api.album(id)),
   artist: (id: string) =>
