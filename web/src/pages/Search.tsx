@@ -1,14 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { Loader2, Music, Search as SearchIcon } from "lucide-react";
 import { api } from "@/api/client";
-import type {
-  Album,
-  Artist,
-  Playlist,
-  SearchResponse,
-  TopHit,
-} from "@/api/types";
+import { queryKeys } from "@/api/queryKeys";
+import { useApi } from "@/hooks/useApi";
+import type { Album, Artist, Playlist, TopHit } from "@/api/types";
 import type { OnDownload } from "@/api/download";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Grid, SectionHeader, ViewMoreLink } from "@/components/Grid";
@@ -66,38 +62,40 @@ export function Search({ onDownload }: { onDownload: OnDownload }) {
   const [params, setParams] = useSearchParams();
   const q = params.get("q") ?? "";
   const filter = asFilter(params.get("tab"));
-  const [results, setResults] = useState<SearchResponse | null>(null);
-  const [loading, setLoading] = useState(false);
   const [format, setFormat] = useState<AudioFormat>("all");
-  const debounceRef = useRef<number | null>(null);
   const cols = useColumnCount();
 
+  // Debounce the query so a fresh keystroke doesn't fire its own
+  // request — wait 300 ms after typing stops, then search. The
+  // debounced value drives the useApi cache key, so the SWR layer
+  // keys each unique query separately and a re-typed query renders
+  // instantly from cache. Clearing the input bypasses the debounce
+  // and propagates "" immediately so the results disappear the
+  // moment the field empties — no 300ms ghost-results window.
+  const trimmedQ = q.trim();
+  const [debouncedQ, setDebouncedQ] = useState(trimmedQ);
   useEffect(() => {
-    if (debounceRef.current !== null) window.clearTimeout(debounceRef.current);
-    const query = q.trim();
-    if (!query) {
-      setResults(null);
-      setLoading(false);
+    if (!trimmedQ) {
+      setDebouncedQ("");
       return;
     }
-    setLoading(true);
-    // Guard against a slow response overwriting newer state — if the query
-    // changed while this search was in-flight, discard its result.
-    let cancelled = false;
-    debounceRef.current = window.setTimeout(async () => {
-      try {
-        const res = await api.search(query, 16);
-        if (!cancelled) setResults(res);
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    }, 300);
-    return () => {
-      cancelled = true;
-      if (debounceRef.current !== null)
-        window.clearTimeout(debounceRef.current);
-    };
-  }, [q]);
+    const t = window.setTimeout(() => setDebouncedQ(trimmedQ), 300);
+    return () => window.clearTimeout(t);
+  }, [trimmedQ]);
+
+  const { data: results, loading: fetchLoading } = useApi(
+    () => api.search(debouncedQ, 16),
+    [debouncedQ],
+    {
+      cacheKey: debouncedQ ? queryKeys.search(debouncedQ) : undefined,
+      skip: !debouncedQ,
+    },
+  );
+  // Show "Searching..." both during the actual fetch and during the
+  // 300ms debounce window after a fresh keystroke — without this, the
+  // indicator wouldn't appear while the user is still typing, which
+  // reads as "the app didn't notice my input".
+  const loading = fetchLoading || (!!trimmedQ && trimmedQ !== debouncedQ);
 
   const onTabChange = (next: Filter) => {
     const p = new URLSearchParams(params);

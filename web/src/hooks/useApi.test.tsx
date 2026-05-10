@@ -257,6 +257,65 @@ describe("useApi caching", () => {
   });
 });
 
+describe("skip", () => {
+  it("skip=true does not invoke the fetcher and renders idle state", async () => {
+    const fetcher = vi.fn().mockResolvedValue("never");
+
+    function Probe2() {
+      const s = useApi(fetcher, [], { skip: true });
+      return (
+        <span data-testid="state">
+          {String(s.loading)}-{String(s.data)}
+        </span>
+      );
+    }
+
+    await act(async () => {
+      root.render(<Probe2 />);
+    });
+    await act(async () => {
+      await flush();
+    });
+
+    expect(fetcher).not.toHaveBeenCalled();
+    const span = container.querySelector("[data-testid=state]");
+    expect(span?.textContent).toBe("false-null");
+  });
+
+  it("flipping skip from true to false fires a fresh fetch", async () => {
+    const fetcher = vi.fn().mockResolvedValue("found");
+    const seen: State<string>[] = [];
+    const handle: { setSkip?: (b: boolean) => void } = {};
+
+    function Probe3() {
+      const reactMod: typeof import("react") = require("react");
+      const [skip, setSkip] = reactMod.useState<boolean>(true);
+      handle.setSkip = setSkip;
+      const s = useApi<string>(fetcher, ["q"], { skip });
+      seen.push(s);
+      return null;
+    }
+
+    await act(async () => {
+      root.render(<Probe3 />);
+    });
+    await act(async () => {
+      await flush();
+    });
+    expect(fetcher).not.toHaveBeenCalled();
+
+    await act(async () => {
+      handle.setSkip?.(false);
+    });
+    await act(async () => {
+      await flush();
+    });
+
+    expect(fetcher).toHaveBeenCalledTimes(1);
+    expect(seen[seen.length - 1].data).toBe("found");
+  });
+});
+
 describe("prefetchApi", () => {
   it("populates the cache without rendering", async () => {
     const fetcher = vi.fn().mockResolvedValue("warmed");
