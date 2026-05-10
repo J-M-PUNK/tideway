@@ -27,6 +27,13 @@ export const queryKeys = {
   libraryPlaylists: "library:playlists",
   libraryTracks: "library:tracks",
   libraryFolders: "library:folders",
+  statsTopArtists: (period: string, limit: number) =>
+    `stats:top-artists:${period}:${limit}`,
+  statsTopTracks: (period: string, limit: number) =>
+    `stats:top-tracks:${period}:${limit}`,
+  statsTopAlbums: (period: string, limit: number) =>
+    `stats:top-albums:${period}:${limit}`,
+  statsLoved: (limit: number) => `stats:loved:${limit}`,
   album: (id: string) => `album:${id}`,
   artist: (id: string) => `artist:${id}`,
   mix: (id: string) => `mix:${id}`,
