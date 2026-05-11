@@ -790,9 +790,13 @@ function AudioEngineFields() {
         </select>
       </Field>
 
+      {/* Order matches the audio path: ReplayGain → EQ → Crossfeed.
+          The Signal Path readout shows stages in this same order, so
+          the mental model "first in the panel = first in the chain"
+          holds end-to-end. */}
+      <ReplayGainField />
       <EqField />
       <CrossfeedField />
-      <ReplayGainField />
     </>
   );
 }
