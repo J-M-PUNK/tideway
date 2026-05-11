@@ -2925,9 +2925,105 @@ def _probe_local_stream_info(path: str) -> Optional[StreamInfo]:
     if codec is None:
         ext = os.path.splitext(path)[1].lstrip(".").lower()
         codec = _normalize_codec(ext)
+    rg = _read_local_replaygain(m)
     return StreamInfo(
         source="local",
         codec=codec,
         bit_depth=_safe_int(getattr(info, "bits_per_sample", None)),
         sample_rate_hz=_safe_int(getattr(info, "sample_rate", None)),
+        track_replay_gain_db=rg.track_gain_db,
+        track_peak=rg.track_peak,
+        album_replay_gain_db=rg.album_gain_db,
+        album_peak=rg.album_peak,
     )
+
+
+def _read_local_replaygain(m) -> ReplayGainTags:
+    """Pull ReplayGain values out of mutagen tags so downloaded
+    tracks get the same loudness-leveling treatment as streamed ones.
+
+    Standard tag names per format:
+      - FLAC / Vorbis: REPLAYGAIN_TRACK_GAIN, REPLAYGAIN_TRACK_PEAK,
+        REPLAYGAIN_ALBUM_GAIN, REPLAYGAIN_ALBUM_PEAK (uppercase).
+      - MP3 (ID3): TXXX:replaygain_track_gain etc. (case-insensitive).
+      - MP4 (iTunes-style): ----:com.apple.iTunes:replaygain_track_gain.
+
+    Mutagen normalises tag access enough that a flat dict-style lookup
+    covers FLAC + Vorbis + MP4 in one path. ID3 needs explicit TXXX
+    frame iteration. Anything we can't parse falls through to an
+    all-None tags object — the resolver treats that as "no data" and
+    skips the gain stage for the track, matching streaming behaviour.
+    """
+    tags: ReplayGainTags = ReplayGainTags()
+    raw_tags = getattr(m, "tags", None)
+    if raw_tags is None:
+        return tags
+
+    def _coerce_gain(value: object) -> Optional[float]:
+        if value is None:
+            return None
+        # Most formats store "-3.45 dB". Strip the unit and parse.
+        if isinstance(value, (list, tuple)) and value:
+            value = value[0]
+        s = str(value).strip()
+        if not s:
+            return None
+        if s.lower().endswith(" db"):
+            s = s[:-3].strip()
+        elif s.lower().endswith("db"):
+            s = s[:-2].strip()
+        try:
+            return float(s)
+        except ValueError:
+            return None
+
+    def _coerce_peak(value: object) -> Optional[float]:
+        if value is None:
+            return None
+        if isinstance(value, (list, tuple)) and value:
+            value = value[0]
+        try:
+            return float(str(value).strip())
+        except ValueError:
+            return None
+
+    # FLAC / Vorbis / MP4 — uppercase keys via mutagen's dict-like
+    # tag accessor. Case-insensitive lookup falls out of trying both.
+    def _get(key: str) -> object:
+        for k in (key, key.upper(), key.lower()):
+            try:
+                v = raw_tags.get(k) if hasattr(raw_tags, "get") else raw_tags[k]
+            except (KeyError, TypeError):
+                v = None
+            if v is not None:
+                return v
+        return None
+
+    tags.track_gain_db = _coerce_gain(_get("replaygain_track_gain"))
+    tags.track_peak = _coerce_peak(_get("replaygain_track_peak"))
+    tags.album_gain_db = _coerce_gain(_get("replaygain_album_gain"))
+    tags.album_peak = _coerce_peak(_get("replaygain_album_peak"))
+
+    # ID3 path: scan TXXX frames if we didn't find anything above. MP3s
+    # written by various taggers use slightly different casing (Tidal's
+    # FLAC→MP3 converters, lame --replaygain-fast, foobar2000) but the
+    # frame description is always one of these four canonical strings.
+    if tags.track_gain_db is None and hasattr(raw_tags, "getall"):
+        try:
+            txxx_frames = raw_tags.getall("TXXX") or []
+        except Exception:
+            txxx_frames = []
+        for frame in txxx_frames:
+            desc = (getattr(frame, "desc", "") or "").lower()
+            text = getattr(frame, "text", None)
+            value = text[0] if isinstance(text, (list, tuple)) and text else text
+            if desc == "replaygain_track_gain" and tags.track_gain_db is None:
+                tags.track_gain_db = _coerce_gain(value)
+            elif desc == "replaygain_track_peak" and tags.track_peak is None:
+                tags.track_peak = _coerce_peak(value)
+            elif desc == "replaygain_album_gain" and tags.album_gain_db is None:
+                tags.album_gain_db = _coerce_gain(value)
+            elif desc == "replaygain_album_peak" and tags.album_peak is None:
+                tags.album_peak = _coerce_peak(value)
+
+    return tags
