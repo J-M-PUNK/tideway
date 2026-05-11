@@ -44,6 +44,7 @@ import { CreditsDialog } from "@/components/CreditsDialog";
 import { DownloadButton } from "@/components/DownloadButton";
 import { HeartButton } from "@/components/HeartButton";
 import { OutputDevicePicker } from "@/components/OutputDevicePicker";
+import { SignalPathDialog } from "@/components/SignalPathDialog";
 import { SleepTimerButton } from "@/components/SleepTimerButton";
 import { useIsDownloaded } from "@/hooks/useDownloadedSet";
 import { useRecordPlays } from "@/hooks/useRecentlyPlayed";
@@ -481,6 +482,7 @@ function StreamingQualityPicker({
   streamInfo: StreamInfo | null;
 }) {
   const { streamingQuality, set } = useUiPreferences();
+  const [signalPathOpen, setSignalPathOpen] = useState(false);
   // What's audible right now drives the colour and the dropdown's
   // "Playing" tag. When stream_info is missing (idle or mid-load)
   // we fall back to the user's preference so the pill still has a
@@ -561,12 +563,23 @@ function StreamingQualityPicker({
           );
         })}
         <DropdownMenuSeparator />
+        <DropdownMenuItem onSelect={() => setSignalPathOpen(true)}>
+          <span className="font-semibold">Signal path…</span>
+          <span className="ml-2 text-[10px] uppercase tracking-wider text-muted-foreground">
+            DSP chain
+          </span>
+        </DropdownMenuItem>
+        <DropdownMenuSeparator />
         <div className="px-2 py-1.5 text-[11px] text-muted-foreground">
           The pill shows what Tidal is delivering for this track. If the release
           doesn't go up to your selected tier, you'll get the highest tier it
           does have.
         </div>
       </DropdownMenuContent>
+      <SignalPathDialog
+        open={signalPathOpen}
+        onOpenChange={setSignalPathOpen}
+      />
     </DropdownMenu>
   );
 }

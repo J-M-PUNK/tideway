@@ -5099,6 +5099,90 @@ class _PlayerPrefetchRequest(BaseModel):
     warm_bytes: bool = True
 
 
+@app.get("/api/player/signal-path")
+def player_signal_path() -> dict:
+    """Snapshot of the audio DSP chain for the now-playing pill's
+    "Signal path" panel. Each entry tells the user (a) what stage
+    is in the path, (b) whether it's actually doing anything to the
+    samples, and (c) any relevant configuration. The top-level
+    `bit_perfect` flag is true only when every stage is bypassed —
+    audiophile users want one definite "bits straight to DAC" indicator.
+    """
+    _require_local_access()
+    player = _native_player()
+    info = player.snapshot()
+    stream = getattr(info, "stream_info", None)
+
+    rg_state = (
+        player.replaygain_state()
+        if hasattr(player, "replaygain_state")
+        else {"mode": "off", "applied_db": 0.0}
+    )
+    eq_active = False
+    eq_mode = settings.eq_mode
+    eq_bypass = settings.eq_bypass
+    eq_profile = settings.eq_active_profile_id or None
+    if eq_mode == "manual" and settings.eq_bands and settings.eq_enabled:
+        eq_active = not eq_bypass
+    elif eq_mode == "profile" and eq_profile:
+        eq_active = not eq_bypass
+
+    crossfeed_amount = settings.crossfeed_amount
+    rg_active = rg_state.get("mode") != "off" and bool(
+        rg_state.get("applied_db", 0.0)
+    )
+    cf_active = crossfeed_amount > 0
+
+    # "Bit-perfect" is true only when no DSP stage touches the buffer
+    # AND the output bypasses the OS mixer. Without exclusive mode the
+    # OS may still resample / mix, so audiophile-grade "bits straight
+    # to DAC" requires both conditions.
+    bit_perfect = (
+        not eq_active
+        and not cf_active
+        and not rg_active
+        and bool(settings.exclusive_mode)
+    )
+
+    return {
+        "bit_perfect": bit_perfect,
+        "source": {
+            "codec": getattr(stream, "codec", None) if stream else None,
+            "sample_rate_hz": getattr(stream, "sample_rate_hz", None)
+            if stream
+            else None,
+            "bit_depth": getattr(stream, "bit_depth", None) if stream else None,
+            "audio_quality": getattr(stream, "audio_quality", None)
+            if stream
+            else None,
+        },
+        "replaygain": {
+            "mode": rg_state.get("mode", "off"),
+            "applied_db": rg_state.get("applied_db", 0.0),
+            "preamp_db": rg_state.get("preamp_db", 0.0),
+            "prevent_clipping": rg_state.get("prevent_clipping", True),
+            "tags_present": rg_state.get("track_gain_db") is not None
+            or rg_state.get("album_gain_db") is not None,
+            "active": rg_active,
+        },
+        "eq": {
+            "mode": eq_mode,
+            "bypass": eq_bypass,
+            "profile_id": eq_profile,
+            "manual_enabled": settings.eq_enabled,
+            "active": eq_active,
+        },
+        "crossfeed": {
+            "amount": crossfeed_amount,
+            "active": cf_active,
+        },
+        "output": {
+            "exclusive_mode": bool(settings.exclusive_mode),
+            "force_volume": bool(settings.force_volume),
+        },
+    }
+
+
 @app.get("/api/player/cache-stats")
 def player_cache_stats() -> dict:
     """Inspect the stream-manifest cache. Useful while testing the
