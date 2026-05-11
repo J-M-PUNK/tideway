@@ -5112,6 +5112,8 @@ def player_signal_path() -> dict:
     player = _native_player()
     info = player.snapshot()
     stream = getattr(info, "stream_info", None)
+    output_state = player.output_stream_state()
+    track_loaded = info.state not in ("idle", "error") and info.track_id is not None
 
     rg_state = player.replaygain_state()
     eq_active = False
@@ -5128,20 +5130,41 @@ def player_signal_path() -> dict:
         rg_state.get("applied_db", 0.0)
     )
     cf_active = crossfeed_amount > 0
+    external_active = bool(output_state.get("external_output_active"))
 
-    # "Bit-perfect" is true only when no DSP stage touches the buffer
-    # AND the output bypasses the OS mixer. Without exclusive mode the
-    # OS may still resample / mix, so audiophile-grade "bits straight
-    # to DAC" requires both conditions.
+    # "Bit-perfect" requires three conditions: no DSP stage touching
+    # the buffer, exclusive output (so the OS mixer can't resample
+    # underneath us), AND a track actually loaded. The badge is
+    # informational about the *active* path, so claiming bit-perfect
+    # while idle would mislead — there's no path to be perfect about.
+    # External output (Tidal Connect / DLNA receiver) routes through
+    # a different pipeline entirely; we can't make any claim about
+    # what the remote device is doing to the bits.
     bit_perfect = (
-        not eq_active
+        track_loaded
+        and not external_active
+        and not eq_active
         and not cf_active
         and not rg_active
         and bool(settings.exclusive_mode)
     )
 
+    # Map sounddevice dtype to a user-readable bit-depth label. PortAudio
+    # packs 24-bit samples into int32 containers, so int32 reads as
+    # "32-bit" in the readout — accurate to what's leaving the
+    # OutputStream, even though the DAC may consume only 24 of those.
+    sd_dtype = output_state.get("sd_dtype")
+    output_bit_depth: Optional[int]
+    if sd_dtype == "int16":
+        output_bit_depth = 16
+    elif sd_dtype == "int32" or sd_dtype == "float32":
+        output_bit_depth = 32
+    else:
+        output_bit_depth = None
+
     return {
         "bit_perfect": bit_perfect,
+        "track_loaded": track_loaded,
         "source": {
             "codec": getattr(stream, "codec", None) if stream else None,
             "sample_rate_hz": getattr(stream, "sample_rate_hz", None)
@@ -5175,6 +5198,12 @@ def player_signal_path() -> dict:
         "output": {
             "exclusive_mode": bool(settings.exclusive_mode),
             "force_volume": bool(settings.force_volume),
+            "device_name": output_state.get("device_name"),
+            "sample_rate_hz": output_state.get("sample_rate_hz"),
+            "bit_depth": output_bit_depth,
+            "channels": output_state.get("channels"),
+            "sd_dtype": sd_dtype,
+            "external_output_active": external_active,
         },
     }
 

@@ -1244,6 +1244,42 @@ class PCMPlayer:
 
     # --- Device selection -------------------------------------------
 
+    def output_stream_state(self) -> dict:
+        """Snapshot of the open OutputStream — what's actually being
+        fed to the OS audio API right now. Surface for the Signal
+        Path readout so audiophiles can see the realised output
+        format alongside the source format. All fields are None
+        when the stream is closed (idle player, between tracks).
+
+        `sd_dtype` is one of "int16" / "int32" / "float32" matching
+        sounddevice's reported sample type. We translate it to a
+        nominal bit depth for the UI; the underlying PortAudio path
+        may pack 24-bit samples into int32 containers, which the
+        readout shows as "32-bit (int32)" to be honest about it.
+        """
+        with self._lock:
+            stream = self._stream
+            sample_rate = self._stream_sample_rate
+            channels = self._stream_channels
+            sd_dtype = self._stream_sd_dtype
+            device_id = self._selected_device_id
+            external = self._external_output_active
+        device_name: Optional[str] = None
+        if device_id:
+            for entry in list_output_devices(stream is not None):
+                if entry.get("id") == device_id:
+                    device_name = entry.get("name")
+                    break
+        return {
+            "stream_open": stream is not None,
+            "sample_rate_hz": sample_rate,
+            "channels": channels,
+            "sd_dtype": sd_dtype,
+            "device_id": device_id or None,
+            "device_name": device_name,
+            "external_output_active": external,
+        }
+
     def list_output_devices(self) -> list[dict]:
         """Enumerate output-capable audio devices for the picker UI.
 
