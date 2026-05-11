@@ -54,13 +54,18 @@ class Crossfeed:
     handler thread; `apply` is called from the audio callback. A
     short lock serialises coefficient + state swaps so the callback
     never sees a half-installed filter.
+
+    Stereo-only — `apply` checks `samples.shape[1] == 2` and no-ops
+    anything else. Mono / 5.1 / etc. pass through.
     """
 
-    def __init__(self, sample_rate: int, channels: int = 2):
+    def __init__(self, sample_rate: int):
         self._sample_rate = int(sample_rate)
-        self._channels = int(channels)
         self._lock = threading.Lock()
         # SOS coefficients for the shared low-pass. `None` = bypass.
+        # Lazily built on first non-zero `set_amount` and reused across
+        # subsequent amount changes — the SOS depends only on the
+        # sample rate, which is fixed for the player's lifetime.
         self._sos: Optional[np.ndarray] = None
         # Independent filter state per channel — both biquad chains
         # walk along their channel's samples; sharing state would
@@ -78,21 +83,23 @@ class Crossfeed:
         """Set crossfeed strength as a percent (0-100). 0 disables;
         any non-zero value installs the low-pass + state. Repeated
         calls with different non-zero amounts only mutate `_amount`,
-        keeping the existing filter state — the response is smooth
-        across user adjustments without re-settling transients."""
+        keeping the cached SOS coefficients and the existing filter
+        state — the response is smooth across user adjustments
+        without re-settling transients and without rebuilding the
+        Butterworth coefficients on every slider tick."""
         clamped = max(0, min(100, int(amount_pct))) / 100.0
         if clamped <= 0.0:
             self.clear()
             return
-        new_sos = self._build_sos()
-        zi_single = sosfilt_zi(new_sos)
         with self._lock:
-            install_state = self._sos is None
-            self._sos = new_sos.astype(np.float32, copy=False)
-            self._amount = clamped
-            if install_state or self._state_l is None or self._state_r is None:
+            if self._sos is None:
+                # First non-zero amount: build + cache the SOS and
+                # initialise per-channel filter state.
+                self._sos = self._build_sos().astype(np.float32, copy=False)
+                zi_single = sosfilt_zi(self._sos)
                 self._state_l = zi_single.astype(np.float32, copy=True)
                 self._state_r = zi_single.astype(np.float32, copy=True)
+            self._amount = clamped
 
     def clear(self) -> None:
         """Disable crossfeed. `apply()` becomes a pass-through."""

@@ -36,7 +36,7 @@ def _sine(freq_hz: float, n: int, sr: int = SR) -> np.ndarray:
 
 
 def test_inactive_is_pass_through():
-    cf = Crossfeed(sample_rate=SR, channels=2)
+    cf = Crossfeed(sample_rate=SR)
     samples = _white_noise(1024)
     original = samples.copy()
     cf.apply(samples)
@@ -44,7 +44,7 @@ def test_inactive_is_pass_through():
 
 
 def test_set_amount_zero_clears():
-    cf = Crossfeed(sample_rate=SR, channels=2)
+    cf = Crossfeed(sample_rate=SR)
     cf.set_amount(50)
     assert cf.is_active()
     cf.set_amount(0)
@@ -56,7 +56,7 @@ def test_set_amount_zero_clears():
 
 
 def test_amount_clamped_to_range():
-    cf = Crossfeed(sample_rate=SR, channels=2)
+    cf = Crossfeed(sample_rate=SR)
     cf.set_amount(150)
     assert cf.amount() == 100
     cf.set_amount(-10)
@@ -71,7 +71,7 @@ def test_amount_bleeds_bass_to_opposite_channel():
     filter's group delay causes a small comb residue between
     L_high and L_low when they recombine; that's normal Bauer-style
     crossfeed behaviour and not something the user can hear."""
-    cf = Crossfeed(sample_rate=SR, channels=2)
+    cf = Crossfeed(sample_rate=SR)
     cf.set_amount(50)
 
     # 200 Hz is well below the 700 Hz cutoff so the LP passes it
@@ -104,7 +104,7 @@ def test_high_frequencies_stay_channel_isolated():
     """At alpha=0.5 a 6 kHz tone fed to one channel should NOT bleed
     into the opposite channel — highs are passed through as
     L_high = L - L_low, which preserves the channel separation."""
-    cf = Crossfeed(sample_rate=SR, channels=2)
+    cf = Crossfeed(sample_rate=SR)
     cf.set_amount(50)
 
     n = 8192
@@ -128,7 +128,7 @@ def test_high_frequencies_stay_channel_isolated():
 def test_mono_input_passes_through_untouched():
     """Crossfeed on a mono buffer must not crash and must not modify
     samples — the math is stereo-only."""
-    cf = Crossfeed(sample_rate=SR, channels=2)
+    cf = Crossfeed(sample_rate=SR)
     cf.set_amount(50)
     samples = np.zeros((1024, 1), dtype=np.float32)
     samples[:, 0] = _sine(440, 1024)
@@ -143,7 +143,7 @@ def test_amount_change_does_not_reset_filter_state():
     test, but verifying the filter state isn't reinstalled (and
     therefore stays continuous across the slider drag) is the
     closest proxy."""
-    cf = Crossfeed(sample_rate=SR, channels=2)
+    cf = Crossfeed(sample_rate=SR)
     cf.set_amount(30)
     state_l_before = cf._state_l.copy()  # type: ignore[union-attr]
     state_r_before = cf._state_r.copy()  # type: ignore[union-attr]

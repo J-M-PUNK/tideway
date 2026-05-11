@@ -1906,9 +1906,7 @@ class PCMPlayer:
         # Crossfeed coefficients depend on the active sample rate, so
         # rebuild it here too. The user setting (`_crossfeed_amount`)
         # survives the rebuild — same pattern as EQ.
-        self._crossfeed = Crossfeed(
-            sample_rate=sample_rate, channels=channels
-        )
+        self._crossfeed = Crossfeed(sample_rate=sample_rate)
         if self._crossfeed_amount > 0:
             try:
                 self._crossfeed.set_amount(self._crossfeed_amount)
