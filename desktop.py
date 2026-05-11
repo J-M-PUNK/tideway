@@ -1156,8 +1156,49 @@ def main(argv: Optional[list[str]] = None) -> int:
 
     try:
         # gui=None lets pywebview pick the native backend
-        # (edgechromium/WebView2 on Windows, WebKit on macOS).
-        webview.start()
+        # (edgechromium/WebView2 on Windows, WebKit on macOS,
+        # WebKitGTK / QtWebEngine on Linux).
+        try:
+            webview.start()
+        except webview.errors.WebViewException as exc:
+            # Linux only: pywebview needs GTK (with python-gobject +
+            # gir1.2-webkit2) or QT (with PyQt5 + QtWebEngine) installed
+            # at the system level. The AppImage doesn't bundle either —
+            # dynamically linking GTK / WebKit2GTK across the matrix of
+            # distros and minor versions out there is a tar pit, and
+            # users on a mainstream desktop distro already have one
+            # backend installed. When neither is available (Arch /
+            # Omarchy without python-gobject is the canonical failure
+            # mode), pywebview raises WebViewException at start() time.
+            # Fall back to the system browser so the user can still
+            # use Tideway while they install the missing packages, and
+            # print actionable instructions for the major distros.
+            print(
+                f"[desktop] pywebview can't open a native window: {exc}",
+                file=sys.stderr,
+                flush=True,
+            )
+            print(
+                "[desktop] On Linux this means GTK or QT Python bindings "
+                "aren't installed. Install one of:\n"
+                "  Debian/Ubuntu:  sudo apt install python3-gi "
+                "gir1.2-webkit2-4.1\n"
+                "  Fedora:         sudo dnf install python3-gobject "
+                "webkit2gtk4.1\n"
+                "  Arch/Omarchy:   sudo pacman -S python-gobject "
+                "webkit2gtk-4.1\n"
+                "[desktop] Falling back to your default browser. Quit "
+                "with Ctrl-C in this terminal.",
+                file=sys.stderr,
+                flush=True,
+            )
+            import webbrowser
+            webbrowser.open(f"http://{HOST}:{PORT}/")
+            try:
+                while not server.should_exit:
+                    time.sleep(0.5)
+            except KeyboardInterrupt:
+                pass
     finally:
         _graceful_shutdown(server)
 
