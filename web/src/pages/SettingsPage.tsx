@@ -790,7 +790,71 @@ function AudioEngineFields() {
       </Field>
 
       <EqField />
+      <CrossfeedField />
     </>
+  );
+}
+
+/**
+ * Bauer-style crossfeed slider. Off (0) by default — user opts in.
+ * 20-40 % is the typical taste range; below that the effect isn't
+ * audible, above it the centre image pulls too far toward mono.
+ *
+ * Disclosure-style hint explains what crossfeed actually does, since
+ * it's a less-common term than "EQ" or "exclusive mode" — the
+ * audiophile crowd will recognise it but new users won't.
+ *
+ * Self-contained on settings.get/put rather than threading
+ * settings/patch in from the parent — matches how the sibling
+ * EqField fetches its own state, keeps the component composable.
+ */
+function CrossfeedField() {
+  const [amount, setAmount] = useState<number | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    api.settings
+      .get()
+      .then((s) => {
+        if (!cancelled) setAmount(s.crossfeed_amount ?? 0);
+      })
+      .catch(() => {
+        if (!cancelled) setAmount(0);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (amount === null) return null;
+
+  const label = amount > 0 ? `Crossfeed — ${amount}%` : "Crossfeed — off";
+
+  const onChange = (next: number) => {
+    setAmount(next);
+    // Fire-and-forget — settings.put is debounced internally enough
+    // for slider drags via the rate-limit on the audio side
+    // (set_crossfeed_amount just stores + restamps the SOS state,
+    // no streams torn down).
+    void api.settings.put({ crossfeed_amount: next }).catch(() => {});
+  };
+
+  return (
+    <Field
+      label={label}
+      hint="Headphone-only stereo imaging. Bleeds the low frequencies of each channel into the opposite ear so hard-panned mixes (60s/70s rock, jazz, orchestral) don't sound like they're playing inside your skull. Highs stay channel-isolated. 20-40% is a tasteful range; 0 disables and audio runs bit-perfect again."
+    >
+      <input
+        type="range"
+        min={0}
+        max={100}
+        step={5}
+        value={amount}
+        onChange={(e) => onChange(Number(e.target.value))}
+        className="h-2 w-full cursor-pointer appearance-none rounded-full bg-secondary accent-primary"
+        aria-label="Crossfeed amount"
+      />
+    </Field>
   );
 }
 
