@@ -133,6 +133,13 @@ class Settings:
     eq_tilt_preamp_offset_db: float = 0.0
     eq_tilt_bass_db: float = 0.0
     eq_tilt_treble_db: float = 0.0
+    # Bauer crossfeed strength (0-100 percent). 0 = bypass, leaving
+    # the audio path bit-perfect. Non-zero engages a 700 Hz low-pass
+    # bleed between channels — preserves high-frequency stereo image
+    # while pulling bass toward the centre, the standard headphone-
+    # listening fix for hard-panned mixes. Off by default; user opts
+    # in via the Settings → Playback slider.
+    crossfeed_amount: int = 0
     # sounddevice output-device index (stringified, matches what
     # /api/player/output-devices returns). Empty string means "use
     # the system default". Persisted so USB DAC / Bluetooth
