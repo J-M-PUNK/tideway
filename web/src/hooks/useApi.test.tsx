@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { act } from "react";
+import { act, useState } from "react";
 import { createRoot, type Root } from "react-dom/client";
 
 (
@@ -221,8 +221,7 @@ describe("useApi caching", () => {
     const handle: { setKey?: (k: string) => void } = {};
 
     function Probe4() {
-      const reactMod: typeof import("react") = require("react");
-      const [key, setKey] = reactMod.useState<string>("k1");
+      const [key, setKey] = useState<string>("k1");
       handle.setKey = setKey;
       const s = useApi<string>(() => fetcher(key), [key], { cacheKey: key });
       seen.push(s);
@@ -337,8 +336,7 @@ describe("skip", () => {
     const handle: { setSkip?: (b: boolean) => void } = {};
 
     function Probe3() {
-      const reactMod: typeof import("react") = require("react");
-      const [skip, setSkip] = reactMod.useState<boolean>(true);
+      const [skip, setSkip] = useState<boolean>(true);
       handle.setSkip = setSkip;
       const s = useApi<string>(fetcher, ["q"], { skip });
       seen.push(s);
