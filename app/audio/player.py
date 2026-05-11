@@ -50,6 +50,13 @@ from app.audio.eq import (
     preset_bands as eq_preset_bands,
 )
 from app.audio.manifest_cache import ManifestCache
+from app.audio.replaygain import (
+    ReplayGain,
+    ReplayGainMode,
+    ReplayGainTags,
+    VALID_MODES as REPLAYGAIN_VALID_MODES,
+    compute_gain_db as compute_replaygain_db,
+)
 from app.audio.output_devices import list_output_devices
 from app.audio.segment_reader import SegmentReader
 
@@ -109,6 +116,17 @@ class StreamInfo:
     sample_rate_hz: Optional[int] = None
     audio_quality: Optional[str] = None
     audio_mode: Optional[str] = None
+    # ReplayGain metadata pulled from the tidalapi Stream object.
+    # Tidal masters come pre-tagged with both track-level and album-
+    # level loudness offsets (relative to the EBU R128 reference) and
+    # the actual sample peaks. The audio engine uses these to apply
+    # loudness leveling at playback time when the user enables it.
+    # All four are Optional because not every stream carries them
+    # (older catalog, low-quality tier, edge cases).
+    track_replay_gain_db: Optional[float] = None
+    track_peak: Optional[float] = None
+    album_replay_gain_db: Optional[float] = None
+    album_peak: Optional[float] = None
 
 
 @dataclass
@@ -294,6 +312,14 @@ class PCMPlayer:
         # setting we re-apply to a freshly-built filter.
         self._crossfeed: Optional[Crossfeed] = None
         self._crossfeed_amount: int = 0
+        # ReplayGain loudness leveling. Single shared instance —
+        # internal state is just a linear gain scalar that gets
+        # recomputed whenever the active stream's tags or the user's
+        # mode/preamp change. Off by default (gain_linear == 1.0).
+        self._replaygain = ReplayGain()
+        self._replaygain_mode: ReplayGainMode = "off"
+        self._replaygain_preamp_db: float = 0.0
+        self._replaygain_prevent_clipping: bool = True
 
         # Audio-callback diagnostics. Each pair is (count, last-print
         # time) for a different rate-limited stderr message:
@@ -540,6 +566,13 @@ class PCMPlayer:
             # the snapshot to report "paused" here, not a perpetual
             # "loading" the frontend can't recover from.
             self._transition("paused")
+
+        # Re-derive ReplayGain from the new stream's tags. The
+        # helper is lock-free, so it doesn't matter that we're now
+        # outside the load lock; doing it synchronously keeps the
+        # gain stage in lockstep with the now-playing track instead
+        # of waiting for the first audio callback to notice.
+        self._apply_replaygain_for(self._current_stream_info)
 
         self._start_decoder_thread()
         t_thread_started = time.monotonic()
@@ -1075,6 +1108,69 @@ class PCMPlayer:
         with self._lock:
             return self._crossfeed_amount
 
+    def set_replaygain(
+        self,
+        mode: str,
+        preamp_db: float,
+        prevent_clipping: bool,
+    ) -> None:
+        """Configure ReplayGain leveling. `mode` is "off", "track",
+        or "album"; unknown modes coerce to "off". The applied gain
+        is recomputed against the currently-loaded stream's tags so
+        the change takes effect immediately, not on the next track.
+        """
+        normalized: ReplayGainMode = (
+            mode if mode in REPLAYGAIN_VALID_MODES else "off"
+        )  # type: ignore[assignment]
+        # Single-attribute writes are GIL-atomic; we don't need the
+        # player lock here. Acquiring it would be safe but creates a
+        # subtle deadlock risk for swap paths that already hold it.
+        self._replaygain_mode = normalized
+        self._replaygain_preamp_db = float(preamp_db)
+        self._replaygain_prevent_clipping = bool(prevent_clipping)
+        # Re-derive gain off the active stream's tags so the change
+        # is audible immediately rather than on the next track.
+        self._apply_replaygain_for(self._current_stream_info)
+
+    def replaygain_state(self) -> dict:
+        """Current configuration + the resolved gain in dB applied
+        right now. Surface for the Settings page so users can see
+        whether the active stream actually has tags or fell back to
+        flat output."""
+        mode = self._replaygain_mode
+        preamp = self._replaygain_preamp_db
+        prevent = self._replaygain_prevent_clipping
+        tags = _replaygain_tags_from(self._current_stream_info)
+        applied_db = compute_replaygain_db(tags, mode, preamp, prevent)
+        return {
+            "mode": mode,
+            "preamp_db": preamp,
+            "prevent_clipping": prevent,
+            "applied_db": applied_db,
+            "track_gain_db": tags.track_gain_db,
+            "track_peak": tags.track_peak,
+            "album_gain_db": tags.album_gain_db,
+            "album_peak": tags.album_peak,
+        }
+
+    def _apply_replaygain_for(self, info: Optional[StreamInfo]) -> None:
+        """Install the gain that corresponds to `info`'s tags + the
+        current user mode/preamp/clipping settings. Lock-free —
+        callers can be in audio-callback / lock-holding contexts
+        without re-entrancy concerns. The ReplayGain instance has
+        its own internal lock for the actual coefficient swap."""
+        if info is None:
+            self._replaygain.clear()
+            return
+        tags = _replaygain_tags_from(info)
+        gain_db = compute_replaygain_db(
+            tags,
+            self._replaygain_mode,
+            self._replaygain_preamp_db,
+            self._replaygain_prevent_clipping,
+        )
+        self._replaygain.set_gain_db(gain_db)
+
     def equalizer_bypass(self) -> bool:
         """Read the current bypass flag — server uses it to expose
         the value via /api/eq/state."""
@@ -1499,6 +1595,24 @@ class PCMPlayer:
                 sample_rate_hz=_safe_int(getattr(stream, "sample_rate", None)),
                 audio_quality=getattr(stream, "audio_quality", None),
                 audio_mode=getattr(stream, "audio_mode", None),
+                # tidalapi exposes the EBU R128 ReplayGain values + actual
+                # peaks straight off the Stream object. Storing them on
+                # StreamInfo means the audio engine can read them through
+                # the same channel everything else flows through (cache
+                # entry, preload, current track) without a separate
+                # plumbing path.
+                track_replay_gain_db=_safe_float(
+                    getattr(stream, "track_replay_gain", None)
+                ),
+                track_peak=_safe_float(
+                    getattr(stream, "track_peak_amplitude", None)
+                ),
+                album_replay_gain_db=_safe_float(
+                    getattr(stream, "album_replay_gain", None)
+                ),
+                album_peak=_safe_float(
+                    getattr(stream, "album_peak_amplitude", None)
+                ),
             )
             duration_s = float(duration) if duration else None
             self._manifest_cache.store(cache_key, list(urls), duration_s, info)
@@ -2098,13 +2212,18 @@ class PCMPlayer:
                 self._seq_bump_counter = 0
             return
 
-        # DSP stages: EQ (10-band biquad / AutoEQ) followed by
-        # crossfeed (Bauer-style stereo imaging). Both require
-        # float32 input, so when either is active we round-trip
-        # through a single float32 buffer instead of paying the
-        # int↔float conversion twice. Bit-perfect pass-through
-        # holds when both stages are inactive (or bypassed) and
-        # we never enter this block.
+        # DSP stages: ReplayGain (scalar gain) → EQ (10-band biquad
+        # / AutoEQ) → crossfeed (Bauer stereo imaging). All three
+        # operate on float32, so when any of them is active we
+        # round-trip through a single float32 buffer instead of
+        # paying the int↔float conversion per stage. Bit-perfect
+        # pass-through holds when all three are inactive and we
+        # never enter this block.
+        #
+        # RG goes first because it sets the base level the rest of
+        # the chain shapes around — applying it after EQ would let
+        # an EQ-boosted band push the post-RG peak into clipping.
+        rg_active = self._replaygain.is_active()
         eq_active = (
             self._eq is not None
             and self._eq.is_active()
@@ -2118,8 +2237,10 @@ class PCMPlayer:
             and outdata.ndim == 2
             and outdata.shape[1] == 2
         )
-        if eq_active or crossfeed_active:
+        if rg_active or eq_active or crossfeed_active:
             if outdata.dtype == np.float32:
+                if rg_active:
+                    self._replaygain.apply(outdata)
                 if eq_active:
                     self._eq.apply(outdata)
                 if crossfeed_active:
@@ -2132,6 +2253,8 @@ class PCMPlayer:
                     32768.0 if outdata.dtype == np.int16 else 2_147_483_648.0
                 )
                 buf = outdata.astype(np.float32, copy=True) / scale_in
+                if rg_active:
+                    self._replaygain.apply(buf)
                 if eq_active:
                     self._eq.apply(buf)
                 if crossfeed_active:
@@ -2697,6 +2820,11 @@ class PCMPlayer:
         self._stream_channels = pre.channels
         self._samples_emitted = 0
         self._callback_carry = None
+        # Re-derive ReplayGain off the new track's tags. Lock-free —
+        # safe in all three contexts this swap runs from (audio
+        # callback for `_try_gapless_swap`, finished-callback bridge,
+        # and held-lock for `_adopt_preload_locked`).
+        self._apply_replaygain_for(pre.stream_info)
 
 
 # ---------------------------------------------------------------------------
@@ -2711,6 +2839,37 @@ def _safe_int(v: object) -> Optional[int]:
         return int(v)
     except (TypeError, ValueError):
         return None
+
+
+def _replaygain_tags_from(info: Optional[StreamInfo]) -> ReplayGainTags:
+    """Lift the four ReplayGain numbers off a StreamInfo into the
+    explicit tag dataclass the gain engine consumes. Returns an
+    all-None tags object when info is None (idle player) so callers
+    can apply unconditionally without an extra null check."""
+    if info is None:
+        return ReplayGainTags()
+    return ReplayGainTags(
+        track_gain_db=info.track_replay_gain_db,
+        track_peak=info.track_peak,
+        album_gain_db=info.album_replay_gain_db,
+        album_peak=info.album_peak,
+    )
+
+
+def _safe_float(v: object) -> Optional[float]:
+    if v is None:
+        return None
+    try:
+        out = float(v)
+    except (TypeError, ValueError):
+        return None
+    # NaN / inf would silently propagate into the gain math and either
+    # mute audio (multiply by 0 from a NaN clamp) or blow it up
+    # (multiply by inf). Treat them as missing so the caller sees None
+    # and decides — the standard "default to 0 dB / unity" path.
+    if out != out or out == float("inf") or out == float("-inf"):
+        return None
+    return out
 
 
 def _normalize_codec(raw: object) -> Optional[str]:

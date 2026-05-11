@@ -4743,6 +4743,13 @@ def _native_player() -> PCMPlayer:
                 _pcm_player_singleton.set_crossfeed_amount(
                     settings.crossfeed_amount
                 )
+            rg_mode = getattr(settings, "replaygain_mode", "off")
+            if rg_mode != "off":
+                _pcm_player_singleton.set_replaygain(
+                    rg_mode,
+                    getattr(settings, "replaygain_preamp_db", 0.0),
+                    getattr(settings, "replaygain_prevent_clipping", True),
+                )
         except Exception as exc:
             print(f"[player] bootstrap failed: {exc}", flush=True)
     return _pcm_player_singleton
@@ -9486,6 +9493,9 @@ class SettingsPayload(BaseModel):
     eq_tilt_bass_db: Optional[float] = None
     eq_tilt_treble_db: Optional[float] = None
     crossfeed_amount: Optional[int] = None
+    replaygain_mode: Optional[str] = None
+    replaygain_preamp_db: Optional[float] = None
+    replaygain_prevent_clipping: Optional[bool] = None
 
 
 @app.get("/api/settings")
@@ -9585,6 +9595,19 @@ def update_settings(payload: SettingsPayload) -> dict:
             )
         except Exception as exc:
             logger.warning("crossfeed amount toggle failed: %s", exc)
+    if (
+        "replaygain_mode" in patch
+        or "replaygain_preamp_db" in patch
+        or "replaygain_prevent_clipping" in patch
+    ):
+        try:
+            _native_player().set_replaygain(
+                new_settings.replaygain_mode,
+                new_settings.replaygain_preamp_db,
+                new_settings.replaygain_prevent_clipping,
+            )
+        except Exception as exc:
+            logger.warning("replaygain toggle failed: %s", exc)
     return asdict(new_settings)
 
 
