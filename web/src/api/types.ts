@@ -349,9 +349,13 @@ export interface Settings {
  *  "Signal path" panel users open from the now-playing pill to
  *  confirm what's actually happening to the bits. */
 export interface SignalPath {
-  /** True only when no DSP stage is active AND exclusive mode is on
-   *  (i.e. samples are literally going to the DAC unchanged). */
+  /** True only when a track is loaded AND no DSP stage is active
+   *  AND exclusive mode is on AND no external output (Tidal
+   *  Connect / DLNA receiver) is taking over. */
   bit_perfect: boolean;
+  /** Whether there's actually a track in the audio pipeline right
+   *  now. Drives the idle / informational state of the panel. */
+  track_loaded: boolean;
   source: {
     codec: string | null;
     sample_rate_hz: number | null;
@@ -380,6 +384,16 @@ export interface SignalPath {
   output: {
     exclusive_mode: boolean;
     force_volume: boolean;
+    device_name: string | null;
+    sample_rate_hz: number | null;
+    bit_depth: number | null;
+    channels: number | null;
+    sd_dtype: string | null;
+    /** True when a Tidal Connect / DLNA receiver is the active
+     *  sink — local output is silenced and the DSP stages below
+     *  don't run on the remote audio (the receiver gets pre-DSP
+     *  PCM). */
+    external_output_active: boolean;
   };
 }
 
