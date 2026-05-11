@@ -5113,11 +5113,7 @@ def player_signal_path() -> dict:
     info = player.snapshot()
     stream = getattr(info, "stream_info", None)
 
-    rg_state = (
-        player.replaygain_state()
-        if hasattr(player, "replaygain_state")
-        else {"mode": "off", "applied_db": 0.0}
-    )
+    rg_state = player.replaygain_state()
     eq_active = False
     eq_mode = settings.eq_mode
     eq_bypass = settings.eq_bypass
@@ -9593,6 +9589,38 @@ def update_settings(payload: SettingsPayload) -> dict:
     _require_local_access()
     global settings
     patch = payload.model_dump(exclude_unset=True)
+
+    # ReplayGain bounds: keep the API honest about what the audio
+    # engine can actually do with these values. The UI slider clamps
+    # preamp to ±10 dB, but a direct PUT with an out-of-range or
+    # non-finite value would propagate through `compute_gain_db` and,
+    # with clipping prevention off, blow up the audio buffer at
+    # multiply time. Reject those rather than silently coerce.
+    if "replaygain_mode" in patch:
+        mode = patch["replaygain_mode"]
+        if mode not in ("off", "track", "album"):
+            raise HTTPException(
+                status_code=400,
+                detail="replaygain_mode must be one of 'off', 'track', 'album'",
+            )
+    if "replaygain_preamp_db" in patch:
+        raw = patch["replaygain_preamp_db"]
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            raise HTTPException(
+                status_code=400, detail="replaygain_preamp_db must be a number"
+            )
+        if value != value or value in (float("inf"), float("-inf")):
+            raise HTTPException(
+                status_code=400, detail="replaygain_preamp_db must be finite"
+            )
+        if value < -10.0 or value > 10.0:
+            raise HTTPException(
+                status_code=400,
+                detail="replaygain_preamp_db must be in [-10, 10]",
+            )
+        patch["replaygain_preamp_db"] = value
 
     # Validate output_dir: must be an existing writable directory. Without
     # this, a PUT with `{"output_dir": "/"}` would quietly persist and all
