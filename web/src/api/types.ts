@@ -331,6 +331,18 @@ export interface Settings {
    *  20-40 is the typical taste range for hard-panned mixes on
    *  headphones. */
   crossfeed_amount: number;
+  /** ReplayGain loudness leveling mode. "off" preserves bit-perfect
+   *  output; "track" applies the per-track gain (best for shuffle);
+   *  "album" applies the album-wide gain (best for whole-album
+   *  listening). */
+  replaygain_mode: "off" | "track" | "album";
+  /** User offset in dB applied on top of the ReplayGain value
+   *  (-10..+10). Useful when EBU R128 reference is too quiet for a
+   *  particular DAC + headphone combination. */
+  replaygain_preamp_db: number;
+  /** When true, the gain is clamped so peak * gain ≤ 1.0 to prevent
+   *  clipping on quieter masters with negative gain offsets. */
+  replaygain_prevent_clipping: boolean;
 }
 
 export interface AuthStatus {
