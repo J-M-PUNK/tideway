@@ -34,6 +34,7 @@ import type {
   QualityOption,
   SearchResponse,
   Settings,
+  SignalPath,
   SubscriptionStatus,
   TidalPage,
   TidalUser,
@@ -1154,6 +1155,11 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ device_id: deviceId }),
       }),
+    /** Snapshot of the audio DSP chain — feeds the "Signal path"
+     *  panel users open from the now-playing pill. Re-fetched on
+     *  every panel-open so the readout reflects the current track
+     *  + the latest user toggles. */
+    signalPath: () => req<SignalPath>("/api/player/signal-path"),
   },
   /** Backend backstop for "what was playing when the user quit."
    *  Pairs with the frontend's localStorage persistence — see
