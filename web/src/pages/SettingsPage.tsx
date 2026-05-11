@@ -45,6 +45,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useToast } from "@/components/toast";
+import { useDebouncedSettingsPut } from "@/hooks/useDebouncedSettingsPut";
 import { useOfflineMode } from "@/hooks/useOfflineMode";
 import {
   useUiPreferences,
@@ -811,6 +812,7 @@ function ReplayGainField() {
     preamp: number;
     preventClipping: boolean;
   } | null>(null);
+  const debouncedPut = useDebouncedSettingsPut();
 
   useEffect(() => {
     let cancelled = false;
@@ -837,17 +839,15 @@ function ReplayGainField() {
 
   const setMode = (mode: "off" | "track" | "album") => {
     setState({ ...state, mode });
-    void api.settings.put({ replaygain_mode: mode }).catch(() => {});
+    debouncedPut({ replaygain_mode: mode });
   };
   const setPreamp = (preamp: number) => {
     setState({ ...state, preamp });
-    void api.settings.put({ replaygain_preamp_db: preamp }).catch(() => {});
+    debouncedPut({ replaygain_preamp_db: preamp });
   };
   const setPreventClipping = (preventClipping: boolean) => {
     setState({ ...state, preventClipping });
-    void api.settings
-      .put({ replaygain_prevent_clipping: preventClipping })
-      .catch(() => {});
+    debouncedPut({ replaygain_prevent_clipping: preventClipping });
   };
 
   return (
@@ -911,6 +911,7 @@ function ReplayGainField() {
  */
 function CrossfeedField() {
   const [amount, setAmount] = useState<number | null>(null);
+  const debouncedPut = useDebouncedSettingsPut();
 
   useEffect(() => {
     let cancelled = false;
@@ -933,11 +934,7 @@ function CrossfeedField() {
 
   const onChange = (next: number) => {
     setAmount(next);
-    // Fire-and-forget — settings.put is debounced internally enough
-    // for slider drags via the rate-limit on the audio side
-    // (set_crossfeed_amount just stores + restamps the SOS state,
-    // no streams torn down).
-    void api.settings.put({ crossfeed_amount: next }).catch(() => {});
+    debouncedPut({ crossfeed_amount: next });
   };
 
   return (
