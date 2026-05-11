@@ -195,14 +195,19 @@ glibc-based distro.
 > test environment, so cold-launch issues on real distros only
 > surface through user reports. The AppImage relies on these
 > packages being installed on your host (most desktop distros have
-> them by default):
+> them by default; minimal installs like Arch / Omarchy do not):
 >
-> - **GTK 3** + **WebKit2GTK 4.1** — Debian/Ubuntu:
->   `libgtk-3-0 libwebkit2gtk-4.1-0`. Fedora: `gtk3 webkit2gtk4.1`.
+> - **GTK 3** + **WebKit2GTK 4.1** + **Python GObject bindings** —
+>   pywebview imports `gi.repository.WebKit2` at startup; without
+>   the bindings it falls back to the system browser with an
+>   actionable error. Debian/Ubuntu:
+>   `libgtk-3-0 libwebkit2gtk-4.1-0 python3-gi gir1.2-webkit2-4.1`.
+>   Fedora: `gtk3 webkit2gtk4.1 python3-gobject`.
+>   Arch/Omarchy: `gtk3 webkit2gtk-4.1 python-gobject`.
 > - **PortAudio** — Debian/Ubuntu: `libportaudio2`.
->   Fedora: `portaudio`.
+>   Fedora: `portaudio`. Arch: `portaudio`.
 > - **libnotify** — Debian/Ubuntu: `libnotify4`.
->   Fedora: `libnotify`.
+>   Fedora: `libnotify`. Arch: `libnotify`.
 >
 > Global media keys require an X11 session (Wayland will degrade —
 > the player still works, the global hotkeys do not). ARM Linux
