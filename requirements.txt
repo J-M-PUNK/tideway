@@ -1,6 +1,6 @@
 tidalapi>=0.8.11
 mutagen>=1.47.0
-requests>=2.33.1
+requests>=2.34.0
 # orjson is a Rust-based JSON encoder that releases the GIL during
 # serialization and is roughly 5x faster than the stdlib `json` for
 # typical response payloads. We wire it in as FastAPI's default
