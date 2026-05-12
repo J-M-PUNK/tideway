@@ -496,10 +496,158 @@ class PCMPlayer:
                     f"dtype {pre.sd_dtype}=={self._stream_sd_dtype}?)"
                 )
                 return self._adopt_preload_locked(pre)
-        # Fall through: no matching preload. Full teardown + fresh
-        # resolve. This is the slow path (~300-800ms).
+        # Fall through: no matching preload.
+        #
+        # Two slow paths from here:
+        #
+        #  (A) **Gapless swap** when there is an active OutputStream and
+        #      the new decoder can produce samples in the same rate /
+        #      dtype / channel triple as the active stream. The new
+        #      decoder thread runs against a fresh queue, then we
+        #      atomically swap references the way `_adopt_preload_locked`
+        #      does for a real preload — the OutputStream stays open
+        #      across the swap, so we never race the OS releasing the
+        #      audio device. This is critical on Windows audio devices
+        #      with slow `IAudioClient::Release` (USB DACs are the
+        #      canonical case: their second `stream.start()` after a
+        #      `close()` fails with a `WdmSyncIoctl` IOCTL error, the
+        #      player flips to state=error, and the frontend's
+        #      auto-advance burns through the queue at ~200 ms / track).
+        #
+        #  (B) **Full teardown + fresh open** when no stream is open yet
+        #      (cold start, after a stop), the device id changed, or the
+        #      new decoder's format doesn't fit the active stream. This
+        #      is the original slow path and the race-prone one — but
+        #      it only fires in cases where we genuinely have to close
+        #      and reopen.
         self._dbg(f"load SLOW PATH: full teardown + fresh resolve for {track_id}")
         load_t0 = time.monotonic()
+
+        # Snapshot the active stream's format so we can decide whether
+        # path (A) is viable BEFORE doing any teardown.
+        with self._lock:
+            active_stream = self._stream
+            active_rate = self._stream_sample_rate
+            active_dtype = self._stream_sd_dtype
+            active_channels = self._stream_channels
+
+        if active_stream is not None and active_rate is not None:
+            try:
+                with self._lock:
+                    self._transition("loading", track_id=track_id)
+                synthetic = self._build_load_pipeline(
+                    track_id, quality, match_rate=active_rate
+                )
+                t_built = time.monotonic()
+            except Exception as exc:
+                log.exception(
+                    "failed to build pipeline for gapless swap on %s", track_id
+                )
+                with self._lock:
+                    self._last_error = str(exc)
+                    self._transition("error")
+                self._emit()
+                return self.snapshot()
+
+            rate_matches = (
+                synthetic.sample_rate == active_rate
+                and synthetic.sd_dtype == active_dtype
+                and synthetic.channels == active_channels
+            )
+            if rate_matches:
+                # Path (A): atomic swap, keep stream open. Mirrors
+                # `_adopt_preload_locked`'s same-rate branch.
+                with self._lock:
+                    old_thread = self._decoder_thread
+                    old_stop_flag = self._stop_flag
+                    old_decoder = self._decoder
+                    # Drop any stale preload (its decoder thread won't
+                    # ever be adopted now that we've replaced the
+                    # active pipeline with a new track).
+                    stale_preload = self._preload
+                    self._preload = None
+                    self._swap_pipeline_to(synthetic)
+                    self._source_urls = synthetic.source_urls
+                    self._source_path = synthetic.source_path
+                    self._paused = False
+                    self._seeking = False
+                    self._last_error = None
+                    # Same contract as the original slow path: load()
+                    # leaves us in "paused"; caller's play() flips to
+                    # "playing".
+                    self._transition("paused")
+
+                # Outside the lock: clean up old refs without holding it
+                # while we wait on a thread join.
+                if old_stop_flag is not None:
+                    old_stop_flag.set()
+                if old_decoder is not None:
+                    try:
+                        old_decoder.cancel_source()
+                    except Exception:
+                        pass
+                if old_thread is not None and old_thread.is_alive():
+                    old_thread.join(timeout=0.5)
+                if old_decoder is not None:
+                    try:
+                        old_decoder.close()
+                    except Exception:
+                        pass
+                # Stale preload: stop its thread and close its decoder
+                # so we don't leak. cancel_source aborts any in-flight
+                # HTTP fetch so the join returns promptly.
+                if stale_preload is not None:
+                    stale_preload.stop_flag.set()
+                    try:
+                        stale_preload.decoder.cancel_source()
+                    except Exception:
+                        pass
+                    if stale_preload.thread.is_alive():
+                        stale_preload.thread.join(timeout=0.5)
+                    try:
+                        stale_preload.decoder.close()
+                    except Exception:
+                        pass
+
+                print(
+                    f"[perf] load track={track_id} "
+                    f"total={(time.monotonic() - load_t0) * 1000.0:.0f}ms "
+                    f"build={(t_built - load_t0) * 1000.0:.0f}ms "
+                    f"swap={(time.monotonic() - t_built) * 1000.0:.0f}ms "
+                    f"(gapless: kept stream open)",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                self._emit()
+                return self.snapshot()
+            else:
+                # Format mismatch — the synthetic pipeline's decoder
+                # can't feed the active stream. Tear it down and fall
+                # through to path (B), which closes the old stream and
+                # opens a new one at the new format. The close+open
+                # race can still fire here, but format-change track
+                # changes are far rarer than format-match ones.
+                self._dbg(
+                    f"load slow path: format mismatch "
+                    f"({synthetic.sample_rate}/{synthetic.sd_dtype}/"
+                    f"{synthetic.channels} vs active "
+                    f"{active_rate}/{active_dtype}/{active_channels}); "
+                    f"discarding synthetic pipeline"
+                )
+                synthetic.stop_flag.set()
+                try:
+                    synthetic.decoder.cancel_source()
+                except Exception:
+                    pass
+                if synthetic.thread.is_alive():
+                    synthetic.thread.join(timeout=0.5)
+                try:
+                    synthetic.decoder.close()
+                except Exception:
+                    pass
+
+        # Path (B): no active stream (or format mismatch fell through).
+        # Full teardown + fresh open at the new decoder's native rate.
         self._teardown()
         t_teardown = time.monotonic()
         with self._lock:
@@ -937,6 +1085,77 @@ class PCMPlayer:
                 "sample_rate": pre.sample_rate,
                 "dtype": pre.sd_dtype,
             }
+
+    def _build_load_pipeline(
+        self,
+        track_id: str,
+        quality: Optional[str],
+        match_rate: Optional[int] = None,
+    ) -> "_Preload":
+        """Resolve `track_id`, open a decoder, start its producer
+        thread, and wrap the lot as a `_Preload` for the caller to
+        adopt via `_swap_pipeline_to`.
+
+        Mirrors `preload()`'s build steps without the `_preload` slot
+        assignment — the gapless load path uses this to manufacture a
+        synthetic preload so it can keep the OutputStream open across a
+        track change (avoiding the WASAPI `IAudioClient::Release` race
+        on slow USB audio devices). `match_rate`, if provided, asks the
+        decoder to emit at that rate so the swap stays format-compatible
+        with the active stream; pass `None` to keep the decoder's native
+        rate.
+
+        Raises on resolve / decoder construction failures. Caller is
+        responsible for tearing down the returned pipeline if it
+        decides not to adopt it.
+        """
+        source_spec, duration_s, stream_info, prefetched_bytes = self._resolve_source(
+            track_id, quality
+        )
+        source = _build_source(source_spec, prefetched=prefetched_bytes)
+        decoder = Decoder(source)
+
+        # Match the active stream's rate so the adopt path can take
+        # the same-rate (stream-stays-open) branch. Skipped in
+        # exclusive mode because we want the source's native rate
+        # there — if it ends up differing from the active stream's,
+        # the caller falls through to the full teardown path.
+        if match_rate is not None and not self._exclusive_mode:
+            decoder.set_target_rate(int(match_rate))
+
+        q: "queue.Queue[Optional[np.ndarray]]" = queue.Queue(
+            maxsize=_PCM_QUEUE_MAX
+        )
+        stop_flag = threading.Event()
+        done = threading.Event()
+
+        thread = threading.Thread(
+            target=PCMPlayer._decoder_loop,
+            args=(decoder, q, stop_flag, done),
+            name="pcm-decoder",
+            daemon=True,
+        )
+        thread.start()
+
+        urls = source_spec if isinstance(source_spec, list) else None
+        path = source_spec if isinstance(source_spec, str) else None
+
+        return _Preload(
+            track_id=track_id,
+            quality=quality,
+            duration_ms=int(duration_s * 1000) if duration_s else 0,
+            stream_info=stream_info,
+            source_urls=list(urls) if urls is not None else None,
+            source_path=path,
+            decoder=decoder,
+            queue=q,
+            thread=thread,
+            stop_flag=stop_flag,
+            done=done,
+            sample_rate=decoder.output_sample_rate,
+            channels=decoder.channels,
+            sd_dtype=decoder.sounddevice_dtype,
+        )
 
     def _drop_preload(self) -> None:
         """Stop the preload thread, close its decoder, clear the slot.
