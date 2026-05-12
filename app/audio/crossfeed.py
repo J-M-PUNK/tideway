@@ -95,10 +95,24 @@ class Crossfeed:
             if self._sos is None:
                 # First non-zero amount: build + cache the SOS and
                 # initialise per-channel filter state.
-                self._sos = self._build_sos().astype(np.float32, copy=False)
+                #
+                # Coefficients and state are kept in float64 even
+                # though the audio buffer is float32. A 700 Hz low-
+                # pass at 44.1 kHz puts the IIR poles at radius
+                # ~0.93–0.96 from the origin, where float32 rounding
+                # on the `a1` / `a2` coefficients is enough to shift
+                # pole locations audibly and to let quantization
+                # error accumulate in the per-sample feedback path.
+                # The audible signature is low-end distortion that
+                # sounds like a bitrate hit on bass content — the
+                # exact thing this crossfeed implementation was
+                # accused of, and a textbook IIR-precision symptom.
+                # `apply()` round-trips the audio slice through
+                # float64 to match.
+                self._sos = self._build_sos()
                 zi_single = sosfilt_zi(self._sos)
-                self._state_l = zi_single.astype(np.float32, copy=True)
-                self._state_r = zi_single.astype(np.float32, copy=True)
+                self._state_l = zi_single.astype(np.float64, copy=True)
+                self._state_r = zi_single.astype(np.float64, copy=True)
             self._amount = clamped
 
     def clear(self) -> None:
@@ -132,8 +146,15 @@ class Crossfeed:
             # Mono / 5.1 / etc. — the crossfeed math is stereo-only.
             return
         with self._lock:
-            l = samples[:, 0]
-            r = samples[:, 1]
+            # Run the IIR pass in float64 to keep the low-frequency
+            # poles well-conditioned (see `set_amount` for the
+            # precision rationale). `sosfilt`'s internal math follows
+            # the input's dtype, so promoting the slice — not just
+            # the coefficients — is what actually fixes the bass
+            # distortion. A 512-frame stereo block is 8 KB at
+            # float64; negligible per-callback cost.
+            l = samples[:, 0].astype(np.float64, copy=False)
+            r = samples[:, 1].astype(np.float64, copy=False)
             l_low, self._state_l = sosfilt(self._sos, l, zi=self._state_l)
             r_low, self._state_r = sosfilt(self._sos, r, zi=self._state_r)
             l_high = l - l_low
@@ -145,8 +166,16 @@ class Crossfeed:
             # At α=0 this simplifies to L_high + L_low = L (perfect
             # bypass). At α=0.5 the two low-pass paths land equal-
             # weighted on each output, producing mono lows.
-            samples[:, 0] = l_high + (1.0 - alpha) * l_low + alpha * r_low
-            samples[:, 1] = r_high + (1.0 - alpha) * r_low + alpha * l_low
+            #
+            # Cast back to float32 on assignment so the downstream
+            # int-conversion stage and the rest of the audio chain
+            # see the dtype they expect.
+            samples[:, 0] = (
+                l_high + (1.0 - alpha) * l_low + alpha * r_low
+            ).astype(np.float32, copy=False)
+            samples[:, 1] = (
+                r_high + (1.0 - alpha) * r_low + alpha * l_low
+            ).astype(np.float32, copy=False)
 
     # --- internals --------------------------------------------------
 
