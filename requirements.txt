@@ -36,7 +36,7 @@ pywebview>=6.2.1
 # bit-perfect output.
 av>=12.0.0
 sounddevice>=0.5.5
-numpy>=1.26.0
+numpy>=2.4.4
 # scipy powers the PCM engine's 10-band parametric EQ. Biquad IIR
 # filtering in a Python loop can't keep up with the audio callback
 # at 48k; scipy.signal.sosfilt drops into C and comfortably runs
