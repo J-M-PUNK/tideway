@@ -30,7 +30,11 @@ export function ArtistDetail({ onDownload }: { onDownload: OnDownload }) {
   // calls it needs and bundles credits + videos into the response,
   // so the frontend doesn't waterfall three separate fetches on
   // mount like it used to.
-  const { data: artist, loading, error } = useApi(() => api.artist(id), [id], {
+  const {
+    data: artist,
+    loading,
+    error,
+  } = useApi(() => api.artist(id), [id], {
     cacheKey: queryKeys.artist(id),
   });
   const [popularExpanded, setPopularExpanded] = useState(false);
@@ -60,9 +64,16 @@ export function ArtistDetail({ onDownload }: { onDownload: OnDownload }) {
     return <ErrorView error={error ?? "Artist not found"} />;
 
   // "Download full discography" needs a single merged list of everything
-  // the artist has released (albums + EPs + singles; skip appears-on
-  // since those are someone else's records).
-  const fullCatalog = [...artist.albums, ...artist.ep_singles];
+  // the artist has released (albums + EPs + singles + their own
+  // compilations; skip appears-on since those are someone else's
+  // records). Compilations are kept here even though they get their own
+  // shelf — they're still the artist's releases, so dropping them would
+  // silently shrink the discography download.
+  const fullCatalog = [
+    ...artist.albums,
+    ...artist.ep_singles,
+    ...artist.compilations,
+  ];
 
   return (
     <div>
@@ -113,14 +124,13 @@ export function ArtistDetail({ onDownload }: { onDownload: OnDownload }) {
         </>
       )}
 
-      {/* Spotify-style "Popular" row — mixed-format top releases ranked
-       *  by popularity with a recency boost (computed server-side).
-       *  Sits above Albums / EPs because it surfaces the artist's most
-       *  relevant work first regardless of release type. No "View more"
-       *  — this is a curated cap, not a slice of a bigger list. */}
+      {/* Mixed-format "Latest releases" row — the artist's albums,
+       *  EPs, and singles newest-first (computed server-side). Sits
+       *  above Albums / EPs so the freshest output leads. No "View
+       *  more": this is a curated cap, not a slice of a bigger list. */}
       <MediaRow
-        title="Popular releases"
-        items={artist.popular_releases}
+        title="Latest releases"
+        items={artist.latest_releases}
         onDownload={onDownload}
       />
       <MediaRow
@@ -133,6 +143,12 @@ export function ArtistDetail({ onDownload }: { onDownload: OnDownload }) {
         title="EPs & Singles"
         items={artist.ep_singles}
         viewMoreTo={`/artist/${id}/all/eps`}
+        onDownload={onDownload}
+      />
+      <MediaRow
+        title="Compilations"
+        items={artist.compilations}
+        viewMoreTo={`/artist/${id}/all/compilations`}
         onDownload={onDownload}
       />
       {/* Music videos sit above Appears on. The artist's own video

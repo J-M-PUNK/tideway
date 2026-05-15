@@ -7,7 +7,7 @@ import threading
 import time
 import webbrowser
 from concurrent.futures import Future
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -456,7 +456,7 @@ class TidalClient:
             now = datetime.now(expiry.tzinfo) if expiry and expiry.tzinfo else datetime.now()
             if expiry and refresh_token and expiry <= now:
                 try:
-                    if self.session.token_refresh(refresh_token):
+                    if self._token_refresh_capturing(refresh_token):
                         self.save_session()
                 except Exception:
                     pass
@@ -470,6 +470,65 @@ class TidalClient:
             return self.session.check_login()
         except Exception:
             return False
+
+    def _token_refresh_capturing(self, refresh_token: str) -> bool:
+        """Refresh the access token, keeping a rotated refresh token.
+
+        tidalapi 0.8.11's `Session.token_refresh()` updates the
+        access token, expiry, and token type from Tidal's response
+        but never reads the `refresh_token` field of that response.
+        Tidal rotates refresh tokens: a refresh sometimes comes back
+        with a new refresh token and the old one is then invalidated
+        server-side. Because tidalapi drops it, `save_session()` keeps
+        re-persisting the original token; once Tidal kills it (a few
+        days out) the next refresh fails and the user is logged out.
+
+        This mirrors tidalapi's refresh exactly — same OAuth params,
+        same config (so device-code and PKCE both stay correct), same
+        impersonated transport — but also carries a rotated refresh
+        token back onto the session so the subsequent save persists
+        it. Error semantics match tidalapi's so existing callers
+        (AuthenticationError → logout, False → give up) are unchanged.
+        """
+        session = self.session
+        config = session.config
+        is_pkce = bool(getattr(session, "is_pkce", False))
+        params = {
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": (
+                config.client_id_pkce if is_pkce else config.client_id
+            ),
+            "client_secret": (
+                config.client_secret_pkce
+                if is_pkce
+                else config.client_secret
+            ),
+        }
+        resp = session.request_session.post(config.api_oauth2_token, params)
+        body = resp.json()
+        if resp.status_code != 200:
+            raise tidalapi.exceptions.AuthenticationError(
+                "Authentication failed with error "
+                f"'{body.get('error')}: {body.get('error_description')}'"
+            )
+        if not resp.ok:
+            return False
+        session.access_token = body["access_token"]
+        # Naive UTC, matching how tidalapi stores expiry_time
+        # everywhere else. Mixing a tz-aware value here would make
+        # tidalapi's own naive-vs-aware datetime math raise.
+        session.expiry_time = datetime.now(timezone.utc).replace(
+            tzinfo=None
+        ) + timedelta(seconds=body["expires_in"])
+        session.token_type = body["token_type"]
+        # The actual fix: a rotated refresh token must replace the
+        # stored one. Tidal only returns this field when it rotates;
+        # when absent the existing token stays valid, so keep it.
+        new_refresh = body.get("refresh_token")
+        if new_refresh:
+            session.refresh_token = new_refresh
+        return True
 
     def force_refresh(self) -> bool:
         """Explicitly refresh the access token using the stored refresh
@@ -499,7 +558,7 @@ class TidalClient:
                 )
                 return False
             try:
-                ok = self.session.token_refresh(refresh_token)
+                ok = self._token_refresh_capturing(refresh_token)
             except Exception as exc:
                 print(
                     f"[tidal] force_refresh: token_refresh raised: {exc!r}",

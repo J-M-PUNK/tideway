@@ -33,6 +33,7 @@ import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 from typing import Callable, Optional, Union
 
@@ -105,6 +106,16 @@ log = logging.getLogger(__name__)
 # safety net.
 # Memory cost is negligible (~800 KB at int32 stereo).
 _PCM_QUEUE_MAX = 100
+
+# Hard ceiling on the two Tidal round-trips in _resolve_source. The
+# transport already bounds each request (app.http.DEFAULT_TIMEOUT,
+# ~36s worst case), so this is a backstop: it guarantees the player
+# pipeline lock is released even if a transport ever fails to honour
+# its own timeout. Sits above the transport ceiling so the
+# transport's own, more specific error surfaces first in the normal
+# case. Without it, one stalled request held the pipeline lock
+# forever and every playback control hung until an app restart.
+_RESOLVE_TIMEOUT_S = 45.0
 
 
 @dataclass
@@ -1824,13 +1835,35 @@ class PCMPlayer:
             # parse, not a network call.
             tid = int(track_id)
             t_start = time.monotonic()
-            with ThreadPoolExecutor(max_workers=2) as ex:
+            # Not a `with` block: ThreadPoolExecutor.__exit__ does
+            # shutdown(wait=True), which would re-block on a hung
+            # future even after result(timeout=) gave up — defeating
+            # the whole point of bounding the wait. shutdown(wait=
+            # False, cancel_futures=True) lets us return promptly; the
+            # transport timeout (app.http.DEFAULT_TIMEOUT) ensures the
+            # orphaned worker actually unwinds shortly after instead
+            # of lingering.
+            ex = ThreadPoolExecutor(max_workers=2)
+            try:
                 track_future = ex.submit(session.track, tid)
                 stream_holder = tidalapi.Track(session)
                 stream_holder.id = tid
                 stream_future = ex.submit(stream_holder.get_stream)
-                track = track_future.result()
-                stream = stream_future.result()
+                try:
+                    track = track_future.result(timeout=_RESOLVE_TIMEOUT_S)
+                    stream = stream_future.result(timeout=_RESOLVE_TIMEOUT_S)
+                except FutureTimeoutError:
+                    # Surfaces to _load_locked's except: it flips the
+                    # player to state=error and emits, so the frontend
+                    # clears the spinner and the user can pick another
+                    # track — instead of a permanent "loading" that
+                    # only an app restart escaped.
+                    raise RuntimeError(
+                        "Tidal did not respond while resolving the "
+                        "track (timed out)"
+                    )
+            finally:
+                ex.shutdown(wait=False, cancel_futures=True)
             t_after_network = time.monotonic()
             manifest = stream.get_stream_manifest()
             t_end = time.monotonic()

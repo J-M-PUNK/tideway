@@ -101,6 +101,31 @@ def test_parse_top_row_extracts_all_fields():
     assert a.aoty_url and a.aoty_url.startswith(
         "https://www.albumoftheyear.org/album/"
     )
+    # Genre tags drive the Top-of-year picker; names and slugs are
+    # captured in lockstep, order preserved as AOTY lists them.
+    assert a.genres == ["Electroclash", "Electropop"]
+    assert a.genre_slugs == ["181-electroclash", "31-electropop"]
+
+
+def test_parse_top_row_without_genre_block_yields_empty_genres():
+    html = (
+        "<div class='albumListRow'>"
+        "<h2 class='albumListTitle'>"
+        "<a href='/album/1-x-y.php' itemprop='url'>X - Y</a>"
+        "</h2></div>"
+    )
+    rows = _parse_album_list_rows(html)
+    assert len(rows) == 1
+    assert rows[0].genres == []
+    assert rows[0].genre_slugs == []
+
+
+def test_release_cards_have_no_genres():
+    # The /releases/this-week/ card markup carries no genre, so the
+    # New-releases surface intentionally exposes no genre filter.
+    rows = _parse_album_block_cards(_RELEASE_BLOCK_HTML)
+    assert len(rows) == 1
+    assert rows[0].genres == []
 
 
 def test_parse_top_row_handles_missing_must_hear_flag():

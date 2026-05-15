@@ -32,14 +32,14 @@ export function AotyHomeSection() {
   return (
     <div>
       <AotyRow
-        title={`Top albums of ${year}`}
-        fetch={() => api.aoty.topOfYear({ limit: 30 })}
-        viewMoreTo="/aoty/top-of-year"
-      />
-      <AotyRow
         title="New album releases"
         fetch={() => api.aoty.recentReleases(60)}
         viewMoreTo="/aoty/new-releases"
+      />
+      <AotyRow
+        title={`Top albums of ${year}`}
+        fetch={() => api.aoty.topOfYear({ limit: 30 })}
+        viewMoreTo="/aoty/top-of-year"
       />
     </div>
   );
@@ -104,10 +104,35 @@ function SectionHeader({
   viewMoreTo: string | null;
 }) {
   return (
-    <div className="mb-4 mt-8 flex items-baseline justify-between gap-4">
-      <h2 className="text-2xl font-bold tracking-tight">{title}</h2>
+    <div className="mb-4 mt-8 flex items-start justify-between gap-4">
+      <div>
+        <h2 className="text-2xl font-bold tracking-tight">{title}</h2>
+        <AotyAttribution />
+      </div>
       {viewMoreTo && <ViewMoreLink to={viewMoreTo} />}
     </div>
+  );
+}
+
+/**
+ * Small attribution line shown under every AOTY-sourced section
+ * title. The data is scraped from albumoftheyear.org, so it's
+ * credited wherever it surfaces. Exported because the drill-down
+ * page shows the same credit under its page title.
+ */
+export function AotyAttribution() {
+  return (
+    <p className="mt-0.5 text-xs text-muted-foreground">
+      Courtesy of{" "}
+      <a
+        href="https://www.albumoftheyear.org"
+        target="_blank"
+        rel="noreferrer"
+        className="underline underline-offset-2 hover:text-foreground"
+      >
+        Album of the Year
+      </a>
+    </p>
   );
 }
 

@@ -17,6 +17,7 @@ export type ArtistSectionKey =
   | "top-tracks"
   | "albums"
   | "eps"
+  | "compilations"
   | "appears-on"
   | "similar"
   | "videos"
@@ -38,6 +39,11 @@ const SECTIONS: Record<ArtistSectionKey, SectionMeta> = {
   "top-tracks": { title: "Popular", field: "top_tracks", kind: "tracks" },
   albums: { title: "Albums", field: "albums", kind: "media" },
   eps: { title: "EPs & Singles", field: "ep_singles", kind: "media" },
+  compilations: {
+    title: "Compilations",
+    field: "compilations",
+    kind: "media",
+  },
   "appears-on": { title: "Appears on", field: "appears_on", kind: "media" },
   similar: { title: "Fans also like", field: "similar", kind: "media" },
   videos: { title: "Videos", field: "videos", kind: "videos" },
@@ -56,6 +62,7 @@ interface ArtistData {
   top_tracks: Track[];
   albums: Album[];
   ep_singles: Album[];
+  compilations: Album[];
   appears_on: Album[];
   similar: Artist[];
   videos: Video[];

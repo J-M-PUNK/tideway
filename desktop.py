@@ -436,18 +436,35 @@ def main(argv: Optional[list[str]] = None) -> int:
         except Exception:
             pass
 
-        # Re-show the hidden window when the user clicks the dock icon.
-        # Wired AFTER webview.start() so NSApp is up; we hook this from
-        # the `shown` event below rather than registering at create time.
-        def _install_dock_reopen() -> None:
+        def _macos_quit() -> None:
+            # A real quit (Dock right-click → Quit, Apple-menu Quit,
+            # Cmd+Q) must tear down every window, not just the main
+            # one — pywebview only stops the run loop once the last
+            # window closes, so leaving a mini-player open would
+            # otherwise keep the process alive. Mirrors the in-app
+            # Quit's destroy() path, which the existing graceful
+            # shutdown already hangs off of.
+            for w in list(webview.windows):
+                try:
+                    w.destroy()
+                except Exception:
+                    pass
+
+        # Re-show the hidden window when the user clicks the dock icon,
+        # and take over applicationShouldTerminate: so OS-level quit
+        # paths actually quit. Wired AFTER webview.start() (via the
+        # `shown` event) so NSApp and pywebview's app delegate exist;
+        # both helpers are idempotent.
+        def _install_macos_app_hooks() -> None:
             try:
                 from app import window_chrome as _window_chrome
                 _window_chrome.install_macos_dock_reopen(_show_window)
+                _window_chrome.install_macos_quit_handler(_macos_quit)
             except Exception:
                 pass
 
         try:
-            window.events.shown += _install_dock_reopen
+            window.events.shown += _install_macos_app_hooks
         except Exception:
             pass
 
