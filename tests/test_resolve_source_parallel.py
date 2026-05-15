@@ -17,7 +17,10 @@ barrier and the test will time out.
 from __future__ import annotations
 
 import threading
+import time
 from unittest.mock import MagicMock, patch
+
+import pytest
 
 
 def test_resolve_source_runs_metadata_and_playbackinfo_in_parallel():
@@ -128,3 +131,59 @@ def test_resolve_source_passes_track_id_as_int():
     assert session.track.call_args.args == (987,)
     # The minimal Track holder gets the same int id.
     assert holder.id == 987
+
+
+def test_resolve_source_bounded_when_tidal_stalls():
+    """A stalled Tidal request must NOT hold the caller forever.
+
+    _resolve_source runs under the player's pipeline lock, so an
+    unbounded wait here froze every playback control until an app
+    restart. The result(timeout=) backstop has to give up and raise
+    so _load_locked can flip the player to a recoverable error
+    state. Pins that the wait is bounded and the worker thread is
+    left able to unwind (it does once `release` is set, standing in
+    for the transport timeout aborting the socket).
+    """
+    from app.audio.player import PCMPlayer
+
+    player = PCMPlayer.__new__(PCMPlayer)
+    player._manifest_cache = MagicMock()
+    player._manifest_cache.lookup.return_value = None
+    player._local_lookup = None
+    player._quality_clamp = None
+
+    session = MagicMock()
+    session.config.quality = "LOSSLESS"
+
+    release = threading.Event()
+
+    def hung_session_track(_tid):
+        # Stand-in for a Tidal connection that accepts but never
+        # responds. The real transport timeout aborts the socket;
+        # here the test releases it after asserting the bound held.
+        release.wait(timeout=10.0)
+        return MagicMock(duration=120)
+
+    session.track.side_effect = hung_session_track
+
+    holder = MagicMock()
+    holder.get_stream.side_effect = lambda: (
+        release.wait(timeout=10.0) or MagicMock()
+    )
+
+    player._session_getter = lambda: session
+
+    try:
+        with patch("app.audio.player._RESOLVE_TIMEOUT_S", 0.3), patch(
+            "app.audio.player.tidalapi.Track", return_value=holder
+        ):
+            t0 = time.monotonic()
+            with pytest.raises(RuntimeError, match="timed out"):
+                player._resolve_source("12345", quality=None)
+            elapsed = time.monotonic() - t0
+
+        # Bounded: nowhere near the 10 s the mock would otherwise
+        # block for. Generous ceiling to stay non-flaky on CI.
+        assert elapsed < 3.0, f"resolve hung for {elapsed:.1f}s"
+    finally:
+        release.set()

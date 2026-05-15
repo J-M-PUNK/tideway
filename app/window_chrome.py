@@ -842,6 +842,86 @@ def install_macos_dock_reopen(show_callback) -> None:
     _dock_reopen_observer = observer
 
 
+# Delegate kept alive for the lifetime of the process. NSApplication
+# holds a weak reference to its delegate; a local that goes out of
+# scope would stop receiving applicationShouldTerminate:.
+_macos_quit_delegate = None
+
+
+def install_macos_quit_handler(quit_callback) -> None:
+    """Make a genuine app-quit actually quit on macOS.
+
+    pywebview 6.2's Cocoa app delegate routes
+    applicationShouldTerminate: through every window's `closing`
+    event. Our macOS closing handler (desktop.py) hides the window
+    and cancels the close so the red X follows the platform
+    convention. The side effect: every OS-level quit path —
+    right-clicking the Dock icon and choosing Quit, the Apple-menu
+    Quit, and Cmd+Q — also goes through that handler, so the app
+    only hides and never terminates. The desktop.py comment claiming
+    Cmd+Q bypasses the closing event is wrong for this pywebview
+    version: `AppDelegate.applicationShouldTerminate_` calls
+    `should_close` for each window, which fires `closing`.
+
+    The decision of whether to terminate is the app delegate's
+    applicationShouldTerminate: — there is no NSNotification for it
+    the way there is for dock-reopen, so the delegate method is the
+    only correct place to fix this. We subclass pywebview's own
+    AppDelegate and override just that one selector to run the real
+    quit, inheriting everything else (e.g.
+    applicationSupportsSecureRestorableState:) untouched. Pinning
+    ourselves into `_shared_app_delegate` means pywebview's
+    per-window `app.setDelegate_(_shared_app_delegate)` keeps our
+    delegate when a second window (mini-player, in-app login) is
+    created instead of reverting to the stock one.
+
+    `quit_callback` should drive the same teardown the in-app Quit
+    menu uses (destroy the windows); pywebview's own
+    last-window-closed path then stops the run loop and the existing
+    graceful-shutdown code runs. Idempotent.
+    """
+    global _macos_quit_delegate
+    if sys.platform != "darwin":
+        return
+    if _macos_quit_delegate is not None:
+        return
+
+    try:
+        import AppKit  # type: ignore
+        from webview.platforms.cocoa import BrowserView  # type: ignore
+    except Exception as exc:
+        log.warning(
+            "window_chrome: macOS quit handler requires PyObjC + "
+            "pywebview cocoa backend: %s",
+            exc,
+        )
+        return
+
+    terminate_cancel = getattr(AppKit, "NSTerminateCancel", 0)
+
+    class _QuitAppDelegate(BrowserView.AppDelegate):  # type: ignore[misc]
+        def applicationShouldTerminate_(self, _sender):  # noqa: N802
+            try:
+                quit_callback()
+            except Exception:
+                log.exception("window_chrome: quit callback raised")
+            # Destroying the windows ends the run loop through
+            # pywebview's normal teardown (same as the in-app Quit),
+            # so cancel AppKit's own immediate termination and let
+            # that path run — it's the one wired to the existing
+            # graceful shutdown.
+            return terminate_cancel
+
+    delegate = _QuitAppDelegate.alloc().init()
+    app = AppKit.NSApplication.sharedApplication()
+    app.setDelegate_(delegate)
+    try:
+        BrowserView._shared_app_delegate = delegate
+    except Exception:
+        pass
+    _macos_quit_delegate = delegate
+
+
 # ---------------------------------------------------------------------------
 # Windows
 # ---------------------------------------------------------------------------

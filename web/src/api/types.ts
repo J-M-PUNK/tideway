@@ -48,6 +48,13 @@ export interface Album {
   cover: string | null;
   artists: ArtistRef[];
   explicit: boolean;
+  /** Tidal's streamability verdict (streamReady / allowStreaming).
+   *  False = listed but not playable here. Absent on payloads built
+   *  before this field existed; treat absent as available. */
+  available?: boolean;
+  /** Tidal's release classification: "album" | "ep" | "single" |
+   *  "compilation". Null when Tidal omits it. */
+  album_type?: string | null;
   share_url?: string | null;
   release_date?: string | null;
   copyright?: string | null;
@@ -166,14 +173,18 @@ export interface AlbumDetail extends Album {
 
 export interface ArtistDetail extends Artist {
   top_tracks: Track[];
-  /** Spotify-style mixed-format "Popular" row — top albums, EPs, and
-   *  singles ranked by popularity with a recency boost. Computed
-   *  server-side from the deduped discography. Capped at 12 so the
-   *  responsive single-row reflow always has more material than any
-   *  breakpoint will show. */
-  popular_releases: Album[];
+  /** Mixed-format "Latest releases" row — the artist's albums, EPs,
+   *  and singles newest-first (compilations and appears-on excluded).
+   *  Computed server-side from the deduped discography. Capped at 12
+   *  so the responsive single-row reflow always has more material
+   *  than any breakpoint will show. */
+  latest_releases: Album[];
   albums: Album[];
   ep_singles: Album[];
+  /** The artist's own compilation releases (Greatest Hits, Best Of,
+   *  anniversary collections) — split out of `albums` server-side by
+   *  Tidal's album type so the Albums shelf is studio albums only. */
+  compilations: Album[];
   appears_on: Album[];
   bio: string | null;
   similar: Artist[];
@@ -501,7 +512,21 @@ export interface AotyAlbum {
   rank: number | null;
   must_hear: boolean;
   aoty_url: string | null;
+  /** AOTY's genre tags. Populated for the Top-of-year list rows;
+   *  the this-week New-releases cards don't carry genre, so those
+   *  come back empty. `genre_slugs` is parallel to `genres` (same
+   *  order/length) — the "{id}-{slug}" segment for fetching that
+   *  genre's chart. */
+  genres: string[];
+  genre_slugs: string[];
   tidal_album: Album | null;
+}
+
+/** One entry from AOTY's genre index — `slug` is AOTY's
+ *  "{id}-{kebab-name}" path segment, `name` the display label. */
+export interface AotyGenre {
+  slug: string;
+  name: string;
 }
 
 export interface LastFmLovedTrack {

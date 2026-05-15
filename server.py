@@ -1200,6 +1200,23 @@ def track_to_dict(t) -> dict:
     }
 
 
+def _album_is_streamable(a) -> bool:
+    """Whether Tidal will actually let this album play.
+
+    Tidal's catalog returns records it then refuses to stream
+    (region-locked, delisted, not-yet-released). `streamReady` /
+    `allowStreaming` are Tidal's own flags for that. Treat an album
+    as dead only on an explicit False — when the flag is missing
+    (some page modules omit it) assume playable so a sparse payload
+    doesn't blank a whole shelf.
+    """
+    if _first(lambda: a.available) is False:
+        return False
+    if _first(lambda: a.allow_streaming) is False:
+        return False
+    return True
+
+
 def album_to_dict(a) -> dict:
     release_date = _first(lambda: a.release_date)
     media_tags = _first(lambda: a.media_metadata_tags) or []
@@ -1207,12 +1224,25 @@ def album_to_dict(a) -> dict:
         "kind": "album",
         "id": str(a.id),
         "name": a.name,
+        # Tidal's release classification, lower-cased; None when
+        # omitted. In practice Tidal only ever sends ALBUM / EP /
+        # SINGLE (never a compilation flag — that split comes from
+        # the curated artist-page module instead), but it's accurate
+        # metadata so it's surfaced for any UI that wants it.
+        "album_type": (
+            str(_first(lambda: a.type)).lower()
+            if _first(lambda: a.type)
+            else None
+        ),
         "num_tracks": _first(lambda: a.num_tracks) or 0,
         "year": _first(lambda: a.year),
         "duration": _first(lambda: a.duration) or 0,
         "cover": _image_url(a, 640),
         "artists": _artists(a),
         "explicit": bool(_first(lambda: a.explicit)),
+        # Tidal's own streamability verdict (streamReady /
+        # allowStreaming). False = listed but not playable here.
+        "available": _album_is_streamable(a),
         "share_url": _first(lambda: a.share_url),
         # Release date as an ISO date string (YYYY-MM-DD); the Tidal
         # object exposes it as a datetime.date. Frontend formats it.
@@ -3933,13 +3963,21 @@ def lastfm_chart_top_tags(limit: int = 50) -> list[dict]:
 
 
 @app.get("/api/aoty/top-of-year")
-def aoty_top_of_year(year: int | None = None, limit: int = 50) -> list[dict]:
-    """AOTY's highest-user-rated albums for the given year, decorated
-    with Tidal album dicts under `tidal_album` (or None when Tidal
-    doesn't have a match)."""
+def aoty_top_of_year(
+    year: int | None = None, limit: int = 50, genre: str | None = None
+) -> list[dict]:
+    """AOTY's highest-rated albums for the given year, decorated with
+    Tidal album dicts under `tidal_album` (or None when Tidal has no
+    match). With `genre` (an AOTY "{id}-{slug}" segment) it returns
+    that genre's real year chart instead of the global one."""
     _require_auth()
     y = year if year is not None else datetime.now().year
-    listing = aoty_module.top_albums_of_year(y, limit=limit)
+    if genre:
+        listing = aoty_module.top_albums_of_year_by_genre(
+            genre, y, limit=limit
+        )
+    else:
+        listing = aoty_module.top_albums_of_year(y, limit=limit)
     return aoty_resolver.resolve_listing(listing)
 
 
@@ -3950,6 +3988,25 @@ def aoty_recent_releases(limit: int = 30) -> list[dict]:
     doesn't have a match)."""
     _require_auth()
     listing = aoty_module.recent_releases(limit=limit)
+    return aoty_resolver.resolve_listing(listing)
+
+
+@app.get("/api/aoty/genres")
+def aoty_genres() -> list[dict]:
+    """AOTY's genre list as `[{slug, name}, ...]` for the genre
+    picker on the New-releases drill-down. No Tidal resolution —
+    this is just the dropdown's options."""
+    _require_auth()
+    return aoty_module.genre_index()
+
+
+@app.get("/api/aoty/genre-releases")
+def aoty_genre_releases(genre: str, limit: int = 60) -> list[dict]:
+    """Recent albums for one AOTY genre (the "Recent {Genre} Albums"
+    section of /genre/{slug}/), decorated with Tidal album dicts
+    under `tidal_album` (or None when Tidal has no match)."""
+    _require_auth()
+    listing = aoty_module.recent_releases_by_genre(genre, limit=limit)
     return aoty_resolver.resolve_listing(listing)
 
 
@@ -7764,23 +7821,35 @@ def artist_detail(artist_id: int) -> dict:
     videos = f_videos.result()
     credits = f_credits.result()
 
-    # Merge "Appears on" rows scraped from the curated page into
-    # raw_appears. tidalapi's `get_other()` uses filter=COMPILATIONS
-    # which only returns multi-artist compilations and misses the
-    # common "appears on" case of a featured or guest performance
-    # on another artist's album. Tidal's own artist page carries a
-    # dedicated "Appears on" module with those entries.
+    # Pull two modules off Tidal's curated artist page:
+    #
+    #  - "Appears on" / "Featured": tidalapi's `get_other()`
+    #    (filter=COMPILATIONS) misses the common guest-performance
+    #    case, and the page module carries those entries.
+    #  - "Compilations": Tidal does NOT expose a compilation flag on
+    #    the album object — `album.type` is ALWAYS ALBUM/EP/SINGLE,
+    #    even for greatest-hits sets — so `get_albums()` returns the
+    #    artist's retrospectives mixed in with studio albums. The
+    #    curated page is the only place Tidal itself separates them,
+    #    via a dedicated "Compilations" module. Same mechanism as the
+    #    "Appears on" pull right next to it, not a title heuristic on
+    #    the albums list.
+    raw_compilations: list = []
     if artist_page is not None:
         try:
             from tidalapi.album import Album as _TidalAlbum
 
             for cat in getattr(artist_page, "categories", []) or []:
                 cat_title = (getattr(cat, "title", "") or "").strip().lower()
-                if "appear" not in cat_title and "featured" not in cat_title:
+                is_appears = "appear" in cat_title or "featured" in cat_title
+                is_comp = "compilation" in cat_title
+                if not is_appears and not is_comp:
                     continue
                 for item in getattr(cat, "items", []) or []:
                     if isinstance(item, _TidalAlbum):
-                        raw_appears.append(item)
+                        (raw_compilations if is_comp else raw_appears).append(
+                            item
+                        )
         except Exception:
             pass
 
@@ -7799,8 +7868,10 @@ def artist_detail(artist_id: int) -> dict:
     # so different editions (deluxe / anniversary), different
     # artists with same title, and explicit-vs-clean variants all stay
     # separate — but duplicate uploads of the same release collapse.
-    # Precedence: albums win over EPs, EPs win over appears-on. The
-    # first list a key appears in is where it stays.
+    # Precedence: compilations win over albums, albums over EPs, EPs
+    # over appears-on. The first list a key appears in is where it
+    # stays — so a retrospective that also shows up in get_albums()
+    # is claimed by the Compilations shelf and dropped from Albums.
 
     def _album_key(a) -> Optional[tuple]:
         name = (getattr(a, "name", "") or "").strip().lower()
@@ -7833,6 +7904,11 @@ def artist_detail(artist_id: int) -> dict:
             out.append(a)
         return out
 
+    # Compilations dedupe FIRST so the shared seen-sets give them
+    # precedence: a retrospective that also comes back from
+    # get_albums() is claimed by the Compilations shelf and skipped
+    # when albums dedupe runs, instead of showing in both.
+    compilations_objs = _dedupe(raw_compilations)
     albums_objs = _dedupe(raw_albums)
     ep_singles_objs = _dedupe(raw_eps)
     appears_on_objs = _dedupe(raw_appears)
@@ -7841,46 +7917,42 @@ def artist_detail(artist_id: int) -> dict:
     # user's content-filter setting. Keeps the discography looking like
     # Tidal's own client where duplicates rarely sit side by side.
     pref = (settings.explicit_content_preference or "explicit").lower()
+    compilations_objs = filter_explicit_dupes(compilations_objs, pref, kind="album")
     albums_objs = filter_explicit_dupes(albums_objs, pref, kind="album")
     ep_singles_objs = filter_explicit_dupes(ep_singles_objs, pref, kind="album")
     appears_on_objs = filter_explicit_dupes(appears_on_objs, pref, kind="album")
 
-    # Spotify-style "Popular" row: mixed-format (albums + EPs + singles)
-    # ranked by popularity with a recency boost so freshly-dropped
-    # records get visibility before they accumulate plays. Skip
-    # appears_on since those are someone else's records. Cap at 12 —
-    # more than any frontend breakpoint will render in a single row.
-    now_utc = datetime.now(timezone.utc)
-
-    def _popular_score(a) -> float:
-        pop = float(getattr(a, "popularity", 0) or 0)
+    # "Latest releases" row: mixed-format (albums + EPs + singles),
+    # newest first. Skip appears_on (someone else's records) and
+    # compilations (retrospectives, not new output). Cap at 12 —
+    # more than any frontend breakpoint shows in a single row.
+    def _release_sort_key(a) -> tuple[int, float]:
         rd = getattr(a, "release_date", None) or getattr(
             a, "available_release_date", None
         )
-        months = 0.0
-        if rd is not None:
-            try:
-                if rd.tzinfo is None:
-                    rd = rd.replace(tzinfo=timezone.utc)
-                months = max(0.0, (now_utc - rd).days / 30.44)
-            except Exception:
-                months = 0.0
-        # Tidal's popularity field is sometimes 0 / missing on older
-        # catalogue items — don't sink them to the bottom; let recency
-        # alone score them with a tiny base.
-        base = pop if pop > 0 else 1.0
-        return base / (1.0 + months / 12.0)
+        if rd is None:
+            # Undated records sort last rather than jumping the row.
+            return (0, 0.0)
+        try:
+            if getattr(rd, "tzinfo", None) is None:
+                rd = rd.replace(tzinfo=timezone.utc)
+            return (1, rd.timestamp())
+        except Exception:
+            return (0, 0.0)
 
-    popular_objs = sorted(
-        [*albums_objs, *ep_singles_objs], key=_popular_score, reverse=True
+    latest_objs = sorted(
+        [*albums_objs, *ep_singles_objs],
+        key=_release_sort_key,
+        reverse=True,
     )[:12]
 
     result = {
         **artist_to_dict(artist),
         "top_tracks": top_tracks,
-        "popular_releases": [album_to_dict(a) for a in popular_objs],
+        "latest_releases": [album_to_dict(a) for a in latest_objs],
         "albums": [album_to_dict(a) for a in albums_objs],
         "ep_singles": [album_to_dict(a) for a in ep_singles_objs],
+        "compilations": [album_to_dict(a) for a in compilations_objs],
         "appears_on": [album_to_dict(a) for a in appears_on_objs],
         "bio": bio,
         "similar": similar,
@@ -9772,6 +9844,12 @@ def _serialize_page_item(item) -> Optional[dict]:
     if isinstance(item, tidalapi.Track):
         return track_to_dict(item)
     if isinstance(item, tidalapi.Album):
+        # Drop albums Tidal lists but won't stream (region lock,
+        # delisted, unreleased). They surface in editorial rows like
+        # "New releases" / "Top releases" and only reveal themselves
+        # as dead when the user clicks play.
+        if not _album_is_streamable(item):
+            return None
         return album_to_dict(item)
     if isinstance(item, tidalapi.Artist):
         return artist_to_dict(item)
@@ -9984,6 +10062,15 @@ def _raw_entry_to_item(entry: Any) -> Optional[dict]:
                 "share_url": None,
             }
         if item_type == "ALBUM":
+            # Same streamability gate as the parsed path
+            # (_album_is_streamable / _serialize_page_item): drop
+            # albums Tidal lists but won't play, only on an explicit
+            # False so a sparse V2 payload doesn't blank the row.
+            if (
+                data.get("streamReady") is False
+                or data.get("allowStreaming") is False
+            ):
+                return None
             return {
                 "kind": "album",
                 "id": str(data.get("id") or ""),
@@ -9994,6 +10081,10 @@ def _raw_entry_to_item(entry: Any) -> Optional[dict]:
                 "cover": _cover(data.get("cover")),
                 "artists": _artist_names(data.get("artists")),
                 "explicit": bool(data.get("explicit")),
+                # Reached only when streamable (non-streamable
+                # returned None above); keep the key for shape parity
+                # with album_to_dict.
+                "available": True,
                 "share_url": None,
                 "release_date": data.get("releaseDate"),
                 "copyright": data.get("copyright"),

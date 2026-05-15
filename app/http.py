@@ -15,6 +15,20 @@ import sys
 # user-agent claims to be the Tidal Android app.
 _IMPERSONATE_PROFILE = "chrome131_android"
 
+# Default per-request timeout for every Tidal HTTP call. tidalapi's
+# basic_request never passes a timeout, so without a transport-level
+# default a stalled connection blocks the caller forever. The audio
+# engine resolves a track under the player's pipeline lock, so one
+# hung Tidal request there freezes every playback control until the
+# app is restarted. A short connect timeout fails fast when the host
+# is unreachable; the read value is an inactivity budget (time
+# between bytes), not a total, so a slow-but-progressing hi-res
+# segment download is never cut short — only a truly dead connection
+# trips it.
+_CONNECT_TIMEOUT_S = 6.0
+_READ_TIMEOUT_S = 30.0
+DEFAULT_TIMEOUT = (_CONNECT_TIMEOUT_S, _READ_TIMEOUT_S)
+
 
 def build_impersonated_session():
     """Return a curl-cffi Session with the shared impersonation
@@ -55,7 +69,9 @@ def build_impersonated_session():
             setattr(_CurlSession, _method_name, _make_compat(_orig))
         _CurlSession._tideway_post_compat = True
     try:
-        return _curl_req.Session(impersonate=_IMPERSONATE_PROFILE)
+        return _curl_req.Session(
+            impersonate=_IMPERSONATE_PROFILE, timeout=DEFAULT_TIMEOUT
+        )
     except Exception as exc:
         print(
             f"[http] curl-cffi session construction failed: {exc!r}",
@@ -70,6 +86,17 @@ def _build_requests_session():
     from requests.adapters import HTTPAdapter
     from urllib3.util.retry import Retry
 
+    # requests has no session-level default timeout, so callers that
+    # don't pass one (tidalapi's basic_request) would block forever on
+    # a stalled socket. Inject the default at the adapter layer — the
+    # documented way to give a requests.Session a baseline timeout —
+    # while still letting an explicit per-request timeout win.
+    class _TimeoutHTTPAdapter(HTTPAdapter):
+        def send(self, request, **kwargs):
+            if kwargs.get("timeout") is None:
+                kwargs["timeout"] = DEFAULT_TIMEOUT
+            return super().send(request, **kwargs)
+
     s = Session()
     retry = Retry(
         total=2,
@@ -78,7 +105,9 @@ def _build_requests_session():
         allowed_methods=frozenset(["GET", "HEAD"]),
         raise_on_status=False,
     )
-    adapter = HTTPAdapter(pool_connections=32, pool_maxsize=64, max_retries=retry)
+    adapter = _TimeoutHTTPAdapter(
+        pool_connections=32, pool_maxsize=64, max_retries=retry
+    )
     s.mount("http://", adapter)
     s.mount("https://", adapter)
     return s

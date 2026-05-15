@@ -12,6 +12,7 @@ import type {
 } from "@/api/types";
 import { EmptyState } from "@/components/EmptyState";
 import { Skeleton } from "@/components/Skeletons";
+import { VirtualList } from "@/components/VirtualList";
 import {
   AlbumCard,
   ArtistCard,
@@ -120,11 +121,12 @@ function TracksList({ period }: { period: LastFmPeriod }) {
     );
   }
   return (
-    <div className="flex flex-col gap-1">
-      {data.map((t, i) => (
-        <TrackRow key={`${t.name}-${t.artist}-${i}`} rank={i + 1} track={t} />
-      ))}
-    </div>
+    <VirtualList
+      count={data.length}
+      estimateSize={64}
+      rowKey={(i) => `${data[i].name}-${data[i].artist}-${i}`}
+      renderRow={(i) => <TrackRow rank={i + 1} track={data[i]} />}
+    />
   );
 }
 
@@ -170,11 +172,12 @@ function LovedList() {
     );
   }
   return (
-    <div className="flex flex-col gap-1">
-      {data.map((t, i) => (
-        <LovedRow key={`${t.name}-${t.artist}-${i}`} row={t} />
-      ))}
-    </div>
+    <VirtualList
+      count={data.length}
+      estimateSize={64}
+      rowKey={(i) => `${data[i].name}-${data[i].artist}-${i}`}
+      renderRow={(i) => <LovedRow row={data[i]} />}
+    />
   );
 }
 

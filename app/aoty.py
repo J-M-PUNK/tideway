@@ -39,7 +39,7 @@ import logging
 import re
 import threading
 import time
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass, asdict, field
 from typing import Optional
 from urllib.parse import urljoin
 
@@ -71,6 +71,15 @@ _cache: dict[str, tuple[float, list[dict]]] = {}
 # active because new albums get added daily.
 _TOP_OF_YEAR_TTL_SEC = 3600.0  # 1 hour
 _RECENT_RELEASES_TTL_SEC = 1800.0  # 30 min
+# The genre list on /genre.php changes maybe once a year; the
+# per-genre recent grid turns over like the global one.
+_GENRE_INDEX_TTL_SEC = 86400.0  # 24 hours
+_GENRE_RELEASES_TTL_SEC = 1800.0  # 30 min
+
+# AOTY genre slugs are "{numeric-id}-{kebab-name}" (e.g. "7-rock",
+# "22-r-and-b"). Pin the shape so a caller-supplied value can't be
+# bent into an arbitrary path on albumoftheyear.org.
+_GENRE_SLUG_RE = re.compile(r"^\d+-[a-z0-9-]+$")
 
 
 @dataclass
@@ -91,6 +100,15 @@ class AotyAlbum:
     rank: Optional[int] = None
     must_hear: bool = False
     aoty_url: Optional[str] = None
+    # AOTY's own genre tags for the album. Present on the
+    # `/ratings/*` list rows; the `/releases/this-week/` cards don't
+    # carry genre in their markup, so those stay empty. `genre_slugs`
+    # is parallel to `genres` (same order, same length) and holds the
+    # "{id}-{kebab}" path segment so the Top-of-year picker can fetch
+    # that genre's real year chart instead of filtering the global
+    # top-100 down to a handful.
+    genres: list[str] = field(default_factory=list)
+    genre_slugs: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -135,6 +153,47 @@ def top_albums_of_year(year: int, limit: int = 50) -> list[dict]:
     return payload
 
 
+def top_albums_of_year_by_genre(
+    genre_slug: str, year: int, limit: int = 60
+) -> list[dict]:
+    """Highest-rated albums of `year` for one genre.
+
+    AOTY scopes its year chart by genre at `/genre/{slug}/{year}/`,
+    same `albumListRow` shape and same ~25-per-page pagination as the
+    global chart (page 1 is the bare path, later pages take a
+    trailing `{page}/`). This is the real per-genre chart — not the
+    global top-100 filtered down, which left niche genres with a
+    handful of entries.
+    """
+    limit = max(1, min(int(limit), 100))
+    if not _GENRE_SLUG_RE.match(genre_slug or ""):
+        log.warning("aoty: rejecting malformed genre slug %r", genre_slug)
+        return []
+    cache_key = f"genre-top:{genre_slug}:{year}:{limit}"
+    cached = _cache_get(cache_key, _TOP_OF_YEAR_TTL_SEC)
+    if cached is not None:
+        return cached
+
+    out: list[AotyAlbum] = []
+    page = 1
+    while len(out) < limit and page <= 6:
+        suffix = "" if page == 1 else f"{page}/"
+        path = f"/genre/{genre_slug}/{year}/{suffix}"
+        html = _fetch(urljoin(_BASE_URL, path))
+        if html is None:
+            break
+        rows = _parse_album_list_rows(html)
+        if not rows:
+            break
+        out.extend(rows)
+        page += 1
+
+    out = out[:limit]
+    payload = [a.to_dict() for a in out]
+    _cache_set(cache_key, payload)
+    return payload
+
+
 def recent_releases(limit: int = 30) -> list[dict]:
     """Recently-released albums, AOTY's grid-card view at /releases/this-week/.
 
@@ -156,6 +215,86 @@ def recent_releases(limit: int = 30) -> list[dict]:
         _cache_set(cache_key, [])
         return []
     rows = _parse_album_block_cards(html)[:limit]
+    payload = [a.to_dict() for a in rows]
+    _cache_set(cache_key, payload)
+    return payload
+
+
+def genre_index() -> list[dict]:
+    """The genre list from /genre.php as `[{slug, name}, ...]`.
+
+    Each genre is linked as `/genre/{id}-{slug}/`. The page repeats
+    every link with a "View More" label; we keep the first
+    human-named occurrence per slug and drop the duplicates. Used to
+    populate the genre picker on the New-releases drill-down.
+    """
+    cached = _cache_get("genre-index", _GENRE_INDEX_TTL_SEC)
+    if cached is not None:
+        return cached
+
+    html = _fetch(urljoin(_BASE_URL, "/genre.php"))
+    if html is None:
+        _cache_set("genre-index", [])
+        return []
+    soup = BeautifulSoup(html, "html.parser")
+    out: list[dict] = []
+    seen: set[str] = set()
+    for a in soup.select('a[href^="/genre/"]'):
+        href = a.get("href") or ""
+        m = re.match(r"^/genre/(\d+-[a-z0-9-]+)/?$", href if isinstance(href, str) else "")
+        if not m:
+            continue
+        slug = m.group(1)
+        name = a.get_text(strip=True)
+        # The page emits a "View More" link to the same genre after
+        # the named one — skip it and any later repeats.
+        if not name or name.lower() == "view more" or slug in seen:
+            continue
+        seen.add(slug)
+        out.append({"slug": slug, "name": name})
+    out.sort(key=lambda g: g["name"].lower())
+    _cache_set("genre-index", out)
+    return out
+
+
+def recent_releases_by_genre(genre_slug: str, limit: int = 60) -> list[dict]:
+    """Recent albums for one genre, from the "Recent {Genre} Albums"
+    section of `/genre/{slug}/`.
+
+    The genre page stacks several `<div class="section">` blocks
+    (Critics' Highest Rated, Users' Highest Rated, Recent, …), each
+    introduced by an `<h2 class="subHeadline">`. We scope parsing to
+    the section whose header reads "Recent … Albums" so this returns
+    new releases rather than the genre's all-time canon. The cards
+    are the same `albumBlock` shape as `/releases/this-week/`, so the
+    existing card parser handles them once the section is isolated.
+    """
+    limit = max(1, min(int(limit), 100))
+    if not _GENRE_SLUG_RE.match(genre_slug or ""):
+        log.warning("aoty: rejecting malformed genre slug %r", genre_slug)
+        return []
+    cache_key = f"genre-recent:{genre_slug}:{limit}"
+    cached = _cache_get(cache_key, _GENRE_RELEASES_TTL_SEC)
+    if cached is not None:
+        return cached
+
+    html = _fetch(urljoin(_BASE_URL, f"/genre/{genre_slug}/"))
+    if html is None:
+        _cache_set(cache_key, [])
+        return []
+    soup = BeautifulSoup(html, "html.parser")
+    section = None
+    for h2 in soup.select("h2.subHeadline"):
+        if re.search(r"recent\b.*\balbums", h2.get_text(" ", strip=True), re.I):
+            section = h2.find_parent("div", class_="section")
+            break
+    if section is None:
+        # Layout changed or the genre has no recent section — empty
+        # rather than falling back to the whole page (which would mix
+        # in the all-time canon and mislabel it as "new").
+        _cache_set(cache_key, [])
+        return []
+    rows = _parse_album_block_cards(str(section))[:limit]
     payload = [a.to_dict() for a in rows]
     _cache_set(cache_key, payload)
     return payload
@@ -266,6 +405,25 @@ def _parse_album_list_rows(html: str) -> list[AotyAlbum]:
 
         must_hear = row.select_one("div.albumListCover.mustHear") is not None
 
+        # AOTY tags each row with one or more genre links
+        # (`div.albumListGenre > a[href^="/genre/"]`). Capture the
+        # display name and the slug from the href in lockstep so the
+        # picker can both label and fetch a genre. De-duped by name,
+        # original order preserved.
+        genres: list[str] = []
+        genre_slugs: list[str] = []
+        for g in row.select("div.albumListGenre a"):
+            name = g.get_text(strip=True)
+            if not name or name in genres:
+                continue
+            href = g.get("href") or ""
+            m = re.match(
+                r"^/genre/(\d+-[a-z0-9-]+)/?$",
+                href if isinstance(href, str) else "",
+            )
+            genres.append(name)
+            genre_slugs.append(m.group(1) if m else "")
+
         aoty_url: Optional[str] = None
         href = title_anchor.get("href")
         if isinstance(href, str) and href:
@@ -282,6 +440,8 @@ def _parse_album_list_rows(html: str) -> list[AotyAlbum]:
                 rank=rank,
                 must_hear=must_hear,
                 aoty_url=aoty_url,
+                genres=genres,
+                genre_slugs=genre_slugs,
             )
         )
     return out

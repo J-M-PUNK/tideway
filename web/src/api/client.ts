@@ -23,6 +23,7 @@ import type {
   LastFmUserInfo,
   LastFmWeeklyScrobble,
   AotyAlbum,
+  AotyGenre,
   LocalFile,
   LocalVideo,
   Lyrics,
@@ -331,10 +332,11 @@ export const api = {
     /** Top-rated albums of the given year per AlbumOfTheYear, with
      *  each entry decorated with a Tidal album dict when one exists.
      *  Year defaults server-side to the current year. */
-    topOfYear: (opts?: { year?: number; limit?: number }) => {
+    topOfYear: (opts?: { year?: number; limit?: number; genre?: string }) => {
       const params = new URLSearchParams();
       if (opts?.year !== undefined) params.set("year", String(opts.year));
       if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
+      if (opts?.genre) params.set("genre", opts.genre);
       const qs = params.toString();
       return req<AotyAlbum[]>(`/api/aoty/top-of-year${qs ? `?${qs}` : ""}`);
     },
@@ -342,6 +344,16 @@ export const api = {
      *  entry decorated with a Tidal album dict when one exists. */
     recentReleases: (limit = 30) =>
       req<AotyAlbum[]>(`/api/aoty/recent-releases?limit=${limit}`),
+    /** AOTY's genre list ({slug, name}) for the New-releases genre
+     *  picker. */
+    genres: () => req<AotyGenre[]>(`/api/aoty/genres`),
+    /** Recent albums for one AOTY genre (the "Recent {Genre}
+     *  Albums" section of /genre/{slug}/), each decorated with a
+     *  Tidal album dict when one exists. */
+    genreReleases: (slug: string, limit = 60) =>
+      req<AotyAlbum[]>(
+        `/api/aoty/genre-releases?genre=${encodeURIComponent(slug)}&limit=${limit}`,
+      ),
   },
   spotify: {
     /** Spotify's global play count for a recording identified by
