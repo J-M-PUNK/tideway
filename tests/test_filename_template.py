@@ -43,11 +43,18 @@ def _item(**overrides) -> DownloadItem:
     return DownloadItem(**base)
 
 
-def _settings(template, *, output_dir, create_album_folders=True):
+def _settings(
+    template,
+    *,
+    output_dir,
+    create_album_folders=True,
+    create_playlist_folders=True,
+):
     return SimpleNamespace(
         filename_template=template,
         output_dir=str(output_dir),
         create_album_folders=create_album_folders,
+        create_playlist_folders=create_playlist_folders,
     )
 
 
@@ -84,6 +91,30 @@ def test_render_supports_new_tokens():
     assert rendered == (
         "Travis Scott - 2018/Astroworld [E]/02 Sicko Mode [E]"
     )
+
+
+def test_render_playlist_tokens_when_from_playlist():
+    """{playlist_num} is zero-padded playlist order; {playlist} is the
+    playlist name. This is the #129 fix: playlist downloads number by
+    playlist position, not album track number."""
+    item = _item(
+        title="Sicko Mode",
+        track_num=2,  # album position — stays {track_num}
+        playlist_index=5,
+        playlist_name="Chill Mix",
+    )
+    assert _render_template("{playlist_num} - {title}", item) == "05 - Sicko Mode"
+    assert _render_template("{playlist}/{playlist_num}", item) == "Chill Mix/05"
+    # {track_num} keeps meaning album position even on a playlist item.
+    assert _render_template("{track_num}", item) == "02"
+
+
+def test_render_playlist_tokens_empty_off_playlist():
+    """Album / single downloads leave the playlist tokens empty so a
+    template carrying {playlist_num} still renders cleanly."""
+    item = _item(title="Hello")  # playlist_index defaults to 0
+    assert _render_template("{playlist_num}{title}", item) == "Hello"
+    assert _render_template("{playlist}", item) == "_"  # empty → sanitized
 
 
 def test_render_track_title_alias_matches_title():
@@ -188,6 +219,53 @@ def test_build_path_single_segment_with_album_folder_toggle(tmp_path):
     out = _build_path(item, settings, ".flac")
 
     assert out == tmp_path / "Astroworld" / "Travis Scott - Sicko Mode.flac"
+
+
+def test_build_path_playlist_item_nests_under_playlist_folder(tmp_path):
+    """#129: a playlist download lands under a folder named after the
+    playlist (not the album), and {playlist_num} orders the files."""
+    item = _item(
+        album="Astroworld",
+        artist="Travis Scott",
+        title="Sicko Mode",
+        playlist_index=5,
+        playlist_name="Road Trip",
+    )
+    settings = _settings(
+        "{playlist_num} - {artist} - {title}",
+        output_dir=tmp_path,
+        create_album_folders=True,
+        create_playlist_folders=True,
+    )
+
+    out = _build_path(item, settings, ".flac")
+
+    assert out == (
+        tmp_path / "Road Trip" / "05 - Travis Scott - Sicko Mode.flac"
+    )
+
+
+def test_build_path_playlist_folder_toggle_off_falls_back_to_album(tmp_path):
+    """With per-playlist folders disabled, a playlist item behaves
+    like any other download and uses the album-folder shortcut."""
+    item = _item(
+        album="Astroworld",
+        title="Sicko Mode",
+        playlist_index=5,
+        playlist_name="Road Trip",
+    )
+    settings = _settings(
+        "{artist} - {title}",
+        output_dir=tmp_path,
+        create_album_folders=True,
+        create_playlist_folders=False,
+    )
+
+    out = _build_path(item, settings, ".flac")
+
+    assert out == (
+        tmp_path / "Astroworld" / "Track Artist - Sicko Mode.flac"
+    )
 
 
 def test_build_path_template_with_separator_disables_album_folder_shortcut(tmp_path):

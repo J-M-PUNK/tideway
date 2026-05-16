@@ -42,6 +42,11 @@ describe("renderTemplate", () => {
       renderTemplate("{artist}", { ...SAMPLE_TRACK, artist: "AC/DC" }),
     ).toBe("AC_DC");
   });
+  it("interpolates the playlist tokens (mirrors the Python renderer)", () => {
+    expect(
+      renderTemplate("{playlist}/{playlist_num} - {title}", SAMPLE_TRACK),
+    ).toBe("Chill Mix/05 - Sicko Mode");
+  });
 });
 
 describe("templateHasSeparator", () => {

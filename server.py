@@ -4796,6 +4796,13 @@ def _native_player() -> PCMPlayer:
                 _pcm_player_singleton.set_exclusive_mode(True)
             if getattr(settings, "force_volume", False):
                 _pcm_player_singleton.set_force_volume(True)
+            else:
+                # Restore the last software volume so a restart
+                # doesn't jump back to 100 %. Skipped under
+                # force_volume, which pins volume at 100 by design.
+                _pcm_player_singleton.set_volume(
+                    int(getattr(settings, "volume", 100))
+                )
             if getattr(settings, "crossfeed_amount", 0) > 0:
                 _pcm_player_singleton.set_crossfeed_amount(
                     settings.crossfeed_amount
@@ -5509,7 +5516,15 @@ def player_seek(req: _PlayerSeekRequest) -> dict:
 @app.post("/api/player/volume")
 def player_volume(req: _PlayerVolumeRequest) -> dict:
     _require_local_access()
-    return _snapshot_dict(_native_player().set_volume(req.volume))
+    snap = _native_player().set_volume(req.volume)
+    # Persist the *applied* volume (set_volume clamps, and pins to
+    # 100 under force_volume) so it survives a restart. Guarded so a
+    # slider drag doesn't rewrite settings.json on every tick.
+    applied = int(getattr(snap, "volume", req.volume))
+    if applied != int(getattr(settings, "volume", 100)):
+        settings.volume = applied
+        save_settings(settings)
+    return _snapshot_dict(snap)
 
 
 @app.post("/api/player/muted")
@@ -9677,6 +9692,12 @@ class SettingsPayload(BaseModel):
     replaygain_mode: Optional[str] = None
     replaygain_preamp_db: Optional[float] = None
     replaygain_prevent_clipping: Optional[bool] = None
+    volume: Optional[int] = None
+    create_playlist_folders: Optional[bool] = None
+    window_x: Optional[int] = None
+    window_y: Optional[int] = None
+    window_width: Optional[int] = None
+    window_height: Optional[int] = None
 
 
 @app.get("/api/settings")
@@ -9821,6 +9842,11 @@ def update_settings(payload: SettingsPayload) -> dict:
             )
         except Exception as exc:
             logger.warning("replaygain toggle failed: %s", exc)
+    if "volume" in patch:
+        try:
+            _native_player().set_volume(int(new_settings.volume))
+        except Exception as exc:
+            logger.warning("volume apply failed: %s", exc)
     return asdict(new_settings)
 
 

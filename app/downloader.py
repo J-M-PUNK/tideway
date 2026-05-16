@@ -254,6 +254,14 @@ class DownloadItem:
     disc_num: int = 0
     track_explicit: bool = False
     album_explicit_flag: bool = False
+    # Playlist context, set only when the item came from a playlist
+    # download. playlist_index is the 1-based position in the
+    # playlist (the {playlist_num} token); track_num stays the
+    # album track number so {track_num} keeps its meaning.
+    # playlist_name drives the {playlist} token and the optional
+    # per-playlist folder. 0 / "" means "not from a playlist".
+    playlist_index: int = 0
+    playlist_name: str = ""
 
 
 class Downloader:
@@ -360,16 +368,28 @@ class Downloader:
             file=_sys.stderr,
             flush=True,
         )
+        # Triples: (track, album_obj, playlist_index). playlist_index
+        # is the 1-based position for playlist downloads, captured
+        # BEFORE the shuffle below so it survives the reorder; 0 for
+        # album / single-track.
         pairs: list[tuple]
+        playlist_name = (
+            getattr(obj, "name", "") or ""
+            if content_type == "playlist"
+            else ""
+        )
         try:
             if content_type == "track":
-                pairs = [(obj, getattr(obj, "album", None))]
+                pairs = [(obj, getattr(obj, "album", None), 0)]
             elif content_type == "album":
                 tracks = self._call_with_auth_retry(obj.tracks)
-                pairs = [(t, obj) for t in tracks]
+                pairs = [(t, obj, 0) for t in tracks]
             elif content_type == "playlist":
                 tracks = self._call_with_auth_retry(obj.tracks)
-                pairs = [(t, getattr(t, "album", None)) for t in tracks]
+                pairs = [
+                    (t, getattr(t, "album", None), idx)
+                    for idx, t in enumerate(tracks, 1)
+                ]
             else:
                 print(
                     f"[downloader] _enqueue_object: unsupported kind {content_type!r}",
@@ -421,9 +441,16 @@ class Downloader:
             file=_sys.stderr,
             flush=True,
         )
-        for track, album_obj in pairs:
+        for track, album_obj, pl_idx in pairs:
             item = DownloadItem(item_id=str(uuid.uuid4()), url="")
-            _populate_item_from_track(item, track, album_obj, quality)
+            _populate_item_from_track(
+                item,
+                track,
+                album_obj,
+                quality,
+                playlist_index=pl_idx,
+                playlist_name=playlist_name,
+            )
             self._track_map_put(item.item_id, (track, album_obj))
             self.on_add(item)
             # Persist so a restart can resume. Per-track records use
@@ -542,12 +569,20 @@ class Downloader:
             self.on_update(placeholder)
             return
 
+        playlist_name = (
+            getattr(obj, "name", "") or ""
+            if content_type == "playlist"
+            else ""
+        )
         if content_type == "track":
-            pairs = [(obj, getattr(obj, "album", None))]
+            pairs = [(obj, getattr(obj, "album", None), 0)]
         elif content_type == "album":
-            pairs = [(t, obj) for t in obj.tracks()]
+            pairs = [(t, obj, 0) for t in obj.tracks()]
         elif content_type == "playlist":
-            pairs = [(t, getattr(t, "album", None)) for t in obj.tracks()]
+            pairs = [
+                (t, getattr(t, "album", None), idx)
+                for idx, t in enumerate(obj.tracks(), 1)
+            ]
         else:
             placeholder.status = DownloadStatus.FAILED
             placeholder.error = f"Unsupported type: {content_type}"
@@ -566,8 +601,15 @@ class Downloader:
             return
 
         if len(pairs) == 1:
-            track, album_obj = pairs[0]
-            _populate_item_from_track(placeholder, track, album_obj, quality)
+            track, album_obj, pl_idx = pairs[0]
+            _populate_item_from_track(
+                placeholder,
+                track,
+                album_obj,
+                quality,
+                playlist_index=pl_idx,
+                playlist_name=playlist_name,
+            )
             self._track_map_put(placeholder.item_id, (track, album_obj))
             self.on_update(placeholder)
             tid = getattr(track, "id", None)
@@ -588,9 +630,16 @@ class Downloader:
             # Drop the placeholder entirely — the per-track items replace it.
             self.on_remove(placeholder.item_id)
 
-            for track, album_obj in pairs:
+            for track, album_obj, pl_idx in pairs:
                 item = DownloadItem(item_id=str(uuid.uuid4()), url=url)
-                _populate_item_from_track(item, track, album_obj, quality)
+                _populate_item_from_track(
+                    item,
+                    track,
+                    album_obj,
+                    quality,
+                    playlist_index=pl_idx,
+                    playlist_name=playlist_name,
+                )
                 self._track_map_put(item.item_id, (track, album_obj))
                 self.on_add(item)
                 tid = getattr(track, "id", None)
@@ -1515,11 +1564,21 @@ def _looks_like_auth_error(exc: Exception) -> bool:
 
 
 def _populate_item_from_track(
-    item: DownloadItem, track, album_obj, quality: Optional[str]
+    item: DownloadItem,
+    track,
+    album_obj,
+    quality: Optional[str],
+    *,
+    playlist_index: int = 0,
+    playlist_name: str = "",
 ) -> None:
     """Single source of truth for setting a DownloadItem's metadata
     from tidalapi objects. Called from every enqueue path so adding a
-    new template token only needs one wiring change here, not three."""
+    new template token only needs one wiring change here, not three.
+
+    `playlist_index` / `playlist_name` are passed only by the
+    playlist enqueue paths; everything else leaves them at the
+    0 / "" defaults so {playlist_num} renders empty off a playlist."""
     resolved_album = album_obj or getattr(track, "album", None)
     item.title = track.name
     item.artist = _artist_names(track)
@@ -1531,6 +1590,8 @@ def _populate_item_from_track(
     item.disc_num = getattr(track, "volume_num", 0) or 0
     item.track_explicit = bool(getattr(track, "explicit", False))
     item.album_explicit_flag = bool(getattr(resolved_album, "explicit", False))
+    item.playlist_index = int(playlist_index or 0)
+    item.playlist_name = playlist_name or ""
 
 
 def _artist_names(track) -> str:
@@ -1683,6 +1744,15 @@ def _render_template(template: str, item: DownloadItem) -> str:
             year=year_str,
             explicit=_explicit_marker(item.track_explicit),
             album_explicit=_explicit_marker(item.album_explicit_flag),
+            # Playlist-order position; empty when the item isn't from
+            # a playlist so a template carrying {playlist_num} still
+            # renders cleanly for album / single downloads.
+            playlist_num=(
+                str(item.playlist_index).zfill(2)
+                if item.playlist_index > 0
+                else ""
+            ),
+            playlist=_sanitize_segment(item.playlist_name),
         )
     )
 
@@ -1745,12 +1815,20 @@ def _build_path(item: DownloadItem, settings, ext: str) -> Path:
     safe_segments = [_sanitize_segment(s) for s in segments]
 
     base = Path(settings.output_dir)
-    if (
-        settings.create_album_folders
-        and item.album
-        and not _template_has_separator(settings.filename_template)
-    ):
-        base = base / _sanitize_segment(item.album)
+    # Backward-compat folder shortcuts, only when the template
+    # doesn't already define structure with `/`. A playlist item
+    # nests under the playlist name (so playlist downloads stay
+    # together and {playlist_num} numbers them in order); everything
+    # else keeps the album-folder behaviour unchanged.
+    if not _template_has_separator(settings.filename_template):
+        if (
+            getattr(settings, "create_playlist_folders", True)
+            and item.playlist_index > 0
+            and item.playlist_name
+        ):
+            base = base / _sanitize_segment(item.playlist_name)
+        elif settings.create_album_folders and item.album:
+            base = base / _sanitize_segment(item.album)
 
     *dirs, last = safe_segments
     final = base

@@ -361,6 +361,12 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
                 hint="Only takes effect when the filename template doesn't already contain a folder separator (/). With a multi-segment template the template itself defines the folder structure."
               />
               <Toggle
+                checked={settings.create_playlist_folders}
+                onChange={(v) => patch({ create_playlist_folders: v })}
+                label="Create a subfolder per playlist"
+                hint="Playlist downloads go into a folder named after the playlist instead of per-album folders. Use {playlist_num} in the template to number tracks in playlist order. Ignored when the template already contains a folder separator (/)."
+              />
+              <Toggle
                 checked={settings.skip_existing}
                 onChange={(v) => patch({ skip_existing: v })}
                 label="Skip downloads that already exist on disk"
