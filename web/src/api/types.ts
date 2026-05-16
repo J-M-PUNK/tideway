@@ -354,6 +354,19 @@ export interface Settings {
   /** When true, the gain is clamped so peak * gain ≤ 1.0 to prevent
    *  clipping on quieter masters with negative gain offsets. */
   replaygain_prevent_clipping: boolean;
+  /** Last software volume (0..100), persisted so a restart doesn't
+   *  jump back to 100 %. */
+  volume: number;
+  /** Group a downloaded playlist's tracks under a folder named after
+   *  the playlist; {playlist_num} then numbers them in playlist
+   *  order. */
+  create_playlist_folders: boolean;
+  /** Desktop window geometry, persisted on close. -1 = not set yet
+   *  (first run uses the platform default). */
+  window_x: number;
+  window_y: number;
+  window_width: number;
+  window_height: number;
 }
 
 /** Snapshot of every stage in the audio DSP chain — drives the

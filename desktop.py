@@ -368,11 +368,33 @@ def main(argv: Optional[list[str]] = None) -> int:
     # to do reliably.
     use_frameless = sys.platform == "win32"
 
+    # Restore the window's last size + position. settings.window_* is
+    # -1 until the first close, so a fresh install still gets the
+    # 1280x800 default and pywebview's centred placement (x/y=None).
+    # Negative x/y are legitimate on multi-monitor setups, so only
+    # the -1 sentinel is treated as "unset".
+    import server as _server
+
+    _win_w, _win_h, _win_x, _win_y = 1280, 800, None, None
+    try:
+        _sw = int(getattr(_server.settings, "window_width", -1))
+        _sh = int(getattr(_server.settings, "window_height", -1))
+        _sx = int(getattr(_server.settings, "window_x", -1))
+        _sy = int(getattr(_server.settings, "window_y", -1))
+        if _sw >= 800 and _sh >= 600:
+            _win_w, _win_h = _sw, _sh
+        if _sx != -1 or _sy != -1:
+            _win_x, _win_y = _sx, _sy
+    except Exception:
+        pass
+
     window = webview.create_window(
         "Tideway",
         f"http://{HOST}:{PORT}/",
-        width=1280,
-        height=800,
+        width=_win_w,
+        height=_win_h,
+        x=_win_x,
+        y=_win_y,
         min_size=(800, 600),
         frameless=use_frameless,
         # easy_drag would make every mousedown try to drag the window,
@@ -381,6 +403,32 @@ def main(argv: Optional[list[str]] = None) -> int:
         # React titlebar instead.
         easy_drag=False,
     )
+
+    def _save_window_geometry() -> None:
+        """Capture the window's current size + position into settings
+        so the next launch restores it. Best-effort: reading geometry
+        off a window that's already torn down (or a backend that
+        doesn't report it) must not break the close path. Called
+        while the window is still alive — the macOS hide path and the
+        Win/Linux closing event, before destroy."""
+        try:
+            from app.settings import save_settings as _save_settings
+
+            w = int(window.width)
+            h = int(window.height)
+            x = int(window.x)
+            y = int(window.y)
+            # A minimized/zero-size read is junk; keep the last good
+            # geometry rather than persisting a collapsed window.
+            if w < 800 or h < 600:
+                return
+            _server.settings.window_width = w
+            _server.settings.window_height = h
+            _server.settings.window_x = x
+            _server.settings.window_y = y
+            _save_settings(_server.settings)
+        except Exception:
+            pass
 
     # Close behavior. On Windows / Linux the X destroys the window and
     # the process exits. On macOS we follow the platform convention:
@@ -410,7 +458,8 @@ def main(argv: Optional[list[str]] = None) -> int:
     def _quit_app() -> None:
         # Used by the in-app Quit menu's /api/_internal/quit
         # endpoint. Bypasses the closing-to-hide path on macOS by
-        # calling destroy directly.
+        # calling destroy directly, so capture geometry first.
+        _save_window_geometry()
         try:
             window.destroy()
         except Exception:
@@ -425,6 +474,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             this handler (they go through NSApp.terminate / window
             .destroy respectively), so the user can still quit; only
             the X click is intercepted."""
+            _save_window_geometry()
             try:
                 window.hide()
             except Exception:
@@ -444,6 +494,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             # otherwise keep the process alive. Mirrors the in-app
             # Quit's destroy() path, which the existing graceful
             # shutdown already hangs off of.
+            _save_window_geometry()
             for w in list(webview.windows):
                 try:
                     w.destroy()
@@ -465,6 +516,19 @@ def main(argv: Optional[list[str]] = None) -> int:
 
         try:
             window.events.shown += _install_macos_app_hooks
+        except Exception:
+            pass
+    else:
+        # Windows / Linux: the X destroys the window and the process
+        # exits, so geometry has to be captured here, in the closing
+        # event, while the window is still alive. Returning True lets
+        # the close proceed unchanged.
+        def _on_closing_win_linux() -> bool:
+            _save_window_geometry()
+            return True
+
+        try:
+            window.events.closing += _on_closing_win_linux
         except Exception:
             pass
 

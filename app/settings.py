@@ -42,6 +42,11 @@ class Settings:
     videos_dir: str = field(default_factory=_default_videos_dir)
     filename_template: str = "{artist} - {title}"
     create_album_folders: bool = True
+    # When downloading a playlist, group its tracks under a folder
+    # named after the playlist (parallel to create_album_folders for
+    # albums). The {playlist_num} template token then numbers them in
+    # playlist order rather than by their album track number.
+    create_playlist_folders: bool = True
     skip_existing: bool = True
     # How many downloads may run in parallel. Gated by the Downloader's
     # semaphore so changing this doesn't require a process restart.
@@ -183,6 +188,10 @@ class Settings:
     # bit-depth loss. Implemented by clamping set_volume() to 100 and
     # hiding the slider in the UI.
     force_volume: bool = False
+    # Last software volume (0..100), persisted so a restart doesn't
+    # blast the user at 100 %. Restored onto the player at startup;
+    # the /api/player/volume endpoint writes it back on every change.
+    volume: int = 100
     # When the user's queue runs out — last track on an album,
     # playlist, mix, single-track play, anything — take over with an
     # Artist Radio mix seeded from the last track's primary artist.
@@ -211,6 +220,15 @@ class Settings:
     #  - "clean":    keep the clean edit when both exist.
     #  - "both":     show both, as the raw API returned them.
     explicit_content_preference: str = "explicit"
+    # Desktop window geometry, persisted on close and restored on the
+    # next launch. -1 means "not set yet" so the first run uses the
+    # platform default size + centred position instead of forcing a
+    # stored 0,0. Negative x/y are otherwise legitimate on
+    # multi-monitor setups, so only the sentinel is special-cased.
+    window_x: int = -1
+    window_y: int = -1
+    window_width: int = -1
+    window_height: int = -1
 
 
 def _migrate_default_paths(s: Settings) -> bool:

@@ -39,6 +39,8 @@ export const SAMPLE_TRACK = {
   year: "2018",
   explicit: " [E]",
   album_explicit: " [E]",
+  playlist_num: "05",
+  playlist: "Chill Mix",
 } as const;
 
 export type TemplateTokens = Record<string, string>;
@@ -164,5 +166,14 @@ export const TEMPLATE_TOKENS: ReadonlyArray<{
   {
     token: "{album_explicit}",
     description: "Same marker, but driven by the album-level flag",
+  },
+  {
+    token: "{playlist_num}",
+    description:
+      "Two-digit playlist position, e.g. 05 (empty unless downloading a playlist)",
+  },
+  {
+    token: "{playlist}",
+    description: "Playlist name (empty unless downloading a playlist)",
   },
 ];

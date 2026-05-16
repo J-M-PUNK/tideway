@@ -328,6 +328,12 @@ export function usePlayer() {
   // frontend boots with an empty queue, and the first snapshot
   // arrives with a track id we cannot render without metadata.
   const rehydratingTrackIdRef = useRef<string | null>(null);
+  // The backend persists volume in settings.json and restores it
+  // onto the player at startup, so the UI adopts it from the first
+  // snapshot (applyTransportState) instead of pushing the
+  // localStorage value up — which used to overwrite the restored
+  // volume with 100 % whenever pywebview lost localStorage.
+  const serverVolumeAdopted = useRef(false);
 
   useEffect(() => {
     const url = "/api/player/events";
@@ -430,6 +436,17 @@ export function usePlayer() {
     // job and stays separate so the optimistic-update / rehydrate
     // race surface is contained to one place.
     const applyTransportState = (snap: PlayerSnapshot) => {
+      // Adopt the server's persisted volume from the first snapshot.
+      // The backend restores it from settings.json at startup and is
+      // the source of truth; without this the localStorage value
+      // (default 100 % when pywebview drops localStorage) would win
+      // and a restart blasts the user. Done once so live slider
+      // drags aren't fought by later snapshots.
+      const adoptServerVolume = !serverVolumeAdopted.current;
+      if (adoptServerVolume) serverVolumeAdopted.current = true;
+      const volPatch = adoptServerVolume
+        ? { volume: Math.max(0, Math.min(1, snap.volume / 100)) }
+        : {};
       setState((s) => {
         const currentTime = snap.position_ms / 1000;
         const duration =
@@ -444,6 +461,7 @@ export function usePlayer() {
             currentTime: 0,
             // Keep streamInfo so the quality badge doesn't flicker
             // off in the brief window before the next track loads.
+            ...volPatch,
           };
         }
         return {
@@ -456,6 +474,7 @@ export function usePlayer() {
           duration,
           streamInfo: snap.stream_info,
           forceVolume: !!snap.force_volume,
+          ...volPatch,
         };
       });
     };
@@ -562,14 +581,6 @@ export function usePlayer() {
       if (es) es.close();
     };
   }, []);
-
-  // Apply the restored volume to the backend once on mount.
-  const initialVolumeApplied = useRef(false);
-  useEffect(() => {
-    if (initialVolumeApplied.current) return;
-    initialVolumeApplied.current = true;
-    api.player.volume(Math.round(state.volume * 100)).catch(() => {});
-  }, [state.volume]);
 
   // macOS Now Playing metadata push. The backend's PlayerSnapshot has
   // track_id but no title / artist / album / cover, and on macOS we
