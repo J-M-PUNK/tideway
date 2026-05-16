@@ -12,7 +12,11 @@ import { imageProxy } from "@/lib/utils";
  * etc.). Home shows a single row + "View more" link that lands here.
  */
 export function MixesPage() {
-  const { data: mixes, loading, error } = useApi(() => api.mixes(), [], {
+  const {
+    data: mixes,
+    loading,
+    error,
+  } = useApi(() => api.mixes(), [], {
     cacheKey: queryKeys.mixes,
   });
 

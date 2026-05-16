@@ -100,8 +100,19 @@ def _openhome_device(
 @pytest.fixture
 def mock_soap(monkeypatch):
     """Replace requests.post with a stub that returns an empty SOAP
-    response. Records every call so tests can assert on which
-    actions fired in what order."""
+    response. Records calls so tests can assert which actions fired
+    in what order.
+
+    Only POSTs to this file's synthetic device control host
+    (`_service` builds every control URL on 192.168.1.50:8080) are
+    recorded. `requests.post` is process-global, so a background
+    poller leaked by another test (tidal_connect polls Time +
+    Volume on its own device) would otherwise land in this capture
+    and corrupt the asserted SOAP sequence. Scoping the recorder to
+    the device under test keeps these assertions hermetic without
+    depending on suite-wide thread teardown.
+    """
+    _UNDER_TEST_HOST = "192.168.1.50:8080"
     calls: list[dict] = []
 
     class _MockResp:
@@ -121,14 +132,15 @@ def mock_soap(monkeypatch):
             f'<s:Body><u:{action}Response xmlns:u="x"/></s:Body>'
             '</s:Envelope>'
         )
-        calls.append(
-            {
-                "url": url,
-                "data": data,
-                "action": action,
-                "headers": headers or {},
-            }
-        )
+        if _UNDER_TEST_HOST in (url or ""):
+            calls.append(
+                {
+                    "url": url,
+                    "data": data,
+                    "action": action,
+                    "headers": headers or {},
+                }
+            )
         return _MockResp(body)
 
     monkeypatch.setattr(requests, "post", _fake_post)

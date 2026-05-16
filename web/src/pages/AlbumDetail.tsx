@@ -30,7 +30,11 @@ import { cn, formatDuration, imageProxy } from "@/lib/utils";
 
 export function AlbumDetail({ onDownload }: { onDownload: OnDownload }) {
   const { id = "" } = useParams();
-  const { data: album, loading, error } = useApi(() => api.album(id), [id], {
+  const {
+    data: album,
+    loading,
+    error,
+  } = useApi(() => api.album(id), [id], {
     cacheKey: queryKeys.album(id),
   });
   // Warm the stream-manifest cache for every track on this album as

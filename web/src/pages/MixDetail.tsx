@@ -17,7 +17,11 @@ import { HeroSkeleton, TrackListSkeleton } from "@/components/Skeletons";
 
 export function MixDetail({ onDownload }: { onDownload: OnDownload }) {
   const { id = "" } = useParams();
-  const { data: mix, loading, error } = useApi(() => api.mix(id), [id], {
+  const {
+    data: mix,
+    loading,
+    error,
+  } = useApi(() => api.mix(id), [id], {
     cacheKey: queryKeys.mix(id),
   });
   const [shuffleIntent, setShuffleIntent] = useState(false);
