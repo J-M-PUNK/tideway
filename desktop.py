@@ -214,6 +214,23 @@ def _graceful_shutdown(server: "uvicorn.Server") -> None:  # type: ignore[name-d
     except Exception:
         pass
 
+    # Close the audio OutputStream before the interpreter exits.
+    # sounddevice registers an atexit Pa_Terminate(); if a stream is
+    # still open when Python finalizes, PortAudio tears it down from
+    # that atexit hook against a live CoreAudio callback and aborts
+    # (malloc heap corruption -> "Tideway quit unexpectedly"). This
+    # only started biting once the macOS quit paths actually
+    # terminated the process. stop() does the ordered teardown
+    # (abort + close the stream, stop the decoder thread) so
+    # Pa_Terminate has nothing left to free.
+    try:
+        import server as _server
+        player = getattr(_server, "_pcm_player_singleton", None)
+        if player is not None:
+            player.stop()
+    except Exception:
+        pass
+
 
 def _enable_webview_media_prefs() -> None:
     """Patch the Cocoa backend with the WKWebView config pywebview 6.2
