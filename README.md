@@ -76,7 +76,22 @@ frequency-response graph that visualises the cumulative shape,
 and per-device profile mapping so different headphones plugged
 into different DACs each apply their own correction
 automatically. See [docs/eq-and-autoeq.md](docs/eq-and-autoeq.md)
-for the full guide. The output device picker lists every USB DAC,
+for the full guide.
+
+Three more optional stages sit in Settings under Playback, all off
+by default so the path stays bit-perfect until you reach for them.
+**Crossfeed** bleeds a little of each channel into the opposite ear
+through a Bauer-style 700 Hz split, which pulls hard-panned mixes
+out of the middle of your skull and closer to a speaker soundstage.
+**ReplayGain** loudness leveling smooths the volume jumps between
+tracks using the EBU R128 numbers Tidal already ships and that
+downloaded files carry in their tags, with per-track and per-album
+modes. A **Signal Path** readout shows exactly what is happening to
+the audio right now, from source bit depth and sample rate through
+each active stage to the output device, so you can confirm a stream
+really is bit-perfect.
+
+The output device picker lists every USB DAC,
 Bluetooth sink, and builtin option the OS exposes, plus Chromecast
 targets, Tidal Connect renderers, and UPnP/DLNA devices discovered
 on the LAN. You can switch between any of them mid playback. The
@@ -90,10 +105,15 @@ notification on every track change.
 **Browsing and library.** Search, a unified Charts page (Popular,
 Top, Rising, and New Releases as tabs), and dedicated album,
 artist, playlist, and mix pages are all there. The Home page also
-surfaces two AlbumOfTheYear-backed discovery rows (a top-of-year
-highlight reel and a new-releases row) so you can find music that
-isn't already in heavy rotation. Album, artist, playlist, and mix
-pages have Play, Shuffle, and a More menu. Albums also show a
+surfaces two AlbumOfTheYear-backed discovery rows, a top-of-year
+highlight reel and a new-releases row, so you can find music that
+isn't already in heavy rotation. Both open into full pages where
+you can filter by genre, so pulling up the year's best ambient or
+this week's new metal is one dropdown away, with the data credited
+back to AlbumOfTheYear. Album, artist, playlist, and mix pages have
+Play, Shuffle, and a More menu. Artist pages keep compilations in
+their own section instead of mixing them into the studio albums,
+and lead with a Latest releases row. Albums also show a
 quality badge that reflects the best version Tidal has in its
 catalog. That includes Max, Lossless, Dolby Atmos, and 360
 Reality Audio, though see the limits section below for what the
@@ -120,8 +140,13 @@ in the global popularity signal.
 run through a concurrent queue that you can tune. Metadata and
 artwork are embedded with mutagen. Any track you have downloaded
 plays straight from disk without touching the Tidal streaming
-path. A filename template, a toggle for per album folders, and a
-skip existing option cover the common download preferences.
+path. A filename template, toggles for per-album and per-playlist
+folders, and a skip-existing option cover the common download
+preferences. A downloaded playlist lands in a folder named after
+the playlist and is numbered in playlist order rather than by
+album track number, and the template understands `{playlist_num}`
+and `{playlist}` alongside the usual title, track, album, and
+artist tokens.
 
 ![Download quality picker](assets/screenshots/download-quality.png)
 
@@ -253,8 +278,7 @@ updates flow over Server Sent Events, both for player state and
 for download progress.
 
 The desktop shell is pywebview, which uses WKWebView on macOS and
-WebView2 on Windows. The tray icon uses pystray. Global media
-keys are delivered by pynput.
+WebView2 on Windows. Global media keys are delivered by pynput.
 
 ## Run it from source
 
@@ -333,7 +357,9 @@ there is never a reason to install ffmpeg or VLC on the side.
 
 Your settings live in `settings.json` in the per-user data
 directory. You can edit everything from the Settings page inside
-the app.
+the app. Your last volume and the window's size and position are
+remembered there too, so a relaunch comes back the way you left
+it.
 
 Spotify enrichment works anonymously out of the box and needs no
 login. The Spotify importer is different. It needs a Spotify
