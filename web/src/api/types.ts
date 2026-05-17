@@ -361,6 +361,10 @@ export interface Settings {
    *  the playlist; {playlist_num} then numbers them in playlist
    *  order. */
   create_playlist_folders: boolean;
+  /** Downconvert hi-res (24-bit / >48 kHz) downloads to 16-bit /
+   *  44.1 kHz FLAC for legacy DAPs (old iPod + Rockbox, etc.).
+   *  Off by default; CD-quality and lossy sources are untouched. */
+  downconvert_hires_downloads: boolean;
   /** Desktop window geometry, persisted on close. -1 = not set yet
    *  (first run uses the platform default). */
   window_x: number;

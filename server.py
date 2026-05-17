@@ -9694,6 +9694,7 @@ class SettingsPayload(BaseModel):
     replaygain_prevent_clipping: Optional[bool] = None
     volume: Optional[int] = None
     create_playlist_folders: Optional[bool] = None
+    downconvert_hires_downloads: Optional[bool] = None
     window_x: Optional[int] = None
     window_y: Optional[int] = None
     window_width: Optional[int] = None

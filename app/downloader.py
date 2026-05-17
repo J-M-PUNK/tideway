@@ -1230,13 +1230,20 @@ class Downloader:
 
             if needs_flac_remux:
                 # Strip the FLAC stream out of the MP4 container into a
-                # native .flac file. Stream-copy via PyAV — no decode /
-                # encode, output is bit-identical to what Tidal sent.
-                # Lands in a .flac.part intermediate so the atomic rename
-                # below still gives skip-existing an all-or-nothing view.
+                # native .flac file. Normally a stream copy via PyAV —
+                # no decode / encode, output is bit-identical to what
+                # Tidal sent. With the hi-res downconvert setting on,
+                # a 24-bit / >48 kHz source is instead resampled to
+                # 16-bit / 44.1 kHz for legacy players; CD-quality
+                # sources still pass through bit-exact. Lands in a
+                # .flac.part intermediate so the atomic rename below
+                # still gives skip-existing an all-or-nothing view.
                 flac_part = out_path.with_suffix(".flac.part")
                 try:
-                    _remux_mp4_to_flac(tmp_path, flac_part)
+                    if getattr(s, "downconvert_hires_downloads", False):
+                        _transcode_to_cd_flac(tmp_path, flac_part)
+                    else:
+                        _remux_mp4_to_flac(tmp_path, flac_part)
                 except Exception as exc:
                     # Clean up both intermediates so a retry starts fresh.
                     for stray in (tmp_path, flac_part):
@@ -1503,6 +1510,118 @@ def _remux_mp4_to_flac(mp4_path: Path, flac_path: Path) -> None:
             output_container.close()
     finally:
         input_container.close()
+
+
+def _audio_stream_is_hires(astream) -> bool:
+    """True when the source is 24-bit and/or above 48 kHz.
+
+    Tidal FLAC decodes as `s16` for CD-quality Lossless and `s32`
+    for 24-bit Max, so the decoded sample-format width is the
+    reliable bit-depth signal (libav doesn't populate
+    `bits_per_raw_sample` on the FLAC codec context here). Anything
+    at 16-bit and <= 48 kHz is left exactly as Tidal sent it.
+    """
+    rate = 0
+    try:
+        rate = int(astream.codec_context.sample_rate or 0)
+    except Exception:
+        rate = 0
+    bits = 16
+    fmt = getattr(astream, "format", None)
+    if fmt is not None:
+        b = getattr(fmt, "bits", None)
+        if b:
+            bits = int(b)
+        elif "s32" in (fmt.name or "") or "s64" in (fmt.name or ""):
+            bits = 32
+    return rate > 48000 or bits > 16
+
+
+def _transcode_to_cd_flac(src_path: Path, dst_path: Path) -> None:
+    """Write `src_path`'s audio to `dst_path` as 16-bit / 44.1 kHz
+    FLAC, for players that can't decode hi-res in real time.
+
+    Only engages when the source is actually hi-res. A CD-quality
+    or lossy source is stream-copied unchanged (bit-exact, no
+    re-encode) so this is safe to call unconditionally on the
+    hi-res download path. Resampling to 44.1 kHz runs in float
+    through libswresample; the float-to-16-bit step applies TPDF
+    dither at 1 LSB rather than truncating, which is the difference
+    between a clean downconvert and audible quantization noise.
+
+    Raises on any failure — the caller cleans up intermediates.
+    """
+    import av
+    import numpy as np
+
+    probe = av.open(str(src_path))
+    try:
+        if not probe.streams.audio:
+            raise RuntimeError("input has no audio stream")
+        hires = _audio_stream_is_hires(probe.streams.audio[0])
+    finally:
+        probe.close()
+
+    if not hires:
+        # CD-quality / lossy: hand off to the bit-exact stream copy.
+        _remux_mp4_to_flac(src_path, dst_path)
+        return
+
+    inp = av.open(str(src_path))
+    try:
+        astream = inp.streams.audio[0]
+        layout = "stereo"
+        try:
+            if astream.layout and astream.layout.name:
+                layout = astream.layout.name
+        except Exception:
+            layout = "stereo"
+
+        resampler = av.AudioResampler(
+            format="flt", layout=layout, rate=44100
+        )
+        out = av.open(str(dst_path), mode="w", format="flac")
+        try:
+            ostream = out.add_stream("flac", rate=44100)
+            ostream.format = "s16"  # 16-bit FLAC
+            ostream.layout = layout
+            rng = np.random.default_rng()
+            pts = 0
+
+            def _emit(fl_frame) -> None:
+                nonlocal pts
+                samples = fl_frame.to_ndarray().reshape(-1).astype(
+                    np.float32
+                )
+                scaled = samples * 32767.0
+                # TPDF: sum of two independent uniforms is triangular
+                # over (-1, 1), i.e. +/-1 LSB peak.
+                dither = rng.random(
+                    samples.shape, dtype=np.float32
+                ) - rng.random(samples.shape, dtype=np.float32)
+                quantized = np.clip(
+                    np.round(scaled + dither), -32768, 32767
+                ).astype(np.int16)
+                of = av.AudioFrame.from_ndarray(
+                    quantized.reshape(1, -1), format="s16", layout=layout
+                )
+                of.sample_rate = 44100
+                of.pts = pts
+                pts += of.samples
+                for pkt in ostream.encode(of):
+                    out.mux(pkt)
+
+            for frame in inp.decode(astream):
+                for rframe in resampler.resample(frame):
+                    _emit(rframe)
+            for rframe in resampler.resample(None):
+                _emit(rframe)
+            for pkt in ostream.encode(None):
+                out.mux(pkt)
+        finally:
+            out.close()
+    finally:
+        inp.close()
 
 
 def _looks_like_rate_limit(exc: Exception) -> bool:

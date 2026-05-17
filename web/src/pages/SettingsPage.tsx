@@ -367,6 +367,12 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
                 hint="Playlist downloads go into a folder named after the playlist instead of per-album folders. Use {playlist_num} in the template to number tracks in playlist order. Ignored when the template already contains a folder separator (/)."
               />
               <Toggle
+                checked={settings.downconvert_hires_downloads}
+                onChange={(v) => patch({ downconvert_hires_downloads: v })}
+                label="Downconvert hi-res downloads to 16-bit / 44.1 kHz"
+                hint="For old iPods (Rockbox) and other legacy players that can't decode 24-bit or high-sample-rate FLAC in real time. Only hi-res sources are touched; CD-quality and lossy downloads stay bit-exact. Resampling is high quality with TPDF dither."
+              />
+              <Toggle
                 checked={settings.skip_existing}
                 onChange={(v) => patch({ skip_existing: v })}
                 label="Skip downloads that already exist on disk"
