@@ -47,6 +47,14 @@ class Settings:
     # albums). The {playlist_num} template token then numbers them in
     # playlist order rather than by their album track number.
     create_playlist_folders: bool = True
+    # Downconvert hi-res (24-bit and/or >48 kHz) downloads to
+    # 16-bit / 44.1 kHz FLAC so they play on hardware that can't
+    # decode hi-res in real time (old iPods running Rockbox, most
+    # legacy DAPs). Off by default — downloads stay bit-exact unless
+    # you opt in. CD-quality and lossy sources are never touched;
+    # the resample is high quality and the bit-depth reduction uses
+    # TPDF dither.
+    downconvert_hires_downloads: bool = False
     skip_existing: bool = True
     # How many downloads may run in parallel. Gated by the Downloader's
     # semaphore so changing this doesn't require a process restart.
