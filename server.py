@@ -54,6 +54,7 @@ from app.http import SESSION
 from app.lastfm import LastFmClient
 from app.local_index import LocalIndex
 from app import now_playing_state
+from app import search_ranking
 from app.paths import bundled_resource_dir
 from app.play_reporter import PlayReporter, PlaySession, recent_log as play_report_recent_log
 from app.release_keys import TRUSTED_RELEASE_PUBKEYS
@@ -7045,31 +7046,67 @@ def search(q: str, limit: int = 25) -> dict:
     _require_auth()
     if not q.strip():
         return {"top_hit": None, "tracks": [], "albums": [], "artists": [], "playlists": []}
-    limit = max(1, min(limit, 100))
+    display = max(1, min(limit, 100))
+    # Ask Tidal for a wider pool than we'll show. Its ranking is
+    # popularity-skewed, so a good exact match for a short query can
+    # sit past position 25; rescoring can't surface what was never
+    # fetched. One call, just a bigger page — no extra round-trips.
+    pool = min(100, max(display, 50))
     try:
-        results = tidal.search(q, limit=limit)
+        results = tidal.search(q, limit=pool)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=f"Search failed: {exc}")
     pref = (settings.explicit_content_preference or "explicit").lower()
+    taste = _search_taste()
     raw_tracks = list(results.get("tracks", []))
     raw_albums = list(results.get("albums", []))
-    artists = _rerank_artists(q, list(results.get("artists", [])))
-    top_hit = results.get("top_hit")
+    artists = _rerank_artists(q, list(results.get("artists", [])), taste)
+    tidal_top = results.get("top_hit")
     # When the query points at a specific artist, splice that artist's
     # top tracks into the results. Tidal's raw `tracks` array ranks by
     # title-match relevance, so a query like "oliv" returns random
     # songs whose names contain "oliv" rather than Olivia Rodrigo's
     # catalog. Has to run before explicit-dedupe so the spliced-in
     # tracks participate in the explicit/clean collapse.
-    tracks = _rerank_tracks(q, top_hit, artists, raw_tracks)
+    tracks = _rerank_tracks(q, tidal_top, artists, raw_tracks, taste)
     tracks = filter_explicit_dupes(tracks, pref, kind="track")
-    albums = filter_explicit_dupes(raw_albums, pref, kind="album")
+    albums = filter_explicit_dupes(
+        _rerank_albums(q, raw_albums, taste), pref, kind="album"
+    )
+
+    # Recompute the hero. Take the strongest exact/prefix match across
+    # the top of each type, preferring artist then album then track on
+    # a class tie. Only override Tidal's pick when there's a real
+    # match — for a fuzzy / typo query keep whatever Tidal nominated
+    # (or nothing) rather than inventing a confident hero.
+    top_hit = tidal_top
+    best: Optional[tuple] = None
+    for entity, type_rank in (
+        (artists[0] if artists else None, 0),
+        (albums[0] if albums else None, 1),
+        (tracks[0] if tracks else None, 2),
+    ):
+        if entity is None:
+            continue
+        cls = search_ranking.best_class(q, getattr(entity, "name", "") or "")
+        if cls < search_ranking.CLASS_PREFIX:
+            continue
+        cand = (cls, -type_rank)
+        if best is None or cand > best[0]:
+            best = (cand, entity)
+    if best is not None:
+        top_hit = best[1]
+
+    # Pool was widened for ranking; trim back to the requested size.
     return {
         "top_hit": _top_hit_to_dict(top_hit),
-        "tracks": [track_to_dict(t) for t in tracks],
-        "albums": [album_to_dict(a) for a in albums],
-        "artists": [artist_to_dict(a) for a in artists],
-        "playlists": [playlist_to_dict(p) for p in results.get("playlists", [])],
+        "tracks": [track_to_dict(t) for t in tracks[:display]],
+        "albums": [album_to_dict(a) for a in albums[:display]],
+        "artists": [artist_to_dict(a) for a in artists[:display]],
+        "playlists": [
+            playlist_to_dict(p)
+            for p in list(results.get("playlists", []))[:display]
+        ],
     }
 
 
@@ -7094,31 +7131,66 @@ def _top_hit_to_dict(top_hit) -> Optional[dict]:
     return None
 
 
-def _rerank_artists(query: str, artists: list) -> list:
-    """Match Tidal's own search feel: surface the exact-name match
-    first, then splice in its relational "Fans also like" neighbours,
-    then keep the remaining fuzzy matches in whatever order Tidal
-    returned.
+def _collect_taste_names() -> list[str]:
+    """Raw artist names the user actually listens to: Tidal
+    favourites + Last.fm top artists. Each source is best-effort —
+    a not-connected Last.fm or a favourites page hiccup just
+    contributes nothing. Runs on search_ranking's background thread,
+    never the request path."""
+    names: list[str] = []
+    try:
+        for a in tidal.get_favorite_artists() or []:
+            n = getattr(a, "name", "")
+            if n:
+                names.append(n)
+    except Exception:
+        pass
+    try:
+        for d in lastfm.get_top_artists(limit=100) or []:
+            n = d.get("name") if isinstance(d, dict) else None
+            if n:
+                names.append(n)
+    except Exception:
+        pass
+    return names
 
-    Runs best-effort. If the similarity lookup fails (network blip,
-    Tidal rate-limit, unknown-artist edge case), we skip the injection
-    and return the original list intact."""
+
+def _search_taste() -> frozenset:
+    return search_ranking.get_taste(_collect_taste_names)
+
+
+def _rerank_artists(query: str, artists: list, taste: frozenset) -> list:
+    """Score every result so an exact name match wins regardless of
+    popularity (the "ear" vs "Earth, Wind & Fire" case), with the
+    user's taste and popularity ordering ties. When the new top
+    result is an exact-name match, splice its "Fans also like"
+    neighbours in behind it, the way Tidal's own search feels.
+
+    Best-effort: the score sort always runs; the similar fan-out is
+    skipped on any lookup failure."""
     if not artists:
         return artists
 
-    norm_query = _norm_title(query)
+    artists = search_ranking.rerank(
+        query,
+        artists,
+        get_name=lambda a: getattr(a, "name", "") or "",
+        get_popularity=lambda a: getattr(a, "popularity", 0),
+        taste=taste,
+    )
+
+    norm_query = search_ranking.normalize(query)
     if not norm_query:
         return artists
 
-    # Find the first result whose normalized name equals the query.
+    # Scoring already floated an exact-name match to the front; find
+    # it for the fan-out. No exact match -> the scored order stands.
     exact_idx: Optional[int] = None
     for i, a in enumerate(artists):
-        if _norm_title(getattr(a, "name", "")) == norm_query:
+        if search_ranking.normalize(getattr(a, "name", "")) == norm_query:
             exact_idx = i
             break
     if exact_idx is None:
-        # No confident top hit — don't fan out, just hand Tidal's
-        # ordering through. Avoids bad injections for misspellings.
         return artists
 
     top_hit = artists[exact_idx]
@@ -7179,7 +7251,26 @@ def _detect_target_artist(query: str, top_hit, artists: list):
     return None
 
 
-def _rerank_tracks(query: str, top_hit, artists: list, tracks: list) -> list:
+def _rerank_albums(query: str, albums: list, taste: frozenset) -> list:
+    """Score albums by title match with taste + popularity ties,
+    same tiered model as artists/tracks."""
+    if not albums:
+        return albums
+    return search_ranking.rerank(
+        query,
+        albums,
+        get_name=lambda a: getattr(a, "name", "") or "",
+        get_popularity=lambda a: getattr(a, "popularity", 0),
+        get_artist_names=lambda a: [
+            getattr(ar, "name", "") for ar in (getattr(a, "artists", None) or [])
+        ],
+        taste=taste,
+    )
+
+
+def _rerank_tracks(
+    query: str, top_hit, artists: list, tracks: list, taste: frozenset
+) -> list:
     """Make the Songs row useful for artist-shaped queries.
 
     Tidal's `/search` endpoint ranks the `tracks` array by literal
@@ -7196,19 +7287,39 @@ def _rerank_tracks(query: str, top_hit, artists: list, tracks: list) -> list:
     Best-effort. If detection fails or the top-tracks call errors out
     (network blip, missing artist, rate-limit), the function returns
     Tidal's tracks unchanged."""
+    def _title(t) -> str:
+        return getattr(t, "name", "") or ""
+
+    def _track_artist_names(t):
+        return [getattr(a, "name", "") for a in (getattr(t, "artists", None) or [])]
+
+    def _scored(items: list) -> list:
+        return search_ranking.rerank(
+            query,
+            items,
+            get_name=_title,
+            get_popularity=lambda t: getattr(t, "popularity", 0),
+            get_artist_names=_track_artist_names,
+            taste=taste,
+        )
+
     if not tracks and not top_hit:
         return tracks
     target = _detect_target_artist(query, top_hit, artists)
     if target is None:
-        return tracks
+        # Title-shaped query (a song name): exact/prefix title match
+        # wins, taste + popularity break ties.
+        return _scored(tracks)
 
     try:
         artist_top = list(target.get_top_tracks(limit=10) or [])
     except Exception:
-        return tracks
+        return _scored(tracks)
     if not artist_top:
-        return tracks
+        return _scored(tracks)
 
+    # Artist-shaped query: lead with that artist's catalogue (its own
+    # top-tracks order), then the remaining Tidal matches rescored.
     seen_ids: set[str] = set()
     out: list = []
     for t in artist_top:
@@ -7217,12 +7328,13 @@ def _rerank_tracks(query: str, top_hit, artists: list, tracks: list) -> list:
             continue
         seen_ids.add(tid)
         out.append(t)
-    for t in tracks:
-        tid = str(getattr(t, "id", "") or "")
-        if not tid or tid in seen_ids:
-            continue
-        seen_ids.add(tid)
-        out.append(t)
+    tail = [
+        t
+        for t in tracks
+        if str(getattr(t, "id", "") or "") not in seen_ids
+        and str(getattr(t, "id", "") or "")
+    ]
+    out.extend(_scored(tail))
     return out
 
 
