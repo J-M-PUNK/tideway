@@ -364,6 +364,51 @@ jobs:
           APPIMAGE_EXTRACT_AND_RUN: "1"
         run: bash scripts/build_appimage.sh
 
+      - name: Smoke-test the AppImage browser fallback
+        # The Linux AppImage has no pywebview backend (frozen Python
+        # can't import system gi), so it must fall back to opening a
+        # browser. A packaging bug leaked the bundle's LD_LIBRARY_PATH
+        # into that launch and /bin/sh died with "undefined symbol:
+        # rl_trim_arg_from_keyseq", so the app served nothing. Run the
+        # freshly built AppImage headless on the runner (a real x86_64
+        # Linux box) and fail the release if that crash recurs or the
+        # server never comes up. This can't prove a GUI opens; it
+        # proves the packaging regression stays dead, every release,
+        # without anyone needing a Linux machine.
+        env:
+          APPIMAGE_EXTRACT_AND_RUN: "1"
+        run: |
+          set -uo pipefail
+          APP=$(ls dist/Tideway-*-x86_64.AppImage | head -1)
+          chmod +x "$APP"
+          "$APP" >appimage_smoke.log 2>&1 &
+          APP_PID=$!
+          ok=0
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:47823/api/health 2>/dev/null \
+                 | grep -q tidal-downloader; then
+              ok=1
+              break
+            fi
+            kill -0 "$APP_PID" 2>/dev/null || break
+            sleep 1
+          done
+          kill "$APP_PID" 2>/dev/null || true
+          wait "$APP_PID" 2>/dev/null || true
+          echo "----- appimage_smoke.log -----"
+          cat appimage_smoke.log || true
+          echo "------------------------------"
+          if grep -qE 'symbol lookup error|rl_trim_arg_from_keyseq' \
+               appimage_smoke.log; then
+            echo "FAIL: the Linux subprocess symbol-lookup crash recurred"
+            exit 1
+          fi
+          if [ "$ok" -ne 1 ]; then
+            echo "FAIL: server never became reachable; AppImage did not come up"
+            exit 1
+          fi
+          echo "PASS: AppImage served headless with no symbol-lookup crash"
+
       - uses: actions/upload-artifact@v7
         with:
           name: Tideway-Linux
