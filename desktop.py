@@ -149,6 +149,78 @@ def _ask_existing_to_focus() -> None:
         pass
 
 
+def _child_env() -> dict:
+    """Environment for spawning system binaries from a frozen build.
+
+    AppRun (AppImage) and PyInstaller prepend our bundled library dir
+    to LD_LIBRARY_PATH so the frozen app finds its own libraries. A
+    child process inherits that, so a system binary — the browser
+    fallback's /bin/sh, xdg-open — loads our bundled libreadline /
+    libtinfo instead of the host's and dies with
+    "undefined symbol: rl_trim_arg_from_keyseq". AppRun stashes the
+    pristine host value in TIDEWAY_HOST_LD_LIBRARY_PATH; PyInstaller
+    stashes its own pre-launch value in LD_LIBRARY_PATH_ORIG. Restore
+    whichever we have, else drop the var, so children link against the
+    host's libraries. No-op when not frozen — nothing to leak.
+    """
+    env = dict(os.environ)
+    if not getattr(sys, "frozen", False):
+        return env
+    host = env.get("TIDEWAY_HOST_LD_LIBRARY_PATH")
+    if host is None:
+        host = env.get("LD_LIBRARY_PATH_ORIG")
+    if host:
+        env["LD_LIBRARY_PATH"] = host
+    else:
+        env.pop("LD_LIBRARY_PATH", None)
+    return env
+
+
+def _open_in_browser(url: str) -> None:
+    """Open `url` in the user's browser without leaking the bundle's
+    library path into the opener.
+
+    macOS (`open`) and Windows (`os.startfile`) openers don't exec a
+    shell that would load our libs, so webbrowser is used directly.
+    A frozen Linux build must spawn the opener with a sanitized
+    environment (see _child_env); webbrowser itself goes through
+    /bin/sh, which is exactly what crashes, so call the opener
+    directly. If no opener is found we print the URL rather than
+    re-trip the crash.
+    """
+    if sys.platform != "linux" or not getattr(sys, "frozen", False):
+        import webbrowser
+
+        webbrowser.open(url)
+        return
+    import shutil
+    import subprocess
+
+    env = _child_env()
+    path_dirs = env.get("PATH")
+    for opener in ("xdg-open", "gio"):
+        exe = shutil.which(opener, path=path_dirs)
+        if not exe:
+            continue
+        argv = [exe, "open", url] if opener == "gio" else [exe, url]
+        try:
+            subprocess.Popen(
+                argv,
+                env=env,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+            return
+        except OSError:
+            continue
+    print(
+        f"[desktop] Couldn't find xdg-open. Open this in your browser: {url}",
+        file=sys.stderr,
+        flush=True,
+    )
+
+
 def _run_uvicorn_in_thread() -> "uvicorn.Server":  # type: ignore[name-defined]
     """Start uvicorn on a daemon thread and return the Server handle so
     the main thread can stop it on window close."""
@@ -359,8 +431,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     server = _run_uvicorn_in_thread()
 
     if args.browser:
-        import webbrowser
-        webbrowser.open(f"http://{HOST}:{PORT}/")
+        _open_in_browser(f"http://{HOST}:{PORT}/")
         try:
             # Block main thread until Ctrl-C or uvicorn exits on its own.
             while not server.should_exit:
@@ -380,8 +451,7 @@ def main(argv: Optional[list[str]] = None) -> int:
             file=sys.stderr,
             flush=True,
         )
-        import webbrowser
-        webbrowser.open(f"http://{HOST}:{PORT}/")
+        _open_in_browser(f"http://{HOST}:{PORT}/")
         try:
             while not server.should_exit:
                 time.sleep(0.5)
@@ -1293,21 +1363,24 @@ def main(argv: Optional[list[str]] = None) -> int:
                 flush=True,
             )
             print(
-                "[desktop] On Linux this means GTK or QT Python bindings "
-                "aren't installed. Install one of:\n"
+                "[desktop] No pywebview backend in this build, so Tideway "
+                "runs in your browser instead. This is the supported mode "
+                "for the Linux AppImage; the native window needs PyGObject "
+                "or Qt, which the AppImage can't bundle portably across "
+                "distros. The packages below only help if you run Tideway "
+                "from source, not from the AppImage:\n"
                 "  Debian/Ubuntu:  sudo apt install python3-gi "
                 "gir1.2-webkit2-4.1\n"
                 "  Fedora:         sudo dnf install python3-gobject "
                 "webkit2gtk4.1\n"
                 "  Arch/Omarchy:   sudo pacman -S python-gobject "
                 "webkit2gtk-4.1\n"
-                "[desktop] Falling back to your default browser. Quit "
-                "with Ctrl-C in this terminal.",
+                f"[desktop] Opening http://{HOST}:{PORT}/ in your browser. "
+                "Quit with Ctrl-C in this terminal.",
                 file=sys.stderr,
                 flush=True,
             )
-            import webbrowser
-            webbrowser.open(f"http://{HOST}:{PORT}/")
+            _open_in_browser(f"http://{HOST}:{PORT}/")
             try:
                 while not server.should_exit:
                     time.sleep(0.5)

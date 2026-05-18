@@ -14,5 +14,12 @@
 # We do NOT bundle GTK / WebKit2GTK / PortAudio / libnotify —
 # those are expected from the host system. Documented in the README.
 HERE="$(dirname "$(readlink -f "${0}")")"
+# Save the host's pristine library path BEFORE we prepend the bundle.
+# Any subprocess that execs a system binary (the browser fallback's
+# /bin/sh, xdg-open) must not inherit our bundled libs, or it loads
+# our libreadline / libtinfo instead of the host's and dies with an
+# "undefined symbol" error. desktop.py's _child_env() restores this
+# when spawning such processes.
+export TIDEWAY_HOST_LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}"
 export LD_LIBRARY_PATH="${HERE}/usr/bin:${LD_LIBRARY_PATH}"
 exec "${HERE}/usr/bin/Tideway" "$@"
