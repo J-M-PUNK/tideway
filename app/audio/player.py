@@ -378,6 +378,19 @@ class PCMPlayer:
         self._cb_status_last_print = 0.0
         self._cb_starve_count = 0
         self._cb_starve_last_print = 0.0
+        # Callback-jitter detection. PortAudio invokes the callback on
+        # a realtime thread roughly every frames/rate seconds. When
+        # something hogs the GIL/CPU (a page-navigation enrichment
+        # burst, big JSON serialize) the callback is delivered late
+        # even though the PCM queue is full — audible crackle that
+        # never trips queue-starvation or PortAudio's own underrun
+        # flag. We time the gap between consecutive audio-delivering
+        # callbacks and log a missed deadline, rate-limited.
+        self._cb_last_t = 0.0
+        self._cb_prev_audio = False
+        self._cb_jitter_count = 0
+        self._cb_jitter_last_print = 0.0
+        self._cb_jitter_worst_ms = 0.0
         # Heartbeat tick counter, only incremented when _DEBUG is on.
         # 1-per-callback log every 100 ticks confirms the callback
         # is actually running + advancing.
@@ -2376,11 +2389,60 @@ class PCMPlayer:
             except Exception:
                 pass
 
+    def _log_callback_jitter(self, gap_s: float, expected_s: float) -> None:
+        """Rate-limited diagnostic for a missed callback deadline: the
+        realtime thread was serviced `gap_s` after the previous audio
+        callback, well past the `expected_s` buffer period. Distinct
+        from starvation (queue had data) and from PortAudio status
+        (the device didn't necessarily flag it) — this is the GIL/CPU
+        contention crackle, the kind you hear when navigating pages
+        mid-playback. One line + worst-case + count per second."""
+        now = time.monotonic()
+        self._cb_jitter_count += 1
+        gap_ms = gap_s * 1000.0
+        if gap_ms > self._cb_jitter_worst_ms:
+            self._cb_jitter_worst_ms = gap_ms
+        if now - self._cb_jitter_last_print >= 1.0:
+            count = self._cb_jitter_count
+            worst = self._cb_jitter_worst_ms
+            self._cb_jitter_count = 0
+            self._cb_jitter_worst_ms = 0.0
+            self._cb_jitter_last_print = now
+            msg = (
+                f"callback jitter: late by "
+                f"{gap_ms - expected_s * 1000.0:.0f}ms "
+                f"(gap={gap_ms:.0f}ms expected={expected_s * 1000.0:.1f}ms "
+                f"worst={worst:.0f}ms count_since_last={count}) "
+                f"— missed audio deadline, queue was not starved"
+            )
+            print(f"[audio] {msg}", file=sys.stderr, flush=True)
+            try:
+                audio_log.info(msg)
+            except Exception:
+                pass
+
     def _audio_callback(self, outdata, frames, time_info, status) -> None:
         if status:
             self._log_callback_status(status)
         if PCMPlayer._DEBUG:
             self._log_callback_heartbeat()
+
+        # Callback-jitter check. Only meaningful between two
+        # consecutive callbacks that both delivered continuous audio;
+        # a gap after pause/seek/swap/underrun/stop is expected, not a
+        # glitch, so those paths leave _cb_prev_audio False. A gap of
+        # >= 2x the buffer period means the realtime thread was
+        # serviced a full buffer late — that's the audible crackle.
+        now = time.monotonic()
+        if self._cb_prev_audio and self._cb_last_t:
+            rate = self._stream_sample_rate or 0
+            if rate:
+                expected = frames / float(rate)
+                gap = now - self._cb_last_t
+                if expected > 0.0 and gap >= expected * 2.0:
+                    self._log_callback_jitter(gap, expected)
+        self._cb_last_t = now
+        self._cb_prev_audio = False
 
         # Paused → output silence, don't drain queue, don't advance
         # position. Zero-latency resume: on unpause the next call
@@ -2608,6 +2670,10 @@ class PCMPlayer:
                 outdata[:] = scaled.astype(outdata.dtype)
 
         self._samples_emitted += frames
+        # Reached the end having delivered real audio this callback,
+        # so the gap to the NEXT callback is a meaningful deadline
+        # measurement (see the jitter check at the top).
+        self._cb_prev_audio = True
         # Bump seq so the frontend's SSE dedupe lets through the
         # position update. The callback fires ~90Hz at 44.1k /512
         # frames, so ~every 20th call keeps us close to 4-5Hz —
