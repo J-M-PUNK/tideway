@@ -76,10 +76,6 @@ from app.audio.segment_reader import SegmentReader
 # (pyatv not installed, etc.) the reference stays None and the
 # corresponding tap branch is skipped.
 try:
-    from app.audio import airplay as _airplay_mod
-except Exception:  # noqa: BLE001
-    _airplay_mod = None  # type: ignore[assignment]
-try:
     from app.audio import cast as _cast_mod
 except Exception:  # noqa: BLE001
     _cast_mod = None  # type: ignore[assignment]
@@ -263,8 +259,8 @@ class PCMPlayer:
         self._volume = 100  # 0..100
         self._muted = False
         # External output active: when something else is rendering
-        # the audio (Cast device, AirPlay receiver, Tidal Connect
-        # target), the local sounddevice OutputStream still runs but
+        # the audio (Cast device, Tidal Connect target), the local
+        # sounddevice OutputStream still runs but
         # writes silence so the user doesn't hear two copies of
         # the music coming from their Mac speakers and the remote
         # device. The PCM tap to those external sinks happens BEFORE
@@ -1264,7 +1260,7 @@ class PCMPlayer:
     def set_external_output_active(self, active: bool) -> None:
         """Toggle local-output silencing.
 
-        Called by the Cast / AirPlay / Tidal Connect managers when
+        Called by the Cast / Tidal Connect managers when
         a remote output session opens or closes. While true, the
         audio callback writes silence to the local sounddevice
         OutputStream so the user doesn't hear duplicate audio from
@@ -2454,30 +2450,9 @@ class PCMPlayer:
             else:
                 self._callback_carry = self._callback_carry[take:]
 
-        # AirPlay tap. When an AirPlay session is active, push a
-        # copy of the raw decoded PCM to the AirPlay pipe BEFORE
-        # EQ / volume / mute run. The AirPlay receiver has its own
-        # volume control, so sending pre-volume audio keeps local
-        # mute from silencing the remote speaker. The module is
-        # imported at file scope, so this branch does only attribute
-        # reads on the realtime path (no import lock).
-        if _airplay_mod is not None:
-            try:
-                if _airplay_mod.AirPlayManager.is_available():
-                    mgr = _airplay_mod.AirPlayManager.instance()
-                    if mgr.is_connected():
-                        # np.ascontiguousarray is a no-op when outdata
-                        # is already contiguous (which it always is
-                        # coming from sounddevice), so no copy cost
-                        # on the hot path. The encoder runs off-thread
-                        # and is tolerant of dropped chunks.
-                        mgr.push_pcm(np.ascontiguousarray(outdata))
-            except Exception:
-                # Never let AirPlay errors take down local playback.
-                pass
-
-        # Cast tap. Same pre-EQ / pre-volume position as AirPlay —
-        # the Cast device has its own volume control, so muting
+        # Cast tap. Runs before EQ / volume / mute so the device
+        # gets the raw decoded PCM; the Cast device has its own
+        # volume control, so muting
         # locally shouldn't silence the remote speaker. The
         # is_active() probe is lock-free in the common 'no
         # session' case, so the cost when nobody's casting is one
@@ -2536,7 +2511,7 @@ class PCMPlayer:
                 pass
 
         # External output active: silence local. Done AFTER the
-        # AirPlay / Cast / Tidal Connect taps above (so the remote
+        # Cast / Tidal Connect taps above (so the remote
         # receiver gets full-amplitude audio at its own volume
         # control) and BEFORE the volume / mute logic below (so the
         # silencing is unconditional regardless of user volume
