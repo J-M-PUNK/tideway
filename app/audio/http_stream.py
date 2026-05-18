@@ -1,7 +1,9 @@
 """Shared infrastructure for serving Tideway's audio over HTTP.
 
-Both the AirPlay sender (`app/audio/airplay.py`) and the Chromecast
-sender (`app/audio/cast.py`) need the same three things:
+The Chromecast sender (`app/audio/cast.py`) and the UPnP/DLNA
+sender (`app/audio/upnp.py`) both deliver audio the same way: hand
+the receiver a LAN URL that streams an open-ended FLAC. The
+delivery side lives here so neither has to reimplement it:
 
   RingBuffer        — a bounded byte buffer the encoder writes to
                       and the HTTP serve loop reads from.
@@ -18,22 +20,15 @@ sender (`app/audio/cast.py`) need the same three things:
                       separate from the FastAPI server because
                       FastAPI binds 127.0.0.1 (intentional — every
                       other /api/* endpoint must NOT be LAN-
-                      reachable) but a Cast / AirPlay receiver is
-                      on the LAN and can't reach loopback.
+                      reachable) but a Cast / DLNA receiver is on
+                      the LAN and can't reach loopback.
 
   primary_lan_ip()  — picks the right LAN-facing interface so the
                       URL we hand the receiver is actually
                       reachable.
 
-These primitives are protocol-agnostic. Cast and AirPlay layer their
-own control protocols on top, but the audio-delivery side is
-identical.
-
-History: this module was extracted from `app/audio/airplay.py` when
-the Cast sender needed the same primitives. The original AirPlay
-implementation (`AirPlayManager`, pyatv pairing, RAOP control)
-stays in airplay.py — only the bits that have nothing to do with
-AirPlay specifically moved here.
+These primitives are protocol-agnostic. Cast and DLNA layer their
+own control protocols on top; the audio-delivery side is identical.
 """
 from __future__ import annotations
 
@@ -166,8 +161,8 @@ class FlacStreamEncoder:
     container.
 
     FLAC is integer-only — the encoder rejects floating-point
-    sample formats. Pass int16 or int32 PCM; the AirPlay /
-    Chromecast pipeline upstream is responsible for not handing
+    sample formats. Pass int16 or int32 PCM; the Cast / DLNA
+    pipeline upstream is responsible for not handing
     over float audio.
     """
 
@@ -309,14 +304,14 @@ class StreamHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 
     Why not just expose the stream endpoint on the main FastAPI
     server: FastAPI binds to 127.0.0.1 in both dev and packaged
-    builds. A Cast / AirPlay receiver is on the LAN and can't reach
+    builds. A Cast / DLNA receiver is on the LAN and can't reach
     that address. Binding FastAPI to 0.0.0.0 would fix the
     reachability but would also expose every other /api/* endpoint
     to the LAN, which is a security regression. Running a tiny
     dedicated listener just for the stream endpoint keeps the blast
     radius to exactly this one stream.
 
-    Lifecycle is bolted to the session — Cast or AirPlay manager
+    Lifecycle is bolted to the session — Cast or DLNA manager
     starts it on connect, shuts it down on disconnect. Serves a
     single configurable path; everything else 404s.
     """
@@ -335,7 +330,7 @@ class StreamHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
 class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
     # Python's BaseHTTPRequestHandler defaults to HTTP/1.0. Combined
     # with our chunked Transfer-Encoding, that's a spec violation —
-    # chunked encoding is HTTP/1.1+ only. Cast / AirPlay receivers
+    # chunked encoding is HTTP/1.1+ only. Cast / DLNA receivers
     # that see "HTTP/1.0 200 OK" plus "Transfer-Encoding: chunked"
     # apply HTTP/1.0's "close after body" semantics, get a stream
     # that never closes a body they can't parse, and bail silently.
