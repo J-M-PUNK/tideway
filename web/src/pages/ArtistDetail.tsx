@@ -37,6 +37,14 @@ export function ArtistDetail({ onDownload }: { onDownload: OnDownload }) {
   } = useApi(() => api.artist(id), [id], {
     cacheKey: queryKeys.artist(id),
   });
+  // Secondary content — the "Appears On" / "Compilations" rows and
+  // the radio mix id — comes from a separate, deferred fetch. Those
+  // were the slow part of the artist page (Tidal's curated page +
+  // radio mix). This is non-blocking: the page paints immediately
+  // and these rows fill in when /extras lands.
+  const { data: extras } = useApi(() => api.artistExtras(id), [id], {
+    cacheKey: `artist-extras:${id}`,
+  });
   const [popularExpanded, setPopularExpanded] = useState(false);
   // The user's liked tracks + albums credited to this artist. Spotify
   // renders a "You Liked" summary card above Albums; clicking it
@@ -63,17 +71,23 @@ export function ArtistDetail({ onDownload }: { onDownload: OnDownload }) {
   if (error || !artist)
     return <ErrorView error={error ?? "Artist not found"} />;
 
+  // Overlay the deferred extras once they arrive; until then fall
+  // back to the thin values the fast primary payload carries
+  // (appears_on from get_other only, compilations empty, mix null).
+  const compilations = extras?.compilations ?? artist.compilations;
+  const appearsOn =
+    extras?.appears_on && extras.appears_on.length
+      ? extras.appears_on
+      : artist.appears_on;
+  const artistMixId = extras?.artist_mix_id ?? artist.artist_mix_id;
+
   // "Download full discography" needs a single merged list of everything
   // the artist has released (albums + EPs + singles + their own
   // compilations; skip appears-on since those are someone else's
   // records). Compilations are kept here even though they get their own
   // shelf — they're still the artist's releases, so dropping them would
   // silently shrink the discography download.
-  const fullCatalog = [
-    ...artist.albums,
-    ...artist.ep_singles,
-    ...artist.compilations,
-  ];
+  const fullCatalog = [...artist.albums, ...artist.ep_singles, ...compilations];
 
   return (
     <div>
@@ -85,7 +99,7 @@ export function ArtistDetail({ onDownload }: { onDownload: OnDownload }) {
         allAlbums={fullCatalog}
         shareUrl={artist.share_url}
         onDownload={onDownload}
-        artistMixId={artist.artist_mix_id}
+        artistMixId={artistMixId}
       />
 
       {artist.top_tracks.length > 0 && (
@@ -147,7 +161,7 @@ export function ArtistDetail({ onDownload }: { onDownload: OnDownload }) {
       />
       <MediaRow
         title="Compilations"
-        items={artist.compilations}
+        items={compilations}
         viewMoreTo={`/artist/${id}/all/compilations`}
         onDownload={onDownload}
       />
@@ -163,7 +177,7 @@ export function ArtistDetail({ onDownload }: { onDownload: OnDownload }) {
       )}
       <MediaRow
         title="Appears on"
-        items={artist.appears_on}
+        items={appearsOn}
         viewMoreTo={`/artist/${id}/all/appears-on`}
         onDownload={onDownload}
       />

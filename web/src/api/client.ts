@@ -1,6 +1,7 @@
 import type {
   AlbumDetail,
   ArtistDetail,
+  ArtistExtras,
   AuthStatus,
   Album,
   Artist,
@@ -825,6 +826,7 @@ export const api = {
       }[]
     >(`/api/album/${id}/credits`),
   artist: (id: string) => req<ArtistDetail>(`/api/artist/${id}`),
+  artistExtras: (id: string) => req<ArtistExtras>(`/api/artist/${id}/extras`),
   artistRadio: (id: string) => req<Track[]>(`/api/artist/${id}/radio`),
   artistCredits: (id: string) =>
     req<(Track & { role: string })[]>(`/api/artist/${id}/credits`),
