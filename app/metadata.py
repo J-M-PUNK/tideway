@@ -19,7 +19,12 @@ _ALLOWED_COVER_HOSTS = {"resources.tidal.com", "images.tidal.com"}
 _MAX_COVER_BYTES = 5 * 1024 * 1024  # 5 MB — larger than any real Tidal cover
 
 
-def tag_file(file_path: Path, track, cover_data: Optional[bytes] = None):
+def tag_file(
+    file_path: Path,
+    track,
+    cover_data: Optional[bytes] = None,
+    album_obj=None,
+):
     """Tag a downloaded audio file atomically.
 
     mutagen's in-place save rewrites the file, which means a crash between
@@ -39,9 +44,9 @@ def tag_file(file_path: Path, track, cover_data: Optional[bytes] = None):
     try:
         shutil.copy2(file_path, tmp_path)
         if ext == ".flac":
-            _tag_flac(tmp_path, track, cover_data)
+            _tag_flac(tmp_path, track, cover_data, album_obj)
         else:
-            _tag_m4a(tmp_path, track, cover_data)
+            _tag_m4a(tmp_path, track, cover_data, album_obj)
         os.replace(tmp_path, file_path)
     except Exception:
         try:
@@ -166,14 +171,14 @@ def fetch_cover_art(album_obj) -> Optional[bytes]:
         return None
 
 
-def _tag_flac(path: Path, track, cover_data: Optional[bytes]):
+def _tag_flac(path: Path, track, cover_data: Optional[bytes], album_obj=None):
     from mutagen.flac import FLAC, Picture
 
     audio = FLAC(str(path))
     audio["title"] = track.name
     audio["artist"] = _artist_names(track)
     audio["album"] = _safe(getattr(track, "album", None), "name") or ""
-    audio["albumartist"] = _album_artist_name(track)
+    audio["albumartist"] = _album_artist_name(track, album_obj)
     audio["tracknumber"] = str(getattr(track, "track_num", 0))
     num_tracks = _safe(getattr(track, "album", None), "num_tracks")
     if num_tracks:
@@ -193,14 +198,14 @@ def _tag_flac(path: Path, track, cover_data: Optional[bytes]):
     audio.save()
 
 
-def _tag_m4a(path: Path, track, cover_data: Optional[bytes]):
+def _tag_m4a(path: Path, track, cover_data: Optional[bytes], album_obj=None):
     from mutagen.mp4 import MP4, MP4Cover
 
     audio = MP4(str(path))
     audio["\xa9nam"] = track.name
     audio["\xa9ART"] = _artist_names(track)
     audio["\xa9alb"] = _safe(getattr(track, "album", None), "name") or ""
-    audio["aART"] = _album_artist_name(track)
+    audio["aART"] = _album_artist_name(track, album_obj)
     num_tracks = _safe(getattr(track, "album", None), "num_tracks") or 0
     audio["trkn"] = [(getattr(track, "track_num", 0), num_tracks)]
 
@@ -225,14 +230,29 @@ def _artist_names(track) -> str:
         return ""
 
 
-def _album_artist_name(track) -> str:
+def _album_artist_name(track, album_obj=None) -> str:
     """The canonical album-level artist. We tag this so file managers
     and our own Local Library group every track on an album under one
     heading even when individual tracks credit guest artists (e.g.
     Thriller's "The Girl Is Mine" lists Paul McCartney alongside
     Michael Jackson). Falls back to the track's own primary artist
     when tidalapi doesn't expose an album.artist.
+
+    `album_obj` is the single album object the downloader resolved for
+    the whole release. Prefer it: the per-track `track.album` blob
+    Tidal embeds is not consistent across an album — some tracks carry
+    a "Various Artists"/TIDAL placeholder credit — so deriving the
+    album artist per track splits one album into several in the
+    library. The resolved album object is the same for every track of
+    an album download, so its artist is the stable key.
     """
+    try:
+        if album_obj is not None:
+            name = album_obj.artist.name
+            if name:
+                return name
+    except Exception:
+        pass
     try:
         name = track.album.artist.name
         if name:
