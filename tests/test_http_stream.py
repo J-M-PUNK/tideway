@@ -1,9 +1,9 @@
 """Tests for the shared HTTP-streaming helpers in app/audio/http_stream.
 
-These primitives back the Chromecast and UPnP/DLNA senders, which
-share one implementation. They shipped without tests; this file
-closes the gap. The pieces are well-suited to unit testing —
-RingBuffer is a
+These primitives back both the AirPlay and Chromecast senders. They
+were extracted from the AirPlay-specific module so both could share
+one implementation, and shipped without tests; this file closes the
+gap. The pieces are well-suited to unit testing — RingBuffer is a
 pure-Python data structure with simple invariants, FlacStreamEncoder
 takes a numpy array and returns bytes (no I/O, no networking), and
 primary_lan_ip's UDP-socket trick is testable with patching.
@@ -133,7 +133,7 @@ class TestFlacStreamEncoder:
         """A simple int16 stereo chunk encodes to non-empty FLAC
         bytes. We don't validate the FLAC binary structure
         explicitly; the round-trip-decoded path is more meaningful
-        and tested in the Cast / DLNA end-to-end paths against
+        and tested in the AirPlay / Cast end-to-end paths against
         real receivers."""
         enc = FlacStreamEncoder(sample_rate=44100, channels=2, dtype="int16")
         # 1024 frames of stereo silence is enough to fill at least
@@ -248,7 +248,7 @@ class TestStreamHTTPServerProtocol:
         """The request handler must advertise HTTP/1.1. Python's
         BaseHTTPRequestHandler defaults to HTTP/1.0; combined with
         the chunked Transfer-Encoding the handler emits, that's a
-        spec violation that makes Cast / DLNA receivers (Hisense
+        spec violation that makes Cast / AirPlay receivers (Hisense
         especially) silently drop the stream. Pinned as a class
         attribute so the value is observable without spinning up a
         real server."""

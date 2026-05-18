@@ -83,6 +83,18 @@ for pkg in (
     # stubs for the `tls_client` module tree at startup and routes
     # spotapi's requests through curl-cffi instead. Skipping the
     # collect_all here keeps the broken dylib out of the bundle.
+    #
+    # pyatv (AirPlay/RAOP sender) loads protocol backends dynamically
+    # and ships data files; srptools / bitarray / miniaudio carry C
+    # extensions PyInstaller's static pass misses, and zeroconf is the
+    # shared mDNS stack pyatv + pychromecast both use. If any aren't
+    # installed the build skips them and AirPlayManager.is_available()
+    # just returns False at runtime — graceful, no crash.
+    "pyatv",
+    "srptools",
+    "bitarray",
+    "miniaudio",
+    "zeroconf",
 ):
     try:
         _d, _b, _h = collect_all(pkg)

@@ -68,6 +68,15 @@ for pkg in (
     "didl_lite",
     "voluptuous",
     "curl_cffi",
+    # pyatv (AirPlay/RAOP sender): dynamic protocol backends + data
+    # files; srptools / bitarray / miniaudio carry C extensions and
+    # zeroconf is the shared mDNS stack pyatv + pychromecast use.
+    # Missing -> is_available() returns False at runtime, no crash.
+    "pyatv",
+    "srptools",
+    "bitarray",
+    "miniaudio",
+    "zeroconf",
 ):
     try:
         _d, _b, _h = collect_all(pkg)

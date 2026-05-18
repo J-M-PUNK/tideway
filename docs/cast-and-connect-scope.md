@@ -1,12 +1,5 @@
 # Chromecast + Tidal Connect — implementation scope
 
-> **Status note (AirPlay removed):** the AirPlay sender
-> (`app/audio/airplay.py`) was never finished, never shipped, and
-> has been deleted along with its endpoints and hidden UI. Any
-> AirPlay references below are historical design context only.
-> `app/audio/http_stream.py` (RingBuffer, FLAC encoder, HTTP
-> server) was kept; it now backs the Cast and UPnP/DLNA senders.
-
 Two output integrations, both "Tideway sends audio to a device on the
 LAN," but with different architectures. Cast streams Tideway's
 decoded audio to the device. Connect tells the device to fetch

@@ -52,7 +52,20 @@ binaries: list[tuple[str, str]] = []
 # replace the transport with `app.spotify_curl_session` (curl-cffi)
 # at runtime, and the bundled `tls-client-64.dll` panics on Windows.
 # Skipping the collect_all keeps the broken DLL out of the install.
-for pkg in ("pydantic", "pydantic_core", "curl_cffi"):
+for pkg in (
+    "pydantic",
+    "pydantic_core",
+    "curl_cffi",
+    # pyatv (AirPlay/RAOP sender): dynamic protocol backends + data
+    # files; srptools / bitarray / miniaudio carry C extensions and
+    # zeroconf is the shared mDNS stack. Missing -> is_available()
+    # returns False at runtime, no crash.
+    "pyatv",
+    "srptools",
+    "bitarray",
+    "miniaudio",
+    "zeroconf",
+):
     try:
         _d, _b, _h = collect_all(pkg)
         datas += _d

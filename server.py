@@ -6444,6 +6444,33 @@ def _autoeq_on_device_change(device_id: str) -> None:
         log.exception("autoeq device-change resolver failed")
 
 
+# ---------------------------------------------------------------------------
+# AirPlay integration
+#
+# AirPlay is an optional second output. When connected, the PCM the
+# player decodes is tee'd into a FLAC encoder and pushed to a paired
+# receiver via pyatv. Discovery, pair, connect, and disconnect each
+# have their own endpoint below so the frontend can walk the user
+# through the flow. None of this is load-bearing on regular local
+# playback; when AirPlay is off, the tap is a no-op.
+# ---------------------------------------------------------------------------
+
+
+class _AirPlayDeviceRequest(BaseModel):
+    device_id: str
+
+
+class _AirPlayPinRequest(BaseModel):
+    pin: str
+
+
+def _airplay_manager():
+    """Lazy import so a broken pyatv install doesn't crash the app."""
+    from app.audio.airplay import AirPlayManager  # noqa: WPS433
+
+    return AirPlayManager.instance()
+
+
 @app.get("/api/cast/devices")
 def cast_devices() -> dict:
     """Snapshot of Chromecast devices currently visible on the LAN.
@@ -6860,6 +6887,102 @@ def upnp_devices() -> dict:
             for d in devices
         ],
     }
+
+
+@app.get("/api/airplay/devices")
+def airplay_devices() -> dict:
+    _require_local_access()
+    from app.audio.airplay import AirPlayManager
+
+    if not AirPlayManager.is_available():
+        return {
+            "available": False,
+            "reason": AirPlayManager.import_error(),
+            "devices": [],
+            "connected_id": None,
+        }
+    mgr = _airplay_manager()
+    devices = mgr.discover()
+    return {
+        "available": True,
+        "devices": [
+            {
+                "id": d.id,
+                "name": d.name,
+                "address": d.address,
+                "has_raop": d.has_raop,
+                "paired": d.paired,
+            }
+            for d in devices
+        ],
+        "connected_id": mgr.current_device_id(),
+    }
+
+
+@app.post("/api/airplay/pair/start")
+def airplay_pair_start(req: _AirPlayDeviceRequest) -> dict:
+    _require_local_access()
+    try:
+        _airplay_manager().begin_pairing(req.device_id)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    return {"ok": True}
+
+
+@app.post("/api/airplay/pair/pin")
+def airplay_pair_pin(req: _AirPlayPinRequest) -> dict:
+    _require_local_access()
+    try:
+        _airplay_manager().submit_pin(req.pin)
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    return {"ok": True}
+
+
+@app.post("/api/airplay/pair/cancel")
+def airplay_pair_cancel() -> dict:
+    _require_local_access()
+    _airplay_manager().cancel_pairing()
+    return {"ok": True}
+
+
+@app.post("/api/airplay/connect")
+def airplay_connect(req: _AirPlayDeviceRequest) -> dict:
+    _require_local_access()
+    # The AirPlay encoder needs to match the player's current output
+    # format. We read it off the active player; if nothing is loaded
+    # yet, fall back to 44.1 kHz stereo int16 (CD-quality), the
+    # lowest-common-denominator that every receiver accepts. The
+    # player will reconnect-at-correct-format on the next load() if
+    # the actual stream is hi-res.
+    player = _native_player()
+    sample_rate = getattr(player, "_stream_sample_rate", None) or 44100
+    channels = getattr(player, "_stream_channels", None) or 2
+    dtype = getattr(player, "_stream_sd_dtype", None) or "int16"
+    try:
+        _airplay_manager().connect(
+            req.device_id,
+            sample_rate=sample_rate,
+            channels=channels,
+            dtype=dtype,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+    return {"ok": True, "connected_id": req.device_id}
+
+
+@app.post("/api/airplay/disconnect")
+def airplay_disconnect() -> dict:
+    _require_local_access()
+    _airplay_manager().disconnect()
+    return {"ok": True}
+
+
+# The actual audio stream endpoint pyatv reaches is served by a
+# dedicated HTTP listener bound to 0.0.0.0 on an ephemeral port,
+# owned by AirPlayManager. See app/audio/airplay.py and
+# _StreamHTTPServer for why FastAPI doesn't host the stream
+# directly.
 
 
 # Hotkey bus + routes moved to `app/routers/hotkey.py`. The

@@ -342,8 +342,8 @@ app/                shared Python logic: tidal client, downloader,
                     metadata, play reporting, Spotify and Last.fm
                     clients
 app/audio/          audio engine: decoder, segment reader, player,
-                    equalizer, gapless splicing, Cast and DLNA
-                    output
+                    equalizer, gapless splicing, AirPlay output
+                    (coming soon)
 server.py           FastAPI entry point
 desktop.py          pywebview shell, which is the entry point for
                     the packaged app
@@ -405,7 +405,10 @@ that changes, we can revisit.
 
 **Network audio output is mostly there, with caveats.**
 Chromecast, Tidal Connect, and UPnP/DLNA all ship in the output
-device picker.
+device picker. AirPlay is still coming: the code is written, the
+PCM tap on the audio engine feeds a live FLAC stream out to a
+paired receiver, but the feature is off in the current build
+because we haven't tested it against real hardware yet.
 
 The DLNA path in particular has not been bench-tested against
 real renderers. The unit tests cover the SOAP wrappers, session

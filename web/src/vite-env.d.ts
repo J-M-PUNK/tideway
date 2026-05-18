@@ -1,5 +1,13 @@
 /// <reference types="vite/client" />
 
+interface ImportMetaEnv {
+  readonly VITE_SHOW_AIRPLAY?: string;
+}
+
+interface ImportMeta {
+  readonly env: ImportMetaEnv;
+}
+
 // app-region (and the -webkit-app-region alias) is a Chromium /
 // WebView2-specific CSS property used to declare drag regions inside
 // frameless windows. The DOM lib doesn't ship typings for it, so we

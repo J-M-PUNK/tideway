@@ -99,6 +99,17 @@ async-upnp-client>=0.47.0
 # Assistant, Mopidy, and Music Assistant use, MIT-licensed and
 # actively maintained.
 pychromecast>=14.0.10
+# AirPlay (RAOP / AirPlay 1) sender. Used by app/audio/airplay.py for
+# device discovery (mDNS via the zeroconf pychromecast already pulls),
+# the HomeKit-style PIN pair handshake some receivers require, and
+# streaming Tideway's encoded audio to AirPort Express / many
+# third-party AirPlay speakers / Apple TV in AirPlay-1 mode. pyatv is
+# primarily a control library; its audio-send support is the RAOP
+# (AirPlay 1) path — AirPlay 2-only devices (HomePod, modern
+# multi-room speakers) are out of scope. Optional at import: if the
+# wheel fails, AirPlayManager.is_available() returns False and the
+# realtime PCM tap no-ops, so the rest of the app is unaffected.
+pyatv>=0.14.0
 # Build-only: PyInstaller packages desktop.py + web/dist into a native
 # .exe / .app. Not needed at runtime but bundling keeps the build command
 # documented in a single place.
