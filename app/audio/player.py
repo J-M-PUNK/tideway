@@ -652,15 +652,17 @@ class PCMPlayer:
                     except Exception:
                         pass
 
-                print(
+                _perf = (
                     f"[perf] load track={track_id} "
                     f"total={(time.monotonic() - load_t0) * 1000.0:.0f}ms "
                     f"build={(t_built - load_t0) * 1000.0:.0f}ms "
                     f"swap={(time.monotonic() - t_built) * 1000.0:.0f}ms "
-                    f"(gapless: kept stream open)",
-                    file=sys.stderr,
-                    flush=True,
+                    f"(gapless: kept stream open)"
                 )
+                print(_perf, file=sys.stderr, flush=True)
+                # Also persist: a Finder-launched .app discards stderr,
+                # so without this the slow-start breakdown is lost.
+                audio_log.info(_perf)
                 self._emit()
                 return self.snapshot()
             else:
@@ -775,7 +777,7 @@ class PCMPlayer:
         # `stream_open` is the sounddevice OutputStream open and
         # `thread_start` is the producer-thread spawn cost; both
         # stable across calls so they're floor values.
-        print(
+        _perf = (
             f"[perf] load track={track_id} "
             f"total={(t_thread_started - load_t0) * 1000.0:.0f}ms "
             f"teardown={(t_teardown - load_t0) * 1000.0:.0f}ms "
@@ -783,10 +785,12 @@ class PCMPlayer:
             f"decoder_init={(t_decoder - t_resolved) * 1000.0:.0f}ms "
             f"stream_open={(t_stream_open - t_before_stream) * 1000.0:.0f}ms "
             f"thread_start="
-            f"{(t_thread_started - t_stream_open) * 1000.0:.0f}ms",
-            file=sys.stderr,
-            flush=True,
+            f"{(t_thread_started - t_stream_open) * 1000.0:.0f}ms"
         )
+        print(_perf, file=sys.stderr, flush=True)
+        # Also persist: a Finder-launched .app discards stderr, so
+        # without this the cold-start phase breakdown is unrecoverable.
+        audio_log.info(_perf)
         self._emit()
         return self.snapshot()
 
@@ -982,7 +986,7 @@ class PCMPlayer:
         # stays open across a seek so there's no `stream_open`
         # phase here.
         kind = "local" if start_offset_s is None else "dash"
-        print(
+        _perf = (
             f"[perf] seek target_s={target_s:.2f} kind={kind} "
             f"effective_s={effective_s:.2f} "
             f"total={(t_thread_started - seek_t0) * 1000.0:.0f}ms "
@@ -994,10 +998,10 @@ class PCMPlayer:
             f"decoder_init="
             f"{(t_decoder_init - t_source_built) * 1000.0:.0f}ms "
             f"thread_start="
-            f"{(t_thread_started - t_decoder_init) * 1000.0:.0f}ms",
-            file=sys.stderr,
-            flush=True,
+            f"{(t_thread_started - t_decoder_init) * 1000.0:.0f}ms"
         )
+        print(_perf, file=sys.stderr, flush=True)
+        audio_log.info(_perf)
         return effective_s
 
     def _build_source_at(
