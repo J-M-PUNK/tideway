@@ -1282,13 +1282,14 @@ class Downloader:
             # the user with an untagged track and a stuck FAILED row.
             from app.metadata import fetch_cover_art, tag_file
             tag_error: Optional[str] = None
+            resolved_album = album_obj or getattr(track, "album", None)
             try:
-                cover = fetch_cover_art(album_obj or getattr(track, "album", None))
+                cover = fetch_cover_art(resolved_album)
             except Exception as exc:
                 cover = None
                 tag_error = f"cover fetch failed: {exc}"
             try:
-                tag_file(out_path, track, cover)
+                tag_file(out_path, track, cover, album_obj=resolved_album)
             except Exception as exc:
                 if not tag_error:
                     tag_error = f"tagging failed: {exc}"
