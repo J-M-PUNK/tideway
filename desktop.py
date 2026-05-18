@@ -491,6 +491,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     except Exception:
         pass
 
+    # pywebview's Cocoa backend ignores create_window's x / y and the
+    # create-time size, so on macOS the window always comes up centred
+    # at the default size. _restore_macos_geometry() re-applies the
+    # persisted geometry after the window is shown; this flag gates it
+    # so a fresh install keeps pywebview's centred default.
+    _have_saved_geom = _win_x is not None and _win_y is not None
+
     window = webview.create_window(
         "Tideway",
         f"http://{HOST}:{PORT}/",
@@ -619,6 +626,32 @@ def main(argv: Optional[list[str]] = None) -> int:
 
         try:
             window.events.shown += _install_macos_app_hooks
+        except Exception:
+            pass
+
+        _geom_restored: list[bool] = []
+
+        def _restore_macos_geometry() -> None:
+            """Re-apply the persisted size + position once the window
+            exists. Needed because pywebview's Cocoa backend ignores
+            the geometry passed to create_window — the window always
+            comes up centred at the default size otherwise. One-shot:
+            a later dock-reopen must not stomp a position the user
+            moved the window to during the session."""
+            if not _have_saved_geom or _geom_restored:
+                return
+            _geom_restored.append(True)
+            try:
+                window.resize(_win_w, _win_h)
+            except Exception:
+                pass
+            try:
+                window.move(_win_x, _win_y)
+            except Exception:
+                pass
+
+        try:
+            window.events.shown += _restore_macos_geometry
         except Exception:
             pass
     else:
