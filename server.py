@@ -5086,6 +5086,20 @@ def now_playing_update(payload: _NowPlayingMetadata) -> dict:
         duration_ms=payload.duration_ms,
         artwork_url=payload.artwork_url,
     )
+    # Keep a Chromecast session's now-playing card in sync with the
+    # track. No-op when nothing is casting; dedup'd internally so the
+    # frequent same-track calls don't trigger a receiver reload.
+    try:
+        from app.audio.cast import cast_manager as _cast_manager
+
+        _cast_manager.set_now_playing(
+            title=payload.title,
+            artist=payload.artist,
+            album=payload.album,
+            art_url=payload.artwork_url,
+        )
+    except Exception:
+        pass
     return {"ok": True}
 
 

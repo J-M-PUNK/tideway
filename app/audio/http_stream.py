@@ -98,6 +98,18 @@ class RingBuffer:
             del self._buf[: len(chunk)]
             return chunk
 
+    def flush(self) -> None:
+        """Drop all buffered bytes, keep the stream open.
+
+        Used on a Cast track-change reset: the encoder is rebuilt so
+        a fresh FLAC header leads the stream, and the receiver's new
+        connection then starts at the live edge instead of replaying
+        the seconds of backlog that pile up FIFO. That backlog is the
+        permanent latency floor today.
+        """
+        with self._cv:
+            self._buf.clear()
+
     def close(self) -> None:
         with self._cv:
             self._closed = True
