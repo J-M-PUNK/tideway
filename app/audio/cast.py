@@ -114,6 +114,27 @@ def is_audio_only(device: CastDevice) -> bool:
     return device.cast_type in _AUDIO_CAST_TYPES
 
 
+def _music_metadata(
+    title: str, artist: str, album: str, art_url: str
+) -> dict:
+    """Build the Cast Default Media Receiver now-playing card.
+
+    metadataType 3 is MusicTrackMediaMetadata — the shape the DMR
+    renders as a music card (title, artist, album, cover) on TVs and
+    hub displays. Empty fields are omitted so the receiver falls back
+    to its own layout instead of showing blank rows. Title always
+    falls back to "Tideway" so the card is never nameless.
+    """
+    meta: dict = {"metadataType": 3, "title": title or "Tideway"}
+    if artist:
+        meta["artist"] = artist
+    if album:
+        meta["albumName"] = album
+    if art_url:
+        meta["images"] = [{"url": art_url}]
+    return meta
+
+
 # ---------------------------------------------------------------------
 # CastSession — the live connection to one device
 # ---------------------------------------------------------------------
@@ -161,6 +182,11 @@ class _SessionState:
     receiver_state: Optional[str] = None
     receiver_idle_reason: Optional[str] = None
     receiver_status_at: float = 0.0
+    # Last now-playing metadata dict pushed to the receiver. Used to
+    # skip a redundant reload (position ticks fire often; only a real
+    # title/artist/album change should reload) and to re-send the
+    # card if the receiver reconnects.
+    now_playing: Optional[dict] = None
 
 
 # ---------------------------------------------------------------------
@@ -198,6 +224,12 @@ class CastManager:
         # so the frontend's NowPlaying can show "casting to X" /
         # "stopped casting" without polling.
         self._listeners: list[Callable[[Optional[CastDevice]], None]] = []
+
+        # Last now-playing metadata seen (set by set_now_playing even
+        # when no session is active), so a connect() that happens
+        # mid-playback can seed the receiver's card with the current
+        # track instead of a bare "Tideway".
+        self._last_np: Optional[dict] = None
 
         # Local-output silencer hook. Called with True when a
         # session opens, False when it closes. server.py wires this
@@ -451,11 +483,17 @@ class CastManager:
         # speakers).
         try:
             mc = cast_obj.media_controller
+            # Seed the card with the track that's already playing (if
+            # we've seen a now-playing update this session) instead of
+            # a bare "Tideway". set_now_playing keeps it current after
+            # this on every track change.
+            init_meta = self._last_np or _music_metadata("", "", "", "")
+            session.now_playing = init_meta
             mc.play_media(
                 session.stream_url,
                 "audio/flac",
-                title="Tideway",
                 stream_type="LIVE",
+                metadata=init_meta,
             )
             mc.block_until_active(timeout=10.0)
             session.media_loaded = True
@@ -562,6 +600,91 @@ class CastManager:
         print(f"[cast] disconnected: {session.device.friendly_name}",
               flush=True)
         self._notify_listeners(None)
+
+    def set_now_playing(
+        self,
+        title: str = "",
+        artist: str = "",
+        album: str = "",
+        art_url: str = "",
+    ) -> None:
+        """Update the receiver's now-playing card for the current
+        track. Called off the realtime path (the /api/now-playing
+        endpoint the frontend hits on every track change).
+
+        Tideway casts one continuous live FLAC, so the receiver keeps
+        the single session it was handed at connect — its card never
+        changed and showed "Tideway" forever. The Default Media
+        Receiver only takes metadata from a LOAD, and a mid-stream
+        re-LOAD of the same URL would hand the receiver headerless
+        FLAC (the STREAMINFO went by long ago). So a real track change
+        does three things together, under the encoder lock so the
+        realtime push can't interleave:
+
+          1. drop the encoder so the next push rebuilds it and a
+             fresh FLAC header leads the stream again,
+          2. flush the ring to the live edge so the receiver's new
+             connection doesn't replay the backlog (this is also the
+             latency fix — that backlog was the permanent delay
+             floor),
+          3. re-issue play_media with the new card.
+
+        The cost is a brief re-buffer at each track boundary; that is
+        the deliberate tradeoff for the card actually being correct,
+        and it starts at the live edge so it is far better than the
+        old wrong-card-plus-huge-delay behaviour. Dedup'd so position
+        ticks (same title/artist/album) don't trigger a reload.
+        """
+        meta = _music_metadata(title, artist, album, art_url)
+        self._last_np = meta
+        with self._session_lock:
+            session = self._session
+        if session is None:
+            return
+        if session.now_playing == meta:
+            return  # same track — nothing visible would change
+
+        # Steps 1 + 2 under the encoder lock so a concurrent
+        # push_pcm() can't encode into the buffer between the flush
+        # and the rebuild. push_pcm rebuilds the encoder whenever
+        # session.encoder is None, writing a fresh header first.
+        with session.encoder_lock:
+            old_encoder = session.encoder
+            session.encoder = None
+            session.encoder_rate = 0
+            session.encoder_channels = 0
+            session.encoder_dtype = ""
+            session.buffer.flush()
+            session.now_playing = meta
+        if old_encoder is not None:
+            # Discard the old encoder's tail on purpose — we want the
+            # stream to restart, not to splice the previous track's
+            # final frames in ahead of the new header.
+            try:
+                old_encoder.close()
+            except Exception as exc:
+                log.debug("cast: old encoder close on reload: %r", exc)
+
+        # Network call OUTSIDE the encoder lock so it never stalls the
+        # realtime audio callback. Best-effort: a receiver that
+        # rejects the reload is logged, not raised, so a track change
+        # can't take down playback.
+        try:
+            mc = session.cast.media_controller  # type: ignore[attr-defined]
+            mc.play_media(
+                session.stream_url,
+                "audio/flac",
+                stream_type="LIVE",
+                metadata=meta,
+            )
+            mc.block_until_active(timeout=5.0)
+            print(
+                f"[cast] now playing: {meta.get('title')} — "
+                f"{meta.get('artist', '')}".rstrip(" —"),
+                flush=True,
+            )
+        except Exception as exc:
+            log.debug("cast: now-playing reload failed: %r", exc)
 
     # ---- PCM tap (called from PCMPlayer's audio callback) -----------
 
