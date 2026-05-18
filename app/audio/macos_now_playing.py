@@ -87,6 +87,9 @@ class MacOSNowPlayingBridge:
         # Strong refs to the Cocoa block handlers so they don't get
         # garbage-collected and silently stop firing remote commands.
         self._handler_refs: list[Any] = []
+        # The MPRemoteCommand objects we bound handlers to. Kept so
+        # stop() can remove every target from Apple's side at quit.
+        self._bound_commands: list[Any] = []
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -174,6 +177,7 @@ class MacOSNowPlayingBridge:
             # Pin the returned target ref so ARC doesn't drop it.
             self._handler_refs.append(ref)
             self._handler_refs.append(handler)
+            self._bound_commands.append(cmd)
 
     # ------------------------------------------------------------------
     # State + metadata updates
@@ -247,6 +251,60 @@ class MacOSNowPlayingBridge:
                 )
             except Exception as exc:
                 _say(f"clear failed: {exc!r}")
+
+    def stop(self) -> None:
+        """Tear down the macOS Now Playing integration before the
+        interpreter finalizes, on the main thread during quit.
+
+        Why this is needed: MediaRemote retains the nowPlayingInfo
+        dict (Python-backed NSNumbers, i.e. OC_PythonNumber) and the
+        MPRemoteCommandCenter target blocks (PyObjC callables). On
+        quit, MediaRemote's serial queue can dispatch a queued
+        callback into one of those objects while Python is finalizing.
+        That re-enters a dying interpreter on a libdispatch thread and
+        trips libpthread's "pthread_exit() called from a thread not
+        created by pthread_create()" abort — the "Tideway quit
+        unexpectedly" dialog. Removing every command target and
+        nulling nowPlayingInfo here leaves MediaRemote holding only
+        Apple objects, so a late callback has no Python to reach.
+
+        Idempotent and a no-op off darwin / when never started.
+        """
+        if sys.platform != "darwin":
+            return
+        with self._lock:
+            if not self._enabled:
+                return
+            # Flip this first: update_state() / _push() bail on
+            # `not self._enabled`, so a player event racing this
+            # teardown can't repopulate nowPlayingInfo after we clear
+            # it.
+            self._enabled = False
+            commands = list(self._bound_commands)
+            self._bound_commands.clear()
+            info_center = self._info_center
+        try:
+            import MediaPlayer  # type: ignore[import-not-found]
+
+            for cmd in commands:
+                try:
+                    # A nil target removes every handler registered
+                    # for the command, dropping our PyObjC blocks
+                    # from Apple's side.
+                    cmd.removeTarget_(None)
+                    cmd.setEnabled_(False)
+                except Exception:
+                    pass
+            if info_center is not None:
+                info_center.setNowPlayingInfo_(None)
+                info_center.setPlaybackState_(
+                    MediaPlayer.MPNowPlayingPlaybackStateStopped
+                )
+        except Exception as exc:
+            _say(f"stop failed: {exc!r}")
+        finally:
+            self._handler_refs.clear()
+        _say("Now Playing torn down for shutdown")
 
     # ------------------------------------------------------------------
     # Push to MPNowPlayingInfoCenter

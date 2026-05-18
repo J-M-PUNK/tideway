@@ -214,6 +214,22 @@ def _graceful_shutdown(server: "uvicorn.Server") -> None:  # type: ignore[name-d
     except Exception:
         pass
 
+    # Tear down the macOS Now Playing integration before the
+    # interpreter finalizes. MediaRemote retains our nowPlayingInfo
+    # (Python-backed NSNumbers) and MPRemoteCommandCenter blocks; a
+    # callback fired on its serial queue during finalization re-enters
+    # the dying interpreter and trips libpthread's pthread_exit abort
+    # ("Tideway quit unexpectedly", crash thread on
+    # com.apple.MediaRemote...serialQueue). stop() removes every Python
+    # object from Apple's side so a late callback has nothing to call.
+    try:
+        import server as _server
+        bridge = getattr(_server, "macos_now_playing_bridge", None)
+        if bridge is not None:
+            bridge.stop()
+    except Exception:
+        pass
+
     # Close the audio OutputStream before the interpreter exits.
     # sounddevice registers an atexit Pa_Terminate(); if a stream is
     # still open when Python finalizes, PortAudio tears it down from
