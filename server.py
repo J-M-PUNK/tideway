@@ -7786,47 +7786,80 @@ def artist_detail(artist_id: int) -> dict:
     # don't look like a scrape to Tidal's abuse layer (a real client
     # opening an artist page does similar volume), and the wall-clock
     # drops to roughly two waves of the slowest single call.
-    with ThreadPoolExecutor(max_workers=5) as pool:
+    # Per-task wall-time instrumentation. Cold artist load is ~1.6s
+    # and widening this pool did NOT help (measured: same at 5 and 10
+    # workers), so a single task dominates rather than fan-out
+    # queueing. _safe_t records each task's own duration; the
+    # [perf] artist line below names the long pole.
+    _t0 = time.monotonic()
+    _tt: dict[str, float] = {}
+
+    def _safe_t(name, fn, default):
+        _s = time.monotonic()
+        try:
+            return fn()
+        except Exception:
+            return default
+        finally:
+            _tt[name] = (time.monotonic() - _s) * 1000.0
+
+    # One worker per remaining task. With the two heavy poles
+    # (page, mix) moved to /extras, the eight that stay are
+    # uniformly fast (~100-400ms) except for occasional Tidal-side
+    # spikes on a single call. Sizing the pool to the fan-out means
+    # a spiky call always starts immediately instead of queueing
+    # behind five workers, so total ~= the slowest single call.
+    with ThreadPoolExecutor(max_workers=8) as pool:
         # Bio used to be jittered to spread the burst, but that was
         # premature: bio is a small text fetch, not a stream-manifest
         # request, and the 50-200ms sleep added directly to the
         # critical path with no observable behavior benefit.
-        f_bio = pool.submit(_safe, artist.get_bio, None)
+        f_bio = pool.submit(_safe_t, "bio", artist.get_bio, None)
         f_similar = pool.submit(
-            _safe,
+            _safe_t,
+            "similar",
             lambda: [artist_to_dict(a) for a in artist.get_similar()][:12],
             [],
         )
         f_top_tracks = pool.submit(
-            _safe,
+            _safe_t,
+            "top_tracks",
             lambda: [
                 track_to_dict(t) for t in tidal.get_artist_top_tracks(artist)
             ],
             [],
         )
         f_albums_raw = pool.submit(
-            _safe, lambda: list(tidal.get_artist_albums(artist)) or [], []
+            _safe_t,
+            "albums",
+            lambda: list(tidal.get_artist_albums(artist)) or [],
+            [],
         )
         f_eps = pool.submit(
-            _safe, lambda: list(artist.get_ep_singles(limit=40)) or [], []
+            _safe_t,
+            "eps",
+            lambda: list(artist.get_ep_singles(limit=40)) or [],
+            [],
         )
         f_compilations = pool.submit(
-            _safe, lambda: list(artist.get_other(limit=40)) or [], []
-        )
-        f_page = pool.submit(_safe, artist.page, None)
-        f_mix_id = pool.submit(
-            _safe, lambda: str(artist.get_radio_mix().id), None
+            _safe_t,
+            "comps",
+            lambda: list(artist.get_other(limit=40)) or [],
+            [],
         )
         # Credits and videos used to be separate endpoints the
         # frontend fetched in parallel after the main artist
         # payload arrived. Folding them into the same response
         # saves two HTTP round-trips on every artist page load.
         f_videos = pool.submit(
-            _safe,
+            _safe_t,
+            "videos",
             lambda: [video_to_dict(v) for v in artist.get_videos(limit=50) or []],
             [],
         )
-        f_credits = pool.submit(_safe, lambda: _artist_credits_list(artist_id, 20), [])
+        f_credits = pool.submit(
+            _safe_t, "credits", lambda: _artist_credits_list(artist_id, 20), []
+        )
 
     bio = f_bio.result()
     similar = f_similar.result()
@@ -7834,10 +7867,35 @@ def artist_detail(artist_id: int) -> dict:
     raw_albums = f_albums_raw.result()
     raw_eps = f_eps.result()
     raw_appears = list(f_compilations.result())
-    artist_page = f_page.result()
-    artist_mix_id = f_mix_id.result()
+    # artist.page() (~1.5-3s) and get_radio_mix() (~0.35-3.2s) are the
+    # two measured latency poles and feed only secondary content (the
+    # "Appears On / Compilations" rows and the radio id). They're
+    # deferred to GET /api/artist/{id}/extras so first paint isn't
+    # blocked on them. Response keys stay present for compatibility:
+    # appears_on falls back to the fast get_other() set, compilations
+    # is empty, and artist_mix_id is null until /extras lands.
+    artist_page = None
+    artist_mix_id = None
     videos = f_videos.result()
     credits = f_credits.result()
+
+    _perf = (
+        f"[perf] artist id={artist_id} "
+        f"total={(time.monotonic() - _t0) * 1000.0:.0f}ms "
+        + " ".join(
+            f"{k}={v:.0f}ms"
+            for k, v in sorted(
+                _tt.items(), key=lambda kv: kv[1], reverse=True
+            )
+        )
+    )
+    print(_perf, file=sys.stderr, flush=True)
+    try:
+        from app.audio.player import audio_log as _audio_log
+
+        _audio_log.info(_perf)
+    except Exception:
+        pass
 
     # Pull two modules off Tidal's curated artist page:
     #
@@ -7998,6 +8056,85 @@ def artist_radio(artist_id: int) -> list[dict]:
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc))
     return [track_to_dict(t) for t in tracks]
+
+
+_artist_extras_cache: dict[str, tuple[float, dict]] = {}
+_artist_extras_cache_lock = threading.Lock()
+
+
+@app.get("/api/artist/{artist_id}/extras")
+def artist_extras(artist_id: int) -> dict:
+    """Secondary artist-page content split off the main payload
+    because it is the slow part. Two measured latency poles live
+    here: Tidal's curated `artist.page()` (~1.5-3s, the only source
+    of the "Compilations" module and the full "Appears On" set) and
+    `get_radio_mix()` (~0.35-3.2s, just the radio mix id). The main
+    /api/artist/{id} no longer blocks on these; the frontend fetches
+    this after first paint and fills the rows in. Cached for the same
+    TTL as the detail payload so back-navigation is free."""
+    _require_auth()
+    cache_key = str(artist_id)
+    now = time.monotonic()
+    with _artist_extras_cache_lock:
+        c = _artist_extras_cache.get(cache_key)
+    if c and (now - c[0]) < _ARTIST_DETAIL_CACHE_TTL_SEC:
+        return c[1]
+    try:
+        artist = tidal.session.artist(artist_id)
+    except Exception as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+    def _safe(fn, default):
+        try:
+            return fn()
+        except Exception:
+            return default
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        f_page = pool.submit(_safe, artist.page, None)
+        f_mix = pool.submit(
+            _safe, lambda: str(artist.get_radio_mix().id), None
+        )
+    page = f_page.result()
+    mix_id = f_mix.result()
+
+    raw_appears: list = []
+    raw_comps: list = []
+    if page is not None:
+        try:
+            from tidalapi.album import Album as _TidalAlbum
+
+            for cat in getattr(page, "categories", []) or []:
+                t = (getattr(cat, "title", "") or "").strip().lower()
+                is_app = "appear" in t or "featured" in t
+                is_comp = "compilation" in t
+                if not is_app and not is_comp:
+                    continue
+                for item in getattr(cat, "items", []) or []:
+                    if isinstance(item, _TidalAlbum):
+                        (raw_comps if is_comp else raw_appears).append(item)
+        except Exception:
+            pass
+
+    def _byid(items: list) -> list:
+        seen: set = set()
+        out: list = []
+        for a in items:
+            aid = getattr(a, "id", None)
+            if aid is None or aid in seen:
+                continue
+            seen.add(aid)
+            out.append(a)
+        return out
+
+    result = {
+        "appears_on": [album_to_dict(a) for a in _byid(raw_appears)],
+        "compilations": [album_to_dict(a) for a in _byid(raw_comps)],
+        "artist_mix_id": mix_id,
+    }
+    with _artist_extras_cache_lock:
+        _artist_extras_cache[cache_key] = (time.monotonic(), result)
+    return result
 
 
 # ---------------------------------------------------------------------------

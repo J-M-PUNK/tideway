@@ -171,6 +171,16 @@ export interface AlbumDetail extends Album {
   related_artists: Artist[];
 }
 
+/** Secondary artist-page content fetched after first paint via
+ *  /api/artist/{id}/extras. Split out because the Tidal calls behind
+ *  it (the curated page + the radio mix) are the slow part of the
+ *  artist page; the primary payload no longer blocks on them. */
+export interface ArtistExtras {
+  appears_on: Album[];
+  compilations: Album[];
+  artist_mix_id: string | null;
+}
+
 export interface ArtistDetail extends Artist {
   top_tracks: Track[];
   /** Mixed-format "Latest releases" row — the artist's albums, EPs,
