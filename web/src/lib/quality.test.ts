@@ -113,13 +113,18 @@ describe("filterAvailableQualities", () => {
     ).toEqual(["low_96k", "low_320k", "high_lossless", "hi_res_lossless"]);
   });
 
-  it("hides both lossless tiers when only an unsupported tag is present", () => {
-    // DOLBY_ATMOS / SONY_360RA aren't deliverable to our PKCE
-    // session, so a track tagged only with those is effectively
-    // lossy-only — neither lossless tier should show.
+  it("keeps every tier for an immersive-only tag (Thriller Atmos regression)", () => {
+    // DOLBY_ATMOS / SONY_360RA is the album's spatial master, not a
+    // statement about the stereo downmix. Tidal still serves a FLAC
+    // stereo and our PKCE session receives it, so no tier may be
+    // hidden. Thriller's canonical record is the Atmos master; the
+    // old filter wrongly capped it at Medium.
     expect(
       values(filterAvailableQualities(ALL_QUALITIES, ["DOLBY_ATMOS"])),
-    ).toEqual(["low_96k", "low_320k"]);
+    ).toEqual(["low_96k", "low_320k", "high_lossless", "hi_res_lossless"]);
+    expect(
+      values(filterAvailableQualities(ALL_QUALITIES, ["SONY_360RA"])),
+    ).toEqual(["low_96k", "low_320k", "high_lossless", "hi_res_lossless"]);
   });
 
   it("normalizes tag case", () => {

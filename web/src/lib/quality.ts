@@ -27,17 +27,25 @@ export function effectiveFormatLabel(
 /**
  * Filter the quality catalog down to tiers that are actually
  * deliverable for the given track or album. Used by the download-
- * menu surfaces so a Hi-Fi-only release doesn't list Max (which
- * would just download the same FLAC file Tidal serves at High),
- * and a lossy-only release doesn't list either lossless tier.
+ * menu surfaces so a Hi-Fi-only release doesn't list Max, which
+ * would just download the same FLAC file Tidal serves at High.
  *
- * The filter is conservative: when `tags` is undefined or empty,
- * we return the full list. Tidal doesn't always populate media_tags
- * on older / niche catalog entries, and stripping legitimate
- * quality options for those would surprise users more than the
- * occasional "you picked Max but got Lossless" badge does. Only
- * when we have positive signal that a tier isn't there do we hide
- * it.
+ * The only tag pattern that is real evidence a tier is missing is
+ * "LOSSLESS present, HIRES_LOSSLESS absent": Tidal is telling us the
+ * best master is CD-res, so Max is pointless there. Every other tag
+ * set is NOT evidence the stereo lossless stream is gone. In
+ * particular an immersive-only tag like DOLBY_ATMOS or SONY_360RA is
+ * the album's spatial master, not a statement about the stereo
+ * downmix. Tidal still serves a CD or hi-res FLAC stereo for those,
+ * and our PKCE session always receives that downmix, so hiding the
+ * lossless tiers there is wrong. That was the Thriller bug: its
+ * canonical record is the Atmos master, tagged DOLBY_ATMOS only, and
+ * the old filter capped it at Medium.
+ *
+ * Truly lossy-only releases carry no media_tags at all, so the
+ * empty-tags fail-open branch already covers them. We never hide
+ * High on tag evidence: anything Tidal streams at all is available
+ * as at least a CD-res FLAC.
  */
 export function filterAvailableQualities(
   qualities: QualityOption[],
@@ -45,15 +53,8 @@ export function filterAvailableQualities(
 ): QualityOption[] {
   if (!tags || tags.length === 0) return qualities;
   const T = new Set(tags.map((x) => x.toUpperCase()));
-  const hasHires = T.has("HIRES_LOSSLESS");
-  const hasLossless = hasHires || T.has("LOSSLESS");
-  return qualities.filter((q) => {
-    if (q.value === "hi_res_lossless") return hasHires;
-    if (q.value === "high_lossless") return hasLossless;
-    // Lossy tiers (low_96k, low_320k) are universally available
-    // for anything Tidal will stream at all. Anything else (future
-    // tier additions) is shown by default — better to keep an
-    // unrecognized option than hide one we should have allowed.
-    return true;
-  });
+  const cdOnly = T.has("LOSSLESS") && !T.has("HIRES_LOSSLESS");
+  return qualities.filter((q) =>
+    q.value === "hi_res_lossless" ? !cdOnly : true,
+  );
 }
