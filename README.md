@@ -141,9 +141,13 @@ in the global popularity signal.
 
 ![Stats page](assets/screenshots/stats.png)
 
-**Downloads.** Hi-res stereo FLAC and music video downloads all
-run through a concurrent queue that you can tune. Metadata and
-artwork are embedded with mutagen. Any track you have downloaded
+**Downloads.** The file format follows the quality tier. High and
+Max are lossless and download as FLAC. Tidal delivers that FLAC
+inside an MP4, so Tideway remuxes it into a native `.flac` file.
+Low and Medium are lossy AAC and download as `.m4a`, which is the
+standard AAC container, not a deprecated format. Music videos
+download as well. Everything runs through a concurrent queue that
+you can tune. Metadata and artwork are embedded with mutagen. Any track you have downloaded
 plays straight from disk without touching the Tidal streaming
 path. A filename template, toggles for per-album and per-playlist
 folders, and a skip-existing option cover the common download
