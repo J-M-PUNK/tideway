@@ -90,6 +90,35 @@ except Exception:  # noqa: BLE001
 
 log = logging.getLogger(__name__)
 
+# Persistent audio-event log. A Finder-launched .app discards
+# stdout/stderr, so the [audio]/[pcm] prints below never survive a
+# real incident — an audio glitch was undebuggable from logs. This
+# rotating file in the app data dir does survive, mirroring how
+# window_chrome keeps its own. Realtime-safe: the callback emitters
+# are rate-limited to ~1/sec and the swap line fires once per track
+# change, so no per-block file I/O is added. Falls back to a
+# NullHandler if the data dir isn't writable, so logging never raises
+# on the audio thread.
+audio_log = logging.getLogger("tideway.audio")
+audio_log.setLevel(logging.INFO)
+audio_log.propagate = False
+if not audio_log.handlers:
+    try:
+        from logging.handlers import RotatingFileHandler
+        from app.paths import user_data_dir
+
+        _ah = RotatingFileHandler(
+            str(user_data_dir() / "audio.log"),
+            maxBytes=1_000_000,
+            backupCount=3,
+        )
+        _ah.setFormatter(
+            logging.Formatter("%(asctime)s %(message)s", "%Y-%m-%d %H:%M:%S")
+        )
+        audio_log.addHandler(_ah)
+    except Exception:
+        audio_log.addHandler(logging.NullHandler())
+
 
 # Back-pressure between the decoder and the audio callback. Each
 # item is one AudioFrame's worth of PCM (~1024 samples typical).
@@ -224,6 +253,13 @@ class PCMPlayer:
 
         self._paused = False
         self._seeking = False
+        # Set while _swap_pipeline_to() is rewriting the pipeline refs
+        # from another thread. The audio callback is lock-free, so
+        # without this it can run mid-swap and apply the previous
+        # track's ReplayGain/filter state to the new track's samples —
+        # a split second of full-scale clipped audio on track change.
+        # Callback emits silence while this is set, same as _seeking.
+        self._swapping = False
         self._volume = 100  # 0..100
         self._muted = False
         # External output active: when something else is rendering
@@ -2292,6 +2328,12 @@ class PCMPlayer:
                 file=sys.stderr,
                 flush=True,
             )
+            try:
+                audio_log.info(
+                    "callback status=%s count_since_last=%d", status, count
+                )
+            except Exception:
+                pass
 
     def _log_callback_heartbeat(self) -> None:
         """DEBUG-only per-100-callback heartbeat. Confirms the
@@ -2327,6 +2369,12 @@ class PCMPlayer:
                 file=sys.stderr,
                 flush=True,
             )
+            try:
+                audio_log.info(
+                    "queue starvation count_since_last=%d", count
+                )
+            except Exception:
+                pass
 
     def _audio_callback(self, outdata, frames, time_info, status) -> None:
         if status:
@@ -2346,6 +2394,17 @@ class PCMPlayer:
         # hasn't started would let the callback raise CallbackStop
         # and end the stream mid-seek.
         if self._seeking:
+            outdata.fill(0)
+            return
+
+        # A pipeline swap is rewriting decoder/queue/gain refs on
+        # another thread. This callback is lock-free, so reading a
+        # half-swapped pipeline would feed the new track's samples
+        # through the old track's ReplayGain/filters — the
+        # split-second "explosion" on track change. Silence until the
+        # swap (including the ReplayGain re-derive) completes; it's
+        # sub-millisecond, so this is inaudible.
+        if self._swapping:
             outdata.fill(0)
             return
 
@@ -3075,42 +3134,71 @@ class PCMPlayer:
         `_Preload` only has to be wired up once.
 
         Atomicity: each assignment is one bytecode op under the GIL,
-        but the *sequence* of swaps is not atomic. Callers must
-        ensure the audio callback can't observe a half-swapped
-        state. The three current callers each handle this:
-
-          - `_try_gapless_swap` runs IN the callback; the callback
-            is the sole modifier at the track-boundary moment.
-          - `_bridge_to_preload` runs after `finished_callback`
-            fired, so the callback isn't running on the old stream.
-          - `_adopt_preload_locked` holds `_lock` and (for
-            cross-rate) closes the old stream before calling.
+        but the *sequence* is not atomic, and the audio callback is
+        lock-free — holding `_lock` (as `_adopt_preload_locked` does)
+        does NOT keep the callback out, so it could read a
+        half-swapped pipeline: the new track's queue with the old
+        track's ReplayGain and filter state. That mismatch is the
+        split-second "explosion" on track change. The `_swapping`
+        guard below closes it: it's set before the first ref changes
+        and cleared after the ReplayGain re-derive, and the callback
+        emits silence the whole time (sub-millisecond, inaudible).
+        `_try_gapless_swap` runs in the callback thread itself, so
+        the guard there is just set and cleared within one
+        invocation — harmless, and keeps a single code path.
 
         Always copies the rate / dtype / channels triple along with
         the rest. Same-rate swaps no-op those (the values match the
         active stream); the alternative — conditional copies — was
         the contract drift this helper exists to prevent.
         """
-        self._decoder = pre.decoder
-        self._pcm_queue = pre.queue
-        self._decoder_thread = pre.thread
-        self._stop_flag = pre.stop_flag
-        self._decoder_done = pre.done
-        self._current_track_id = pre.track_id
-        self._current_duration_ms = pre.duration_ms
-        self._current_stream_info = pre.stream_info
-        self._source_urls = pre.source_urls
-        self._source_path = pre.source_path
-        self._stream_sample_rate = pre.sample_rate
-        self._stream_sd_dtype = pre.sd_dtype
-        self._stream_channels = pre.channels
-        self._samples_emitted = 0
-        self._callback_carry = None
-        # Re-derive ReplayGain off the new track's tags. Lock-free —
-        # safe in all three contexts this swap runs from (audio
-        # callback for `_try_gapless_swap`, finished-callback bridge,
-        # and held-lock for `_adopt_preload_locked`).
-        self._apply_replaygain_for(pre.stream_info)
+        old_track = self._current_track_id
+        old_info = self._current_stream_info
+        self._swapping = True
+        try:
+            self._decoder = pre.decoder
+            self._pcm_queue = pre.queue
+            self._decoder_thread = pre.thread
+            self._stop_flag = pre.stop_flag
+            self._decoder_done = pre.done
+            self._current_track_id = pre.track_id
+            self._current_duration_ms = pre.duration_ms
+            self._current_stream_info = pre.stream_info
+            self._source_urls = pre.source_urls
+            self._source_path = pre.source_path
+            self._stream_sample_rate = pre.sample_rate
+            self._stream_sd_dtype = pre.sd_dtype
+            self._stream_channels = pre.channels
+            self._samples_emitted = 0
+            self._callback_carry = None
+            # Re-derive ReplayGain off the new track's tags while the
+            # callback is still silenced, so it never applies the old
+            # gain to the new samples.
+            self._apply_replaygain_for(pre.stream_info)
+        finally:
+            self._swapping = False
+        # Logged after the guard clears so the file write is outside
+        # the silence window. This is the line that was missing when
+        # the explosion couldn't be traced from logs: it records the
+        # ReplayGain delta across the swap, which is what drives the
+        # level jump when the race is open.
+        def _rg(info) -> str:
+            if info is None:
+                return "n/a"
+            t = getattr(info, "track_replay_gain_db", None)
+            a = getattr(info, "album_replay_gain_db", None)
+            return f"track={t} album={a}"
+
+        try:
+            audio_log.info(
+                "swap %s -> %s | rg old(%s) new(%s)",
+                old_track,
+                pre.track_id,
+                _rg(old_info),
+                _rg(pre.stream_info),
+            )
+        except Exception:
+            pass
 
 
 # ---------------------------------------------------------------------------
