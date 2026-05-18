@@ -25,6 +25,26 @@ def test_ring_buffer_flush_drops_backlog_keeps_open():
     assert rb.read(64, timeout=0.1) == b"live"
 
 
+def test_ring_buffer_single_consumer_supersede():
+    # read() is destructive; two overlapping serve threads (the
+    # Cast per-track reload's new GET racing the old one) must not
+    # both drain the buffer. A newer attach() supersedes the old.
+    rb = RingBuffer(max_bytes=1024)
+    g1 = rb.attach()
+    rb.write(b"AAAA")
+    assert rb.read(64, timeout=0.1, gen=g1) == b"AAAA"
+
+    g2 = rb.attach()  # new connection takes over
+    assert rb.is_superseded(g1)
+    assert not rb.is_superseded(g2)
+
+    rb.write(b"BBBB")
+    # The stale consumer gets nothing and is told to stop...
+    assert rb.read(64, timeout=0.1, gen=g1) == b""
+    # ...the live one gets the bytes.
+    assert rb.read(64, timeout=0.1, gen=g2) == b"BBBB"
+
+
 def test_music_metadata_shape_and_fallbacks():
     full = _music_metadata("Song", "Artist", "Album", "http://art/x.jpg")
     assert full == {

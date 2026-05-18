@@ -69,6 +69,32 @@ class RingBuffer:
         self._buf = bytearray()
         self._cv = threading.Condition()
         self._closed = False
+        # Single-active-consumer guard. read() is destructive (it
+        # deletes the bytes it returns), so two HTTP serve threads on
+        # the same buffer would split the FLAC stream and corrupt
+        # both. The Cast track-change reload issues a fresh play_media
+        # per track, and the receiver's new GET can briefly overlap
+        # the old connection. attach() bumps this generation; an
+        # older serve loop sees it move and exits, leaving exactly
+        # one consumer.
+        self._gen = 0
+
+    def attach(self) -> int:
+        """Register as the current consumer and supersede any prior
+        one. Returns this consumer's generation token; pass it to
+        read()/is_superseded(). Wakes a blocked older reader so it
+        notices it's been superseded promptly instead of after its
+        next idle timeout."""
+        with self._cv:
+            self._gen += 1
+            self._cv.notify_all()
+            return self._gen
+
+    def is_superseded(self, gen: int) -> bool:
+        """True once a newer consumer has attach()ed. The serve loop
+        checks this each iteration and returns, so a stale connection
+        stops draining the shared buffer."""
+        return gen != self._gen
 
     def write(self, data: bytes) -> None:
         with self._cv:
@@ -86,14 +112,24 @@ class RingBuffer:
             self._buf.extend(data)
             self._cv.notify_all()
 
-    def read(self, n: int, timeout: float = 1.0) -> bytes:
+    def read(
+        self, n: int, timeout: float = 1.0, gen: Optional[int] = None
+    ) -> bytes:
         deadline = time.monotonic() + timeout
         with self._cv:
             while not self._buf and not self._closed:
+                if gen is not None and gen != self._gen:
+                    # Superseded by a newer consumer while we were
+                    # blocked here — return empty so the stale serve
+                    # loop exits instead of consuming the new
+                    # consumer's bytes.
+                    return b""
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return b""
                 self._cv.wait(timeout=remaining)
+            if gen is not None and gen != self._gen:
+                return b""
             chunk = bytes(self._buf[:n])
             del self._buf[: len(chunk)]
             return chunk
@@ -348,12 +384,21 @@ class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Connection", "close")
         self.end_headers()
         buf = server.buffer
+        # Become the sole consumer. A later GET (the Cast per-track
+        # reload's new connection) supersedes this one so two threads
+        # never drain the destructive buffer at once.
+        my_gen = buf.attach()
         try:
             while True:
-                chunk = buf.read(16384, timeout=2.0)
+                if buf.is_superseded(my_gen):
+                    # A newer connection took over. End this stream
+                    # cleanly and stop reading the shared buffer.
+                    self._write_chunk(b"")
+                    return
+                chunk = buf.read(16384, timeout=2.0, gen=my_gen)
                 if not chunk:
                     # Idle read with a closed buffer ends the stream.
-                    if buf.is_closed:
+                    if buf.is_closed or buf.is_superseded(my_gen):
                         self._write_chunk(b"")
                         return
                     continue
