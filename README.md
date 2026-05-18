@@ -1,13 +1,10 @@
 # Tideway
 
-TIDAL BUT BETTER. NO BLOAT WITH THE ABSOLUTE MOST.
-
-The ultimate desktop client for Tidal. Bit perfect gapless playback,
-hi-res downloads, listening data from Last.fm and Spotify, full
-library management, and more. Everything ships in one native
-feeling desktop app that packages a FastAPI backend, a React and
-Tailwind frontend, and a PyAV and sounddevice audio engine behind
-a single pywebview window.
+The native desktop client for Tidal. Bit-perfect gapless playback,
+hi-res downloads, a real parametric EQ, and your listening history
+from Last.fm and Spotify, in one app with no web bloat. It packages
+a FastAPI backend, a React and Tailwind frontend, and a PyAV and
+sounddevice audio engine behind a single pywebview window.
 
 > ### About your Tidal account
 >
@@ -27,7 +24,15 @@ a single pywebview window.
 > your own risk. If you cannot accept any chance of a Tidal action
 > against your account, do not use this app.
 
-![Home page](assets/screenshots/home.png)
+<!-- TODO: replace the screenshot below with a 20-30s demo GIF
+     (play a track with the signal-path readout, open the EQ, queue
+     an album download at Max) and save it as
+     assets/screenshots/demo.gif. A short clip converts far better
+     than a static shot for every channel we'd post this on. -->
+
+![Tideway](assets/screenshots/home.png)
+
+**[Download for macOS, Windows, or Linux »](../../releases/latest)**
 
 ## Contents
 
