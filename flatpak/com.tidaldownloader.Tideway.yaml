@@ -1,0 +1,76 @@
+# Flatpak manifest — native Linux build (replaces the AppImage's
+# browser fallback with a real WebKitGTK window). See
+# docs/linux-flatpak.md for scope and the staged plan.
+#
+# STATUS: Stage 0 scaffold. Items marked TODO(stage1) are filled in
+# from the VM in Stage 1 (real source hashes, the pip-generated
+# python deps module). It is intentionally not buildable yet.
+
+app-id: com.tidaldownloader.Tideway
+runtime: org.gnome.Platform
+# GNOME 47 maps to the freedesktop 24.08 base (drives the Node
+# SDK-extension version below). Pinned; bump deliberately.
+runtime-version: "47"
+sdk: org.gnome.Sdk
+sdk-extensions:
+  # Node only exists in the build sandbox to produce web/dist; it
+  # is not part of the runtime the app ships against.
+  - org.freedesktop.Sdk.Extension.node20
+command: tideway
+
+finish-args:
+  - --share=network                       # Tidal / Spotify / Last.fm
+  - --socket=pulseaudio                   # PortAudio/sounddevice out
+  - --socket=wayland                      # native window
+  - --socket=fallback-x11                 # X11 fallback
+  - --device=dri                          # WebKitGTK GPU compositing
+  - --filesystem=xdg-download             # downloads -> ~/Downloads
+  - --talk-name=org.freedesktop.Notifications  # libnotify
+
+cleanup:
+  - /include
+  - /lib/pkgconfig
+  - /share/man
+  - "*.a"
+  - "*.la"
+
+modules:
+  # sounddevice needs libportaudio; the GNOME runtime does not ship
+  # it, so build it. TODO(stage1): pin a real release tarball + its
+  # sha256 (computed in the VM).
+  - name: portaudio
+    buildsystem: autotools
+    sources:
+      - type: archive
+        url: https://files.portaudio.com/archives/pa_stable_v190700_20210406.tgz
+        sha256: TODO_STAGE1_PORTAUDIO_SHA256
+
+  # Offline, hashed PyPI deps generated from requirements.txt with
+  # flatpak-pip-generator. TODO(stage1): generate
+  # python3-requirements.json in the VM and include it here:
+  #   - python3-requirements.json
+
+  - name: tideway
+    buildsystem: simple
+    # Node extension is mounted under /usr/lib/sdk/node20; put it on
+    # PATH only for the web build.
+    build-options:
+      append-path: /usr/lib/sdk/node20/bin
+    build-commands:
+      # Web bundle.
+      - npm --prefix web ci --no-audit --no-fund
+      - npm --prefix web run build
+      # App payload. The runtime Python imports `gi`, so pywebview
+      # uses the GTK/WebKit backend — no browser fallback.
+      - install -d /app/share/tideway
+      - cp -r app server.py desktop.py VERSION web/dist /app/share/tideway/
+      - install -Dm755 flatpak/tideway-launcher.sh /app/bin/tideway
+      - install -Dm644 flatpak/com.tidaldownloader.Tideway.desktop
+        /app/share/applications/com.tidaldownloader.Tideway.desktop
+      - install -Dm644 assets/icon.png
+        /app/share/icons/hicolor/512x512/apps/com.tidaldownloader.Tideway.png
+      # TODO(stage1): AppStream metainfo (required by Flathub; good
+      # practice for a self-hosted repo too).
+    sources:
+      - type: dir
+        path: ..
