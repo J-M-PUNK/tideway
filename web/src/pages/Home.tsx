@@ -32,45 +32,25 @@ import type {
   Track,
 } from "@/api/types";
 
-// Titles of Tidal editorial rows we do not want on our home page.
-// Matched case insensitively as a substring against the row title,
-// normalised to strip curly Unicode apostrophes so either `'` or `'`
-// in the source catches.
-const HIDDEN_HOME_ROW_TITLES = [
-  "albums you'll enjoy",
-  "your favorite artists",
-  "popular playlists",
-  // Tidal renders this as a single-card row whose only item is the
-  // "My Most Listened" auto-playlist. Redundant as a launcher when
-  // the playlist itself is already in Your Library.
-  "your listening history",
-  "spotlighted uploads",
-  // Editorial playlists with an algorithmic sheen — the items inside
-  // are the same recommendations already surfacing in mixes and
-  // suggestions, just rebranded. The row reads as filler on the home
-  // page, so drop it like the "Because you liked X" rows below.
-  "user playlists you'll love",
-  // Tidal's "Suggested new" rows (albums + songs) duplicate what the
-  // AOTY-backed Top albums / New releases sections give us, with
-  // less editorial value (Tidal-algorithm picks vs human-rated AOTY
-  // entries). Hiding both keeps the home page focused on the AOTY
-  // discovery surfaces and the user's own listening history.
-  "suggested new albums for you",
-  "suggested new songs for you",
-  // Source rows for the formerly-merged "Suggested new songs" row.
-  // Hiding them at source means the merge logic below produces
-  // nothing, even though the merge code still exists (left in place
-  // in case we later re-enable a curated merged version).
-  "recommended new tracks",
-  "uploads for you",
-  // "Because you liked X" / "Because you listened to X" rows are a
-  // long tail of duplicates of the items that sit right above them.
-  // The user can still find the same recommendations inside the full
-  // discovery surfaces (artist pages, mixes). Drop them from the home
-  // stream so the page stays scannable.
-  "because you liked",
-  "because you listened",
-];
+// Allowlist of the only Tidal editorial rows we render on the home
+// page. This is deliberately an allowlist, not a denylist: Tidal
+// keeps introducing new rows ("Alternative R&B and more", "Soulful
+// pop and more", "Because you liked X", ...) and a denylist lets
+// every new one leak through until someone notices and adds it.
+// Anything whose normalised title isn't exactly one of these is
+// dropped.
+//
+// Combined with the always-rendered AotyHomeSection (Top albums +
+// New releases), these three give the five home categories we want:
+// Top albums, New releases, Recently played, Custom mixes, Personal
+// radio stations. Matched on exact normalised title — the same
+// equality the compact / hoist / priority buckets below already
+// rely on, so Tidal's real titles are known to normalise to these.
+const ALLOWED_HOME_ROW_TITLES = new Set([
+  "recently played",
+  "custom mixes",
+  "personal radio stations",
+]);
 
 // "Recommended new tracks" and "Uploads for you" both surface
 // newly-added catalog content Tidal thinks we'd like. Fold them into
@@ -114,18 +94,22 @@ function filterHomeRows(page: TidalPage): {
   hoistedAlbums: PageCategory | null;
   page: TidalPage;
 } {
-  const hideNeedles = HIDDEN_HOME_ROW_TITLES.map(normalizeTitle);
   const mergeNeedles = MERGE_SOURCE_TITLES.map(normalizeTitle);
 
-  // First pass: drop hidden rows, and collect the merge sources into a
-  // single merged row that takes the first merge source's slot.
+  // First pass: keep only allowlisted rows (everything Tidal sends
+  // that isn't one of our categories is dropped here), then collect
+  // any merge sources into a single merged row. The allowlist runs
+  // before the merge branch, so merge sources that aren't
+  // allowlisted are dropped and the merge stays inert — same
+  // outcome the old denylist produced, but robust against Tidal
+  // inventing new rows.
   const kept: PageCategory[] = [];
   const mergedItems: PageItem[] = [];
   let mergedTemplate: PageCategory | null = null;
 
   for (const cat of page.categories) {
     const title = normalizeTitle(cat.title ?? "");
-    if (hideNeedles.some((n) => title.includes(n))) continue;
+    if (!ALLOWED_HOME_ROW_TITLES.has(title)) continue;
     if (mergeNeedles.some((n) => title.includes(n))) {
       if (mergedTemplate === null) {
         mergedTemplate = cat;
