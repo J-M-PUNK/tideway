@@ -26,6 +26,7 @@ Threading model:
 """
 from __future__ import annotations
 
+import faulthandler
 import logging
 import os
 import queue
@@ -422,6 +423,22 @@ class PCMPlayer:
         # 20 callbacks (~4-5 Hz at typical 86 Hz callback rate) so
         # the SSE position-update path lets the snapshot through.
         self._seq_bump_counter = 0
+
+        # Stall watchdog. The realtime callback updates _cb_last_t
+        # on every invocation (even paused/seeking — it still fires
+        # to output silence), so if _cb_last_t goes stale while we
+        # should be playing, the callback thread is wedged (the
+        # silent-freeze class that left no log line and needed a
+        # manual `sample` to diagnose). The watchdog is deliberately
+        # lock-free so it can still fire while _lock is deadlocked,
+        # and it dumps every thread's stack so the next freeze
+        # diagnoses itself.
+        self._stall_dumped = False
+        threading.Thread(
+            target=self._stall_watchdog,
+            name="player-stall-watchdog",
+            daemon=True,
+        ).start()
 
         # macOS audio-route listener. Subscribes to TWO CoreAudio
         # events:
@@ -2491,6 +2508,69 @@ class PCMPlayer:
             except Exception:
                 pass
 
+    def _stall_watchdog(self) -> None:
+        """Detect a wedged audio callback and dump every thread's
+        stack so the freeze diagnoses itself.
+
+        The realtime callback sets _cb_last_t on every invocation,
+        including while paused/seeking (it still fires to output
+        silence), so a stale _cb_last_t while state is "playing"
+        means the callback thread is blocked, not idle. 10s is far
+        beyond any normal buffer/jitter (callbacks run ~12x/sec), so
+        there are no false positives from scheduling hiccups.
+
+        Strictly lock-free: it must be able to fire *during* a _lock
+        deadlock, so it only reads plain attributes and never takes
+        _lock. Fires once per stall; rearms when audio resumes.
+        """
+        STALL_S = 10.0
+        while True:
+            time.sleep(5.0)
+            try:
+                last = self._cb_last_t
+                active = (
+                    self._stream is not None
+                    and self._state == "playing"
+                    and not self._paused
+                    and not self._seeking
+                    and bool(last)
+                )
+                if not active:
+                    self._stall_dumped = False
+                    continue
+                silent_for = time.monotonic() - last
+                if silent_for < STALL_S:
+                    self._stall_dumped = False
+                    continue
+                if self._stall_dumped:
+                    continue
+                self._stall_dumped = True
+                from app.paths import user_data_dir
+
+                path = user_data_dir() / "audio_stall.txt"
+                header = (
+                    f"AUDIO STALL: callback silent for {silent_for:.1f}s "
+                    f"state={self._state} track={self._current_track_id}"
+                )
+                try:
+                    with open(path, "w", encoding="utf-8") as fh:
+                        fh.write(header + "\n\n")
+                        faulthandler.dump_traceback(fh, all_threads=True)
+                except Exception:
+                    pass
+                try:
+                    audio_log.info(f"{header}; thread dump -> {path}")
+                except Exception:
+                    pass
+                print(
+                    f"[player] {header}; thread dump -> {path}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            except Exception:
+                # The watchdog must never take the process down.
+                pass
+
     def _audio_callback(self, outdata, frames, time_info, status) -> None:
         if status:
             self._log_callback_status(status)
@@ -2868,9 +2948,24 @@ class PCMPlayer:
         # `_drop_preload` on the HTTP thread can't close the
         # preload's decoder between our capability check below and
         # the ref swap. The lock is held only for the pointer grab
-        # (microseconds) — not during the actual swap or emit —
-        # to keep realtime-callback jitter minimal.
-        with self._lock:
+        # (microseconds) — not during the actual swap or emit.
+        #
+        # CRITICAL: this runs on the PortAudio realtime callback
+        # thread, and _lock is also held by the load/adopt path
+        # while it join()s decoder threads that can stall on a
+        # network segment read. A *blocking* acquire here parks the
+        # realtime thread on that lock until the join unwinds —
+        # which, if the decoder is wedged on a hung fetch, is
+        # forever: audio dies with no log line and every thread ends
+        # up in a cond-wait (the silent freeze). So acquire
+        # non-blocking only; on contention, bail and let the
+        # off-realtime _on_stream_finished bridge handle the
+        # transition (a momentary gap instead of a permanent
+        # deadlock). This restores the "the audio callback is
+        # lock-free" invariant the rest of this file relies on.
+        if not self._lock.acquire(blocking=False):
+            return False
+        try:
             pre = self._preload
             if pre is None:
                 return False
@@ -2883,6 +2978,8 @@ class PCMPlayer:
                 # let _on_stream_finished spawn the bridge thread.
                 return False
             self._preload = None
+        finally:
+            self._lock.release()
         log.info(
             "gapless swap (inline) -> track=%s rate=%dHz dtype=%s",
             pre.track_id, pre.sample_rate, pre.sd_dtype,
