@@ -259,14 +259,64 @@ blocked every prior attempt is solved on the real target. This is
 the project go/no-go gate and it is GO.
 
 Caveat (not repeating the earlier over-claim): SETUP acceptance is
-not audio. Playback still needs the buffered-audio packetization
-to the dataPort (ChaCha20-Poly1305, already implemented by
-pyatv's `AirPlayV2.send_audio_packet`), `SETRATEANCHORTIME`, and
-an in-process PTP grandmaster for playback timing (the
-announce/sync kind that owntone and airplay2-rs prove a sender can
-do without nqptp, not the daemon). Real work remains, but it is no
-longer a black box and the single biggest unknown resolved
-favourably.
+not audio. Playback still needs the timing and audio path below.
+
+## Complete wire spec (reverse-engineered, owntone-canonical)
+
+Every byte layout is now known. Sources: owntone `rtp_common.c` /
+`airplay.c` (canonical sender), validated against the Hisense for
+auth + SETUP. No remaining wire-format unknowns.
+
+**Timing is NOT a SETRATEANCHORTIME RTSP request.** owntone never
+sends one. The anchor is delivered as an RTCP "time announce" /
+sync packet sent periodically to the receiver's `controlPort`
+(the one returned by the stream SETUP). PTP form, 28 bytes
+(`RTCP_SYNC_PACKET_PTP_LEN`, matches the receiver's
+`TIME_ANNOUNCE_PTP plen==28`):
+
+    data[0]    = type      # 0x90 boot sync (M=1, stream start), 0x80 periodic
+    data[1]    = 0xd7      # RTCP PT 215, "time announce"
+    data[2:4]  = 00 06     # length in dwords
+    data[4:8]  = be32(cur_stamp.pos)        # RTP pos this stamp refers to
+    data[8:16] = be64(cur_ns)               # our monotonic time (ns) at pos
+    data[16:20]= be32(pos - 11025)          # earliest rtptime to start playing
+    data[20:28]= be64(ptp_clock_id)         # our self-assigned clock id
+
+`cur_stamp` maps "RTP position `pos` == our monotonic time
+`cur_ns`". We pick our own monotonic clock and `ptp_clock_id`.
+
+**Audio packet** to the `dataPort` (RTP, 12-byte header):
+
+    header[0]   = 0x80                 # RTP v2
+    header[1]   = type                 # payload type (marker on first)
+    header[2:4] = be16(seqnum)
+    header[4:8] = be32(rtptime/pos)
+    header[8:12]= be32(ssrc)           # 0 for a PTP session
+    payload     = ChaCha20-Poly1305(ALAC_frame, key=shk,
+                    aad=header[4:12], 8-byte nonce from seqnum)
+    packet      = header + ciphertext + nonce[-8:]
+
+This is exactly what pyatv's `AirPlayV2.send_audio_packet`
+already implements (`Chacha20Cipher8byteNonce`, aad
+`rtp_header[4:12]`). Audio is ALAC, 352 samples/frame, 44100/16/2;
+PyAV (libav) has an ALAC encoder.
+
+**The one remaining empirical question:** does the Hisense accept
+us as its own grandmaster off these RTCP sync packets alone (no
+real gPTP exchange on 319/320), or does it run a gPTP slave that
+must lock to a real IEEE 1588 grandmaster (nqptp territory) before
+it will render? owntone uses nqptp for real gPTP; the RTCP sync
+packet is the rtptime/clock map either way. The Stage 4 spike
+answers this: send the RTCP sync packets + audio with our own
+monotonic clock as grandmaster, no gPTP, and listen for sound.
+If silent, implement the pure-Python IEEE 1588 grandmaster with
+nqptp (now cloned under .airplay2-test/) as the line reference.
+
+Net: the protocol is fully cracked. What remains is engineering
+(UDP control + data sockets, the periodic sync-packet sender, an
+ALAC encoder, the RTP packetizer reusing pyatv's cipher, a pacing
+loop), then the empirical grandmaster-trust gate, then the live
+PCM feed and lifecycle.
 
 Stage 1 finding: the target Hisense TV advertises
 `SupportsAirPlayAudio + SupportsBufferedAudio + SupportsPTP` and
