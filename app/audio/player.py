@@ -3089,8 +3089,28 @@ class PCMPlayer:
             ).start()
             return
 
+        # Natural EOF. PortAudio's `paComplete` puts the stream
+        # into a terminal "stopped" state that `Pa_StartStream`
+        # cannot revive — the docs say it has to be reopened. If
+        # we leave `self._stream` pointing at this corpse, the
+        # next `load()` snapshots it as `active_stream`, takes
+        # path (A) ("kept stream open"), and rebinds the new
+        # pipeline against a dead OutputStream. `play()` calls
+        # `stream.start()` on macOS, which returns without error
+        # but never re-wakes the CoreAudio callback thread. The
+        # decoder fills the queue, blocks on `put`, and the
+        # stall watchdog reports `state=playing, silent`. Close
+        # and drop the ref here so the next load takes the full
+        # reopen path (B) — that path already works correctly.
+        old_stream = self._stream
         with self._lock:
+            self._stream = None
             self._transition("ended")
+        if old_stream is not None:
+            try:
+                old_stream.close()
+            except Exception:
+                pass
         self._emit()
 
     def _recover_from_device_loss(self) -> None:
