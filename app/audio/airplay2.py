@@ -34,7 +34,9 @@ Pipeline once complete:
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
+import os
 import queue
 import threading
 import traceback
@@ -103,6 +105,71 @@ except Exception as exc:  # pragma: no cover
     is_password_required = None  # type: ignore
     parse_features = None  # type: ignore
     _FEATURES_ERROR = f"pyatv airplay utils unavailable: {exc!r}"
+
+# pyatv's HAP pair-setup / pair-verify and HTTP transport. The
+# canonical recipe is pyatv.protocols.airplay.pairing; Stage 2
+# follows it (http_connect -> pair_setup(HAP) -> start/finish ->
+# str(HapCredentials)) and Stage 3 will pair_verify the stored
+# credentials to derive the encrypted-channel keys. Guarded
+# separately for the same reason as the feature table.
+try:  # pragma: no cover - environment dependent
+    from pyatv.auth.hap_pairing import (  # type: ignore
+        NO_CREDENTIALS,
+        TRANSIENT_CREDENTIALS,
+        parse_credentials,
+    )
+    from pyatv.protocols.airplay.auth import (  # type: ignore
+        AuthenticationType,
+        pair_setup,
+        verify_connection,
+    )
+    from pyatv.support.http import http_connect  # type: ignore
+
+    _PAIR_ERROR: Optional[str] = None
+except Exception as exc:  # pragma: no cover
+    NO_CREDENTIALS = None  # type: ignore
+    TRANSIENT_CREDENTIALS = None  # type: ignore
+    parse_credentials = None  # type: ignore
+    AuthenticationType = None  # type: ignore
+    pair_setup = None  # type: ignore
+    verify_connection = None  # type: ignore
+    http_connect = None  # type: ignore
+    _PAIR_ERROR = f"pyatv HAP pairing unavailable: {exc!r}"
+
+from app.paths import user_data_dir
+
+
+def _creds_path():
+    return user_data_dir() / "airplay2_credentials.json"
+
+
+def _load_creds() -> dict:
+    """device_id -> serialized HapCredentials string. Missing or
+    unreadable store is treated as empty; pairing just runs again."""
+    try:
+        with open(_creds_path(), "r", encoding="utf-8") as fh:
+            data = json.load(fh)
+        return data if isinstance(data, dict) else {}
+    except FileNotFoundError:
+        return {}
+    except (json.JSONDecodeError, OSError) as exc:
+        _say(f"credentials read failed: {exc}")
+        return {}
+
+
+def _save_cred(device_id: str, creds_str: str) -> None:
+    store = _load_creds()
+    store[device_id] = creds_str
+    path = _creds_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Credentials are long-lived pairing secrets; keep them
+        # owner-only, same posture the RAOP path used.
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            json.dump(store, fh)
+    except OSError as exc:
+        _say(f"credentials write failed: {exc}")
 
 
 def _crypto_ready() -> Optional[str]:
@@ -245,6 +312,17 @@ def _classify_device(
 
 
 @dataclass
+class _PendingPair:
+    """In-flight HAP pair-setup: PIN displayed, awaiting the code.
+    Holds the open HTTP connection and pyatv pair-setup procedure
+    between pair_begin and pair_finish."""
+
+    device_id: str
+    http: object
+    procedure: object
+
+
+@dataclass
 class _Session:
     device_id: str
     sample_rate: int
@@ -270,6 +348,7 @@ class AirPlay2Manager:
         self._thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
         self._session: Optional[_Session] = None
+        self._pending_pair: Optional[_PendingPair] = None
 
     # -- lifecycle ---------------------------------------------------
 
@@ -365,10 +444,105 @@ class AirPlay2Manager:
             "See docs/airplay2-sender.md."
         )
 
-    async def _pair(self, device: AirPlay2Device):
-        # Stage 2: HomeKit transient pair-setup (PIN 3939) +
-        # pair-verify via pyatv.auth.hap_*; derive the session keys.
-        raise NotImplementedError("Stage 2: HomeKit pairing")
+    # -- pairing (Stage 2) ------------------------------------------
+
+    @staticmethod
+    def is_paired(device_id: str) -> bool:
+        return device_id in _load_creds()
+
+    async def _resolve(self, device_id: str) -> Optional[AirPlay2Device]:
+        for d in await self._discover(5.0):
+            if d.id == device_id:
+                return d
+        return None
+
+    def pair_begin(self, device_id: str) -> None:
+        """Open a connection and start HAP pair-setup. The receiver
+        displays a PIN; call pair_finish with it. For receivers that
+        advertise transient pairing (the Macs) no pair flow is
+        needed; _verify uses the transient path directly."""
+        if pair_setup is None:
+            raise RuntimeError(_PAIR_ERROR or "pyatv HAP pairing unavailable")
+        self._run_coro(self._pair_begin(device_id), timeout=20.0)
+
+    async def _pair_begin(self, device_id: str) -> None:
+        await self._pair_cancel()
+        device = await self._resolve(device_id)
+        if device is None:
+            raise RuntimeError(f"device {device_id} not found on network")
+        http = await http_connect(device.address, device.port)
+        try:
+            proc = pair_setup(AuthenticationType.HAP, http)
+            await proc.start_pairing()  # receiver displays the PIN
+        except Exception:
+            http.close()
+            raise
+        self._pending_pair = _PendingPair(
+            device_id=device_id, http=http, procedure=proc
+        )
+        _say(f"pair-setup started for {device_id}; enter the PIN on the device")
+
+    def pair_finish(self, pin: str) -> None:
+        """Submit the PIN shown on the receiver; persist credentials."""
+        if self._pending_pair is None:
+            raise RuntimeError("no pairing in progress")
+        self._run_coro(self._pair_finish(pin), timeout=20.0)
+
+    async def _pair_finish(self, pin: str) -> None:
+        pending = self._pending_pair
+        if pending is None:
+            raise RuntimeError("no pairing in progress")
+        try:
+            # pyatv's own handler zero-pads to 4 and passes a str
+            # despite the int annotation; mirror that exactly.
+            creds = await pending.procedure.finish_pairing(
+                "", str(pin).strip().zfill(4), "Tideway"
+            )
+        finally:
+            try:
+                pending.http.close()
+            except Exception:
+                pass
+            self._pending_pair = None
+        _save_cred(pending.device_id, str(creds))
+        _say(f"paired with {pending.device_id}")
+
+    def pair_cancel(self) -> None:
+        if self._pending_pair is None:
+            return
+        self._run_coro(self._pair_cancel(), timeout=5.0)
+
+    async def _pair_cancel(self) -> None:
+        pending = self._pending_pair
+        self._pending_pair = None
+        if pending is not None:
+            try:
+                pending.http.close()
+            except Exception:
+                pass
+
+    async def _verify(self, device: AirPlay2Device):
+        """Open a verified, encrypted AirPlay 2 session: stored HAP
+        credentials if paired, else the transient path when the
+        receiver advertises it. Returns (http, verifier) for Stage 3
+        to derive the channel keys and open the audio RTSP session.
+        Stage 2 deliverable: this round-trip succeeds."""
+        http = await http_connect(device.address, device.port)
+        try:
+            stored = _load_creds().get(device.id)
+            if stored:
+                creds = parse_credentials(stored)
+            elif device.supports_transient_pairing:
+                creds = TRANSIENT_CREDENTIALS
+            else:
+                raise RuntimeError(
+                    f"{device.id} needs pairing; run the pair flow first"
+                )
+            verifier = await verify_connection(creds, http)
+        except Exception:
+            http.close()
+            raise
+        return http, verifier
 
     async def _open_rtsp(self, device: AirPlay2Device):
         # Stage 3: encrypted RTSP control channel — ANNOUNCE, SETUP
