@@ -37,9 +37,12 @@ import asyncio
 import json
 import logging
 import os
+import plistlib
 import queue
+import secrets
 import threading
 import traceback
+import uuid
 from dataclasses import dataclass
 from typing import Optional
 
@@ -154,6 +157,10 @@ try:  # pragma: no cover - environment dependent
         EVENTS_WRITE_INFO,
         AirPlayV2,
     )
+    from pyatv.auth.hap_channel import setup_channel  # type: ignore
+    from pyatv.protocols.airplay.channels import (  # type: ignore
+        EventChannel,
+    )
     from pyatv.support.chacha20 import (  # type: ignore
         Chacha20Cipher8byteNonce,
     )
@@ -169,6 +176,8 @@ except Exception as exc:  # pragma: no cover
     RtspSession = None  # type: ignore
     decode_bplist_from_body = None  # type: ignore
     Chacha20Cipher8byteNonce = None  # type: ignore
+    setup_channel = None  # type: ignore
+    EventChannel = None  # type: ignore
     EVENTS_SALT = EVENTS_READ_INFO = EVENTS_WRITE_INFO = None  # type: ignore
     _STREAM_ERROR = f"pyatv RAOP stream engine unavailable: {exc!r}"
 
@@ -752,6 +761,166 @@ class AirPlay2Manager:
                     t.close()
                 except Exception:
                     pass
+            http.close()
+
+    def probe_setup_ptp(self, device_id: str) -> dict:
+        """PTP spike, step A. Replicate owntone's PTP path framing
+        (timingProtocol PTP + timingPeerInfo/List, RECORD, SETPEERS,
+        then the buffered stream SETUP) WITHOUT running a PTP clock.
+        The go/no-go question: does the Hisense answer the buffered
+        stream SETUP on framing alone, or does it require a live PTP
+        grandmaster reachable before it will respond? Non-disruptive
+        (negotiation only, no audio)."""
+        if AirPlayV2 is None or setup_channel is None:
+            raise RuntimeError(_STREAM_ERROR or "pyatv stream engine missing")
+        return self._run_coro(self._probe_setup_ptp(device_id), timeout=40.0)
+
+    async def _probe_setup_ptp(self, device_id: str) -> dict:
+        device = await self._resolve(device_id)
+        if device is None:
+            raise RuntimeError(f"device {device_id} not found on network")
+        stored = _load_creds().get(device.id)
+        if not stored:
+            raise RuntimeError(
+                f"{device.id} not paired; run scripts/airplay2_pair.py first"
+            )
+
+        BPLIST = "application/x-apple-binary-plist"
+        loop = asyncio.get_event_loop()
+        http = await http_connect(device.address, device.port)
+        sock = http.transport.get_extra_info("socket")
+        local_ip = sock.getsockname()[0]
+        remote_ip = http.remote_ip
+
+        # Synthetic but well-formed identity. PTP correctness does
+        # not matter for SETUP acceptance (step A); a locally
+        # administered MAC, a uuid clock ID, and a signed 8-byte
+        # ClockID are enough to populate the plist.
+        rb = secrets.token_bytes(6)
+        device_id_colon = "02:" + ":".join(f"{b:02X}" for b in rb[1:])
+        clock_uuid = str(uuid.uuid4())
+        clock_id = int.from_bytes(secrets.token_bytes(8), "big", signed=True)
+        session_uuid = str(uuid.uuid4()).upper()
+        group_uuid = str(uuid.uuid4()).upper()
+
+        control_t, _ = await loop.create_datagram_endpoint(
+            asyncio.DatagramProtocol, local_addr=("0.0.0.0", 0)
+        )
+        control_port = control_t.get_extra_info("socket").getsockname()[1]
+
+        creds = parse_credentials(stored)
+        verifier = await verify_connection(creds, http)
+        rtsp = RtspSession(http)
+        channels: list = []
+        try:
+            _say(f"PTP session SETUP -> {device.name}")
+            timingpeerinfo = {
+                "ID": clock_uuid,
+                "DeviceType": 0,
+                "ClockID": clock_id,
+                "SupportsClockPortMatchingOverride": False,
+                "Addresses": [local_ip],
+            }
+            sess_resp = await rtsp.setup(
+                body={
+                    "name": "Tideway",
+                    "deviceID": device_id_colon,
+                    "sessionUUID": session_uuid,
+                    "timingProtocol": "PTP",
+                    "macAddress": device_id_colon,
+                    "groupUUID": group_uuid,
+                    "groupContainsGroupLeader": False,
+                    "timingPeerInfo": timingpeerinfo,
+                    "timingPeerList": [timingpeerinfo],
+                }
+            )
+            sess = decode_bplist_from_body(sess_resp)
+            event_port = sess.get("eventPort", 0)
+            _say(f"PTP session SETUP accepted; eventPort={event_port}")
+
+            if event_port:
+                # Receiver opens its event port slightly late; pyatv
+                # retries here for the same reason.
+                for attempt in range(5):
+                    try:
+                        transport, _ = await setup_channel(
+                            EventChannel,
+                            verifier,
+                            remote_ip,
+                            event_port,
+                            EVENTS_SALT,
+                            EVENTS_READ_INFO,
+                            EVENTS_WRITE_INFO,
+                        )
+                        channels.append(transport)
+                        break
+                    except ConnectionRefusedError:
+                        if attempt == 4:
+                            raise
+                        await asyncio.sleep(1.0)
+
+            await rtsp.record()
+            _say("RECORD accepted")
+
+            setpeers = plistlib.dumps(
+                [remote_ip, local_ip],
+                fmt=plistlib.FMT_BINARY,  # pylint: disable=no-member
+            )
+            await rtsp.exchange(
+                "SETPEERS", body=setpeers, content_type=BPLIST
+            )
+            _say("SETPEERS accepted")
+
+            out_key, _ = verifier.encryption_keys(
+                EVENTS_SALT, EVENTS_WRITE_INFO, EVENTS_READ_INFO
+            )
+            shk = out_key[0:32]
+            stream_resp = await rtsp.setup(
+                body={
+                    "streams": [
+                        {
+                            "audioFormat": 0x40000,  # ALAC/44100/16/2
+                            "audioMode": "default",
+                            "controlPort": control_port,
+                            "ct": 2,  # ALAC
+                            "isMedia": True,
+                            "latencyMax": 88200,
+                            "latencyMin": 11025,
+                            "shk": shk,
+                            "spf": 352,
+                            "sr": 44100,
+                            "type": 0x67,  # 103 buffered
+                            "supportsDynamicStreamID": False,
+                            "streamConnectionID": rtsp.session_id,
+                        }
+                    ]
+                }
+            )
+            r = decode_bplist_from_body(stream_resp)
+            stream = r["streams"][0]
+            _say(
+                f"BUFFERED STREAM SETUP ACCEPTED by {device.name}: "
+                f"dataPort={stream.get('dataPort')} "
+                f"controlPort={stream.get('controlPort')}"
+            )
+            return {
+                "data_port": stream.get("dataPort"),
+                "control_port": stream.get("controlPort"),
+                "ptp_framing_sufficient": True,
+            }
+        except Exception as exc:
+            _say(f"PTP-framed SETUP failed for {device.name}: {exc}", exc=True)
+            raise
+        finally:
+            for t in channels:
+                try:
+                    t.close()
+                except Exception:
+                    pass
+            try:
+                control_t.close()
+            except Exception:
+                pass
             http.close()
 
     async def _start_timing(self, session: _Session):

@@ -236,6 +236,38 @@ The `probe_setup` / `probe_setup_seq` harnesses and this log are
 the reusable artifacts; the NTP path stays in the tree as a
 documented dead end for this class of receiver.
 
+### PTP spike (step A): GATE PASSED on the Hisense
+
+`probe_setup_ptp` replicates owntone's PTP path framing without a
+running PTP clock: verify -> `SETUP(session, timingProtocol PTP,
+timingPeerInfo/timingPeerList)` -> event channel -> `RECORD` ->
+`SETPEERS` (array of [receiver ip, local ip]) -> `SETUP(stream)`
+with owntone's ALAC body (`audioFormat 0x40000`, `ct:2`,
+`type:0x67`/103 buffered, `shk` 32 bytes, `streamConnectionID`).
+
+Result against the Hisense (`srcvers 377`):
+
+    PTP session SETUP accepted; eventPort=44619
+    RECORD accepted
+    SETPEERS accepted
+    BUFFERED STREAM SETUP ACCEPTED: dataPort=44077 controlPort=47256
+
+The receiver answered the buffered stream SETUP and allocated
+audio ports **with no PTP clock running**. PTP framing alone is
+sufficient for the negotiation. The protocol-handshake wall that
+blocked every prior attempt is solved on the real target. This is
+the project go/no-go gate and it is GO.
+
+Caveat (not repeating the earlier over-claim): SETUP acceptance is
+not audio. Playback still needs the buffered-audio packetization
+to the dataPort (ChaCha20-Poly1305, already implemented by
+pyatv's `AirPlayV2.send_audio_packet`), `SETRATEANCHORTIME`, and
+an in-process PTP grandmaster for playback timing (the
+announce/sync kind that owntone and airplay2-rs prove a sender can
+do without nqptp, not the daemon). Real work remains, but it is no
+longer a black box and the single biggest unknown resolved
+favourably.
+
 Stage 1 finding: the target Hisense TV advertises
 `SupportsAirPlayAudio + SupportsBufferedAudio + SupportsPTP` and
 mandatory pairing, but does NOT advertise the CoreUtils/transient
