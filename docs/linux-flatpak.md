@@ -57,15 +57,43 @@ it.
 
 ## Staged plan
 
-0. Branch, this doc, manifest scaffold. (current)
-1. `flatpak-builder` builds in the VM. Highest technical risk:
-   PyAV/libav, curl_cffi (native), numpy, sounddevice all building
-   and importing under the GNOME runtime sandbox + PortAudio.
-2. Headless VM run: prove pywebview selects the GTK/WebKit backend
-   (native, not browser-fallback) and the server comes up with no
-   crash. Visual confirmation of an actual window needs a display
-   (a GUI VM or a real Linux desktop) — explicitly out of scope of
-   the headless harness and noted as a manual check.
+0. Branch, this doc, manifest scaffold. **Done.**
+1. `flatpak-builder` builds in the VM. **Done.** All 20 Python
+   modules + PortAudio + the web bundle build clean under the
+   GNOME runtime sandbox; payload comes out around 526 MB. Two
+   lessons baked into the manifest:
+   - **Rust and Cython transitives need prebuilt wheels.**
+     Offline-hashed sdists fail in the sandbox because their
+     PEP-517 build backends (`maturin`, `setuptools-rust`,
+     `Cython`) aren't available. We pass an explicit
+     `--prefer-wheels` list to `flatpak-pip-generator` covering
+     orjson, curl-cffi, pillow, av, numpy, scipy, rapidfuzz,
+     pydantic-core, watchfiles, httptools, pyyaml, uvloop,
+     aiohttp, zeroconf, cffi. Wheels are arch-conditional
+     (`only-arches: x86_64 / aarch64`) so the same module file
+     works on either build host.
+   - **The npm install needs offline sources too.** `npm ci`
+     against the live registry fails with the sandbox's
+     network-disabled state. `flatpak-node-generator` produces
+     `node-sources.json` from `package-lock.json`, the manifest
+     points `npm_config_cache` and `XDG_CACHE_HOME` at the
+     generated `flatpak-node/` tree, and `npm ci --offline`
+     succeeds.
+2. Headless VM run. **Done.** Inside the GNOME 49 sandbox
+   (Python 3.13.13, PyGObject 3.50.1, GTK 3.0, WebKit2 4.1) the
+   FastAPI server boots, `Uvicorn running on http://127.0.0.1:
+   47823` lands, and pywebview reaches into the GTK backend
+   trying to create a window. Under `xvfb-run` the window
+   creation fails with `Gtk-WARNING: cannot open display` and
+   `Invalid MIT-MAGIC-COOKIE-1 key` — the X11 cookie can't be
+   shared into the Flatpak sandbox by xvfb, but the failure mode
+   itself is the proof: pywebview only emits Gtk-WARNINGs
+   because GTK is the backend it selected. No
+   `webbrowser`-fallback log, no missing-`gi` import, no
+   "GTK cannot be loaded". The native dependency stack (PyAV,
+   numpy, scipy, sounddevice, curl_cffi, etc.) loads at runtime,
+   not just at import. Visual confirmation of an actual window
+   needs a real display and stays out of scope here.
 3. Distribution + auto-updater + CI:
    - **Open decision:** self-hosted Flatpak repo (keeps release
      control + the existing GitHub-Actions cadence; lean) vs
@@ -81,6 +109,15 @@ it.
      `flatpak/flatpak-github-actions` actions) producing a bundle
      and/or pushing the repo; the AppImage job's fate (drop vs
      keep as a fallback artifact) is part of the Stage 3 decision.
+
+## Runtime version
+
+The manifest pins `org.gnome.Platform//49` (freedesktop 25.08 base,
+Python 3.13). The original scaffold used 47, which went EOL on
+2025-10-15. The bump is mechanical: change the runtime-version,
+re-pull `org.freedesktop.Sdk.Extension.node20//25.08`, regenerate
+`python3-requirements.json` with `--runtime org.gnome.Sdk//49` so
+wheel selection matches the new runtime's Python ABI, rebuild.
 
 ## Note
 

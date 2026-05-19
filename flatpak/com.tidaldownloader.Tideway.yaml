@@ -2,15 +2,16 @@
 # browser fallback with a real WebKitGTK window). See
 # docs/linux-flatpak.md for scope and the staged plan.
 #
-# STATUS: Stage 0 scaffold. Items marked TODO(stage1) are filled in
-# from the VM in Stage 1 (real source hashes, the pip-generated
-# python deps module). It is intentionally not buildable yet.
+# STATUS: Stage 1. PortAudio source hash and the pip-generated
+# python3-requirements.json module are filled in. First buildable
+# revision; first real flatpak-builder run lives in the VM.
 
 app-id: com.tidaldownloader.Tideway
 runtime: org.gnome.Platform
-# GNOME 47 maps to the freedesktop 24.08 base (drives the Node
-# SDK-extension version below). Pinned; bump deliberately.
-runtime-version: "47"
+# GNOME 49 maps to the freedesktop 25.08 base (drives the Node
+# SDK-extension version below). Pinned; bump deliberately. GNOME
+# 47 (the original scaffold) went EOL 2025-10-15.
+runtime-version: "49"
 sdk: org.gnome.Sdk
 sdk-extensions:
   # Node only exists in the build sandbox to produce web/dist; it
@@ -36,29 +37,34 @@ cleanup:
 
 modules:
   # sounddevice needs libportaudio; the GNOME runtime does not ship
-  # it, so build it. TODO(stage1): pin a real release tarball + its
-  # sha256 (computed in the VM).
+  # it. Built here; sha256 computed off the upstream tarball.
   - name: portaudio
     buildsystem: autotools
     sources:
       - type: archive
         url: https://files.portaudio.com/archives/pa_stable_v190700_20210406.tgz
-        sha256: TODO_STAGE1_PORTAUDIO_SHA256
+        sha256: 47efbf42c77c19a05d22e627d42873e991ec0c1357219c0d74ce6a2948cb2def
 
   # Offline, hashed PyPI deps generated from requirements.txt with
-  # flatpak-pip-generator. TODO(stage1): generate
-  # python3-requirements.json in the VM and include it here:
-  #   - python3-requirements.json
+  # flatpak-pip-generator. Regenerate by running the script in the
+  # VM against the project's requirements.txt and copying the
+  # resulting JSON over this file.
+  - python3-requirements.json
 
   - name: tideway
     buildsystem: simple
-    # Node extension is mounted under /usr/lib/sdk/node20; put it on
-    # PATH only for the web build.
+    # Node extension is mounted under /usr/lib/sdk/node20/bin. The
+    # build sandbox has no network; npm reads from the offline cache
+    # laid down by flatpak-node-generator under flatpak-node/.
     build-options:
       append-path: /usr/lib/sdk/node20/bin
+      env:
+        XDG_CACHE_HOME: /run/build/tideway/flatpak-node/cache
+        npm_config_cache: /run/build/tideway/flatpak-node/npm-cache
+        npm_config_offline: "true"
     build-commands:
-      # Web bundle.
-      - npm --prefix web ci --no-audit --no-fund
+      # Web bundle (offline; tarballs come from node-sources.json).
+      - npm --prefix web ci --offline --no-audit --no-fund
       - npm --prefix web run build
       # App payload. The runtime Python imports `gi`, so pywebview
       # uses the GTK/WebKit backend — no browser fallback.
@@ -74,3 +80,4 @@ modules:
     sources:
       - type: dir
         path: ..
+      - node-sources.json

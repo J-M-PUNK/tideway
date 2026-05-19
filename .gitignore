@@ -244,3 +244,8 @@ watchlist.json
 
 # macOS
 .DS_Store
+
+# Flatpak build state (created next to the manifest when
+# flatpak-builder runs locally; never check in either)
+.flatpak-builder/
+.build-flatpak/
