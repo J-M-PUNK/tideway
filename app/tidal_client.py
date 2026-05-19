@@ -1,7 +1,9 @@
 import json
+import logging
 import os
 import re
 import stat
+import sys
 import tempfile
 import threading
 import time
@@ -9,11 +11,32 @@ import webbrowser
 from concurrent.futures import Future
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Callable, Optional, Tuple
 
 import tidalapi
 
 from app.paths import user_data_dir
+
+# audio.log is bound to the "tideway.audio" logger in
+# app/audio/player.py (a RotatingFileHandler, propagate=False).
+# Auth-lifecycle lines used to print only to stderr, which is
+# invisible in the packaged app — so a user "getting logged out"
+# left no diagnosable trace in production. Mirror the high-signal
+# auth lines to audio.log as well, same pattern the AirPlay
+# diagnostics use.
+_audit_log = logging.getLogger("tideway.audio")
+
+
+def _tlog(msg: str) -> None:
+    """High-signal Tidal auth line: dev console (stderr) + audio.log."""
+    line = f"[tidal] {msg}"
+    print(line, file=sys.stderr, flush=True)
+    try:
+        _audit_log.info(line)
+    except Exception:
+        # Logging to file must never break the auth path; the
+        # stderr line already carried the signal.
+        pass
 
 SESSION_FILE = user_data_dir() / "tidal_session.json"
 
@@ -399,6 +422,11 @@ class TidalClient:
         self.session = tidalapi.Session(config)
         _install_tidal_request_gate(self.session)
         _swap_to_impersonated_transport(self.session)
+        self._install_capturing_refresh()
+        # Set by the server to its auth-cache invalidator. Invoked
+        # when a hard refresh failure logs the user out, so the UI
+        # bounces to Login immediately instead of after the cache TTL.
+        self.on_auth_lost: Optional[Callable[[], None]] = None
         self._login_future: Optional[Future] = None
         # Cached subscription-tier result. Populated on first call and
         # refreshed every _SUB_TTL_SEC. Subscription almost never changes
@@ -530,6 +558,52 @@ class TidalClient:
             session.refresh_token = new_refresh
         return True
 
+    def _token_refresh_and_persist(self, refresh_token: str) -> bool:
+        """token_refresh that captures rotation AND persists.
+
+        This is what tidalapi's own request layer calls on a 401
+        (request.py: `self.session.token_refresh(refresh_token)`).
+        tidalapi's native implementation drops a rotated refresh
+        token, so a few days later the next refresh fails and the
+        user is silently logged out. Routing that internal path
+        through the capturing implementation — and saving the
+        result so a process exit right after a mid-session
+        auto-refresh doesn't lose the rotated token — is what makes
+        the session durable rather than expiring every few days.
+        """
+        ok = self._token_refresh_capturing(refresh_token)
+        if ok:
+            try:
+                self.save_session()
+            except Exception:
+                # Persisting is best-effort here; the in-memory
+                # session is already correct and the watchdog /
+                # explicit force_refresh will re-save shortly.
+                pass
+        return ok
+
+    def _install_capturing_refresh(self) -> None:
+        """Shadow tidalapi's Session.token_refresh on this session
+        with the rotation-capturing+persisting version, so EVERY
+        refresh path — explicit force_refresh, the background
+        watchdog, and tidalapi's own internal auto-refresh-on-401 —
+        keeps a rotated refresh token. Re-applied after logout()
+        because that builds a fresh Session. Same monkeypatch
+        approach already used for the request gate and impersonated
+        transport on this object."""
+        self.session.token_refresh = self._token_refresh_and_persist
+
+    def _notify_auth_lost(self) -> None:
+        """Tell the server its cached auth state is stale (refresh
+        token dead, user logged out) so the next /auth/status flips
+        to logged-out and the UI bounces to Login immediately."""
+        cb = getattr(self, "on_auth_lost", None)
+        if cb is not None:
+            try:
+                cb()
+            except Exception:
+                pass
+
     def force_refresh(self) -> bool:
         """Explicitly refresh the access token using the stored refresh
         token. Called by the download path when it hits a 401 — tidalapi's
@@ -546,43 +620,33 @@ class TidalClient:
         workers don't fire two token_refresh RPCs at once. The second
         caller will see the fresh token after the first finishes.
         """
-        import sys as _sys
-
         with self._refresh_lock:
             refresh_token = getattr(self.session, "refresh_token", None)
             if not refresh_token:
-                print(
-                    "[tidal] force_refresh: no refresh_token on session",
-                    file=_sys.stderr,
-                    flush=True,
-                )
+                _tlog("force_refresh: no refresh_token on session")
                 return False
             try:
                 ok = self._token_refresh_capturing(refresh_token)
             except Exception as exc:
-                print(
-                    f"[tidal] force_refresh: token_refresh raised: {exc!r}",
-                    file=_sys.stderr,
-                    flush=True,
-                )
-                # AuthenticationError means the refresh token itself is dead.
-                # Blow the session away so the user is prompted to log in
-                # again rather than chasing 401s forever.
+                _tlog(f"force_refresh: token_refresh raised: {exc!r}")
+                # AuthenticationError means the refresh token itself is
+                # dead. Blow the session away so the user is prompted to
+                # log in again rather than chasing 401s forever, and tell
+                # the server to drop its cached auth state so the very
+                # next /auth/status bounces the UI to Login immediately
+                # instead of waiting out the cache TTL.
                 if type(exc).__name__ == "AuthenticationError":
                     try:
                         self.logout()
                     except Exception:
                         pass
+                    self._notify_auth_lost()
                 return False
             if not ok:
-                print(
-                    "[tidal] force_refresh: token_refresh returned False",
-                    file=_sys.stderr,
-                    flush=True,
-                )
+                _tlog("force_refresh: token_refresh returned False")
                 return False
             self.save_session()
-            print("[tidal] force_refresh: success", file=_sys.stderr, flush=True)
+            _tlog("force_refresh: success")
             return True
 
     def _refresh_watchdog(self) -> None:
@@ -594,8 +658,6 @@ class TidalClient:
         logged there; the watchdog swallows its own errors so a transient
         network blip doesn't kill the thread.
         """
-        import sys as _sys
-
         while not self._refresh_stop.is_set():
             # Wake up early if someone signals stop (e.g. tests).
             if self._refresh_stop.wait(self._REFRESH_CHECK_INTERVAL_SEC):
@@ -613,19 +675,13 @@ class TidalClient:
                 seconds_left = (expiry - now).total_seconds()
                 if seconds_left > self._REFRESH_WINDOW_SEC:
                     continue
-                print(
-                    f"[tidal] refresh watchdog: token expires in "
-                    f"{seconds_left:.0f}s — refreshing",
-                    file=_sys.stderr,
-                    flush=True,
+                _tlog(
+                    f"refresh watchdog: token expires in "
+                    f"{seconds_left:.0f}s — refreshing"
                 )
                 self.force_refresh()
             except Exception as exc:
-                print(
-                    f"[tidal] refresh watchdog: ignoring error: {exc!r}",
-                    file=_sys.stderr,
-                    flush=True,
-                )
+                _tlog(f"refresh watchdog: ignoring error: {exc!r}")
 
     def get_max_quality(self) -> Optional[str]:
         """Return the highest audio quality the logged-in account is
@@ -793,6 +849,10 @@ class TidalClient:
         self.session = tidalapi.Session(config)
         _install_tidal_request_gate(self.session)
         _swap_to_impersonated_transport(self.session)
+        # logout() builds a fresh Session, so re-shadow token_refresh
+        # or the next login's session would fall back to tidalapi's
+        # rotation-dropping native implementation.
+        self._install_capturing_refresh()
         # The subscription-tier cache belongs to the previous session.
         # Bust it so the next login re-detects under the new client_id.
         with self._sub_lock:
