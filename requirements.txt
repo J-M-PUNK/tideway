@@ -19,7 +19,7 @@ orjson>=3.10.0
 # THAT fallback is the bug we're fixing here: shipping it as the
 # production transport meant every Tideway install looked like a
 # scraper to Tidal's anti-abuse layer.
-curl-cffi>=0.7.0
+curl-cffi>=0.15.0
 pillow>=10.0.0
 fastapi>=0.110.0
 uvicorn[standard]>=0.27.0
