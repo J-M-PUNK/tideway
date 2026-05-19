@@ -638,3 +638,92 @@ jobs:
           # Mark tags containing a hyphen (v0.2.0-rc1 etc.) as
           # prereleases automatically.
           prerelease: ${{ contains(github.ref_name, '-') }}
+
+  # -------------------------------------------------------------------
+  # Publish the OSTree repo from build-linux-flatpak to GitHub Pages
+  # so users can `flatpak remote-add` and get `flatpak update`
+  # support. The bundle on the release page covers the one-shot
+  # install case; this covers the subscribe-and-auto-update case.
+  #
+  # Runs after `publish` because the GitHub Release draft is what
+  # signals a real shipping tag — pre-release builds via
+  # workflow_dispatch don't publish to Pages.
+  # -------------------------------------------------------------------
+  publish-flatpak-repo:
+    needs: [publish]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.ref }}
+          fetch-depth: 1
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: Tideway-Linux-Flatpak-Repo
+          path: ostree-repo
+
+      - name: Drop the .flatpakrepo subscribe file next to the OSTree repo
+        # Users add the remote with `flatpak remote-add ... tideway.flatpakrepo`.
+        # The file lives in the repo at flatpak/tideway.flatpakrepo and
+        # gets served at https://j-m-punk.github.io/tideway/tideway.flatpakrepo.
+        run: |
+          cp flatpak/tideway.flatpakrepo ostree-repo/tideway.flatpakrepo
+
+      - name: Drop an index.html that links the subscribe file + bundle
+        # GitHub Pages serves whatever you point it at; without an
+        # index page, the bare root URL renders an empty directory
+        # listing. A minimal page that explains the install paths
+        # makes the URL discoverable for anyone landing on it.
+        run: |
+          VERSION=$(cat VERSION)
+          cat > ostree-repo/index.html <<HTML
+          <!doctype html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <title>Tideway — Linux install</title>
+            <style>
+              body { font-family: system-ui, sans-serif; max-width: 720px; margin: 3rem auto; padding: 0 1rem; line-height: 1.5; }
+              h1 { margin-top: 0; }
+              code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+              pre { background: #f5f5f5; padding: 0.75rem 1rem; border-radius: 6px; overflow-x: auto; }
+              a { color: #2563eb; }
+            </style>
+          </head>
+          <body>
+            <h1>Tideway — Linux install</h1>
+            <p>Tideway ships as a Flatpak for Linux. Two ways to install.</p>
+
+            <h2>Auto-updating (recommended)</h2>
+            <p>Subscribe to this Flatpak repo once; <code>flatpak update</code> pulls new releases.</p>
+            <pre>flatpak remote-add --user --if-not-exists tideway \\
+              https://j-m-punk.github.io/tideway/tideway.flatpakrepo
+            flatpak install --user tideway com.tidaldownloader.Tideway</pre>
+
+            <h2>One-shot bundle</h2>
+            <p>Download <code>Tideway-${VERSION}.flatpak</code> from the <a href="https://github.com/J-M-PUNK/tideway/releases/latest">latest release</a>, then:</p>
+            <pre>flatpak install --user --bundle Tideway-${VERSION}.flatpak</pre>
+            <p>Won't auto-update; grab a newer bundle when you want to upgrade.</p>
+
+            <p style="margin-top:3rem; color:#666;">
+              <a href="https://github.com/J-M-PUNK/tideway">Project on GitHub</a>
+            </p>
+          </body>
+          </html>
+          HTML
+
+      - name: Deploy to gh-pages branch
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ostree-repo
+          # Each release replaces the previous OSTree repo content;
+          # users `flatpak update` against the new commit. `keep_files:
+          # false` cleans out stale objects from old releases so the
+          # branch doesn't grow unboundedly.
+          keep_files: false
+          commit_message: "Publish Flatpak repo for ${{ github.ref_name }}"

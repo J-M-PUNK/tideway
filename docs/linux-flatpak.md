@@ -3,8 +3,9 @@
 The Linux AppImage has no bundled webview, so pywebview falls back
 to opening the app in the system browser. That was deemed not
 acceptable. This doc covers the Flatpak that replaces it with a
-real native window, the scope, the staged plan, and the open
-decisions.
+real native window — the scope, the architecture, and the staged
+build that got it from manifest scaffold to a GitHub-Pages-hosted
+auto-updating remote.
 
 ## Why Flatpak
 
@@ -94,21 +95,37 @@ it.
    numpy, scipy, sounddevice, curl_cffi, etc.) loads at runtime,
    not just at import. Visual confirmation of an actual window
    needs a real display and stays out of scope here.
-3. Distribution + auto-updater + CI:
-   - **Open decision:** self-hosted Flatpak repo (keeps release
-     control + the existing GitHub-Actions cadence; lean) vs
-     Flathub (slower external review, but discoverability and
-     automatic user updates). Decided with a working build in
-     hand.
-   - The in-app self-updater currently downloads + minisign-
-     verifies the AppImage and execs it. On Flatpak that's wrong:
-     updates come from the Flatpak remote. The Linux updater must
-     detect Flatpak (`/.flatpak-info` / `$FLATPAK_ID`) and either
-     defer to `flatpak update` or hide the in-app install action.
-   - `release.yml` gains a `flatpak-builder` job (the
-     `flatpak/flatpak-github-actions` actions) producing a bundle
-     and/or pushing the repo; the AppImage job's fate (drop vs
-     keep as a fallback artifact) is part of the Stage 3 decision.
+3. Distribution + auto-updater + CI. **Done.** Self-hosted over
+   Flathub: keeps release control on the existing tag-driven
+   GitHub Actions cadence; no external review treadmill. AppImage
+   stays attached as a fallback artifact — same release page, same
+   pipeline — but the Flatpak is what the README recommends.
+   - **3a — In-app updater.** `_running_in_flatpak()` (server.py)
+     checks `/.flatpak-info` and `$FLATPAK_ID`. The
+     `/api/update-check` response carries `kind` (`"flatpak"` or
+     `"installer"`), and `/api/update/install` returns HTTP 409
+     with the exact `flatpak update --user
+     com.tidaldownloader.Tideway` command inside the sandbox. The
+     `UpdateBanner` reads `kind` and replaces the in-app "Install
+     now" button with that command rendered inline. Pinned by
+     `tests/test_update_flatpak.py` and
+     `web/src/components/UpdateBanner.test.tsx`.
+   - **3b — CI.** `build-linux-flatpak` in `.github/workflows/
+     release.yml` installs flatpak-builder on a stock ubuntu-22.04
+     runner, pulls the GNOME 49 runtime + Sdk + Node20 SDK
+     extension from Flathub, runs the manifest with `--repo=repo`,
+     and produces two artifacts: a `.flatpak` bundle (attached to
+     the GitHub Release, signed by `sign-release.sh` alongside the
+     DMG / .exe / AppImage) and the OSTree repo directory.
+   - **3c — Distribution.** `publish-flatpak-repo` deploys the
+     OSTree repo to the `gh-pages` branch on every tag via
+     `peaceiris/actions-gh-pages`. GitHub Pages serves it at
+     `https://j-m-punk.github.io/tideway/`, with a
+     `tideway.flatpakrepo` subscribe file and an `index.html`
+     landing page next to the repo. Users run `flatpak remote-add
+     --user tideway https://j-m-punk.github.io/tideway/
+     tideway.flatpakrepo` and `flatpak install tideway
+     com.tidaldownloader.Tideway`; `flatpak update` thereafter.
 
 ## Runtime version
 
