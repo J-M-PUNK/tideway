@@ -416,12 +416,113 @@ jobs:
           if-no-files-found: error
 
   # -------------------------------------------------------------------
+  # Linux Flatpak — the native-window path. The AppImage above falls
+  # back to opening the app in the system browser because a frozen
+  # PyInstaller build can't import the host's PyGObject/WebKit2GTK.
+  # The Flatpak builds under the GNOME 49 runtime (Python 3.13, GTK 3,
+  # WebKit2 4.1), so pywebview picks the GTK backend and the user
+  # gets a real native window. See docs/linux-flatpak.md.
+  #
+  # We install flatpak-builder + the GNOME 49 runtime on a stock
+  # ubuntu-22.04 runner rather than running inside a
+  # bilelmoussaoui/flatpak-github-actions container. That image lags
+  # GNOME releases by a few months; doing the install ourselves means
+  # the build mirrors what was verified manually in the dev VM and we
+  # control which runtime version ships.
+  # -------------------------------------------------------------------
+  build-linux-flatpak:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+
+      - name: Install flatpak + flatpak-builder
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            flatpak flatpak-builder ostree
+          flatpak --version
+          flatpak-builder --version
+
+      - name: Add Flathub remote
+        # User-scoped to match how end users add it; CI doesn't need
+        # the system-wide install, and user-scope avoids needing sudo
+        # on every flatpak invocation.
+        run: |
+          flatpak remote-add --user --if-not-exists \
+            flathub https://flathub.org/repo/flathub.flatpakrepo
+
+      - name: Install GNOME 49 runtime + Node20 SDK extension
+        # The manifest pins GNOME 49 (freedesktop 25.08 base, Python
+        # 3.13). Node20 SDK extension is needed in the build sandbox
+        # for the web bundle (manifest points npm at an offline cache
+        # vendored by flatpak-node-generator).
+        run: |
+          flatpak install --user -y --no-deps flathub \
+            org.gnome.Platform//49 \
+            org.gnome.Sdk//49 \
+            org.freedesktop.Sdk.Extension.node20//25.08
+
+      - name: Restore flatpak-builder cache
+        # 526 MB native-dep build is slow; cache the build state
+        # between runs. Keyed on the manifest + generated module
+        # files so a dep bump invalidates.
+        uses: actions/cache@v4
+        with:
+          path: |
+            .flatpak-builder
+            .build-flatpak
+          key: flatpak-builder-${{ hashFiles('flatpak/com.tidaldownloader.Tideway.yaml', 'flatpak/python3-requirements.json', 'flatpak/node-sources.json') }}
+          restore-keys: |
+            flatpak-builder-
+
+      - name: Build Flatpak (export to local OSTree repo)
+        # `--repo` puts the build into a flat OSTree repo at
+        # ./repo, which is what Stage 3c serves from GitHub Pages.
+        # `--force-clean` keeps re-runs deterministic; ccache below
+        # keeps the C builds fast across runs.
+        run: |
+          flatpak-builder --user --ccache --force-clean \
+            --repo=repo \
+            .build-flatpak \
+            flatpak/com.tidaldownloader.Tideway.yaml
+
+      - name: Build single-file .flatpak bundle from repo
+        # `flatpak build-bundle` extracts a single .flatpak file
+        # from the OSTree repo for users who want to install
+        # directly without adding a remote. Tag-versioned to match
+        # the DMG / .exe naming pattern.
+        run: |
+          VERSION=$(cat VERSION)
+          flatpak build-bundle repo "Tideway-${VERSION}.flatpak" \
+            com.tidaldownloader.Tideway master
+          ls -la "Tideway-${VERSION}.flatpak"
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: Tideway-Linux-Flatpak
+          path: Tideway-*.flatpak
+          if-no-files-found: error
+
+      - name: Upload OSTree repo for Stage 3c (GitHub Pages publish)
+        # Separate artifact so the publish job can pull just the
+        # bundle, and a future Pages-publish job can pull just the
+        # repo. Keeping them as siblings means we don't bake the
+        # distribution mechanism into the build step.
+        uses: actions/upload-artifact@v7
+        with:
+          name: Tideway-Linux-Flatpak-Repo
+          path: repo
+          if-no-files-found: error
+
+  # -------------------------------------------------------------------
   # Attach the artifacts to the GitHub Release. Only runs on a real
   # tag push — manual dispatch still produces the zips as workflow
   # artifacts but doesn't create a release.
   # -------------------------------------------------------------------
   publish:
-    needs: [build-macos, build-windows, build-windows-arm64, build-linux]
+    needs: [build-macos, build-windows, build-windows-arm64, build-linux, build-linux-flatpak]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
@@ -456,6 +557,10 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           name: Tideway-Linux
+          path: artifacts
+      - uses: actions/download-artifact@v8
+        with:
+          name: Tideway-Linux-Flatpak
           path: artifacts
 
       # Diagnostic — show exactly what landed in artifacts/ so a
@@ -519,6 +624,7 @@ jobs:
             artifacts/Tideway-*.dmg
             artifacts/Tideway-setup-*.exe
             artifacts/Tideway-*-x86_64.AppImage
+            artifacts/Tideway-*.flatpak
           # draft: true so the maintainer can review the auto-populated
           # notes (and edit / restructure if needed) before publishing.
           # Publishing a draft is what actually triggers the auto-update
