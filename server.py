@@ -1509,6 +1509,24 @@ _update_cache_lock = threading.Lock()
 _UPDATE_CACHE_TTL_SEC = 3600.0
 
 
+def _running_in_flatpak() -> bool:
+    """True when this process is running inside a Flatpak sandbox.
+
+    The Flatpak runtime drops `/.flatpak-info` into every sandboxed
+    process's root and sets `$FLATPAK_ID`; either is enough on its
+    own but checking both shields against odd hosts that mount one
+    without the other. Used to redirect the in-app self-updater away
+    from the AppImage download path — Flatpak users get their
+    updates through `flatpak update`, not by re-running an installer.
+    """
+    if os.environ.get("FLATPAK_ID"):
+        return True
+    try:
+        return Path("/.flatpak-info").is_file()
+    except OSError:
+        return False
+
+
 def _parse_semver(v: str) -> tuple[int, ...]:
     """Parse 'v1.2.3' / '1.2.3' / '1.2.3-beta' → (1, 2, 3). Tags that
     don't parse get (0,) so they always compare as older than a real
@@ -1802,12 +1820,19 @@ def update_check() -> dict:
         if cached and now - cached[0] < _UPDATE_CACHE_TTL_SEC:
             return cached[1]
 
+    # `kind` tells the frontend which install affordance to render.
+    # Flatpak users update through `flatpak update`; the in-app
+    # "Install now" button would download an AppImage they can't
+    # execute. The banner reads this and switches to a hint pointing
+    # at the package manager.
+    in_flatpak = _running_in_flatpak()
     payload: dict = {
         "available": False,
         "current": APP_VERSION,
         "latest": None,
         "url": None,
         "notes": None,
+        "kind": "flatpak" if in_flatpak else "installer",
         "error": None,
     }
     asset_url: Optional[str] = None
@@ -1829,9 +1854,17 @@ def update_check() -> dict:
             payload["url"] = latest_url
             payload["notes"] = latest_notes
             if _parse_semver(latest_tag) > _parse_semver(APP_VERSION):
-                asset_url = _match_release_asset(data)
-                if asset_url is not None:
+                if in_flatpak:
+                    # Inside Flatpak we don't need a per-platform
+                    # asset URL to consider the update available —
+                    # the user runs `flatpak update`, the bits come
+                    # from the Flatpak remote, not GitHub. The
+                    # release page link is still useful for notes.
                     payload["available"] = True
+                else:
+                    asset_url = _match_release_asset(data)
+                    if asset_url is not None:
+                        payload["available"] = True
     except Exception as exc:
         # Offline / rate-limited / cert verify failure / repo private.
         # Surface the reason on the response so support can see what's
@@ -1896,6 +1929,21 @@ def update_install() -> dict:
     can tell the user where to look if something goes sideways.
     """
     _require_local_access()
+    if _running_in_flatpak():
+        # The Flatpak path is `flatpak update --user
+        # com.tidaldownloader.Tideway`; downloading the AppImage
+        # here would just confuse the user. Tell them how to get
+        # the update instead of failing silently.
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Tideway is installed via Flatpak. Updates come from "
+                "the Flatpak remote — run `flatpak update --user "
+                "com.tidaldownloader.Tideway` (or use your software "
+                "centre / GNOME Software) to install the latest "
+                "release."
+            ),
+        )
     url = _update_asset_url()
     if url is None:
         raise HTTPException(
