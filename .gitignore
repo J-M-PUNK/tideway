@@ -244,3 +244,6 @@ watchlist.json
 
 # macOS
 .DS_Store
+
+# AirPlay 2 dev test receiver (scripts/airplay2_test_receiver.sh)
+.airplay2-test/
