@@ -1463,6 +1463,21 @@ def register_inapp_login_callback(fn: Callable[[str], None]) -> None:
     _inapp_login_callback = fn
 
 
+# Set by the desktop launcher to its sanitized browser opener
+# (desktop._open_in_browser). /api/open-external prefers it over
+# webbrowser.open() because on a frozen Linux build webbrowser
+# spawns the opener with the bundle's polluted LD_LIBRARY_PATH and
+# fails — that's what broke the paste-the-Oops-URL login on Linux.
+# Returns True if it launched an opener. None in dev / when the
+# server runs without the desktop shell (falls back to webbrowser).
+_external_opener: Optional[Callable[[str], bool]] = None
+
+
+def register_external_opener(fn: Callable[[str], bool]) -> None:
+    global _external_opener
+    _external_opener = fn
+
+
 # ---------------------------------------------------------------------------
 # App version + update check
 # ---------------------------------------------------------------------------
@@ -2990,8 +3005,18 @@ def open_external(req: OpenExternalRequest) -> dict:
             status_code=403,
             detail=f"Host not allowed: {parsed.hostname}",
         )
+    # Prefer the desktop shell's sanitized opener when present. On a
+    # frozen Linux build webbrowser.open() spawns the opener through
+    # the bundle's polluted LD_LIBRARY_PATH and fails (or "succeeds"
+    # without opening anything), which is exactly why the
+    # paste-the-Oops-URL login couldn't open the Tidal page on
+    # Linux. The registered opener (desktop._open_in_browser) uses a
+    # sanitized child env and explicit xdg-open/gio.
     try:
-        ok = webbrowser.open(req.url, new=2)
+        if _external_opener is not None:
+            ok = _external_opener(req.url)
+        else:
+            ok = webbrowser.open(req.url, new=2)
     except Exception as exc:
         raise HTTPException(status_code=500, detail=str(exc))
     if not ok:

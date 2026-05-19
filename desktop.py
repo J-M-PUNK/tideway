@@ -176,9 +176,10 @@ def _child_env() -> dict:
     return env
 
 
-def _open_in_browser(url: str) -> None:
+def _open_in_browser(url: str) -> bool:
     """Open `url` in the user's browser without leaking the bundle's
-    library path into the opener.
+    library path into the opener. Returns True if an opener was
+    launched, False if none could be (caller can then fall back).
 
     macOS (`open`) and Windows (`os.startfile`) openers don't exec a
     shell that would load our libs, so webbrowser is used directly.
@@ -187,12 +188,17 @@ def _open_in_browser(url: str) -> None:
     /bin/sh, which is exactly what crashes, so call the opener
     directly. If no opener is found we print the URL rather than
     re-trip the crash.
+
+    This is also what /api/open-external uses on a frozen Linux
+    build: plain webbrowser.open() there spawns the opener with the
+    bundle's polluted LD_LIBRARY_PATH and silently fails (or returns
+    success without opening anything), which is exactly why the
+    paste-the-Oops-URL login couldn't open the Tidal page on Linux.
     """
     if sys.platform != "linux" or not getattr(sys, "frozen", False):
         import webbrowser
 
-        webbrowser.open(url)
-        return
+        return bool(webbrowser.open(url))
     import shutil
     import subprocess
 
@@ -211,7 +217,7 @@ def _open_in_browser(url: str) -> None:
                 stderr=subprocess.DEVNULL,
                 start_new_session=True,
             )
-            return
+            return True
         except OSError:
             continue
     print(
@@ -219,6 +225,7 @@ def _open_in_browser(url: str) -> None:
         file=sys.stderr,
         flush=True,
     )
+    return False
 
 
 def _run_uvicorn_in_thread() -> "uvicorn.Server":  # type: ignore[name-defined]
@@ -1292,6 +1299,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     # returns `supported: false` and the frontend falls back to the
     # paste flow, opening Safari itself via /api/open-external.
     # Windows / Linux keep the inline pywebview child window.
+    # /api/open-external (the "Open Tidal login" button in the
+    # paste-the-Oops-URL flow, plus other external links) must use
+    # this sanitized opener, not webbrowser.open(): on a frozen
+    # Linux build webbrowser spawns through the bundle's polluted
+    # LD_LIBRARY_PATH and fails, which is what broke URL login on
+    # Linux. Registered on every platform — it degrades to
+    # webbrowser.open() off Linux/non-frozen anyway.
+    _server.register_external_opener(_open_in_browser)
+
     if sys.platform != "darwin":
         _server.register_inapp_login_callback(_open_login_window)
 
