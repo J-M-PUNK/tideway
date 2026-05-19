@@ -36,11 +36,15 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import plistlib
 import queue
 import secrets
+import socket
+import struct
 import threading
+import time
 import traceback
 import uuid
 from dataclasses import dataclass
@@ -128,6 +132,17 @@ try:  # pragma: no cover - environment dependent
     )
     from pyatv.support.http import http_connect  # type: ignore
 
+    # Internals to skip the Apple-only "/pair-pin-start" nudge that
+    # Roku and similar receivers do not implement (they show the PIN
+    # in response to the standard /pair-setup M1 instead).
+    from pyatv.auth import hap_tlv8  # type: ignore
+    from pyatv.auth.hap_srp import SRPAuthHandler  # type: ignore
+    from pyatv.protocols.airplay.auth.hap import (  # type: ignore
+        _AIRPLAY_HEADERS,
+        AirPlayHapPairSetupProcedure,
+        _get_pairing_data,
+    )
+
     _PAIR_ERROR: Optional[str] = None
 except Exception as exc:  # pragma: no cover
     NO_CREDENTIALS = None  # type: ignore
@@ -137,6 +152,11 @@ except Exception as exc:  # pragma: no cover
     pair_setup = None  # type: ignore
     verify_connection = None  # type: ignore
     http_connect = None  # type: ignore
+    hap_tlv8 = None  # type: ignore
+    SRPAuthHandler = None  # type: ignore
+    AirPlayHapPairSetupProcedure = object  # type: ignore
+    _AIRPLAY_HEADERS = None  # type: ignore
+    _get_pairing_data = None  # type: ignore
     _PAIR_ERROR = f"pyatv HAP pairing unavailable: {exc!r}"
 
 # pyatv's RAOP module already implements a complete AirPlay 2
@@ -215,6 +235,48 @@ def _save_cred(device_id: str, creds_str: str) -> None:
             json.dump(store, fh)
     except OSError as exc:
         _say(f"credentials write failed: {exc}")
+
+
+def _credentials_for(device: "AirPlay2Device"):
+    """Pick the HAP credentials for a device. PIN-paired devices
+    (Hisense) have a stored credential. Transient devices (Roku and
+    most non-Apple AirPlay 2 gear) advertise CoreUtils/transient
+    pairing and use the no-PIN TRANSIENT_CREDENTIALS with no pairing
+    step at all. Anything else genuinely needs a pair flow."""
+    stored = _load_creds().get(device.id)
+    if stored:
+        return parse_credentials(stored)
+    if device.supports_transient_pairing:
+        return TRANSIENT_CREDENTIALS
+    raise RuntimeError(
+        f"{device.id} needs PIN pairing; run scripts/airplay2_pair.py first"
+    )
+
+
+class _NoPinStartPairSetup(AirPlayHapPairSetupProcedure):  # type: ignore
+    """HAP pair-setup that skips POST /pair-pin-start.
+
+    /pair-pin-start is an Apple-only nudge that tells the receiver
+    to display its PIN. Roku and similar non-Apple AirPlay 2
+    receivers do not implement it (the request times out) and
+    instead show the PIN in response to the standard /pair-setup M1
+    below. Everything after start_pairing is identical to pyatv's
+    AirPlayHapPairSetupProcedure."""
+
+    async def start_pairing(self) -> None:
+        self.srp.initialize()
+        data = {
+            hap_tlv8.TlvValue.Method: b"\x00",
+            hap_tlv8.TlvValue.SeqNo: b"\x01",
+        }
+        resp = await self.http.post(
+            "/pair-setup",
+            body=hap_tlv8.write_tlv(data),
+            headers=_AIRPLAY_HEADERS,
+        )
+        pairing_data = _get_pairing_data(resp)
+        self._atv_salt = pairing_data[hap_tlv8.TlvValue.Salt]
+        self._atv_pub_key = pairing_data[hap_tlv8.TlvValue.PublicKey]
 
 
 def _crypto_ready() -> Optional[str]:
@@ -517,7 +579,9 @@ class AirPlay2Manager:
             raise RuntimeError(f"device {device_id} not found on network")
         http = await http_connect(device.address, device.port)
         try:
-            proc = pair_setup(AuthenticationType.HAP, http)
+            srp = SRPAuthHandler()
+            srp.initialize()
+            proc = _NoPinStartPairSetup(http, srp)
             await proc.start_pairing()  # receiver displays the PIN
         except Exception:
             http.close()
@@ -565,6 +629,83 @@ class AirPlay2Manager:
                 pending.http.close()
             except Exception:
                 pass
+
+    # -- pairing diagnostic -----------------------------------------
+
+    def diagnose(self, device_id: str) -> dict:
+        """One-run protocol probe: send several pair-setup M1
+        variants and a transient verify, logging exactly what the
+        receiver returns (HTTP status + decoded TLV). Tells us what
+        a non-Apple receiver (Roku) actually wants without any
+        on-device menu navigation. Watch the TV during the run and
+        note which variant makes a code appear."""
+        if hap_tlv8 is None or http_connect is None:
+            raise RuntimeError(_PAIR_ERROR or "pyatv HAP pairing unavailable")
+        return self._run_coro(self._diagnose(device_id), timeout=40.0)
+
+    async def _diagnose(self, device_id: str) -> dict:
+        device = await self._resolve(device_id)
+        if device is None:
+            raise RuntimeError(f"device {device_id} not found on network")
+        T = hap_tlv8.TlvValue
+        variants = [
+            (
+                "M1 Method=PairSetup(0x00)",
+                {T.Method: b"\x00", T.SeqNo: b"\x01"},
+            ),
+            (
+                "M1 Method=PairSetupWithAuth(0x01)",
+                {T.Method: b"\x01", T.SeqNo: b"\x01"},
+            ),
+            (
+                "M1 Method=0x00+Flags=Transient(0x10)",
+                {T.Method: b"\x00", T.SeqNo: b"\x01", T.Flags: bytes([0x10])},
+            ),
+        ]
+        for label, data in variants:
+            http = await http_connect(device.address, device.port)
+            try:
+                resp = await http.post(
+                    "/pair-setup",
+                    body=hap_tlv8.write_tlv(data),
+                    headers=_AIRPLAY_HEADERS,
+                )
+                body = resp.body if isinstance(resp.body, bytes) else b""
+                try:
+                    tlv = hap_tlv8.read_tlv(body)
+                    decoded = {
+                        (k.name if hasattr(k, "name") else str(k)): (
+                            v.hex() if isinstance(v, (bytes, bytearray)) else v
+                        )
+                        for k, v in tlv.items()
+                    }
+                except Exception as dex:
+                    decoded = {"_decode_error": repr(dex)}
+                _say(
+                    f"[diag] {label}: HTTP {resp.code} {resp.message}; "
+                    f"TLV={decoded}; raw={body.hex()[:160]}"
+                )
+            except Exception as exc:
+                _say(f"[diag] {label}: EXCEPTION {exc!r}")
+            finally:
+                try:
+                    http.close()
+                except Exception:
+                    pass
+            await asyncio.sleep(0.5)
+
+        http = await http_connect(device.address, device.port)
+        try:
+            v = await verify_connection(TRANSIENT_CREDENTIALS, http)
+            _say(f"[diag] transient verify: OK -> {type(v).__name__}")
+        except Exception as exc:
+            _say(f"[diag] transient verify: EXCEPTION {exc!r}")
+        finally:
+            try:
+                http.close()
+            except Exception:
+                pass
+        return {"done": True}
 
     async def _verify(self, device: AirPlay2Device):
         """Open a verified, encrypted AirPlay 2 session: stored HAP
@@ -922,6 +1063,246 @@ class AirPlay2Manager:
             except Exception:
                 pass
             http.close()
+
+    # -- buffered session + tone spike (Stage 4/5) ------------------
+
+    async def _buffered_setup(
+        self, device: AirPlay2Device, ct: int, audio_format: int
+    ) -> dict:
+        """Run the validated PTP buffered SETUP sequence and return
+        the live handles. Same sequence proven in _probe_setup_ptp;
+        centralised so the audio path can reuse it."""
+        BPLIST = "application/x-apple-binary-plist"
+        loop = asyncio.get_event_loop()
+        http = await http_connect(device.address, device.port)
+        sock = http.transport.get_extra_info("socket")
+        local_ip = sock.getsockname()[0]
+        remote_ip = http.remote_ip
+
+        rb = secrets.token_bytes(6)
+        device_id_colon = "02:" + ":".join(f"{b:02X}" for b in rb[1:])
+        clock_uuid = str(uuid.uuid4())
+        clock_id = int.from_bytes(secrets.token_bytes(8), "big")
+        session_uuid = str(uuid.uuid4()).upper()
+        group_uuid = str(uuid.uuid4()).upper()
+
+        creds = _credentials_for(device)
+        verifier = await verify_connection(creds, http)
+        rtsp = RtspSession(http)
+        channels: list = []
+
+        timingpeerinfo = {
+            "ID": clock_uuid,
+            "DeviceType": 0,
+            "ClockID": int.from_bytes(
+                clock_id.to_bytes(8, "big"), "big", signed=True
+            ),
+            "SupportsClockPortMatchingOverride": False,
+            "Addresses": [local_ip],
+        }
+        sess_resp = await rtsp.setup(
+            body={
+                "name": "Tideway",
+                "deviceID": device_id_colon,
+                "sessionUUID": session_uuid,
+                "timingProtocol": "PTP",
+                "macAddress": device_id_colon,
+                "groupUUID": group_uuid,
+                "groupContainsGroupLeader": False,
+                "timingPeerInfo": timingpeerinfo,
+                "timingPeerList": [timingpeerinfo],
+            }
+        )
+        event_port = decode_bplist_from_body(sess_resp).get("eventPort", 0)
+        if event_port:
+            for attempt in range(5):
+                try:
+                    transport, _ = await setup_channel(
+                        EventChannel,
+                        verifier,
+                        remote_ip,
+                        event_port,
+                        EVENTS_SALT,
+                        EVENTS_READ_INFO,
+                        EVENTS_WRITE_INFO,
+                    )
+                    channels.append(transport)
+                    break
+                except ConnectionRefusedError:
+                    if attempt == 4:
+                        raise
+                    await asyncio.sleep(1.0)
+
+        await rtsp.record()
+        await rtsp.exchange(
+            "SETPEERS",
+            body=plistlib.dumps(
+                [remote_ip, local_ip],
+                fmt=plistlib.FMT_BINARY,  # pylint: disable=no-member
+            ),
+            content_type=BPLIST,
+        )
+
+        out_key, _ = verifier.encryption_keys(
+            EVENTS_SALT, EVENTS_WRITE_INFO, EVENTS_READ_INFO
+        )
+        shk = out_key[0:32]
+        stream_resp = await rtsp.setup(
+            body={
+                "streams": [
+                    {
+                        "audioFormat": audio_format,
+                        "audioMode": "default",
+                        "controlPort": 0,
+                        "ct": ct,
+                        "isMedia": True,
+                        "latencyMax": 88200,
+                        "latencyMin": 11025,
+                        "shk": shk,
+                        "spf": 352,
+                        "sr": 44100,
+                        "type": 0x67,  # 103 buffered
+                        "supportsDynamicStreamID": False,
+                        "streamConnectionID": rtsp.session_id,
+                    }
+                ]
+            }
+        )
+        stream = decode_bplist_from_body(stream_resp)["streams"][0]
+        return {
+            "http": http,
+            "rtsp": rtsp,
+            "channels": channels,
+            "shk": shk,
+            "clock_id": clock_id,
+            "remote_ip": remote_ip,
+            "data_port": stream.get("dataPort"),
+            "control_port": stream.get("controlPort"),
+        }
+
+    def probe_play_tone(self, device_id: str, seconds: float = 6.0) -> dict:
+        """Stage 4/5 spike: after the validated buffered SETUP, act
+        as our own PTP grandmaster via RTCP time-announce packets
+        and stream a 440 Hz test tone (LPCM) to the dataPort. The
+        empirical gate: does the Hisense actually emit sound off our
+        self-assigned grandmaster, with no real gPTP exchange?"""
+        if AirPlayV2 is None or Chacha20Cipher8byteNonce is None:
+            raise RuntimeError(_STREAM_ERROR or "pyatv stream engine missing")
+        return self._run_coro(
+            self._play_tone(device_id, seconds), timeout=seconds + 40.0
+        )
+
+    async def _play_tone(self, device_id: str, seconds: float) -> dict:
+        device = await self._resolve(device_id)
+        if device is None:
+            raise RuntimeError(f"device {device_id} not found on network")
+        # Validate credentials up front: stored (PIN-paired) or
+        # transient. Raises a clear message only for devices that
+        # genuinely require a PIN pair flow.
+        _credentials_for(device)
+
+        # ct=1 LPCM keeps the audio path trivial (no ALAC encoder)
+        # to isolate the grandmaster-trust question. audioFormat
+        # 0x800 = PCM/44100/16/2.
+        s = await self._buffered_setup(device, ct=1, audio_format=0x800)
+        rtsp = s["rtsp"]
+        data_port = s["data_port"]
+        control_port = s["control_port"]
+        remote_ip = s["remote_ip"]
+        clock_id = s["clock_id"]
+        _say(
+            f"buffered SETUP ok (LPCM); dataPort={data_port} "
+            f"controlPort={control_port}; streaming {seconds:.0f}s tone"
+        )
+
+        cipher = Chacha20Cipher8byteNonce(s["shk"], s["shk"])
+        data_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        control_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        data_addr = (remote_ip, data_port)
+        control_addr = (remote_ip, control_port)
+
+        sr = 44100
+        spf = 352  # samples per frame/packet
+        base_pos = 88200
+        seqnum = secrets.randbelow(0x10000)
+        ssrc = 0  # zero for a PTP session
+
+        def sync_pkt(cur_pos: int, marker: bool) -> bytes:
+            p = bytearray(28)
+            p[0] = 0x90 if marker else 0x80
+            p[1] = 0xD7  # RTCP PT 215 time-announce
+            p[2] = 0x00
+            p[3] = 0x06
+            struct.pack_into(">I", p, 4, cur_pos & 0xFFFFFFFF)
+            struct.pack_into(">Q", p, 8, time.monotonic_ns() & 0xFFFFFFFFFFFFFFFF)
+            struct.pack_into(">I", p, 16, (base_pos - 11025) & 0xFFFFFFFF)
+            struct.pack_into(">Q", p, 20, clock_id & 0xFFFFFFFFFFFFFFFF)
+            return bytes(p)
+
+        # Pre-generate one second of 440 Hz sine, int16 BE stereo,
+        # then loop it. AirPlay LPCM is big-endian s16.
+        tone = bytearray()
+        for n in range(sr):
+            v = int(0.25 * 32767 * math.sin(2 * math.pi * 440.0 * n / sr))
+            tone += struct.pack(">hh", v, v)
+        frame_bytes = spf * 4  # stereo s16
+
+        try:
+            # Boot time-announce, then start audio.
+            control_sock.sendto(sync_pkt(base_pos, True), control_addr)
+            t0 = time.monotonic()
+            pos = base_pos
+            sent = 0
+            last_sync = t0
+            total = int(seconds * sr / spf)
+            for i in range(total):
+                off = ((sent * frame_bytes) % len(tone))
+                buf = (tone * 2)[off:off + frame_bytes]
+
+                header = bytearray(12)
+                header[0] = 0x80
+                header[1] = 0xE0 if i == 0 else 0x60  # marker on first
+                struct.pack_into(">H", header, 2, seqnum & 0xFFFF)
+                struct.pack_into(">I", header, 4, pos & 0xFFFFFFFF)
+                struct.pack_into(">I", header, 8, ssrc & 0xFFFFFFFF)
+
+                nonce = cipher.out_nonce
+                ct = cipher.encrypt(bytes(buf), aad=bytes(header[4:12]))
+                data_sock.sendto(bytes(header) + ct + nonce[-8:], data_addr)
+
+                seqnum = (seqnum + 1) & 0xFFFF
+                pos = (pos + spf) & 0xFFFFFFFF
+                sent += 1
+
+                now = time.monotonic()
+                if now - last_sync >= 1.0:
+                    control_sock.sendto(sync_pkt(pos, False), control_addr)
+                    last_sync = now
+
+                # Pace to real time against an absolute schedule so
+                # jitter doesn't accumulate.
+                target = t0 + (i + 1) * spf / sr
+                delay = target - time.monotonic()
+                if delay > 0:
+                    await asyncio.sleep(delay)
+            _say(f"tone stream finished: {sent} packets to {device.name}")
+            return {"packets": sent, "data_port": data_port}
+        except Exception as exc:
+            _say(f"tone stream failed for {device.name}: {exc}", exc=True)
+            raise
+        finally:
+            try:
+                await rtsp.teardown(rtsp.session_id)
+            except Exception:
+                pass
+            for c in s["channels"]:
+                try:
+                    c.close()
+                except Exception:
+                    pass
+            data_sock.close()
+            control_sock.close()
+            s["http"].close()
 
     async def _start_timing(self, session: _Session):
         # Stage 4: NTP buffered-mode anchor; PTP if the receiver
