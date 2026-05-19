@@ -334,6 +334,14 @@ def _invalidate_auth_cache() -> None:
         _auth_cache["ok"] = False
 
 
+# When a hard refresh failure logs the user out (dead refresh
+# token), drop the cached auth state immediately so the very next
+# /auth/status returns logged_in=false and the frontend bounces to
+# Login, instead of waiting out the cache TTL while play silently
+# fails.
+tidal.on_auth_lost = _invalidate_auth_cache
+
+
 def _invalidate_preview_cache() -> None:
     with _preview_cache_lock:
         _preview_cache.clear()
@@ -4717,6 +4725,10 @@ def _native_player() -> PCMPlayer:
             if local_index.get(str(tid))
             else None,
             quality_clamp=tidal.clamp_quality_to_subscription,
+            # Lets the playback resolve path recover from an expired
+            # token (refresh + retry once) the same way the download
+            # path does, instead of failing silently on "press play".
+            force_refresh=tidal.force_refresh,
         )
         # Mirror state changes into macOS Now Playing so media keys
         # can find us. update_state() no-ops on non-macOS / when the

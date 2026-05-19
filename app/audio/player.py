@@ -207,16 +207,38 @@ class PlayerSnapshot:
     force_volume: bool = False
 
 
+def _looks_like_auth_error(exc: BaseException) -> bool:
+    """Best-effort detection of a Tidal auth (expired-token) error.
+
+    Mirrors server._looks_like_401 deliberately — duplicated rather
+    than imported because player.py must not import server (server
+    imports player). tidalapi wraps these as requests.HTTPError with
+    .response.status_code 401/403, or surfaces them as a RuntimeError
+    whose str() carries '401' / 'Unauthorized'."""
+    resp = getattr(exc, "response", None)
+    if resp is not None and getattr(resp, "status_code", None) in (401, 403):
+        return True
+    msg = str(exc)
+    return "401" in msg or "Unauthorized" in msg
+
+
 class PCMPlayer:
     def __init__(
         self,
         session_getter: Callable[[], tidalapi.Session],
         local_lookup: Optional[Callable[[str], Optional[str]]] = None,
         quality_clamp: Optional[Callable[[str], Optional[str]]] = None,
+        force_refresh: Optional[Callable[[], bool]] = None,
     ):
         self._session_getter = session_getter
         self._local_lookup = local_lookup
         self._quality_clamp = quality_clamp
+        # Called when a playback resolve hits an expired Tidal token.
+        # Returns True if the token was refreshed (caller retries
+        # once), False if the refresh token itself is dead (caller
+        # surfaces a clear "log in again"). Injected by the server
+        # the same way session_getter is; None in tests/standalone.
+        self._force_refresh = force_refresh
 
         self._lock = threading.RLock()
         # Serializes load/stop/seek/preload so concurrent HTTP calls
@@ -1864,6 +1886,54 @@ class PCMPlayer:
             )
             return (list(urls), duration, info, bytes_map)
 
+        try:
+            return self._resolve_uncached(
+                session, track_id, quality, cache_key, t0
+            )
+        except Exception as exc:
+            # The playback resolve path must recover from an expired
+            # Tidal token exactly like the download and metadata
+            # paths already do. Without this, a stale access token
+            # surfaces as a silent "press play, nothing happens":
+            # the 401 propagates, the player flips to error, and the
+            # user is neither refreshed nor bounced to Login.
+            # getattr (not self._force_refresh) because some unit
+            # tests build PCMPlayer via __new__ and never run
+            # __init__; a missing injector just means "no refresh".
+            force_refresh = getattr(self, "_force_refresh", None)
+            if force_refresh is not None and _looks_like_auth_error(exc):
+                if force_refresh():
+                    log.info(
+                        "playback resolve hit a Tidal auth error; "
+                        "token refreshed, retrying once"
+                    )
+                    return self._resolve_uncached(
+                        self._session_getter(),
+                        track_id,
+                        quality,
+                        cache_key,
+                        t0,
+                    )
+                raise RuntimeError(
+                    "Tidal session expired. Please log out and log "
+                    "back in."
+                ) from exc
+            raise
+
+    def _resolve_uncached(
+        self,
+        session: tidalapi.Session,
+        track_id: str,
+        quality: Optional[str],
+        cache_key: tuple,
+        t0: float,
+    ) -> tuple[
+        Union[str, list[str]], Optional[float], StreamInfo, dict[int, bytes]
+    ]:
+        """Cache-miss network resolution: fetch track + playback-info,
+        parse the manifest, populate the cache. Split out of
+        _resolve_source so the caller can retry it once after a
+        force-refresh when Tidal returns an expired-token 401."""
         override = None
         if quality:
             try:
