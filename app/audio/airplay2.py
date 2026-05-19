@@ -136,6 +136,42 @@ except Exception as exc:  # pragma: no cover
     http_connect = None  # type: ignore
     _PAIR_ERROR = f"pyatv HAP pairing unavailable: {exc!r}"
 
+# pyatv's RAOP module already implements a complete AirPlay 2
+# buffered-audio sender (AirPlayV2: verify, base SETUP, audio
+# SETUP, ChaCha20 per-packet encryption; StreamClient: NTP timing
+# server + audio loop). pyatv only fails to reach our devices
+# because its RAOP discovery/credential layer assumes a _raop._tcp
+# service. We drive the streaming engine directly against the
+# AirPlay service with the Stage 2 HAP credentials. See
+# docs/airplay2-sender.md. Guarded separately; pyatv internals.
+try:  # pragma: no cover - environment dependent
+    from pyatv.protocols.raop.protocols import (  # type: ignore
+        StreamContext,
+    )
+    from pyatv.protocols.raop.protocols.airplayv2 import (  # type: ignore
+        EVENTS_READ_INFO,
+        EVENTS_SALT,
+        EVENTS_WRITE_INFO,
+        AirPlayV2,
+    )
+    from pyatv.support.chacha20 import (  # type: ignore
+        Chacha20Cipher8byteNonce,
+    )
+    from pyatv.support.http import (  # type: ignore
+        decode_bplist_from_body,
+    )
+    from pyatv.support.rtsp import RtspSession  # type: ignore
+
+    _STREAM_ERROR: Optional[str] = None
+except Exception as exc:  # pragma: no cover
+    StreamContext = None  # type: ignore
+    AirPlayV2 = None  # type: ignore
+    RtspSession = None  # type: ignore
+    decode_bplist_from_body = None  # type: ignore
+    Chacha20Cipher8byteNonce = None  # type: ignore
+    EVENTS_SALT = EVENTS_READ_INFO = EVENTS_WRITE_INFO = None  # type: ignore
+    _STREAM_ERROR = f"pyatv RAOP stream engine unavailable: {exc!r}"
+
 from app.paths import user_data_dir
 
 
@@ -544,10 +580,179 @@ class AirPlay2Manager:
             raise
         return http, verifier
 
-    async def _open_rtsp(self, device: AirPlay2Device):
-        # Stage 3: encrypted RTSP control channel — ANNOUNCE, SETUP
-        # (buffered audio), SETPEERS, SETRATEANCHORTIME, RECORD.
-        raise NotImplementedError("Stage 3: encrypted RTSP control")
+    # -- session SETUP (Stage 3) ------------------------------------
+
+    def probe_setup(self, device_id: str) -> dict:
+        """Stage 3 acceptance probe: assemble pyatv's AirPlayV2
+        against the device's AirPlay service with our stored HAP
+        credentials and confirm the receiver accepts pair-verify and
+        the buffered-audio SETUP. Non-disruptive: negotiates only,
+        no audio plays. Returns the negotiated ports."""
+        if AirPlayV2 is None:
+            raise RuntimeError(_STREAM_ERROR or "pyatv stream engine missing")
+        return self._run_coro(self._probe_setup(device_id), timeout=30.0)
+
+    async def _probe_setup(self, device_id: str) -> dict:
+        device = await self._resolve(device_id)
+        if device is None:
+            raise RuntimeError(f"device {device_id} not found on network")
+        stored = _load_creds().get(device.id)
+        if not stored:
+            raise RuntimeError(
+                f"{device.id} not paired; run scripts/airplay2_pair.py first"
+            )
+
+        loop = asyncio.get_event_loop()
+        http = await http_connect(device.address, device.port)
+        # The SETUP bodies advertise our timing and control ports.
+        # The receiver records them now and only connects during
+        # RECORD/streaming (Stage 5), but bind real ephemeral UDP
+        # sockets so the ports are genuine and ours.
+        timing_t, _ = await loop.create_datagram_endpoint(
+            asyncio.DatagramProtocol, local_addr=("0.0.0.0", 0)
+        )
+        control_t, _ = await loop.create_datagram_endpoint(
+            asyncio.DatagramProtocol, local_addr=("0.0.0.0", 0)
+        )
+        timing_port = timing_t.get_extra_info("socket").getsockname()[1]
+        control_port = control_t.get_extra_info("socket").getsockname()[1]
+
+        context = StreamContext()
+        context.credentials = parse_credentials(stored)
+        rtsp = RtspSession(http)
+        proto = AirPlayV2(context, rtsp)
+        try:
+            _say(f"opening AirPlay 2 session to {device.name}")
+            await proto.setup(timing_port, control_port)
+            result = {
+                "data_port": context.server_port,
+                "control_port": context.control_port,
+                "verified": True,
+            }
+            _say(
+                f"SETUP accepted by {device.name}: "
+                f"dataPort={context.server_port} "
+                f"controlPort={context.control_port}"
+            )
+            return result
+        except Exception as exc:
+            _say(f"SETUP failed for {device.name}: {exc}", exc=True)
+            raise
+        finally:
+            try:
+                proto.teardown()
+            except Exception:
+                pass
+            for t in (timing_t, control_t):
+                try:
+                    t.close()
+                except Exception:
+                    pass
+            http.close()
+
+    def probe_setup_seq(self, device_id: str) -> dict:
+        """Stage 3b probe: same as probe_setup but using owntone's
+        canonical NTP sequence — session SETUP (NTP) -> RECORD ->
+        stream SETUP with owntone's ALAC body. pyatv's AirPlayV2
+        omits the RECORD before the stream SETUP and uses realtime
+        PCM, which the Hisense never answers. This isolates whether
+        the missing RECORD + ALAC body is the fix. Non-disruptive."""
+        if AirPlayV2 is None:
+            raise RuntimeError(_STREAM_ERROR or "pyatv stream engine missing")
+        return self._run_coro(self._probe_setup_seq(device_id), timeout=30.0)
+
+    async def _probe_setup_seq(self, device_id: str) -> dict:
+        device = await self._resolve(device_id)
+        if device is None:
+            raise RuntimeError(f"device {device_id} not found on network")
+        stored = _load_creds().get(device.id)
+        if not stored:
+            raise RuntimeError(
+                f"{device.id} not paired; run scripts/airplay2_pair.py first"
+            )
+
+        # owntone's proven order: SETUP(session,NTP) -> RECORD ->
+        # SETUP(stream, ALAC). pyatv's AirPlayV2 does session then
+        # stream with no RECORD; subclass to inject it and swap the
+        # stream body for owntone's.
+        class _OwntoneSeqV2(AirPlayV2):  # type: ignore
+            async def setup(self, timing_port: int, control_port: int) -> None:
+                await self._setup_base(timing_port)
+                # Empty RECORD, exactly as owntone/iOS send it.
+                await self.rtsp.record()
+                out_key, _ = self._verifier.encryption_keys(
+                    EVENTS_SALT, EVENTS_WRITE_INFO, EVENTS_READ_INFO
+                )
+                shk = out_key[0:32]
+                resp = await self.rtsp.setup(
+                    body={
+                        "streams": [
+                            {
+                                "audioFormat": 0x40000,  # ALAC/44100/16/2
+                                "audioMode": "default",
+                                "controlPort": control_port,
+                                "ct": 2,  # ALAC
+                                "isMedia": True,
+                                "latencyMax": 88200,
+                                "latencyMin": 11025,
+                                "shk": shk,
+                                "spf": 352,
+                                "sr": 44100,
+                                "type": 0x60,
+                                "supportsDynamicStreamID": False,
+                                "streamConnectionID": self.rtsp.session_id,
+                            }
+                        ]
+                    }
+                )
+                r = decode_bplist_from_body(resp)
+                stream = r["streams"][0]
+                self.context.control_port = stream["controlPort"]
+                self.context.server_port = stream["dataPort"]
+                self._cipher = Chacha20Cipher8byteNonce(shk, shk)
+
+        loop = asyncio.get_event_loop()
+        http = await http_connect(device.address, device.port)
+        timing_t, _ = await loop.create_datagram_endpoint(
+            asyncio.DatagramProtocol, local_addr=("0.0.0.0", 0)
+        )
+        control_t, _ = await loop.create_datagram_endpoint(
+            asyncio.DatagramProtocol, local_addr=("0.0.0.0", 0)
+        )
+        timing_port = timing_t.get_extra_info("socket").getsockname()[1]
+        control_port = control_t.get_extra_info("socket").getsockname()[1]
+
+        context = StreamContext()
+        context.credentials = parse_credentials(stored)
+        rtsp = RtspSession(http)
+        proto = _OwntoneSeqV2(context, rtsp)
+        try:
+            _say(f"opening AirPlay 2 session (owntone seq) to {device.name}")
+            await proto.setup(timing_port, control_port)
+            _say(
+                f"buffered SETUP accepted by {device.name}: "
+                f"dataPort={context.server_port} "
+                f"controlPort={context.control_port}"
+            )
+            return {
+                "data_port": context.server_port,
+                "control_port": context.control_port,
+                "verified": True,
+            }
+        except Exception as exc:
+            _say(f"buffered SETUP failed for {device.name}: {exc}", exc=True)
+            raise
+        finally:
+            try:
+                proto.teardown()
+            except Exception:
+                pass
+            for t in (timing_t, control_t):
+                try:
+                    t.close()
+                except Exception:
+                    pass
+            http.close()
 
     async def _start_timing(self, session: _Session):
         # Stage 4: NTP buffered-mode anchor; PTP if the receiver

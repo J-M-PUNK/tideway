@@ -107,14 +107,134 @@ pyatv ships far more of the AirPlay 2 control side than expected:
   `get_pairing_requirement`, `is_password_required`. Stage 1 reuses
   these directly.
 
-Net effect: Stages 2 and 3 are largely pyatv reuse plus adaptation
-(issue the SETUP with an audio-stream descriptor rather than a
-control descriptor), not from-scratch protocol work. The genuinely
-novel, undocumented effort concentrates in **Stage 5**: ALAC
-encode, the AirPlay 2 buffered-audio packet format, per-packet
-ChaCha20-Poly1305 with the SETUP-derived key, and pacing against
-the timing anchor. This is still substantial but materially
-smaller than "implement the whole protocol."
+### Decisive finding (Stage 3 investigation)
+
+pyatv contains a complete, working AirPlay 2 audio sender that it
+never exposes for our use case:
+
+- `pyatv/protocols/raop/protocols/airplayv2.py` (`AirPlayV2`) does
+  verify_connection, the base SETUP (timing + event channel), the
+  buffered-audio stream SETUP (the real body: `audioFormat`, `ct`,
+  `spf`, `sr`, `shk`, `type`), feedback, and `send_audio_packet`
+  with ChaCha20 8-byte-nonce per-packet encryption.
+- `pyatv/protocols/raop/stream_client.py` (`StreamClient`) drives
+  it: NTP `TimingServer`, control client, the audio send loop,
+  statistics.
+- `pyatv/protocols/raop/__init__.py setup()` shows the assembly:
+  `http_connect(addr, port)` → `RtspSession` → `AirPlayV2(context,
+  rtsp)` → `StreamClient`, with `context.credentials` set.
+
+`pyatv.stream_file` failed for us only because pyatv's RAOP
+*discovery and credential* layer assumes a `_raop._tcp` service
+and legacy RAOP auth. The streaming engine underneath is intact,
+and Stage 2 produced exactly the HAP credentials it needs. So the
+remaining stages are no longer "implement the protocol":
+
+- **Stage 3**: assemble `AirPlayV2` against the device's AirPlay
+  service (port 7000) with the Stage 2 HAP credentials in
+  `StreamContext.credentials`; confirm the receiver accepts
+  verify + the buffered-audio SETUP. Pure pyatv reuse.
+- **Stage 4**: NTP timing is pyatv's `TimingServer`, already
+  driven by `StreamClient`. Reuse.
+- **Stage 5**: the only genuinely novel integration left, and it
+  is integration not protocol: feed Tideway's live float32 PCM
+  into pyatv's audio loop via an `AudioSource` adapter (pyatv's
+  RAOP audio source is file/finite oriented; we need a live,
+  endless source). ALAC/PCM packetization and encryption are
+  already done by `AirPlayV2`/`StreamClient`.
+
+Initial read was that this collapsed the multi-month estimate.
+The Stage 3 hardware test corrected that, and the correction
+matters:
+
+**What genuinely collapsed (validated on the real TV):**
+
+- Authentication. HAP pair-setup + pair-verify with the Stage 2
+  credentials succeeds against the Hisense. Real, hard, done.
+- Encrypted RTSP transport and the general/base SETUP. The TV
+  accepts these via pyatv's reused machinery.
+
+**What did NOT collapse (the real wall, confirmed):**
+
+pyatv's `AirPlayV2` is the **NTP + realtime** variant (it
+hardcodes `timingProtocol: "NTP"`, stream `type` 0x60). The
+canonical receiver source is explicit: server version >= 355
+means the device operates in **PTP + buffered** mode; <= 355 is
+NTP + realtime. The Hisense advertises `srcvers 377.40.00`, so it
+is PTP + buffered, like essentially every modern third-party
+AirPlay 2 TV and speaker. It accepts the general SETUP (lenient)
+but never answers a realtime/NTP stream SETUP. pyatv does not
+implement the PTP + buffered path at all.
+
+So the genuinely novel, undocumented work is back and real:
+
+- A PTP (IEEE 1588) clock responder.
+- `SETPEERS` (PTP peer list exchange) and `SETRATEANCHORTIME`.
+- The buffered-audio stream SETUP (`type` 103, ALAC/PCM, `shk`).
+- Buffered-audio packet pacing against the PTP anchor.
+
+owntone implements all of this in C; `airplay2-receiver` is the
+readable receiver-side spec oracle. No Python sender implements
+the PTP buffered path.
+
+### Correction after reading owntone's canonical sender
+
+The PTP estimate was too pessimistic. owntone's `airplay.c` shows:
+
+- owntone supports NTP and PTP. When no PTP daemon (nqptp) is
+  present it falls back to **in-process NTP** and still streams
+  buffered audio to third-party TVs. PTP/nqptp is NOT required.
+- `payload_make_setpeers` is `if (!use_ptp) return 1; // Skip` —
+  **SETPEERS is PTP-only**; the NTP path omits it.
+- The canonical NTP start sequence is: `SETUP(session, NTP)` →
+  `RECORD` (empty body) → `SETUP(stream)` → `SET_PARAMETER`. The
+  general SETUP body is minimal: `deviceID`, `sessionUUID`,
+  `timingPort`, `timingProtocol:"NTP"`.
+- The stream SETUP body: `audioFormat 0x40000` (ALAC/44100/16/2),
+  `ct:2` (ALAC), `type:0x60`, `spf:352`, `latencyMin:11025`,
+  `shk:<32-byte key>`, `controlPort`, `streamConnectionID`.
+- Audio encryption is ChaCha20-Poly1305, 32-byte key, 8-byte
+  nonce, AAD = RTP header[4:12] — exactly what pyatv's
+  `AirPlayV2.send_audio_packet` already implements.
+
+pyatv's `AirPlayV2` does session SETUP then the stream SETUP with
+**no RECORD in between**, and uses realtime PCM. The Hisense
+accepting verify + general SETUP but never answering the stream
+SETUP is consistent with the missing RECORD. So the likely fix is
+a sequencing change (`SETUP(session,NTP)` → `RECORD` →
+`SETUP(stream)` with owntone's ALAC body), not a PTP stack.
+
+Net: auth + transport done; the remaining work is most likely
+replicating owntone's NTP buffered sequence on top of pyatv's
+primitives, then feeding live PCM (Stage 5). Validated
+empirically against the Hisense before this is claimed — the
+last "collapse" claim was made too early; this one is a
+hypothesis until the TV answers the stream SETUP.
+
+### Stage 3b result: NTP sequence disproven on the Hisense
+
+Implemented owntone's exact NTP order on pyatv primitives:
+`SETUP(session,NTP)` → `RECORD` → `SETUP(stream)` with owntone's
+ALAC body (`audioFormat 0x40000`, `ct:2`, `type:0x60`, `spf:352`,
+`shk` 32 bytes, `streamConnectionID`). Result against the
+Hisense: session SETUP, event channel, and RECORD all succeed;
+the **stream SETUP still times out**. The missing-RECORD
+hypothesis is disproven on this device.
+
+Conclusion: the Hisense (`srcvers 377`, PTP+buffered) does not
+honor owntone's NTP fallback. The remaining path is the **full
+PTP session SETUP**: `timingProtocol:"PTP"` with
+`timingPeerInfo`/`timingPeerList`, the SETPEERS step, a
+`TIME_ANNOUNCE_PTP` RTCP announcer (type 215, 28 bytes, sender as
+PTP grandmaster — format known from airplay2-receiver
+control.py), and `SETRATEANCHORTIME` with `networkTimeSecs/Frac/
+TimelineID/rtpTime/rate`. This is the genuine multi-week
+reverse-engineering effort, now empirically confirmed as required
+for this device, not avoidable via the NTP shortcut.
+
+The `probe_setup` / `probe_setup_seq` harnesses and this log are
+the reusable artifacts; the NTP path stays in the tree as a
+documented dead end for this class of receiver.
 
 Stage 1 finding: the target Hisense TV advertises
 `SupportsAirPlayAudio + SupportsBufferedAudio + SupportsPTP` and
