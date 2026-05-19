@@ -81,6 +81,29 @@ except Exception as exc:  # pragma: no cover
     Protocol = None  # type: ignore
     _DEPS_ERROR = f"pyatv import failed: {exc!r}"
 
+# pyatv ships the canonical AirPlay feature-flag table and the
+# pairing/password classification logic. Reuse it rather than
+# hand-decoding a 64-bit bitfield (the "reuse pyatv" decision in
+# docs/airplay2-sender.md). These are pyatv internals, so the
+# import is guarded separately: a pyatv layout change degrades
+# discovery to conservative "not streamable" rather than crashing
+# the module. Verified against pyatv 0.17.0.
+try:  # pragma: no cover - environment dependent
+    from pyatv.protocols.airplay.utils import (  # type: ignore
+        AirPlayFlags,
+        get_pairing_requirement,
+        is_password_required,
+        parse_features,
+    )
+
+    _FEATURES_ERROR: Optional[str] = None
+except Exception as exc:  # pragma: no cover
+    AirPlayFlags = None  # type: ignore
+    get_pairing_requirement = None  # type: ignore
+    is_password_required = None  # type: ignore
+    parse_features = None  # type: ignore
+    _FEATURES_ERROR = f"pyatv airplay utils unavailable: {exc!r}"
+
 
 def _crypto_ready() -> Optional[str]:
     """None if every crypto/auth dependency is importable, else a
@@ -104,15 +127,121 @@ _IMPLEMENTED = False
 
 @dataclass
 class AirPlay2Device:
-    """An AirPlay 2 candidate from discovery (Stage 1 fills in the
-    decoded TXT features/flags)."""
+    """An AirPlay 2 candidate from discovery, with the TXT
+    features/flags decoded (Stage 1)."""
 
     id: str
     name: str
     address: str
     port: int
-    # Stage 1: decoded `features`/`flags` bitfields, model, whether
-    # the receiver wants transient pairing, supported audio formats.
+    model: str
+    # Decoded from the AirPlay TXT `features` bitfield via pyatv's
+    # canonical AirPlayFlags table.
+    supports_airplay_audio: bool
+    supports_buffered_audio: bool
+    supports_ptp: bool
+    # Whether the receiver advertises a CoreUtils/transient pairing
+    # path (the no-PIN HomeKit pairing the sender will use).
+    supports_transient_pairing: bool
+    # pyatv's pairing verdict for this service: "NotNeeded",
+    # "Mandatory", "Unsupported", or "Disabled". "Unsupported"
+    # means pyatv (and so this sender) cannot pair with it, e.g.
+    # macOS "Current User" access control (act=2).
+    pairing: str
+    password_required: bool
+    raw_features: int
+    # Whether this sender can plausibly stream to it. reason is
+    # populated only when streamable is False.
+    streamable: bool
+    reason: str = ""
+
+
+def _classify_device(
+    device_id: str, name: str, address: str, svc
+) -> AirPlay2Device:
+    """Decode an AirPlay service's TXT into capability flags and
+    decide whether this sender can plausibly stream to it.
+
+    Uses pyatv's canonical AirPlayFlags table and pairing/password
+    logic. If pyatv's airplay utils aren't importable (version
+    drift), the device is still surfaced but conservatively marked
+    not streamable rather than guessed at."""
+    props = dict(svc.properties or {})
+    model = props.get("model", "")
+    port = svc.port
+
+    if parse_features is None:
+        return AirPlay2Device(
+            id=device_id,
+            name=name,
+            address=address,
+            port=port,
+            model=model,
+            supports_airplay_audio=False,
+            supports_buffered_audio=False,
+            supports_ptp=False,
+            supports_transient_pairing=False,
+            pairing="Unknown",
+            password_required=False,
+            raw_features=0,
+            streamable=False,
+            reason=_FEATURES_ERROR or "feature decode unavailable",
+        )
+
+    feat_str = props.get("features", "")
+    try:
+        feats = parse_features(feat_str) if feat_str else AirPlayFlags(0)
+    except ValueError:
+        feats = AirPlayFlags(0)
+
+    audio = AirPlayFlags.SupportsAirPlayAudio in feats
+    buffered = AirPlayFlags.SupportsBufferedAudio in feats
+    ptp = AirPlayFlags.SupportsPTP in feats
+    transient = (
+        AirPlayFlags.SupportsCoreUtilsPairingAndEncryption in feats
+        or AirPlayFlags.SupportsUnifiedPairSetupandMFi in feats
+    )
+    pairing = get_pairing_requirement(svc).name
+    pw_required = is_password_required(svc)
+
+    # Streamable means: it does AirPlay audio, in the buffered mode
+    # the sender targets, and there's a pairing path the sender can
+    # actually perform. "Unsupported" pairing is macOS Current-User
+    # access control (act=2) which the HAP transient path can't do;
+    # password auth isn't implemented.
+    if not audio:
+        streamable, reason = False, "no AirPlay audio (video-only receiver)"
+    elif not buffered:
+        streamable, reason = (
+            False,
+            "no buffered-audio support (realtime/legacy only)",
+        )
+    elif pairing == "Unsupported":
+        streamable, reason = (
+            False,
+            "pairing unsupported (macOS Current User access control)",
+        )
+    elif pw_required:
+        streamable, reason = False, "password-protected (not implemented)"
+    else:
+        streamable, reason = True, ""
+
+    return AirPlay2Device(
+        id=device_id,
+        name=name,
+        address=address,
+        port=port,
+        model=model,
+        supports_airplay_audio=audio,
+        supports_buffered_audio=buffered,
+        supports_ptp=ptp,
+        supports_transient_pairing=transient,
+        pairing=pairing,
+        password_required=pw_required,
+        raw_features=int(feats),
+        streamable=streamable,
+        reason=reason,
+    )
 
 
 @dataclass
@@ -214,18 +343,13 @@ class AirPlay2Manager:
             if airplay_svc is None:
                 continue
             out.append(
-                AirPlay2Device(
-                    id=conf.identifier or str(conf.address),
+                _classify_device(
+                    device_id=conf.identifier or str(conf.address),
                     name=conf.name,
                     address=str(conf.address),
-                    port=airplay_svc.port,
+                    svc=airplay_svc,
                 )
             )
-            # Stage 1 TODO: decode airplay_svc.properties — the
-            # `features`/`flags` bitfields, model (`am`), protocol
-            # version (`vs`), supported encryption (`et`) — and
-            # classify: streamable AirPlay 2 audio vs video-only vs
-            # RAOP-only. Only the streamable ones should surface.
         return out
 
     # -- connect / stream (Stages 2-5) ------------------------------

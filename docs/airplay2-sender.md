@@ -90,6 +90,39 @@ whole thing is opaque otherwise.
 Stages 2 and 4 are where this can stall hardest. Authentication
 and timing are the classic AirPlay 2 walls.
 
+## Re-scoping after Stage 0/1 investigation
+
+pyatv ships far more of the AirPlay 2 control side than expected:
+
+- `pyatv/protocols/airplay/ap2_session.py` (`AP2Session`) already
+  does the encrypted AirPlay 2 connect, RTSP SETUP, event/data
+  channels, and keep-alive. pyatv uses it for remote-control
+  tunnelling, not audio, but the encrypted RTSP plumbing is
+  reusable.
+- `pyatv/protocols/airplay/auth/hap_transient.py` implements
+  transient HomeKit pairing; `pyatv.auth.hap_*` covers
+  pair-setup/verify and the session key schedule.
+- `pyatv/protocols/airplay/utils.py` has the canonical
+  `AirPlayFlags` table plus `parse_features`,
+  `get_pairing_requirement`, `is_password_required`. Stage 1 reuses
+  these directly.
+
+Net effect: Stages 2 and 3 are largely pyatv reuse plus adaptation
+(issue the SETUP with an audio-stream descriptor rather than a
+control descriptor), not from-scratch protocol work. The genuinely
+novel, undocumented effort concentrates in **Stage 5**: ALAC
+encode, the AirPlay 2 buffered-audio packet format, per-packet
+ChaCha20-Poly1305 with the SETUP-derived key, and pacing against
+the timing anchor. This is still substantial but materially
+smaller than "implement the whole protocol."
+
+Stage 1 finding: the target Hisense TV advertises
+`SupportsAirPlayAudio + SupportsBufferedAudio + SupportsPTP` and
+mandatory pairing, but does NOT advertise the CoreUtils/transient
+pairing flag that the macOS receivers do. Stage 2 must therefore
+support classic HAP pair-setup/verify (PIN shown on the TV), not
+assume the no-PIN transient path.
+
 ## Protocol references
 
 - AirPlay 2 internals, authentication: https://emanuelecozzi.net/docs/airplay2/
