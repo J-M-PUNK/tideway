@@ -392,12 +392,24 @@ class LastFmClient:
         except Exception:
             return None
 
-    def get_user_info(self) -> dict:
-        """User profile header: total playcount, registered date, avatar."""
+    def get_user_info(self) -> Optional[dict]:
+        """User profile header: total playcount, registered date, avatar.
+
+        Returns None when the upstream call fails or Last.fm doesn't
+        recognize the configured username (a stored-but-renamed user
+        was the original failure mode — Last.fm responded 404 and the
+        old `return {}` path silently passed an empty object through
+        to the UI, where the Stats page tried to call .toLocaleString
+        on undefined and crashed). Callers should treat None as "no
+        profile available" and skip the header instead of pretending
+        a zero-filled record arrived.
+        """
         data = self._public_get({"method": "user.getInfo"})
         if not data:
-            return {}
+            return None
         user = data.get("user") or {}
+        if not user.get("name"):
+            return None
         reg_raw = user.get("registered") or {}
         # Last.fm returns `registered` as {"unixtime": "123", "#text": 123}
         reg_ts = None
