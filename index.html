@@ -1,9 +1,33 @@
 <!doctype html>
 <html lang="en">
-<head><meta charset="utf-8"><title>Tideway — Linux install</title></head>
-<body style="font-family: system-ui, sans-serif; max-width: 720px; margin: 3rem auto; padding: 0 1rem; line-height: 1.5;">
+<head>
+  <meta charset="utf-8">
+  <title>Tideway — Linux install</title>
+  <style>
+    body { font-family: system-ui, sans-serif; max-width: 720px; margin: 3rem auto; padding: 0 1rem; line-height: 1.5; }
+    h1 { margin-top: 0; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    pre { background: #f5f5f5; padding: 0.75rem 1rem; border-radius: 6px; overflow-x: auto; }
+    a { color: #2563eb; }
+  </style>
+</head>
+<body>
   <h1>Tideway — Linux install</h1>
-  <p>Placeholder. This site is populated by the release pipeline on the next Tideway tag push. The Flatpak repo plus install instructions will land here automatically.</p>
-  <p><a href="https://github.com/J-M-PUNK/tideway">Project on GitHub</a></p>
+  <p>Tideway ships as a Flatpak for Linux. Two ways to install.</p>
+
+  <h2>Auto-updating (recommended)</h2>
+  <p>Subscribe to this Flatpak repo once; <code>flatpak update</code> pulls new releases.</p>
+  <pre>flatpak remote-add --user --if-not-exists tideway \
+    https://j-m-punk.github.io/tideway/tideway.flatpakrepo
+  flatpak install --user tideway com.tidaldownloader.Tideway</pre>
+
+  <h2>One-shot bundle</h2>
+  <p>Download <code>Tideway-1.10.0.flatpak</code> from the <a href="https://github.com/J-M-PUNK/tideway/releases/latest">latest release</a>, then:</p>
+  <pre>flatpak install --user --bundle Tideway-1.10.0.flatpak</pre>
+  <p>Won't auto-update; grab a newer bundle when you want to upgrade.</p>
+
+  <p style="margin-top:3rem; color:#666;">
+    <a href="https://github.com/J-M-PUNK/tideway">Project on GitHub</a>
+  </p>
 </body>
 </html>
