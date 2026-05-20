@@ -217,3 +217,87 @@ def test_invalidate_clears_disk_layer_too(tmp_path, monkeypatch):
         # Both layers gone: refetch happens.
         server._lastfm_cached("k", fetch, ttl_sec=3600.0, persistent=True)
         assert fetch_count[0] == 2
+
+
+# ---------------------------------------------------------------------------
+# cache_empty=False — Popular tracks regression guard.
+# ---------------------------------------------------------------------------
+#
+# The Popular page's resolved chart endpoint used to cache empty
+# results from `_resolve_all` for the full 1-hour TTL. Symptom: one
+# transient Tidal failure left the user looking at "Last.fm didn't
+# return any results" for an hour even after Tidal recovered.
+# `cache_empty=False` makes the empty case bypass both cache layers.
+
+
+def test_cache_empty_false_skips_memory_write_when_fetch_returns_empty():
+    fetch_count = [0]
+
+    def fetch():
+        fetch_count[0] += 1
+        return []  # transient upstream failure
+
+    with patch.object(server.lastfm, "status", return_value={"username": "u"}):
+        server._lastfm_cached("k", fetch, cache_empty=False)
+        # No entry should have been written.
+        assert (
+            server._lastfm_cache.get("u|k") is None
+        ), "empty result must not be cached when cache_empty=False"
+        # Second call refetches — exactly the desired retry.
+        server._lastfm_cached("k", fetch, cache_empty=False)
+        assert fetch_count[0] == 2
+
+
+def test_cache_empty_false_skips_disk_write_when_fetch_returns_empty(
+    tmp_path, monkeypatch
+):
+    """The persistent layer must also skip the write — otherwise the
+    empty list survives app restarts, which was the original bug."""
+    from app import lastfm_disk_cache
+
+    monkeypatch.setattr(
+        lastfm_disk_cache, "_db_path", tmp_path / "lastfm_disk_cache.db"
+    )
+
+    def fetch():
+        return []
+
+    with patch.object(server.lastfm, "status", return_value={"username": "u"}):
+        server._lastfm_cached(
+            "k", fetch, ttl_sec=3600.0, persistent=True, cache_empty=False
+        )
+        # Disk row should be absent.
+        assert lastfm_disk_cache.get("u|k", 3600.0) is None
+
+
+def test_cache_empty_false_still_caches_truthy_results():
+    """The opt-out should only affect empty results — a normal,
+    populated list still gets cached as usual."""
+    fetch_count = [0]
+
+    def fetch():
+        fetch_count[0] += 1
+        return [{"track": "Bohemian Rhapsody"}]
+
+    with patch.object(server.lastfm, "status", return_value={"username": "u"}):
+        server._lastfm_cached("k", fetch, cache_empty=False)
+        server._lastfm_cached("k", fetch, cache_empty=False)
+        assert fetch_count[0] == 1, (
+            "second call should hit the in-memory cache"
+        )
+
+
+def test_default_cache_empty_true_preserves_existing_behavior():
+    """Other endpoints don't opt in; their caching shape must not
+    change. An empty list cached as today's default."""
+    fetch_count = [0]
+
+    def fetch():
+        fetch_count[0] += 1
+        return []
+
+    with patch.object(server.lastfm, "status", return_value={"username": "u"}):
+        server._lastfm_cached("k", fetch)
+        server._lastfm_cached("k", fetch)
+        # Empty result is cached → only one fetch.
+        assert fetch_count[0] == 1
