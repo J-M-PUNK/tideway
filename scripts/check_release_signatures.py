@@ -32,7 +32,7 @@ from pathlib import Path
 # Asset filename suffixes we treat as "installer artifacts that
 # the auto-updater will hand to a user". Anything matching one of
 # these MUST have a `<name>.minisig` sidecar in the same release.
-INSTALLER_SUFFIXES: tuple[str, ...] = (".dmg", ".exe", ".AppImage")
+INSTALLER_SUFFIXES: tuple[str, ...] = (".dmg", ".exe", ".flatpak")
 
 
 def find_missing_minisig(asset_names: list[str]) -> list[str]:

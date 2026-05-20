@@ -251,16 +251,14 @@ flatpak install --user --bundle Tideway-<version>.flatpak
 The bundle won't auto-update — grab a newer one from the release
 page when you want to upgrade.
 
-The legacy AppImage (`Tideway-<version>-x86_64.AppImage`) is still
-attached to every release as a fallback. It runs on glibc-based
-distros without any install step (`chmod +x` then double-click),
-but it opens the app in the system browser instead of a native
-window because a frozen PyInstaller build can't import the host's
-PyGObject. Prefer the Flatpak.
-
 > Global media keys require an X11 session (Wayland will degrade —
 > the player still works, the global hotkeys do not). ARM Linux
 > (Raspberry Pi etc.) is not built today.
+>
+> If you were running the v1.10.x or earlier AppImage, install the
+> Flatpak with the commands above to keep getting updates. The
+> AppImage build was retired in v1.11.0 because it had no native
+> window and fell back to opening the app in the system browser.
 
 ### Why the OS warns you on first launch
 
@@ -277,12 +275,14 @@ and confirm **Open** in the dialog that appears.
 On Windows, click **More info** in the SmartScreen dialog, then
 **Run anyway**.
 
-Linux AppImages have no equivalent warning — the kernel just runs
-whatever the user marked executable.
+The Linux Flatpak doesn't carry a Gatekeeper-style first-launch
+warning; the sandbox is the trust boundary.
 
 If you would rather verify the build yourself, clone the repo and
 follow **Run it from source** below. PyInstaller produces the same
-bundle you download from Releases.
+macOS / Windows bundle you download from Releases; the Linux
+Flatpak is built with `flatpak-builder` against the manifest at
+`flatpak/com.tidaldownloader.Tideway.yaml`.
 
 ## Stack
 
@@ -366,9 +366,8 @@ web/                Vite and React frontend
 run.sh              one command dev launcher
 Tideway-mac.spec    PyInstaller spec for macOS
 Tideway-win.spec    PyInstaller spec for Windows
-Tideway-linux.spec  PyInstaller spec for Linux
-scripts/            build helpers: icons, DMG, AppImage,
-                    Inno Setup .iss
+flatpak/            Flatpak manifest + generated deps for Linux
+scripts/            build helpers: icons, DMG, Inno Setup .iss
 tests/              pytest suite
 .github/workflows/  CI (test.yml) and release pipeline (release.yml)
 ```
@@ -489,16 +488,35 @@ machine.
 
 ### Linux
 
+Linux ships as a Flatpak built against the GNOME 49 runtime
+(Python 3.13, GTK 3, WebKit2GTK 4.1). The PyInstaller-frozen
+AppImage path was retired in v1.11.0 — it couldn't import the
+host's PyGObject / WebKit2GTK and pywebview fell back to opening
+the app in the system browser.
+
 ```
-npm --prefix web run build
-.venv/bin/pyinstaller Tideway-linux.spec --noconfirm
-bash scripts/build_appimage.sh
+# One-time: install flatpak + flatpak-builder + GNOME 49 runtime
+sudo apt-get install flatpak flatpak-builder ostree elfutils
+flatpak remote-add --user --if-not-exists \
+  flathub https://flathub.org/repo/flathub.flatpakrepo
+flatpak install --user -y flathub \
+  org.gnome.Platform//49 org.gnome.Sdk//49 \
+  org.freedesktop.Sdk.Extension.node20//25.08
+
+# Build
+flatpak-builder --user --ccache --force-clean \
+  --repo=repo .build-flatpak \
+  flatpak/com.tidaldownloader.Tideway.yaml
+
+# Install locally
+flatpak-builder --user --install --force-clean \
+  .build-flatpak flatpak/com.tidaldownloader.Tideway.yaml
+flatpak run com.tidaldownloader.Tideway
 ```
 
-The AppImage lands at `dist/Tideway-<version>-x86_64.AppImage`.
-The release pipeline builds on Ubuntu 22.04 (glibc 2.35) so the
-output runs on any glibc-based distro from Debian 12 / Ubuntu
-22.04 / Fedora 36 onward.
+See [docs/linux-flatpak.md](docs/linux-flatpak.md) for the full
+architecture, the `--prefer-wheels` / `flatpak-node-generator`
+trade-offs, and the GPG-signing setup.
 
 ### Auto update
 
@@ -515,8 +533,12 @@ The release asset names must match these patterns:
 Tideway-<version>.dmg                       (macOS, Apple Silicon)
 Tideway-setup-<version>.exe                 (Windows x64)
 Tideway-setup-<version>-arm64.exe           (Windows ARM64)
-Tideway-<version>-x86_64.AppImage           (Linux x86_64)
+Tideway-<version>.flatpak                   (Linux Flatpak bundle)
 ```
+
+The auto-updater also detects when it's running inside a Flatpak
+sandbox and points the user at `flatpak update` instead of trying
+to install a bundle the running app can't replace.
 
 Cutting a release is a tag push, not a manual `gh release create`.
 See [CONTRIBUTING.md](CONTRIBUTING.md) for the full release flow:

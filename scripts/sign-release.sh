@@ -90,11 +90,10 @@ gh release download "$TAG" \
     --repo "$REPO" \
     --pattern 'Tideway-*.dmg' \
     --pattern 'Tideway-setup-*.exe' \
-    --pattern 'Tideway-*-x86_64.AppImage' \
     --pattern 'Tideway-*.flatpak'
 
 shopt -s nullglob
-ARTIFACTS=( Tideway-*.dmg Tideway-setup-*.exe Tideway-*-x86_64.AppImage Tideway-*.flatpak )
+ARTIFACTS=( Tideway-*.dmg Tideway-setup-*.exe Tideway-*.flatpak )
 if [ "${#ARTIFACTS[@]}" -eq 0 ]; then
     echo "No installer artifacts found on release $TAG. Did the build job run?" >&2
     exit 1

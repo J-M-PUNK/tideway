@@ -108,8 +108,8 @@ git push origin v0.X.Y
 
 GitHub Actions picks up the tag and runs `.github/workflows/release.yml`,
 which builds the platform installers (mac DMG, Windows x64 EXE,
-Windows ARM64 EXE, Linux AppImage) and creates a **draft** release on
-the Releases page with:
+Windows ARM64 EXE, Linux Flatpak bundle) and creates a **draft**
+release on the Releases page with:
 
 - Title and tag binding set to `v0.X.Y`
 - Body populated from your release commit's message body
