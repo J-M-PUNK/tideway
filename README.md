@@ -96,6 +96,10 @@ the audio right now, from source bit depth and sample rate through
 each active stage to the output device, so you can confirm a stream
 really is bit-perfect.
 
+![Settings, Playback tab](assets/screenshots/settings-playback.png)
+
+![AutoEQ profile tone graph](assets/screenshots/eq-autoeq.png)
+
 The output device picker lists every USB DAC,
 Bluetooth sink, and builtin option the OS exposes, plus Chromecast
 targets, Tidal Connect renderers, and UPnP/DLNA devices discovered
