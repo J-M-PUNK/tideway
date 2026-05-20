@@ -215,6 +215,18 @@ class Settings:
     # user who had the old toggle off ends up with the new toggle on
     # — they can flip it off again if they didn't want it.
     continue_playing_after_queue_ends: bool = True
+    # Pause Tideway when another device on the same Tidal account
+    # starts playing. Matches Spotify's "playback transferred to
+    # other device" behaviour and the official Tidal client's
+    # cross-device handoff. Default on; users who explicitly want
+    # multi-device-fighting playback can flip it off. Wired to
+    # `app/tidal_realtime.py`'s on_other_device_started callback,
+    # which the desktop launcher binds to PCMPlayer.pause(). The
+    # listener itself is opt-in at the protocol level too: if the
+    # realtime bus protocol hasn't been captured yet (Phase 1 of
+    # the cross-device-pause feature), the listener stays disabled
+    # regardless of this setting.
+    pause_on_other_device: bool = True
     # Spotify Developer app client_id, used by the Spotify → Tidal
     # playlist importer. Users register their own app at
     # developer.spotify.com and paste the id here. PKCE OAuth so we

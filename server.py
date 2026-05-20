@@ -49,6 +49,7 @@ from app.audio.macos_now_playing import MacOSNowPlayingBridge
 from app.audio.player import PCMPlayer
 from app import playlist_import
 from app import spotify_import
+from app import tidal_realtime
 from app.downloader import DownloadItem, DownloadStatus, Downloader
 from app.http import SESSION
 from app.lastfm import LastFmClient
@@ -978,6 +979,79 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             daemon=True,
         ).start()
 
+    # Tidal realtime listener: pauses local playback when another
+    # device on the user's Tidal account starts playing. The listener
+    # itself is currently a scaffold; the protocol-specific bits
+    # (WebSocket URL, frame parser) need a packet capture from the
+    # Tidal web client to land before this does anything. Until then
+    # start() reports phase=disabled and never opens a connection.
+    # Wiring it now so the settings toggle, status endpoint, and
+    # lifespan hook are in place when the protocol capture lands.
+    def _on_other_device_started(payload: dict) -> None:
+        if not getattr(settings, "pause_on_other_device", True):
+            # User opted out: keep playing through cross-device events.
+            return
+        global _cross_device_pause_device
+        # Record which device caused the pause BEFORE actually
+        # pausing so a fast frontend poll of /api/player/state right
+        # after the SSE pause event already sees the reason. The
+        # _on_player_state callback clears this on the next play.
+        device = (payload.get("clientDisplayName") if payload else None) or "another device"
+        _cross_device_pause_device = str(device)
+        try:
+            _native_player().pause()
+        except Exception as exc:
+            print(
+                f"[tidal-realtime] pause-on-other-device failed: {exc!r}",
+                flush=True,
+            )
+
+    def _tidal_token_provider() -> Optional[str]:
+        try:
+            return getattr(tidal.session, "access_token", None)
+        except Exception:
+            return None
+
+    try:
+        _rt_listener = tidal_realtime.start_listener(
+            token_provider=_tidal_token_provider,
+            on_other_device_started=_on_other_device_started,
+        )
+    except Exception as exc:
+        print(f"[tidal-realtime] startup failed: {exc!r}", flush=True)
+        _rt_listener = None
+
+    # When PCMPlayer transitions into the playing state, send a
+    # USER_ACTION frame on the Pushkin WebSocket. That's how
+    # Tidal's backend learns "this device is now the active one"
+    # and pushes PRIVILEGED_SESSION_NOTIFICATION to the other
+    # devices on the same account so they pause. Without this,
+    # cross-device pause only works one way: other devices can
+    # interrupt Tideway, but Tideway can't interrupt them.
+    if _rt_listener is not None:
+        _last_was_playing = [False]
+
+        def _on_player_state(snapshot) -> None:
+            global _cross_device_pause_device
+            is_playing = getattr(snapshot, "state", None) == "playing"
+            if is_playing and not _last_was_playing[0]:
+                _rt_listener.signal_user_action_sync()
+                # Clear the cross-device pause banner the moment
+                # the user resumes (or starts a new track). The
+                # banner only makes sense while paused-by-someone-
+                # else; once the local user takes over again the
+                # message is stale.
+                _cross_device_pause_device = None
+            _last_was_playing[0] = is_playing
+
+        try:
+            _native_player().subscribe(_on_player_state)
+        except Exception as exc:
+            print(
+                f"[tidal-realtime] subscribe to player failed: {exc!r}",
+                flush=True,
+            )
+
     try:
         yield
     finally:
@@ -1015,6 +1089,12 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         try:
             from app.audio.upnp import upnp_manager as _upnp_manager
             _upnp_manager.disconnect()
+        except Exception:
+            pass
+        # Cancel the Tidal realtime listener task. No-op when the
+        # listener stayed disabled (protocol capture still pending).
+        try:
+            tidal_realtime.stop_listener()
         except Exception:
             pass
         # Close the shared requests session so sockets in its connection pool
@@ -4751,6 +4831,17 @@ class _PlayerOutputDeviceRequest(BaseModel):
 _player_bootstrapped = False
 _pcm_player_singleton: Optional[PCMPlayer] = None
 
+# The most recent cross-device-pause cause, surfaced in the player
+# snapshot so the frontend can render a banner explaining why
+# playback stopped ("Paused — playing on iOS"). Set by the Pushkin
+# listener's `on_other_device_started` callback when a
+# PRIVILEGED_SESSION_NOTIFICATION arrives; cleared whenever the
+# local player transitions back into the playing state, or
+# explicitly via the dismiss endpoint. A simple module-level string
+# is enough — only one device can hold the privileged session at a
+# time, so there's no race to worry about.
+_cross_device_pause_device: Optional[str] = None
+
 
 def _native_player() -> PCMPlayer:
     """Return the PCMPlayer singleton. Lazily constructed on first
@@ -5048,6 +5139,11 @@ def _snapshot_dict(snap) -> dict:
         "seq": snap.seq,
         "stream_info": stream_info,
         "force_volume": getattr(snap, "force_volume", False),
+        # Set by the Pushkin listener when another device on the
+        # same Tidal account starts playing; cleared on next local
+        # play. Frontend renders a banner above the play bar with
+        # this device name while it's set.
+        "paused_by_device": _cross_device_pause_device,
     }
 
 
@@ -5431,6 +5527,22 @@ def _dlna_send(action: str) -> None:
             upnp_manager.pause()
     except Exception as exc:  # noqa: BLE001 see docstring
         log.debug("dlna %s passthrough failed: %r", action, exc)
+
+
+@app.post("/api/player/dismiss-pause-reason")
+def player_dismiss_pause_reason() -> dict:
+    """Clear the `paused_by_device` field on the player snapshot.
+
+    The banner's X button calls this so the user can stop seeing
+    the "Paused — playing on iOS" message without having to resume
+    playback to clear it. Returns the fresh snapshot so the
+    frontend can react in-place rather than waiting for the next
+    SSE tick.
+    """
+    _require_local_access()
+    global _cross_device_pause_device
+    _cross_device_pause_device = None
+    return _snapshot_dict(_native_player().snapshot())
 
 
 @app.post("/api/player/play")
@@ -6502,6 +6614,38 @@ def _autoeq_on_device_change(device_id: str) -> None:
     except Exception:
         log = logging.getLogger("autoeq.resolver")
         log.exception("autoeq device-change resolver failed")
+
+
+@app.get("/api/realtime/status")
+def realtime_status() -> dict:
+    """Diagnostic snapshot of the Tidal realtime listener.
+
+    Surfaces phase / last_error / reconnect_count / events_received
+    so a user reporting "cross-device pause didn't work" can paste
+    the response into a bug report and we can see whether the
+    listener was even connected. Loopback-only because there's no
+    reason for an external caller to read this and the listener's
+    internals leak protocol details we don't want to advertise.
+    """
+    _require_local_access()
+    listener = tidal_realtime.get_listener()
+    if listener is None:
+        return {
+            "phase": "idle",
+            "last_error": None,
+            "reconnect_count": 0,
+            "events_received": 0,
+            "protocol_known": False,
+        }
+    s = listener.status()
+    return {
+        "phase": s.phase,
+        "last_error": s.last_error,
+        "reconnect_count": s.reconnect_count,
+        "events_received": s.events_received,
+        "protocol_known": listener.is_protocol_known,
+    }
+
 
 
 @app.get("/api/cast/devices")
@@ -9873,6 +10017,7 @@ class SettingsPayload(BaseModel):
     exclusive_mode: Optional[bool] = None
     force_volume: Optional[bool] = None
     continue_playing_after_queue_ends: Optional[bool] = None
+    pause_on_other_device: Optional[bool] = None
     explicit_content_preference: Optional[str] = None
     download_rate_limit_mbps: Optional[int] = None
     eq_mode: Optional[str] = None

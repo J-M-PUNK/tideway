@@ -14,6 +14,7 @@ import { WindowResizeEdges } from "@/components/WindowResizeEdges";
 import { OfflineBanner } from "@/components/OfflineBanner";
 import { TidalBackoffBanner } from "@/components/TidalBackoffBanner";
 import { UpdateBanner } from "@/components/UpdateBanner";
+import { CrossDevicePauseBanner } from "@/components/CrossDevicePauseBanner";
 import { NowPlaying } from "@/components/NowPlaying";
 import { QueuePanel } from "@/components/QueuePanel";
 import { LyricsPanel } from "@/components/LyricsPanel";
@@ -705,6 +706,7 @@ function Shell({
         </main>
       </div>
       <SelectionBar />
+      <CrossDevicePauseBanner />
       <NowPlaying
         onDownload={enqueue}
         onExpand={() => setFullOpen(true)}

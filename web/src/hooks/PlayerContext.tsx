@@ -44,6 +44,10 @@ interface PlayerMeta {
   /** Mirror of the backend's force_volume flag so the UI can disable
    *  the volume slider when the software volume is pinned at 100. */
   forceVolume: boolean;
+  /** Name of the device that caused a cross-device pause, when one
+   *  is currently pending. Null otherwise. Drives the banner above
+   *  the play bar that explains why playback stopped. */
+  pausedByDevice: string | null;
 }
 
 interface PlayerSleep {
@@ -106,6 +110,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       streamInfo: player.streamInfo,
       source: player.source,
       forceVolume: player.forceVolume,
+      pausedByDevice: player.pausedByDevice,
     }),
     [
       player.track,
@@ -122,6 +127,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       player.streamInfo,
       player.source,
       player.forceVolume,
+      player.pausedByDevice,
     ],
   );
 
