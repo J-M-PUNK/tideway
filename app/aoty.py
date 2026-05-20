@@ -32,6 +32,16 @@ scale.
 Failures are silent: HTTP errors, layout changes, or a missing
 selector return an empty list rather than raising. The caller
 sees zero results and renders a fallback empty state.
+
+Cloudflare note (added 2026-05-20): AOTY put their entire site
+behind Cloudflare's anti-bot challenge. Every request from a
+stock HTTP client now returns 403 with `cf-mitigated: challenge`
+and the JS interstitial. Plain `requests` can't pass it; the
+homepage sections silently emptied out as the existing in-memory
+cache aged out. We switched the fetch path to `curl_cffi` with
+browser-fingerprinted TLS (`impersonate="chrome120"`), which gets
+back HTTP 200 with the full HTML. curl_cffi is already a project
+dependency — used for Tidal's anti-bot path — so no new deps.
 """
 from __future__ import annotations
 
@@ -43,21 +53,23 @@ from dataclasses import dataclass, asdict, field
 from typing import Optional
 from urllib.parse import urljoin
 
-import requests
 from bs4 import BeautifulSoup
+from curl_cffi import requests as cffi_requests
 
 log = logging.getLogger(__name__)
 
 _BASE_URL = "https://www.albumoftheyear.org"
 
-# A modern desktop UA — the page returns a 403 for an empty UA and
-# returns the mobile layout for some bot-string defaults. Plain
-# Chrome desktop matches what an actual browser sends and gives us
-# the desktop HTML the rest of this module is parsing for.
-_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-)
+# Browser to impersonate at the TLS / HTTP/2 / header layer.
+# curl_cffi sets the full Chrome 120 fingerprint when this is
+# active — including the User-Agent, every `sec-ch-ua-*` client
+# hint, `Accept-Language`, and the order of headers. Passing our
+# own `User-Agent` override (or any other header curl_cffi already
+# sets) breaks Cloudflare's consistency check: a Chrome TLS hello
+# paired with an inconsistent set of HTTP headers reads as bot
+# automation. So _fetch() below deliberately sends NO custom
+# headers — the impersonate profile is the whole story.
+_CFFI_IMPERSONATE = "chrome120"
 
 _HTTP_TIMEOUT_SEC = 15.0
 
@@ -325,13 +337,15 @@ def _cache_set(key: str, payload: list[dict]) -> None:
 
 def _fetch(url: str) -> Optional[str]:
     try:
-        r = requests.get(
+        # No `headers=` kwarg. curl_cffi's impersonate profile sets
+        # the entire Chrome-120 header set (UA, every sec-ch-ua-*,
+        # Accept, Accept-Language, header order) consistent with the
+        # TLS hello it sends. Overriding any of those — even a
+        # nominally identical User-Agent — breaks Cloudflare's
+        # cross-check and earns a 403.
+        r = cffi_requests.get(
             url,
-            headers={
-                "User-Agent": _USER_AGENT,
-                "Accept": "text/html,application/xhtml+xml",
-                "Accept-Language": "en-US,en;q=0.9",
-            },
+            impersonate=_CFFI_IMPERSONATE,
             timeout=_HTTP_TIMEOUT_SEC,
         )
     except Exception as exc:
