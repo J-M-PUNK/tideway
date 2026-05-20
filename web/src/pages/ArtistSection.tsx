@@ -1,5 +1,6 @@
+import { useEffect, useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
-import { Video as VideoIcon } from "lucide-react";
+import { List, Video as VideoIcon } from "lucide-react";
 import { api } from "@/api/client";
 import type { Album, Artist, Track, Video } from "@/api/types";
 import type { OnDownload } from "@/api/download";
@@ -8,10 +9,92 @@ import { useLikedByArtist } from "@/hooks/useLikedByArtist";
 import { useVideoPlayer } from "@/hooks/useVideoPlayer";
 import { Grid } from "@/components/Grid";
 import { MediaCard } from "@/components/MediaCard";
+import { MediaListRow } from "@/components/MediaListRow";
 import { TrackList } from "@/components/TrackList";
 import { ErrorView } from "@/components/ErrorView";
 import { GridSkeleton, TrackListSkeleton } from "@/components/Skeletons";
 import { VideoCard } from "@/components/VideoCard";
+import { ViewToggle, type ViewMode } from "@/components/ViewToggle";
+import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
+import { cn } from "@/lib/utils";
+
+/**
+ * Sort orders the album-list view exposes. Album discography is
+ * unusual versus the rest of the app: items don't have a
+ * "recently added" notion (they're not user actions), they have
+ * release dates. So the menu offers newest/oldest/alpha instead
+ * of Library's recent/alpha pair.
+ */
+type AlbumSort = "newest" | "oldest" | "alpha";
+
+const ALBUM_VIEW_KEY = "tideway:artist-section-view";
+const ALBUM_SORT_KEY = "tideway:artist-section-sort";
+
+function loadAlbumView(): ViewMode {
+  try {
+    const v = localStorage.getItem(ALBUM_VIEW_KEY);
+    return v === "list" ? "list" : "grid";
+  } catch {
+    return "grid";
+  }
+}
+
+function loadAlbumSort(): AlbumSort {
+  try {
+    const v = localStorage.getItem(ALBUM_SORT_KEY);
+    if (v === "oldest" || v === "alpha") return v;
+    return "newest";
+  } catch {
+    return "newest";
+  }
+}
+
+/**
+ * Sort an album list by the chosen order. Stable for ties (e.g.
+ * two albums released the same day) and tolerant of missing
+ * release_date / name. Pure so it can be unit-tested without
+ * standing up the page.
+ */
+export function sortAlbums(albums: Album[], sort: AlbumSort): Album[] {
+  // Build sortable keys once so the comparator doesn't repeatedly
+  // parse the same release_date string. .slice() so we don't
+  // mutate the array the parent has cached.
+  const decorated = albums.map((a, i) => ({
+    album: a,
+    // release_date arrives as ISO yyyy-MM-dd from Tidal. Fall
+    // back to the year column when the day-level date is null
+    // so older catalog entries still sort reasonably.
+    when: a.release_date
+      ? Date.parse(a.release_date)
+      : a.year != null
+        ? Date.parse(`${a.year}-01-01`)
+        : Number.NEGATIVE_INFINITY,
+    name: (a.name ?? "").toLocaleLowerCase(),
+    originalIndex: i,
+  }));
+  decorated.sort((x, y) => {
+    if (sort === "alpha") {
+      const cmp = x.name.localeCompare(y.name);
+      if (cmp !== 0) return cmp;
+    } else {
+      // Numeric subtract works for both orders.
+      const cmp = sort === "newest" ? y.when - x.when : x.when - y.when;
+      if (cmp !== 0) return cmp;
+    }
+    // Stable tiebreak on the input order so re-sorting between two
+    // equally-valued items doesn't reshuffle them.
+    return x.originalIndex - y.originalIndex;
+  });
+  return decorated.map((d) => d.album);
+}
 
 export type ArtistSectionKey =
   | "top-tracks"
@@ -226,12 +309,122 @@ function SectionBody({
   if (kind === "videos") {
     return <VideosGrid videos={items as Video[]} />;
   }
+  // The "media" kind covers both album lists (albums, EPs,
+  // compilations, appears-on) and artist lists ("similar"). Only
+  // the album lists get the view toggle + sort — sorting artists
+  // by release date is nonsense, and they're rare enough on this
+  // page (only one section, "Fans also like") that the simpler
+  // tile-only render is fine.
+  const firstItemKind = (items as (Album | Artist)[])[0]?.kind ?? "album";
+  if (firstItemKind === "album") {
+    return (
+      <AlbumSectionBody albums={items as Album[]} onDownload={onDownload} />
+    );
+  }
   return (
     <Grid>
-      {(items as (Album | Artist)[]).map((item) => (
+      {(items as Artist[]).map((item) => (
         <MediaCard key={item.id} item={item} onDownload={onDownload} />
       ))}
     </Grid>
+  );
+}
+
+/**
+ * Album-shaped section with a view toggle (tiles ↔ list) and a
+ * sort dropdown (newest / oldest / A–Z). Preferences are
+ * persisted in localStorage so a user who picks list+alpha on
+ * one artist sees the same setup on the next artist they open.
+ */
+function AlbumSectionBody({
+  albums,
+  onDownload,
+}: {
+  albums: Album[];
+  onDownload: OnDownload;
+}) {
+  const [view, setView] = useState<ViewMode>(() => loadAlbumView());
+  const [sort, setSort] = useState<AlbumSort>(() => loadAlbumSort());
+  // Persist immediately on change so the next mount picks up the
+  // same value. Cheap (localStorage writes are sync but tiny) and
+  // avoids the user wondering why their preference reset.
+  useEffect(() => {
+    try {
+      localStorage.setItem(ALBUM_VIEW_KEY, view);
+    } catch {
+      /* ignore quota / disabled storage */
+    }
+  }, [view]);
+  useEffect(() => {
+    try {
+      localStorage.setItem(ALBUM_SORT_KEY, sort);
+    } catch {
+      /* ignore */
+    }
+  }, [sort]);
+
+  const sorted = useMemo(() => sortAlbums(albums, sort), [albums, sort]);
+
+  return (
+    <div>
+      <div className="mb-4 flex items-center justify-end gap-2">
+        <AlbumSortMenu sort={sort} onSort={setSort} />
+        <ViewToggle view={view} onChange={setView} />
+      </div>
+      {view === "grid" ? (
+        <Grid>
+          {sorted.map((album) => (
+            <MediaCard key={album.id} item={album} onDownload={onDownload} />
+          ))}
+        </Grid>
+      ) : (
+        <div className="flex flex-col gap-0.5">
+          {sorted.map((album) => (
+            <MediaListRow key={album.id} item={album} onDownload={onDownload} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AlbumSortMenu({
+  sort,
+  onSort,
+}: {
+  sort: AlbumSort;
+  onSort: (s: AlbumSort) => void;
+}) {
+  const label =
+    sort === "newest" ? "Newest" : sort === "oldest" ? "Oldest" : "A–Z";
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <Button variant="outline" size="sm">
+          <List className="h-4 w-4" />
+          {label}
+        </Button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        <DropdownMenuLabel>Sort by</DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        <DropdownMenuItem onSelect={() => onSort("newest")}>
+          <span className={cn(sort === "newest" ? "text-primary" : "")}>
+            Newest first
+          </span>
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => onSort("oldest")}>
+          <span className={cn(sort === "oldest" ? "text-primary" : "")}>
+            Oldest first
+          </span>
+        </DropdownMenuItem>
+        <DropdownMenuItem onSelect={() => onSort("alpha")}>
+          <span className={cn(sort === "alpha" ? "text-primary" : "")}>
+            Alphabetical
+          </span>
+        </DropdownMenuItem>
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
 
