@@ -248,7 +248,7 @@ function ArtistChartCard({
 // ---------------------------------------------------------------------------
 
 function ChartTracks({ onDownload }: { onDownload: OnDownload }) {
-  const { data, loading } = useApi(
+  const { data, loading, error } = useApi(
     () => api.lastfm.chartTopTracksResolved(50),
     [],
     { cacheKey: queryKeys.popularTracks },
@@ -291,11 +291,23 @@ function ChartTracks({ onDownload }: { onDownload: OnDownload }) {
 
   if (loading && !data) return <TrackListSkeleton />;
   if (!data || data.length === 0) {
+    // Distinguish "the backend failed" from "the backend returned
+    // genuinely no results". The previous copy ("Last.fm didn't
+    // return any results") was misleading: most of the time the
+    // empty list came from Tidal failing to resolve any of the
+    // chart entries, not from Last.fm having no data. When useApi
+    // surfaces an error (network drop, 500 from /api/lastfm/...),
+    // show it. Otherwise blame Tidal — Last.fm's chart endpoint is
+    // pure JSON, basically never empty in practice; an empty
+    // resolved list means Tidal couldn't find a single match.
+    const description = error
+      ? `Couldn't load chart tracks: ${error.message}`
+      : "Last.fm had chart entries but none of them resolved to Tidal — likely a temporary Tidal hiccup. Try again in a few seconds.";
     return (
       <EmptyState
         icon={Music}
-        title="No data"
-        description="Last.fm didn't return any results."
+        title={error ? "Couldn't load" : "No matches"}
+        description={description}
       />
     );
   }

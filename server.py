@@ -3259,6 +3259,7 @@ _LASTFM_CACHE_TTL_SEC = 300.0
 def _lastfm_cached(
     key: str, fetch, ttl_sec: float = _LASTFM_CACHE_TTL_SEC,
     persistent: bool = False,
+    cache_empty: bool = True,
 ):
     """Scope the cache to (username, endpoint, args). Username is part
     of the key so reconnecting to a different account doesn't serve
@@ -3279,6 +3280,14 @@ def _lastfm_cached(
     the full 18 seconds again. With persistence, the cold load
     happens once per real cache miss instead of once per process
     lifetime.
+
+    `cache_empty=False` skips both cache writes when the fetch
+    returned a falsy value (empty list/dict/None). The Popular
+    page's resolved chart was previously locking in transient
+    "no Tidal resolved" failures for the full 1-hour TTL — every
+    subsequent visit in that window served `[]` even though Tidal
+    had recovered immediately. Caller opts in per endpoint;
+    other endpoints keep the default behavior.
     """
     from app import lastfm_disk_cache
 
@@ -3300,6 +3309,10 @@ def _lastfm_cached(
             return disk_value
     # 3. Real fetch.
     data = fetch()
+    # Skip the cache write for empty results when the caller asked
+    # us to. Otherwise treat the freshly-fetched value as canonical.
+    if not cache_empty and not data:
+        return data
     with _lastfm_cache_lock:
         _lastfm_cache[full_key] = (now, data)
     if persistent:
@@ -4004,6 +4017,12 @@ def lastfm_chart_top_tracks_resolved(limit: int = 50) -> list[dict]:
             title = (entry.get("name") or "").strip()
             artist = (entry.get("artist") or "").strip()
             if not title or not artist:
+                print(
+                    f"[lastfm] chart entry missing title/artist: "
+                    f"{entry!r}",
+                    file=sys.stderr,
+                    flush=True,
+                )
                 return None
 
             cache_key = (
@@ -4017,12 +4036,27 @@ def lastfm_chart_top_tracks_resolved(limit: int = 50) -> list[dict]:
             tidal_jitter_sleep()
             try:
                 results = tidal.search(f"{artist} {title}", limit=5)
-            except Exception:
+            except Exception as exc:  # noqa: BLE001
+                # Don't bury exceptions silently — when every entry
+                # fails this way, the user just sees a blank Popular
+                # tab with no idea Tidal was the culprit.
+                print(
+                    f"[lastfm] chart resolve exception "
+                    f"({artist} / {title}): {exc!r}",
+                    file=sys.stderr,
+                    flush=True,
+                )
                 return None
             tracks = filter_explicit_dupes(
                 results.get("tracks", []), pref, kind="track"
             )
             if not tracks:
+                print(
+                    f"[lastfm] chart resolve: no Tidal match for "
+                    f"{artist} / {title}",
+                    file=sys.stderr,
+                    flush=True,
+                )
                 return None
             # Exact title + artist first; fall back to Tidal's top hit.
             wt = title.lower()
@@ -4059,7 +4093,21 @@ def lastfm_chart_top_tracks_resolved(limit: int = 50) -> list[dict]:
         with ThreadPoolExecutor(max_workers=3) as pool:
             results = list(pool.map(_one, entries))
 
-        return [r for r in results if r is not None]
+        resolved = [r for r in results if r is not None]
+        # When Last.fm returned chart entries but we couldn't
+        # resolve a single one to Tidal, something's wrong upstream
+        # (rate limit, expired session, etc.). Log the chart-level
+        # outcome; the cache_empty=False below ensures we don't
+        # pin this empty result for an hour like we used to.
+        if entries and not resolved:
+            print(
+                f"[lastfm] chart resolve fully failed: {len(entries)} "
+                f"Last.fm entries, zero Tidal matches. Empty result "
+                f"will NOT be cached; next visit retries.",
+                file=sys.stderr,
+                flush=True,
+            )
+        return resolved
 
     # 1-hour TTL with disk persistence. The Last.fm global chart
     # turns over slowly, and the cold-load cost (~18 s for 50 rows
@@ -4068,11 +4116,19 @@ def lastfm_chart_top_tracks_resolved(limit: int = 50) -> list[dict]:
     # layer alone died with the process; the SQLite-backed layer
     # rides through restarts so the user only pays the resolve
     # once per hour even across launches.
+    #
+    # `cache_empty=False` so a transient Tidal failure that empties
+    # the result doesn't lock the user out of Popular for the full
+    # hour. Previous symptom was a recurring "Last.fm didn't return
+    # any results" message that stuck until the cache expired even
+    # after Tidal had recovered. Now an empty result re-fetches on
+    # the next visit, costing ~18 s of resolve once Tidal is back.
     return _lastfm_cached(
         f"chart-top-tracks-resolved:{limit}",
         _resolve_all,
         ttl_sec=3600.0,
         persistent=True,
+        cache_empty=False,
     )
 
 
