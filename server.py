@@ -3332,11 +3332,16 @@ def _invalidate_lastfm_cache() -> None:
 
 
 @app.get("/api/lastfm/user-info")
-def lastfm_user_info() -> dict:
+def lastfm_user_info() -> Optional[dict]:
     """Header profile data for the Stats page — playcount, registered
-    date, avatar. Empty dict if Last.fm isn't connected."""
+    date, avatar. Returns null when Last.fm isn't connected or the
+    configured username doesn't resolve (e.g. user renamed their
+    Last.fm account); the frontend uses null to render a "couldn't
+    load your profile" hint instead of crashing on undefined counts.
+    Don't cache the empty case so a settings fix is reflected without
+    a wait."""
     _require_auth()
-    return _lastfm_cached("user-info", lastfm.get_user_info)
+    return _lastfm_cached("user-info", lastfm.get_user_info, cache_empty=False)
 
 
 @app.get("/api/lastfm/top-artists")

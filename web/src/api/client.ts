@@ -255,7 +255,7 @@ export const api = {
       req<LastFmStatus>("/api/lastfm/disconnect", { method: "POST" }),
     recentTracks: (limit = 100) =>
       req<LastFmRecentTrack[]>(`/api/lastfm/recent-tracks?limit=${limit}`),
-    userInfo: () => req<LastFmUserInfo>("/api/lastfm/user-info"),
+    userInfo: () => req<LastFmUserInfo | null>("/api/lastfm/user-info"),
     topArtists: (period: LastFmPeriod, limit = 50) =>
       req<LastFmTopArtist[]>(
         `/api/lastfm/top-artists?period=${period}&limit=${limit}`,

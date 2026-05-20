@@ -64,6 +64,11 @@ const PERIOD_ORDER: LastFmPeriod[] = [
 export function StatsPage() {
   const [connected, setConnected] = useState<boolean | null>(null);
   const [user, setUser] = useState<LastFmUserInfo | null>(null);
+  // Distinguishes "haven't tried yet" from "tried and got null".
+  // We need both to render the header sensibly when the configured
+  // Last.fm username doesn't resolve (renamed account etc.) — the
+  // status endpoint says connected, but user-info comes back null.
+  const [userFetched, setUserFetched] = useState(false);
   const [period, setPeriod] = useState<LastFmPeriod>("1month");
 
   // Probe status once. If Last.fm isn't connected the whole page
@@ -79,9 +84,13 @@ export function StatsPage() {
         if (s.connected) {
           api.lastfm
             .userInfo()
-            .then((u) => !cancelled && setUser(u))
+            .then((u) => {
+              if (cancelled) return;
+              setUser(u);
+              setUserFetched(true);
+            })
             .catch(() => {
-              /* header falls back to a monogram */
+              if (!cancelled) setUserFetched(true);
             });
         }
       })
@@ -127,7 +136,7 @@ export function StatsPage() {
 
   return (
     <div>
-      <UserHeader user={user} />
+      <UserHeader user={user} userFetched={userFetched} />
       <p className="mb-6 text-xs text-muted-foreground">
         Stats provided by Last.fm. Numbers reflect every scrobble from your
         connected Last.fm account, including plays from this app and from any
@@ -145,7 +154,13 @@ export function StatsPage() {
   );
 }
 
-function UserHeader({ user }: { user: LastFmUserInfo | null }) {
+function UserHeader({
+  user,
+  userFetched,
+}: {
+  user: LastFmUserInfo | null;
+  userFetched: boolean;
+}) {
   const avatar = user?.image ? imageProxy(user.image) : undefined;
   const initial = (user?.username || "?").trim().charAt(0).toUpperCase();
   const memberSince = user?.registered_at
@@ -154,6 +169,16 @@ function UserHeader({ user }: { user: LastFmUserInfo | null }) {
         month: "short",
       })
     : null;
+  // Render the stat row only when Last.fm actually returned a
+  // profile with the four counts. The previous guard (`{user && …}`)
+  // accepted a `{}` payload as truthy and then crashed on
+  // `undefined.toLocaleString()` inside <Stat>.
+  const hasCounts = !!user?.username;
+  // "Tried to fetch, came back empty" — username Tideway has on
+  // record doesn't resolve on Last.fm. Most likely a renamed
+  // account; nudge the user toward Settings instead of silently
+  // serving a half-empty header.
+  const showProfileMissing = userFetched && !user;
 
   return (
     <div className="mb-8">
@@ -192,9 +217,22 @@ function UserHeader({ user }: { user: LastFmUserInfo | null }) {
                 Since {memberSince}
               </>
             )}
+            {showProfileMissing && (
+              <span>
+                Couldn't load your Last.fm profile — the username on file may
+                not exist anymore. Check it in{" "}
+                <Link
+                  to="/settings"
+                  className="underline underline-offset-2 hover:text-foreground"
+                >
+                  Settings
+                </Link>
+                .
+              </span>
+            )}
           </div>
         </div>
-        {user && (
+        {hasCounts && user && (
           <div className="flex flex-wrap gap-6">
             <Stat label="Plays" value={user.playcount} />
             <Stat label="Artists" value={user.artist_count} />
