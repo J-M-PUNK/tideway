@@ -136,9 +136,27 @@ re-pull `org.freedesktop.Sdk.Extension.node20//25.08`, regenerate
 `python3-requirements.json` with `--runtime org.gnome.Sdk//49` so
 wheel selection matches the new runtime's Python ABI, rebuild.
 
+## Trust model
+
+The published repo is served over HTTPS from GitHub Pages, so
+content authenticity rides on GitHub's TLS chain. The `.flatpak`
+bundle attached to each release is also minisign-signed by the
+same `scripts/sign-release.sh` step that signs the DMG / .exe /
+AppImage, so direct-bundle installs from the release page are
+end-to-end verifiable.
+
+Signing OSTree commits with a project GPG key closes the remaining
+gap (a compromised gh-pages host could otherwise substitute
+malicious commits for users on the auto-updating remote). The CI
+side is already wired through `release.yml`'s `build-linux-flatpak`
+job — it's gated on the `OSTREE_GPG_KEY_ID` secret being present
+and is a no-op until you do the one-time setup. See
+[docs/flatpak-gpg-signing.md](flatpak-gpg-signing.md) for the
+key-generation, secret-stashing, and validation steps.
+
 ## Note
 
 The AppImage `/api/open-external` fix (PR #163) is irrelevant to
 the Flatpak path — with a native window the browser-fallback /
 external-open seam isn't taken. It still matters for the AppImage
-until/unless the AppImage is retired in Stage 3.
+until/unless the AppImage is retired in a future release.

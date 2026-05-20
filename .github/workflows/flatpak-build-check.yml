@@ -1,0 +1,88 @@
+name: Flatpak build check
+
+# PRs that touch the Flatpak manifest, the generated module files,
+# or the release pipeline's Flatpak jobs build the manifest end-to-
+# end so the build failure surface is the PR, not the next user-
+# triggered release tag. The release.yml build-linux-flatpak job
+# does the real per-tag work (artifact upload, repo export); this
+# job only proves the manifest still builds. They share the same
+# install + build steps so a fix here is mirrored to release.yml.
+#
+# Runs on push to main with the same path filter so a direct commit
+# also gets verified — without that, a hotfix that lands on main
+# without a PR could regress the build silently.
+on:
+  pull_request:
+    paths:
+      - "flatpak/**"
+      - ".github/workflows/flatpak-build-check.yml"
+      - ".github/workflows/release.yml"
+      - "requirements.txt"
+      - "web/package-lock.json"
+  push:
+    branches:
+      - main
+    paths:
+      - "flatpak/**"
+      - ".github/workflows/flatpak-build-check.yml"
+      - ".github/workflows/release.yml"
+      - "requirements.txt"
+      - "web/package-lock.json"
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install flatpak + flatpak-builder
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            flatpak flatpak-builder ostree
+          flatpak --version
+          flatpak-builder --version
+
+      - name: Add Flathub remote
+        run: |
+          flatpak remote-add --user --if-not-exists \
+            flathub https://flathub.org/repo/flathub.flatpakrepo
+
+      - name: Install GNOME 49 runtime + Node20 SDK extension
+        run: |
+          flatpak install --user -y --no-deps flathub \
+            org.gnome.Platform//49 \
+            org.gnome.Sdk//49 \
+            org.freedesktop.Sdk.Extension.node20//25.08
+
+      - name: Restore flatpak-builder cache
+        # Same key as release.yml so a release rebuild after this
+        # check can reuse the cached state.
+        uses: actions/cache@v4
+        with:
+          path: |
+            .flatpak-builder
+            .build-flatpak
+          key: flatpak-builder-${{ hashFiles('flatpak/com.tidaldownloader.Tideway.yaml', 'flatpak/python3-requirements.json', 'flatpak/node-sources.json') }}
+
+      - name: Build manifest (no artifact upload)
+        # `--repo` isn't needed here — we just want to verify the
+        # build succeeds. Skipping bundle export keeps this job a
+        # few minutes shorter.
+        run: |
+          flatpak-builder --user --ccache --force-clean \
+            .build-flatpak \
+            flatpak/com.tidaldownloader.Tideway.yaml
+
+      - name: Verify payload structure
+        # Quick sanity check that the build actually produced what
+        # we expect — catches manifest typos that build "cleanly"
+        # into nothing useful.
+        run: |
+          test -f .build-flatpak/files/bin/tideway || { echo "FAIL: launcher missing"; exit 1; }
+          test -f .build-flatpak/files/share/tideway/desktop.py || { echo "FAIL: desktop.py missing"; exit 1; }
+          test -f .build-flatpak/files/share/tideway/server.py || { echo "FAIL: server.py missing"; exit 1; }
+          test -d .build-flatpak/files/share/tideway/dist || { echo "FAIL: web/dist missing"; exit 1; }
+          test -f .build-flatpak/files/lib/libportaudio.so.2 || { echo "FAIL: PortAudio missing"; exit 1; }
+          echo "OK: build payload looks correct"
+          du -sh .build-flatpak/files

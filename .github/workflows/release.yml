@@ -464,29 +464,124 @@ jobs:
             org.gnome.Sdk//49 \
             org.freedesktop.Sdk.Extension.node20//25.08
 
+      - name: Check whether GPG signing is configured
+        id: gpg_check
+        # GPG signing of OSTree commits is opt-in. When the secrets
+        # are set, OSTree clients verify the signature on every
+        # `flatpak install` / `flatpak update`, so a compromised
+        # gh-pages host can't push malicious bits. When unset, the
+        # repo serves over HTTPS only — still authenticated by
+        # GitHub's TLS chain but with no signed-content guarantee.
+        # See docs/flatpak-gpg-signing.md for the one-time setup.
+        env:
+          OSTREE_GPG_KEY_ID: ${{ secrets.OSTREE_GPG_KEY_ID }}
+        run: |
+          if [ -n "$OSTREE_GPG_KEY_ID" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "GPG signing: enabled (key $OSTREE_GPG_KEY_ID)"
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "GPG signing: disabled (OSTREE_GPG_KEY_ID secret unset)"
+          fi
+
+      - name: Import OSTree signing key
+        if: steps.gpg_check.outputs.enabled == 'true'
+        env:
+          OSTREE_GPG_PRIVATE_KEY: ${{ secrets.OSTREE_GPG_PRIVATE_KEY }}
+          OSTREE_GPG_PASSPHRASE: ${{ secrets.OSTREE_GPG_PASSPHRASE }}
+        run: |
+          # Use a dedicated gpg homedir under the workspace so it
+          # gets cleaned up with the runner and doesn't bleed into
+          # GitHub's default gpg state.
+          mkdir -p "$GITHUB_WORKSPACE/.gnupg"
+          chmod 700 "$GITHUB_WORKSPACE/.gnupg"
+          echo "GNUPGHOME=$GITHUB_WORKSPACE/.gnupg" >> "$GITHUB_ENV"
+          export GNUPGHOME="$GITHUB_WORKSPACE/.gnupg"
+          # --pinentry-mode loopback lets gpg take the passphrase
+          # over stdin/env. Without it gpg tries to prompt and
+          # fails on a headless runner.
+          echo "allow-loopback-pinentry" > "$GNUPGHOME/gpg-agent.conf"
+          echo "pinentry-mode loopback" > "$GNUPGHOME/gpg.conf"
+          echo "$OSTREE_GPG_PRIVATE_KEY" \
+            | gpg --batch --import \
+              --passphrase "${OSTREE_GPG_PASSPHRASE:-}"
+          # Preset the passphrase so subsequent --gpg-sign calls
+          # don't prompt during the long flatpak-builder run.
+          if [ -n "${OSTREE_GPG_PASSPHRASE:-}" ]; then
+            KEYGRIP=$(gpg --batch --with-keygrip --list-secret-keys \
+              | awk '/Keygrip/ {print $3; exit}')
+            /usr/lib/gnupg/gpg-preset-passphrase --preset \
+              --passphrase "$OSTREE_GPG_PASSPHRASE" "$KEYGRIP" \
+              || echo "gpg-preset-passphrase failed; signing may prompt"
+          fi
+
       - name: Restore flatpak-builder cache
         # 526 MB native-dep build is slow; cache the build state
         # between runs. Keyed on the manifest + generated module
-        # files so a dep bump invalidates.
+        # files so a dep bump invalidates. NO restore-keys fallback
+        # — a near-miss on the key could restore build state for the
+        # wrong set of module hashes; flatpak-builder usually
+        # detects this and rebuilds the affected module, but only
+        # *usually*. Exact match or cold build.
         uses: actions/cache@v4
         with:
           path: |
             .flatpak-builder
             .build-flatpak
           key: flatpak-builder-${{ hashFiles('flatpak/com.tidaldownloader.Tideway.yaml', 'flatpak/python3-requirements.json', 'flatpak/node-sources.json') }}
-          restore-keys: |
-            flatpak-builder-
+
+      - name: Seed local repo with previous gh-pages OSTree state
+        # Delta updates only work when the new commit references
+        # the previous commit as its parent. Without this seeding
+        # step every `flatpak update` re-downloads the full 100 MB+
+        # bundle instead of the few MB of code that actually
+        # changed. Pull whatever OSTree state is currently published
+        # to gh-pages into ./repo so flatpak-builder appends to it
+        # below. First release (no prior OSTree state): nothing is
+        # copied and the new commit is the root commit, same as
+        # before this step existed.
+        run: |
+          mkdir -p repo
+          if git ls-remote --exit-code --heads origin gh-pages >/dev/null 2>&1; then
+            git clone --branch gh-pages --depth 1 \
+              "https://github.com/${{ github.repository }}.git" gh-pages-prev
+            # OSTree's on-disk layout. Other gh-pages files
+            # (index.html, tideway.flatpakrepo) are not OSTree state
+            # and don't need copying — publish-flatpak-repo writes
+            # them fresh each run.
+            for d in objects refs deltas state summary summary.sig config; do
+              if [ -e "gh-pages-prev/$d" ]; then
+                cp -r "gh-pages-prev/$d" "repo/$d"
+              fi
+            done
+            rm -rf gh-pages-prev
+            echo "Seeded ./repo from gh-pages:"
+            ls -la repo/ | head
+          else
+            echo "No gh-pages branch yet; building first OSTree commit"
+          fi
 
       - name: Build Flatpak (export to local OSTree repo)
-        # `--repo` puts the build into a flat OSTree repo at
-        # ./repo, which is what Stage 3c serves from GitHub Pages.
-        # `--force-clean` keeps re-runs deterministic; ccache below
-        # keeps the C builds fast across runs.
+        # `--repo` appends the new commit to ./repo. If the seed
+        # step above populated it from gh-pages, the new commit
+        # gets the previous one as parent and clients pull a small
+        # delta. `--force-clean` keeps the BUILD dir deterministic
+        # but does NOT clear --repo; ccache below keeps the C
+        # builds fast across runs.
+        env:
+          GPG_ENABLED: ${{ steps.gpg_check.outputs.enabled }}
+          OSTREE_GPG_KEY_ID: ${{ secrets.OSTREE_GPG_KEY_ID }}
         run: |
-          flatpak-builder --user --ccache --force-clean \
-            --repo=repo \
+          BUILDER_ARGS=(--user --ccache --force-clean --repo=repo)
+          UPDATE_ARGS=()
+          if [ "$GPG_ENABLED" = "true" ]; then
+            BUILDER_ARGS+=(--gpg-sign="$OSTREE_GPG_KEY_ID" --gpg-homedir="$GNUPGHOME")
+            UPDATE_ARGS+=(--gpg-sign="$OSTREE_GPG_KEY_ID" --gpg-homedir="$GNUPGHOME")
+          fi
+          flatpak-builder "${BUILDER_ARGS[@]}" \
             .build-flatpak \
             flatpak/com.tidaldownloader.Tideway.yaml
+          flatpak build-update-repo "${UPDATE_ARGS[@]}" repo
 
       - name: Build single-file .flatpak bundle from repo
         # `flatpak build-bundle` extracts a single .flatpak file
@@ -668,10 +763,25 @@ jobs:
 
       - name: Drop the .flatpakrepo subscribe file next to the OSTree repo
         # Users add the remote with `flatpak remote-add ... tideway.flatpakrepo`.
-        # The file lives in the repo at flatpak/tideway.flatpakrepo and
-        # gets served at https://j-m-punk.github.io/tideway/tideway.flatpakrepo.
+        # The file lives at flatpak/tideway.flatpakrepo and gets served
+        # at https://j-m-punk.github.io/tideway/tideway.flatpakrepo.
+        #
+        # When the project's GPG public key is committed at
+        # flatpak/tideway-release.pub.gpg (part of the opt-in OSTree
+        # signing setup in docs/flatpak-gpg-signing.md), we append a
+        # `GpgKey=` line containing its base64 so newly-added remotes
+        # turn on signature verification automatically. Without it,
+        # Flatpak adds the remote in no-gpg-verify mode, which still
+        # works but trusts only HTTPS for content authenticity.
         run: |
           cp flatpak/tideway.flatpakrepo ostree-repo/tideway.flatpakrepo
+          if [ -f flatpak/tideway-release.pub.gpg ]; then
+            GPGKEY_B64=$(base64 -w 0 flatpak/tideway-release.pub.gpg)
+            printf 'GpgKey=%s\n' "$GPGKEY_B64" >> ostree-repo/tideway.flatpakrepo
+            echo "Embedded GPG public key in tideway.flatpakrepo"
+          else
+            echo "No flatpak/tideway-release.pub.gpg checked in — remote will install in no-gpg-verify mode"
+          fi
 
       - name: Drop an index.html that links the subscribe file + bundle
         # GitHub Pages serves whatever you point it at; without an

@@ -5,4 +5,7 @@ Homepage=https://github.com/J-M-PUNK/tideway
 Description=Native Tidal/Spotify/Qobuz client with hi-res playback, Last.fm scrobbling, ReplayGain, crossfeed, and offline downloads.
 SuggestedRemoteName=tideway
 DefaultBranch=master
-Comment=Drop this file at flatpak/tideway.flatpakrepo and serve it from GitHub Pages. Users run `flatpak remote-add --user --if-not-exists tideway <Url>tideway.flatpakrepo` to subscribe.
+# release.yml's publish-flatpak-repo job appends `GpgKey=<base64>`
+# below when flatpak/tideway-release.pub.gpg is committed — see
+# docs/flatpak-gpg-signing.md for the setup. Without that file the
+# remote installs in no-gpg-verify mode, with HTTPS-only trust.

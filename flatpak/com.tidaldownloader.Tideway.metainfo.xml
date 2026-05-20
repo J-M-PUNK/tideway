@@ -1,0 +1,78 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  AppStream metadata for the Tideway Flatpak. GNOME Software /
+  KDE Discover read this to render the app's card (icon, name,
+  description, screenshots) and to surface "Updates available"
+  notifications keyed to the release history below. Optional for
+  self-hosted but required if we ever submit to Flathub, so doing
+  it now avoids a future migration.
+-->
+<component type="desktop-application">
+  <id>com.tidaldownloader.Tideway</id>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+
+  <name>Tideway</name>
+  <summary>Native Tidal client with hi-res playback and downloads</summary>
+
+  <description>
+    <p>
+      Tideway is a native desktop client for Tidal. It plays your
+      library bit-perfect, gaplessly, at the highest quality Tidal
+      offers, and lets you download tracks and albums for offline
+      listening. It also pulls scrobbling history from Last.fm and
+      Spotify into a unified listening view.
+    </p>
+    <p>Features:</p>
+    <ul>
+      <li>Bit-perfect, gapless audio across formats and sample rates</li>
+      <li>FLAC, MQA, Dolby Atmos, and hi-res downloads</li>
+      <li>Parametric EQ, crossfeed, ReplayGain, and a Signal Path readout</li>
+      <li>Cast to Chromecast, DLNA, AirPlay, and Tidal Connect targets</li>
+      <li>Last.fm scrobbling and Spotify listening-history import</li>
+    </ul>
+    <p>
+      This app is not made by Tidal. It talks to the same private
+      endpoints the official Tidal apps use; use your own account
+      at your own risk.
+    </p>
+  </description>
+
+  <launchable type="desktop-id">com.tidaldownloader.Tideway.desktop</launchable>
+
+  <url type="homepage">https://github.com/J-M-PUNK/tideway</url>
+  <url type="bugtracker">https://github.com/J-M-PUNK/tideway/issues</url>
+  <url type="vcs-browser">https://github.com/J-M-PUNK/tideway</url>
+
+  <developer id="com.tidaldownloader">
+    <name>Will Pratt</name>
+  </developer>
+
+  <categories>
+    <category>AudioVideo</category>
+    <category>Audio</category>
+    <category>Player</category>
+  </categories>
+
+  <content_rating type="oars-1.1">
+    <content_attribute id="social-info">mild</content_attribute>
+  </content_rating>
+
+  <!--
+    Releases are appended to over time. flatpak-builder reads
+    <release version> to label the Flatpak commit; GNOME Software
+    shows the most-recent release's <description> as the "What's new"
+    section on the app card.
+  -->
+  <releases>
+    <release version="1.9.5" date="2026-05-19">
+      <description>
+        <p>
+          Fixed a freeze on track change where the previous track's
+          audio stream wasn't reopened, leaving the new track in
+          state=playing with no sound.
+        </p>
+      </description>
+    </release>
+  </releases>
+</component>

@@ -2,9 +2,9 @@
 # browser fallback with a real WebKitGTK window). See
 # docs/linux-flatpak.md for scope and the staged plan.
 #
-# STATUS: Stage 1. PortAudio source hash and the pip-generated
-# python3-requirements.json module are filled in. First buildable
-# revision; first real flatpak-builder run lives in the VM.
+# Builds against the GNOME 49 runtime (Python 3.13, GTK 3, WebKit2
+# 4.1). Verified end-to-end in CI on every tag — and on PRs that
+# touch this file or release.yml.
 
 app-id: com.tidaldownloader.Tideway
 runtime: org.gnome.Platform
@@ -18,6 +18,14 @@ sdk-extensions:
   # is not part of the runtime the app ships against.
   - org.freedesktop.Sdk.Extension.node20
 command: tideway
+
+# flatpak-builder auto-runs `appstream-compose` against our metainfo
+# file for the legacy share/appdata/<id>.appdata.xml output. GNOME
+# 49's Sdk doesn't ship that binary (it was deprecated in favour of
+# `appstreamcli compose` years ago) and modern AppStream readers
+# index share/metainfo/<id>.metainfo.xml directly. Disable the
+# auto-step at the manifest level so the build doesn't fail here.
+appstream-compose: false
 
 finish-args:
   - --share=network                       # Tidal / Spotify / Last.fm
@@ -75,8 +83,12 @@ modules:
         /app/share/applications/com.tidaldownloader.Tideway.desktop
       - install -Dm644 assets/icon.png
         /app/share/icons/hicolor/512x512/apps/com.tidaldownloader.Tideway.png
-      # TODO(stage1): AppStream metainfo (required by Flathub; good
-      # practice for a self-hosted repo too).
+      # AppStream metainfo. GNOME Software and KDE Discover read
+      # this to render the app card and surface "Updates available"
+      # notifications. Required for Flathub; useful for self-hosted
+      # because software centres pick the file up automatically.
+      - install -Dm644 flatpak/com.tidaldownloader.Tideway.metainfo.xml
+        /app/share/metainfo/com.tidaldownloader.Tideway.metainfo.xml
     sources:
       - type: dir
         path: ..
