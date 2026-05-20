@@ -952,6 +952,13 @@ export const api = {
       }).catch(() => ({ ok: false })),
     play: () => req<PlayerSnapshot>("/api/player/play", { method: "POST" }),
     pause: () => req<PlayerSnapshot>("/api/player/pause", { method: "POST" }),
+    /** Clear the cross-device pause banner without resuming
+     *  playback. Called when the user dismisses the "Paused —
+     *  playing on iOS" alert with its X button. */
+    dismissPauseReason: () =>
+      req<PlayerSnapshot>("/api/player/dismiss-pause-reason", {
+        method: "POST",
+      }),
     resume: () => req<PlayerSnapshot>("/api/player/resume", { method: "POST" }),
     stop: () => req<PlayerSnapshot>("/api/player/stop", { method: "POST" }),
     seek: (fraction: number) =>

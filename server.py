@@ -987,10 +987,17 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # start() reports phase=disabled and never opens a connection.
     # Wiring it now so the settings toggle, status endpoint, and
     # lifespan hook are in place when the protocol capture lands.
-    def _on_other_device_started(_payload: dict) -> None:
+    def _on_other_device_started(payload: dict) -> None:
         if not getattr(settings, "pause_on_other_device", True):
             # User opted out: keep playing through cross-device events.
             return
+        global _cross_device_pause_device
+        # Record which device caused the pause BEFORE actually
+        # pausing so a fast frontend poll of /api/player/state right
+        # after the SSE pause event already sees the reason. The
+        # _on_player_state callback clears this on the next play.
+        device = (payload.get("clientDisplayName") if payload else None) or "another device"
+        _cross_device_pause_device = str(device)
         try:
             _native_player().pause()
         except Exception as exc:
@@ -1025,9 +1032,16 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         _last_was_playing = [False]
 
         def _on_player_state(snapshot) -> None:
+            global _cross_device_pause_device
             is_playing = getattr(snapshot, "state", None) == "playing"
             if is_playing and not _last_was_playing[0]:
                 _rt_listener.signal_user_action_sync()
+                # Clear the cross-device pause banner the moment
+                # the user resumes (or starts a new track). The
+                # banner only makes sense while paused-by-someone-
+                # else; once the local user takes over again the
+                # message is stale.
+                _cross_device_pause_device = None
             _last_was_playing[0] = is_playing
 
         try:
@@ -4817,6 +4831,17 @@ class _PlayerOutputDeviceRequest(BaseModel):
 _player_bootstrapped = False
 _pcm_player_singleton: Optional[PCMPlayer] = None
 
+# The most recent cross-device-pause cause, surfaced in the player
+# snapshot so the frontend can render a banner explaining why
+# playback stopped ("Paused — playing on iOS"). Set by the Pushkin
+# listener's `on_other_device_started` callback when a
+# PRIVILEGED_SESSION_NOTIFICATION arrives; cleared whenever the
+# local player transitions back into the playing state, or
+# explicitly via the dismiss endpoint. A simple module-level string
+# is enough — only one device can hold the privileged session at a
+# time, so there's no race to worry about.
+_cross_device_pause_device: Optional[str] = None
+
 
 def _native_player() -> PCMPlayer:
     """Return the PCMPlayer singleton. Lazily constructed on first
@@ -5114,6 +5139,11 @@ def _snapshot_dict(snap) -> dict:
         "seq": snap.seq,
         "stream_info": stream_info,
         "force_volume": getattr(snap, "force_volume", False),
+        # Set by the Pushkin listener when another device on the
+        # same Tidal account starts playing; cleared on next local
+        # play. Frontend renders a banner above the play bar with
+        # this device name while it's set.
+        "paused_by_device": _cross_device_pause_device,
     }
 
 
@@ -5497,6 +5527,22 @@ def _dlna_send(action: str) -> None:
             upnp_manager.pause()
     except Exception as exc:  # noqa: BLE001 see docstring
         log.debug("dlna %s passthrough failed: %r", action, exc)
+
+
+@app.post("/api/player/dismiss-pause-reason")
+def player_dismiss_pause_reason() -> dict:
+    """Clear the `paused_by_device` field on the player snapshot.
+
+    The banner's X button calls this so the user can stop seeing
+    the "Paused — playing on iOS" message without having to resume
+    playback to clear it. Returns the fresh snapshot so the
+    frontend can react in-place rather than waiting for the next
+    SSE tick.
+    """
+    _require_local_access()
+    global _cross_device_pause_device
+    _cross_device_pause_device = None
+    return _snapshot_dict(_native_player().snapshot())
 
 
 @app.post("/api/player/play")

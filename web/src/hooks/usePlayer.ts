@@ -82,6 +82,10 @@ export interface PlayerState {
    *  volume slider should render disabled and the backend rejects
    *  set_volume calls; the user attenuates via their DAC / OS. */
   forceVolume: boolean;
+  /** Name of the device that caused a cross-device pause, when one
+   *  is currently pending. Null otherwise. Drives the banner above
+   *  the play bar. */
+  pausedByDevice: string | null;
 }
 
 const INITIAL: PlayerState = {
@@ -99,6 +103,7 @@ const INITIAL: PlayerState = {
   streamInfo: null,
   source: null,
   forceVolume: false,
+  pausedByDevice: null,
 };
 
 /**
@@ -474,6 +479,7 @@ export function usePlayer() {
           duration,
           streamInfo: snap.stream_info,
           forceVolume: !!snap.force_volume,
+          pausedByDevice: snap.paused_by_device ?? null,
           ...volPatch,
         };
       });

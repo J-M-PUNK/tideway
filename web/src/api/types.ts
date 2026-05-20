@@ -147,6 +147,13 @@ export interface PlayerSnapshot {
   /** When true the backend is pinning volume at 100 %. Set via the
    *  "Force volume" option in the bottom bar's output-device menu. */
   force_volume?: boolean;
+  /** Set when local playback was paused by a cross-device-pause
+   *  event from Tidal's Pushkin bus. Contains the display name of
+   *  the device that took over ("iOS", "Desktop", "another device"
+   *  as a fallback). Null when no such pause is current.
+   *  Cleared automatically when the user resumes playback locally
+   *  or explicitly via POST /api/player/dismiss-pause-reason. */
+  paused_by_device?: string | null;
 }
 
 /** Tidal-nominated single most-relevant result. Discriminated by the
