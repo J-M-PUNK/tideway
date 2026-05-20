@@ -76,8 +76,20 @@ modules:
       - npm --prefix web run build
       # App payload. The runtime Python imports `gi`, so pywebview
       # uses the GTK/WebKit backend — no browser fallback.
-      - install -d /app/share/tideway
-      - cp -r app server.py desktop.py VERSION web/dist /app/share/tideway/
+      #
+      # `web/dist` MUST land at `/app/share/tideway/web/dist/`, not
+      # `/app/share/tideway/dist/`. server.py's static mount resolves
+      # the Vite build via `bundled_resource_dir() / "web" / "dist"`,
+      # and `bundled_resource_dir()` returns the package root
+      # (`/app/share/tideway` inside the sandbox). Earlier releases
+      # used a single `cp -r ... web/dist /app/share/tideway/` which
+      # flattens the destination to `/app/share/tideway/dist/`; the
+      # static mount then skipped registration, the SPA fallback
+      # route was never wired up, and the pywebview window loaded
+      # `{"detail":"Not Found"}` instead of the React app.
+      - install -d /app/share/tideway/web
+      - cp -r app server.py desktop.py VERSION /app/share/tideway/
+      - cp -r web/dist /app/share/tideway/web/
       - install -Dm755 flatpak/tideway-launcher.sh /app/bin/tideway
       - install -Dm644 flatpak/com.tidaldownloader.Tideway.desktop
         /app/share/applications/com.tidaldownloader.Tideway.desktop

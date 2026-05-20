@@ -466,6 +466,51 @@ jobs:
             flatpak/com.tidaldownloader.Tideway.yaml
           flatpak build-update-repo "${UPDATE_ARGS[@]}" repo
 
+      - name: Smoke-test the running app serves the React UI
+        # Verifies the user-facing URL works before we package the
+        # bundle and ship it. v1.10.0 + v1.11.0 shipped with the
+        # static SPA mount looking at the wrong path; the window
+        # loaded "{"detail":"Not Found"}" instead of the React app
+        # and nobody caught it until a user reported it. This step
+        # installs to --user, launches under --browser (skips the
+        # GTK window, so no xvfb needed), and asserts that the
+        # root URL returns HTML with the app title in it. Fails the
+        # release if not.
+        run: |
+          set -uo pipefail
+          flatpak-builder --user --install --force-clean \
+            .build-flatpak flatpak/com.tidaldownloader.Tideway.yaml
+          flatpak run --user com.tidaldownloader.Tideway --browser \
+            > flatpak_smoke.log 2>&1 &
+          APP_PID=$!
+          ok=0
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:47823/api/health 2>/dev/null \
+                 | grep -q tidal-downloader; then
+              ok=1
+              break
+            fi
+            kill -0 "$APP_PID" 2>/dev/null || break
+            sleep 1
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "FAIL: server never bound on :47823"
+            cat flatpak_smoke.log
+            exit 1
+          fi
+          body=$(curl -fsS http://127.0.0.1:47823/)
+          if ! echo "$body" | grep -qi "<title>Tideway</title>"; then
+            echo "FAIL: root URL did not serve the React index.html"
+            echo "----- response body -----"
+            echo "$body" | head -c 500
+            echo
+            kill "$APP_PID" 2>/dev/null || true
+            exit 1
+          fi
+          echo "PASS: root URL serves the React index.html"
+          kill "$APP_PID" 2>/dev/null || true
+          wait "$APP_PID" 2>/dev/null || true
+
       - name: Build single-file .flatpak bundle from repo
         # `flatpak build-bundle` extracts a single .flatpak file
         # from the OSTree repo for users who want to install
