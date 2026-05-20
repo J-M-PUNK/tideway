@@ -437,13 +437,20 @@ jobs:
         with:
           ref: ${{ github.event.inputs.tag || github.ref }}
 
-      - name: Install flatpak + flatpak-builder
+      - name: Install flatpak + flatpak-builder + elfutils
+        # elfutils provides eu-strip, which flatpak-builder shells
+        # out to for debuginfo extraction. It isn't pulled in as a
+        # hard dep of flatpak-builder on Ubuntu 22.04, so a stock
+        # runner fails with "Failed to execute child process
+        # eu-strip" the first time a module produces an ELF
+        # binary.
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            flatpak flatpak-builder ostree
+            flatpak flatpak-builder ostree elfutils
           flatpak --version
           flatpak-builder --version
+          eu-strip --version | head -1
 
       - name: Add Flathub remote
         # User-scoped to match how end users add it; CI doesn't need

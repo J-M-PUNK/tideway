@@ -35,13 +35,18 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Install flatpak + flatpak-builder
+      - name: Install flatpak + flatpak-builder + elfutils
+        # elfutils provides eu-strip, which flatpak-builder shells
+        # out to for debuginfo extraction. Mirror this in
+        # release.yml — same apt line in both keeps the two build
+        # paths from drifting.
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
-            flatpak flatpak-builder ostree
+            flatpak flatpak-builder ostree elfutils
           flatpak --version
           flatpak-builder --version
+          eu-strip --version | head -1
 
       - name: Add Flathub remote
         run: |
