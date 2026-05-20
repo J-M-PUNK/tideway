@@ -48,7 +48,7 @@ const primary: Array<{
   { to: "/feed", label: "Feed", icon: Rss, prefetch: prefetch.feed },
   {
     to: "/popular",
-    label: "Charts",
+    label: "Discover",
     icon: TrendingUp,
     prefetch: prefetch.popularArtists,
   },
