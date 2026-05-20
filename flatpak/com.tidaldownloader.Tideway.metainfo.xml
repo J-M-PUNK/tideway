@@ -42,11 +42,13 @@
 
   <url type="homepage">https://github.com/J-M-PUNK/tideway</url>
   <url type="bugtracker">https://github.com/J-M-PUNK/tideway/issues</url>
-  <url type="vcs-browser">https://github.com/J-M-PUNK/tideway</url>
 
-  <developer id="com.tidaldownloader">
-    <name>Will Pratt</name>
-  </developer>
+  <!-- The legacy developer_name tag is used here instead of the
+       newer <developer id><name>...</name></developer> because
+       AppStream 0.15 (the version shipping in Ubuntu 22.04 and
+       similar) rejects the newer form as an unknown tag. Both 0.15
+       and 1.0 accept developer_name. -->
+  <developer_name>Will Pratt</developer_name>
 
   <categories>
     <category>AudioVideo</category>
