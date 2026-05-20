@@ -82,12 +82,70 @@ jobs:
       - name: Verify payload structure
         # Quick sanity check that the build actually produced what
         # we expect — catches manifest typos that build "cleanly"
-        # into nothing useful.
+        # into nothing useful. The web/dist path is the load-bearing
+        # one: server.py's static mount looks for
+        # bundled_resource_dir() / "web" / "dist" / "index.html",
+        # and v1.10.0 + v1.11.0 shipped with the contents flattened
+        # to /share/tideway/dist/ so the React UI never rendered
+        # (window loaded "{"detail":"Not Found"}"). This step's
+        # previous assertion checked the broken path and silently
+        # passed. Now anchored on the real served file.
         run: |
           test -f .build-flatpak/files/bin/tideway || { echo "FAIL: launcher missing"; exit 1; }
           test -f .build-flatpak/files/share/tideway/desktop.py || { echo "FAIL: desktop.py missing"; exit 1; }
           test -f .build-flatpak/files/share/tideway/server.py || { echo "FAIL: server.py missing"; exit 1; }
-          test -d .build-flatpak/files/share/tideway/dist || { echo "FAIL: web/dist missing"; exit 1; }
+          test -f .build-flatpak/files/share/tideway/VERSION || { echo "FAIL: VERSION missing"; exit 1; }
+          test -f .build-flatpak/files/share/tideway/web/dist/index.html || { echo "FAIL: React index.html missing from /share/tideway/web/dist/"; exit 1; }
+          test -d .build-flatpak/files/share/tideway/web/dist/assets || { echo "FAIL: hashed Vite assets missing"; exit 1; }
           test -f .build-flatpak/files/lib/libportaudio.so.2 || { echo "FAIL: PortAudio missing"; exit 1; }
           echo "OK: build payload looks correct"
           du -sh .build-flatpak/files
+
+      - name: Smoke-test the running app serves the React UI
+        # Install the freshly built bits, launch under --browser
+        # (no pywebview window, just the FastAPI server), and assert
+        # the root URL returns HTML — not the JSON 404 that v1.10
+        # and v1.11 shipped. This is the test that would have caught
+        # the original bug. --browser short-circuits the GTK window
+        # creation, so no xvfb is needed.
+        run: |
+          set -uo pipefail
+          flatpak-builder --user --install --force-clean \
+            .build-flatpak flatpak/com.tidaldownloader.Tideway.yaml
+          flatpak run --user com.tidaldownloader.Tideway --browser \
+            > flatpak_smoke.log 2>&1 &
+          APP_PID=$!
+          ok=0
+          for _ in $(seq 1 60); do
+            if curl -fsS http://127.0.0.1:47823/api/health 2>/dev/null \
+                 | grep -q tidal-downloader; then
+              ok=1
+              break
+            fi
+            kill -0 "$APP_PID" 2>/dev/null || break
+            sleep 1
+          done
+          if [ "$ok" -ne 1 ]; then
+            echo "FAIL: server never bound on :47823"
+            cat flatpak_smoke.log
+            exit 1
+          fi
+          # Probe the root URL — the path pywebview loads. Bug class
+          # is "static SPA mount didn't register, fallback 404s with
+          # JSON". Catch that here: response must be HTML and must
+          # contain the app title.
+          body=$(curl -fsS http://127.0.0.1:47823/)
+          if ! echo "$body" | grep -qi "<title>Tideway</title>"; then
+            echo "FAIL: root URL did not serve the React index.html"
+            echo "----- response body -----"
+            echo "$body" | head -c 500
+            echo
+            echo "----- /api/health (for comparison, should be JSON) -----"
+            curl -sS http://127.0.0.1:47823/api/health
+            echo
+            kill "$APP_PID" 2>/dev/null || true
+            exit 1
+          fi
+          echo "PASS: root URL serves the React index.html"
+          kill "$APP_PID" 2>/dev/null || true
+          wait "$APP_PID" 2>/dev/null || true
