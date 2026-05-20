@@ -1006,12 +1006,37 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             return None
 
     try:
-        tidal_realtime.start_listener(
+        _rt_listener = tidal_realtime.start_listener(
             token_provider=_tidal_token_provider,
             on_other_device_started=_on_other_device_started,
         )
     except Exception as exc:
         print(f"[tidal-realtime] startup failed: {exc!r}", flush=True)
+        _rt_listener = None
+
+    # When PCMPlayer transitions into the playing state, send a
+    # USER_ACTION frame on the Pushkin WebSocket. That's how
+    # Tidal's backend learns "this device is now the active one"
+    # and pushes PRIVILEGED_SESSION_NOTIFICATION to the other
+    # devices on the same account so they pause. Without this,
+    # cross-device pause only works one way: other devices can
+    # interrupt Tideway, but Tideway can't interrupt them.
+    if _rt_listener is not None:
+        _last_was_playing = [False]
+
+        def _on_player_state(snapshot) -> None:
+            is_playing = getattr(snapshot, "state", None) == "playing"
+            if is_playing and not _last_was_playing[0]:
+                _rt_listener.signal_user_action_sync()
+            _last_was_playing[0] = is_playing
+
+        try:
+            _native_player().subscribe(_on_player_state)
+        except Exception as exc:
+            print(
+                f"[tidal-realtime] subscribe to player failed: {exc!r}",
+                flush=True,
+            )
 
     try:
         yield

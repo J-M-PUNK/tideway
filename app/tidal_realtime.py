@@ -82,6 +82,7 @@ import asyncio
 import inspect
 import json
 import logging
+import time
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Optional
 
@@ -166,6 +167,14 @@ class RealtimeListener:
     _task: Optional[asyncio.Task] = field(default=None, init=False)
     _shutdown: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _status: ListenerStatus = field(default_factory=ListenerStatus, init=False)
+    # Stashed when start() runs so signal_user_action_sync() can
+    # hand the coroutine back to the right loop from sync code (the
+    # PCMPlayer state-change listener fires from arbitrary threads).
+    _loop: Optional[asyncio.AbstractEventLoop] = field(default=None, init=False)
+    # The currently-open WebSocket while _connect_and_serve is in
+    # the middle of its serve loop, else None. Read by
+    # send_user_action; never written from outside the loop.
+    _ws: Optional[object] = field(default=None, init=False)
 
     @property
     def is_protocol_known(self) -> bool:
@@ -183,6 +192,7 @@ class RealtimeListener:
         self._shutdown.clear()
         self._status = ListenerStatus(phase="connecting")
         loop = asyncio.get_running_loop()
+        self._loop = loop
         self._task = loop.create_task(
             self._run(), name="tidal-realtime-listener"
         )
@@ -301,27 +311,37 @@ class RealtimeListener:
             )
 
         # Phase 2: open the WebSocket and serve frames. No subscribe
-        # message and no client heartbeats — the Tidal web client
-        # sends `USER_ACTION` frames on page user-action events but
-        # they're not required for connection liveness, so we skip
-        # them. Same certifi CA bundle as the token POST so the WS
-        # handshake doesn't trip the same system-CA issue.
+        # message and no periodic client heartbeats. The outbound
+        # USER_ACTION frame is sent on demand by
+        # signal_user_action_sync() — it's how we tell Pushkin
+        # "this device is now the active one" so other devices on
+        # the same account pause in response. Same certifi CA
+        # bundle as the token POST so the WS handshake doesn't trip
+        # the same system-CA issue.
         async with websockets.connect(
             ws_url,
             open_timeout=_CONNECT_TIMEOUT_SEC,
             ssl=ssl_ctx,
         ) as ws:
+            self._ws = ws
             self._status.phase = "connected"
             self._status.last_error = None
             log.info(
                 "tidal_realtime: connected to Pushkin (reconnect_count=%d)",
                 self._status.reconnect_count,
             )
-            async for raw in ws:
-                frame = self._parse_frame(raw)
-                if frame is None:
-                    continue
-                await self._dispatch_frame(frame, ws)
+            try:
+                async for raw in ws:
+                    frame = self._parse_frame(raw)
+                    if frame is None:
+                        continue
+                    await self._dispatch_frame(frame, ws)
+            finally:
+                # Clear the ws reference so signal_user_action_sync
+                # callers in flight stop trying to send through a
+                # half-closed socket. The reconnect loop will
+                # re-populate this on the next successful connect.
+                self._ws = None
 
     async def _dispatch_frame(self, frame: dict, ws) -> None:
         """Route a parsed frame to the right action.
@@ -355,6 +375,73 @@ class RealtimeListener:
             log.warning(
                 "tidal_realtime: unhandled frame type %r", frame_type
             )
+
+    async def send_user_action(self) -> bool:
+        """Send a USER_ACTION frame on the current WebSocket.
+
+        The Tidal web client fires this whenever the user clicks
+        or presses a key in the page; Pushkin's backend uses these
+        to mark the device as the "active" one. When Pushkin sees
+        a fresh user-action from device B while device A is the
+        current active device, it pushes
+        PRIVILEGED_SESSION_NOTIFICATION to device A so A pauses.
+
+        For Tideway, the natural trigger is "track started
+        playing" — that's the moral equivalent of clicking the
+        web app's play button. server.py subscribes to PCMPlayer
+        state changes and calls signal_user_action_sync() on the
+        transition into the playing state.
+
+        Returns True if the frame was sent, False if there was no
+        open connection (caller's fault for racing the reconnect
+        loop). Send failures (broken pipe, etc.) raise; the
+        receive loop will see them too and trigger reconnect.
+        """
+        ws = self._ws
+        if ws is None:
+            log.debug(
+                "tidal_realtime: signal_user_action with no open "
+                "WebSocket; dropping"
+            )
+            return False
+        # `startedAt` is a Unix-millisecond timestamp; the web
+        # client uses a TrueTime-corrected clock (sync'd against
+        # api.tidal.com/v1/ping's Date header) but ordinary local
+        # time is close enough for Pushkin's purposes — the
+        # backend doesn't seem to use this value to break ties.
+        body = json.dumps(
+            {
+                "payload": {"startedAt": int(time.time() * 1000)},
+                "type": "USER_ACTION",
+            },
+            separators=(",", ":"),
+        )
+        await ws.send(body)
+        return True
+
+    def signal_user_action_sync(self) -> None:
+        """Sync-friendly wrapper around send_user_action() so the
+        PCMPlayer's state-change listener (which runs on player
+        threads, not the asyncio loop) can fire USER_ACTION
+        without an awaiting context.
+
+        Best-effort: silently drops if the listener isn't running
+        yet, the loop isn't available, or the send fails. None of
+        those are fatal — the next state change will retry, and
+        the worst-case user impact is that one play action doesn't
+        pause other devices.
+        """
+        loop = self._loop
+        if loop is None or self._ws is None:
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self.send_user_action(), loop
+            )
+        except RuntimeError as exc:
+            # Loop closed mid-call (shutdown race). Nothing we can
+            # do; drop the signal.
+            log.debug("tidal_realtime: signal dropped: %r", exc)
 
     @staticmethod
     def _parse_frame(raw: bytes | str) -> Optional[dict]:
