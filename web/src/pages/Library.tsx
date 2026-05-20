@@ -7,12 +7,10 @@ import {
   Folder,
   Heart,
   Home,
-  LayoutGrid,
   Library as LibraryIcon,
   List,
   ListMusic,
   Loader2,
-  Menu,
   Plus,
   User,
 } from "lucide-react";
@@ -33,6 +31,7 @@ import { CreateFolderDialog } from "@/components/CreateFolderDialog";
 import { CreatePlaylistDialog } from "@/components/CreatePlaylistDialog";
 import { MediaCard } from "@/components/MediaCard";
 import { MediaListRow } from "@/components/MediaListRow";
+import { ViewToggle, type ViewMode } from "@/components/ViewToggle";
 import {
   FormatFilter,
   type AudioFormat,
@@ -55,7 +54,7 @@ import { cn } from "@/lib/utils";
 
 type Section = "albums" | "artists" | "playlists" | "tracks";
 type Sort = "recent" | "alpha";
-type View = "grid" | "list";
+type View = ViewMode;
 
 const VIEW_KEY_PREFIX = "tideway:library-view:";
 
@@ -436,49 +435,6 @@ function DownloadAllTracks({ tracks }: { tracks: Track[] }) {
       )}
       Download all
     </Button>
-  );
-}
-
-function ViewToggle({
-  view,
-  onChange,
-}: {
-  view: View;
-  onChange: (v: View) => void;
-}) {
-  return (
-    <div className="inline-flex rounded-md border border-border bg-secondary p-0.5">
-      <button
-        type="button"
-        onClick={() => onChange("grid")}
-        title="Grid view"
-        aria-label="Grid view"
-        aria-pressed={view === "grid"}
-        className={cn(
-          "flex h-8 w-8 items-center justify-center rounded-sm transition-colors",
-          view === "grid"
-            ? "bg-background text-foreground"
-            : "text-muted-foreground hover:text-foreground",
-        )}
-      >
-        <LayoutGrid className="h-4 w-4" />
-      </button>
-      <button
-        type="button"
-        onClick={() => onChange("list")}
-        title="List view"
-        aria-label="List view"
-        aria-pressed={view === "list"}
-        className={cn(
-          "flex h-8 w-8 items-center justify-center rounded-sm transition-colors",
-          view === "list"
-            ? "bg-background text-foreground"
-            : "text-muted-foreground hover:text-foreground",
-        )}
-      >
-        <Menu className="h-4 w-4" />
-      </button>
-    </div>
   );
 }
 
