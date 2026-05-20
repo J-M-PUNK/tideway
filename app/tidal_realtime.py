@@ -3,7 +3,7 @@ same Tidal account starts playing.
 
 Tidal's official clients react to playback events from other devices
 via a realtime bus. When another device on the same account begins a
-playback_session, the bus pushes a state-change frame and the
+playback session, the bus pushes a state-change frame and the
 receiving client pauses locally. Spotify and the official Tidal app
 both behave this way out of the box; users coming from those expect
 Tideway to behave the same.
@@ -13,32 +13,37 @@ posts our own `playback_session` events to the event-producer bus
 (`ec.tidal.com/api/event-batch`), which is what makes "Tideway plays
 show up in Recently Played" and "starting Tideway pauses other
 devices that listen to the same bus" work today. This module is the
-**receive** half: a long-lived WebSocket subscription to whatever
-Tidal's realtime bus is, with an `on_other_device_started` callback
-that the desktop launcher wires to PCMPlayer.pause().
+**receive** half: a long-lived WebSocket subscription to Tidal's
+realtime bus ("Pushkin"), with an `on_other_device_started` callback
+that the launcher wires to `PCMPlayer.pause()`.
 
-## Status: scaffolded, protocol capture pending
+## Protocol
 
-The scaffold is here so the wiring (settings field, lifespan hook,
-diagnostic endpoint, callback into the player) can be reviewed and
-shipped without the protocol-specific details. Connection setup,
-the subscribe message, and the frame parser are stubs marked
-**TODO(phase-1)** that need a packet capture from Tidal's web
-client to fill in. See
-`private/features/cross-device-pause-listener.md` for the capture
-plan and the open questions about auth shape, frame format, etc.
+Reverse-engineered from the Tidal web client's `pushkin-*.js` module
+(2026-05-20). Two phases:
 
-Until the capture lands, the listener:
-  - Constructs cleanly,
-  - Reports `phase=disabled` from `status()` because the protocol
-    constants are placeholders,
-  - Refuses to start when called: returns immediately with a logged
-    "TODO" message rather than spinning a real WebSocket connection
-    against a guessed URL that can't actually work.
+  1. **Token acquisition.** POST to `https://api.tidal.com/v1/rt/
+     connect` with `Authorization: Bearer <access_token>`. Response
+     is `{"url": "wss://pushkin-v2.tidal.com/public/token/<uuid>/
+     ws"}` — the full WebSocket URL including a per-session token
+     baked into the path. Tokens are minted per connection; we
+     re-acquire on every (re)connect.
 
-This shape lets the rest of the app integrate (settings toggle,
-status endpoint, lifespan registration) without producing connection
-churn against a wrong endpoint.
+  2. **WebSocket session.** Plain JSON frames. Incoming types we
+     handle:
+       - `PRIVILEGED_SESSION_NOTIFICATION` — payload has
+         `clientDisplayName` (e.g. "iOS") and `sessionId`. Fires
+         when another device on the same Tidal account takes
+         playback. We pause local playback in response.
+       - `RECONNECT` — server-initiated reconnect. Close and
+         reopen.
+       - Anything else: log and ignore.
+
+     Outgoing frames are optional. The web client only sends
+     `USER_ACTION` messages in response to page user-action events
+     (clicks, keypresses); they're not heartbeats and Tidal's
+     backend doesn't seem to require them for connection liveness,
+     so we don't send anything.
 
 ## Threading model
 
@@ -58,10 +63,24 @@ the cancellation, closes the WebSocket if open, and exits.
 The pause callback fires from inside the asyncio loop. PCMPlayer's
 methods are thread-safe (they take `_lock` internally) so calling
 into them from the loop is fine; we don't need a thread hop.
+
+## Self-event filtering
+
+The web client's frame handler pauses unconditionally on every
+`PRIVILEGED_SESSION_NOTIFICATION` — no self-filter by sessionId.
+This works in practice because Tidal's backend doesn't echo a
+client's own session events back to that same client's connection.
+We follow the same posture: pause callback fires unconditionally;
+trust the server to not push our own events to us. If we ever see
+self-pause from a Tideway-only-playing scenario, the fix is to
+compare against the sessionId play_reporter generated for the
+active session.
 """
 from __future__ import annotations
 
 import asyncio
+import inspect
+import json
 import logging
 from dataclasses import dataclass, field
 from typing import Awaitable, Callable, Optional
@@ -69,27 +88,10 @@ from typing import Awaitable, Callable, Optional
 log = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# Protocol constants — TODO(phase-1): replace placeholders after capture.
-# ---------------------------------------------------------------------------
-#
-# `cross-device-pause-listener.md` records the open questions:
-#   - Is the realtime endpoint really WebSocket, or long-polling / SSE?
-#   - Auth shape: bearer header, query param, post-connect AUTH frame?
-#   - Do we need a "register this session" handshake first?
-#   - Frame format: JSON, binary, protobuf?
-#   - Are there events we'd want to ignore (our own play_reporter
-#     events bouncing back)?
-#
-# Until those are answered the listener stays in `disabled` phase and
-# never opens a connection. Replacing these constants and the
-# `_parse_frame` helper below is the entire surface the Phase 1
-# capture changes.
-
-_REALTIME_URL: Optional[str] = None  # e.g. "wss://realtime.tidal.com/v1/listen"
-_SUBSCRIBE_MESSAGE: Optional[str] = None  # JSON sent on connect, if needed
-_HEARTBEAT_INTERVAL_SEC: Optional[float] = None  # client-side ping cadence
-
+# HTTP endpoint that mints a per-session WebSocket URL. Returns
+# {"url": "wss://pushkin-v2.tidal.com/public/token/<uuid>/ws"}.
+# Reverse-engineered from `pushkin-*.js`'s `l()` function.
+_RT_CONNECT_URL = "https://api.tidal.com/v1/rt/connect"
 
 # Backoff schedule for reconnects. Doubles each consecutive failure,
 # capped so we don't drift into multi-minute holes that delay the
@@ -98,6 +100,14 @@ _HEARTBEAT_INTERVAL_SEC: Optional[float] = None  # client-side ping cadence
 # responsive while still being polite to Tidal's bus during outages.
 _BACKOFF_INITIAL_SEC = 0.5
 _BACKOFF_MAX_SEC = 60.0
+
+# How long to wait for the token POST + WebSocket handshake before
+# giving up and treating it as a connection failure. The token POST
+# is a single HTTPS round-trip against api.tidal.com; the handshake
+# is a single TLS+WS upgrade. Tens of seconds is generous; longer
+# than that means something's wrong (DNS, blocked, captive portal)
+# and we should back off, not wait.
+_CONNECT_TIMEOUT_SEC = 10.0
 
 
 # ---------------------------------------------------------------------------
@@ -120,11 +130,9 @@ OtherDeviceStartedCallback = Callable[[dict], Awaitable[None] | None]
 class ListenerStatus:
     """What `/api/realtime/status` returns. Diagnostic surface only."""
 
-    # One of: "disabled", "idle", "connecting", "connected",
-    # "reconnecting", "stopped". "disabled" specifically means the
-    # protocol constants haven't been filled in yet (Phase 1 not
-    # done). "idle" means the listener was constructed but start()
-    # hasn't been called.
+    # One of: "idle", "connecting", "connected", "reconnecting",
+    # "stopped". "idle" means the listener was constructed but
+    # start() hasn't been called.
     phase: str = "idle"
     # Last error message, if any. Cleared on successful connect.
     last_error: Optional[str] = None
@@ -161,28 +169,16 @@ class RealtimeListener:
 
     @property
     def is_protocol_known(self) -> bool:
-        """True once the Phase 1 capture has populated the protocol
-        constants. Until then start() is a no-op and status reports
-        `disabled`."""
-        return _REALTIME_URL is not None
+        """Reverse-engineered protocol is in place since 2026-05-20;
+        kept on the public surface for the `/api/realtime/status`
+        diagnostic endpoint and for any callers that want to gate
+        on it. Always True now."""
+        return True
 
     def start(self) -> None:
         """Spawn the connection task. Idempotent: a second call while
         already running is a no-op."""
         if self._task is not None and not self._task.done():
-            return
-        if not self.is_protocol_known:
-            self._status.phase = "disabled"
-            self._status.last_error = (
-                "Tidal realtime protocol not captured yet; listener "
-                "is a no-op until Phase 1 of the cross-device-pause "
-                "feature lands. See "
-                "private/features/cross-device-pause-listener.md."
-            )
-            log.info(
-                "tidal_realtime: start() called but protocol unknown; "
-                "no connection will be opened"
-            )
             return
         self._shutdown.clear()
         self._status = ListenerStatus(phase="connecting")
@@ -244,46 +240,124 @@ class RealtimeListener:
             backoff = min(backoff * 2.0, _BACKOFF_MAX_SEC)
 
     async def _connect_and_serve(self) -> None:
-        """Open one WebSocket connection, subscribe, and serve frames
-        until the connection drops. Re-raised exceptions trigger
+        """Acquire a token, open the Pushkin WebSocket, and serve
+        frames until the connection drops. Raised exceptions trigger
         reconnect via _run().
 
-        TODO(phase-1): this method is a placeholder. The real
-        implementation will:
-          1. Read the access token via self.token_provider().
-          2. Open a WebSocket to _REALTIME_URL with the right auth
-             shape (header / query param / post-connect frame, TBD).
-          3. Send _SUBSCRIBE_MESSAGE if the protocol requires one.
-          4. Loop reading frames; for each, call _parse_frame() and
-             dispatch other-device-started events to the callback.
-          5. Heartbeat at _HEARTBEAT_INTERVAL_SEC if the bus needs
-             keep-alives.
+        Lazy import of aiohttp + websockets so test environments that
+        construct the listener without an event loop don't fail at
+        import time on a missing optional dep.
         """
-        # Sanity belt: the public start() method already checked
-        # is_protocol_known and won't have spawned us if the protocol
-        # is unknown, but we double-check here in case start() is
-        # ever called before constants land.
-        if not self.is_protocol_known:
-            raise RuntimeError("realtime protocol constants not set")
-        # Real implementation lands here in Phase 1. For now, raise
-        # so _run()'s reconnect loop logs and backs off; once
-        # constants are populated this becomes the actual connect
-        # and serve loop.
-        raise NotImplementedError(
-            "tidal_realtime._connect_and_serve: protocol not captured"
-        )
+        access_token = self.token_provider()
+        if not access_token:
+            # No Tidal session right now (logged out, refresh in
+            # flight). Raise so _run() backs off and tries again
+            # once the session is back.
+            raise RuntimeError("no Tidal access token available")
+
+        import aiohttp
+        import websockets
+
+        # Phase 1: POST to /v1/rt/connect with the Bearer token to
+        # mint a per-session WebSocket URL. The response carries the
+        # full wss:// URL including the token UUID baked into the
+        # path; we don't need to construct it ourselves.
+        async with aiohttp.ClientSession() as http:
+            async with http.post(
+                _RT_CONNECT_URL,
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Content-Type": "application/json",
+                },
+                timeout=aiohttp.ClientTimeout(total=_CONNECT_TIMEOUT_SEC),
+            ) as resp:
+                if resp.status == 401:
+                    # Token rejected — the access_token from the
+                    # provider is stale. Force a refresh next time
+                    # by surfacing this as a specific error.
+                    raise RuntimeError(
+                        "Pushkin token request returned 401; access "
+                        "token rejected"
+                    )
+                resp.raise_for_status()
+                payload = await resp.json()
+        ws_url = payload.get("url")
+        if not ws_url:
+            raise RuntimeError(
+                f"Pushkin token response missing 'url': {payload!r}"
+            )
+
+        # Phase 2: open the WebSocket and serve frames. No subscribe
+        # message and no client heartbeats — the Tidal web client
+        # sends `USER_ACTION` frames on page user-action events but
+        # they're not required for connection liveness, so we skip
+        # them.
+        async with websockets.connect(
+            ws_url,
+            open_timeout=_CONNECT_TIMEOUT_SEC,
+        ) as ws:
+            self._status.phase = "connected"
+            self._status.last_error = None
+            log.info(
+                "tidal_realtime: connected to Pushkin (reconnect_count=%d)",
+                self._status.reconnect_count,
+            )
+            async for raw in ws:
+                frame = self._parse_frame(raw)
+                if frame is None:
+                    continue
+                await self._dispatch_frame(frame, ws)
+
+    async def _dispatch_frame(self, frame: dict, ws) -> None:
+        """Route a parsed frame to the right action.
+
+        - PRIVILEGED_SESSION_NOTIFICATION → callback (pause local).
+        - RECONNECT → close socket; _run()'s outer loop reopens.
+        - anything else → log + ignore (forward-compat).
+        """
+        frame_type = frame.get("type")
+        if frame_type == "PRIVILEGED_SESSION_NOTIFICATION":
+            self._status.events_received += 1
+            payload = frame.get("payload") or {}
+            log.info(
+                "tidal_realtime: PRIVILEGED_SESSION_NOTIFICATION "
+                "from %s; firing pause callback",
+                payload.get("clientDisplayName") or "<unknown>",
+            )
+            try:
+                result = self.on_other_device_started(payload)
+                if inspect.isawaitable(result):
+                    await result
+            except Exception:
+                log.exception(
+                    "tidal_realtime: on_other_device_started "
+                    "callback raised"
+                )
+        elif frame_type == "RECONNECT":
+            log.info("tidal_realtime: server-initiated reconnect")
+            await ws.close()
+        else:
+            log.warning(
+                "tidal_realtime: unhandled frame type %r", frame_type
+            )
 
     @staticmethod
     def _parse_frame(raw: bytes | str) -> Optional[dict]:
-        """Decode a single bus frame into a structured dict.
-
-        TODO(phase-1): implement once we know whether frames are
-        JSON, binary, or protobuf. Stubbed to return None so the
-        dispatcher in _connect_and_serve treats unknown frames as
-        unhandled (which is the correct behavior for events we
-        don't recognize even after the capture).
-        """
-        return None
+        """Decode a single bus frame. Returns the parsed dict, or
+        None if the frame isn't a JSON object we can route on.
+        Garbage frames are non-fatal: log and skip."""
+        try:
+            text = raw.decode("utf-8") if isinstance(raw, (bytes, bytearray)) else raw
+            obj = json.loads(text)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            log.warning("tidal_realtime: dropped non-JSON frame: %r", exc)
+            return None
+        if not isinstance(obj, dict):
+            log.warning(
+                "tidal_realtime: dropped non-object frame: %r", obj
+            )
+            return None
+        return obj
 
 
 # ---------------------------------------------------------------------------
