@@ -220,29 +220,44 @@ On Windows, download `Tideway-setup-<version>.exe` and run it. The
 installer drops the app under your user profile, registers a Start
 Menu entry, and offers an optional desktop shortcut.
 
-On Linux, download `Tideway-<version>-x86_64.AppImage`, mark it
-executable (`chmod +x Tideway-*-x86_64.AppImage`), and run it. The
-AppImage is portable — no install step, no root needed, runs on any
-glibc-based distro.
+On Linux, the recommended install is the Flatpak. It bundles GTK
+and WebKit2GTK from the GNOME 49 runtime so the app gets a real
+native window without any host-package fiddling, and `flatpak
+update` keeps it current.
 
-> **Linux support is experimental.** There is no maintainer Linux
-> test environment, so cold-launch issues on real distros only
-> surface through user reports. The AppImage relies on these
-> packages being installed on your host (most desktop distros have
-> them by default; minimal installs like Arch / Omarchy do not):
->
-> - **GTK 3** + **WebKit2GTK 4.1** + **Python GObject bindings** —
->   pywebview imports `gi.repository.WebKit2` at startup; without
->   the bindings it falls back to the system browser with an
->   actionable error. Debian/Ubuntu:
->   `libgtk-3-0 libwebkit2gtk-4.1-0 python3-gi gir1.2-webkit2-4.1`.
->   Fedora: `gtk3 webkit2gtk4.1 python3-gobject`.
->   Arch/Omarchy: `gtk3 webkit2gtk-4.1 python-gobject`.
-> - **PortAudio** — Debian/Ubuntu: `libportaudio2`.
->   Fedora: `portaudio`. Arch: `portaudio`.
-> - **libnotify** — Debian/Ubuntu: `libnotify4`.
->   Fedora: `libnotify`. Arch: `libnotify`.
->
+```sh
+# Subscribe to the auto-updating repo (one-time)
+flatpak remote-add --user --if-not-exists tideway \
+  https://j-m-punk.github.io/tideway/tideway.flatpakrepo
+
+# Install
+flatpak install --user tideway com.tidaldownloader.Tideway
+
+# Run
+flatpak run com.tidaldownloader.Tideway
+
+# Update later
+flatpak update --user com.tidaldownloader.Tideway
+```
+
+If you'd rather not subscribe to a remote, download
+`Tideway-<version>.flatpak` from the latest release and install the
+single-file bundle:
+
+```sh
+flatpak install --user --bundle Tideway-<version>.flatpak
+```
+
+The bundle won't auto-update — grab a newer one from the release
+page when you want to upgrade.
+
+The legacy AppImage (`Tideway-<version>-x86_64.AppImage`) is still
+attached to every release as a fallback. It runs on glibc-based
+distros without any install step (`chmod +x` then double-click),
+but it opens the app in the system browser instead of a native
+window because a frozen PyInstaller build can't import the host's
+PyGObject. Prefer the Flatpak.
+
 > Global media keys require an X11 session (Wayland will degrade —
 > the player still works, the global hotkeys do not). ARM Linux
 > (Raspberry Pi etc.) is not built today.

@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Tideway
+Comment=Tidal music player and downloader
+Exec=tideway
+Icon=com.tidaldownloader.Tideway
+Categories=AudioVideo;Audio;Player;
+Terminal=false
+StartupNotify=true

@@ -444,6 +444,13 @@ export const api = {
       latest: string | null;
       url: string | null;
       notes: string | null;
+      // "flatpak" when the backend detects /.flatpak-info or
+      // $FLATPAK_ID; "installer" everywhere else (macOS, Windows,
+      // and the Linux AppImage path). The banner uses this to swap
+      // the in-app "Install now" button for a "managed by Flatpak"
+      // hint, since downloading and execing an AppImage from inside
+      // a Flatpak sandbox can't update the installed app.
+      kind?: "flatpak" | "installer";
       // Non-null when the GitHub fetch itself failed (offline, cert
       // verification problem, rate limit, repo private). The banner
       // doesn't display this, but it's useful for `/api/health`-style
