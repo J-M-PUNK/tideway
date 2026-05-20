@@ -255,14 +255,27 @@ class RealtimeListener:
             # once the session is back.
             raise RuntimeError("no Tidal access token available")
 
+        import ssl
+
         import aiohttp
+        import certifi
         import websockets
+
+        # Use certifi's CA bundle explicitly. The python.org Python
+        # macOS distribution doesn't trust the system Keychain by
+        # default, so aiohttp's default SSL context fails to verify
+        # the api.tidal.com cert with "unable to get local issuer
+        # certificate". The existing `requests`-based code in
+        # _fetch_latest_release dodges this because requests ships
+        # certifi; aiohttp has to be pointed at it.
+        ssl_ctx = ssl.create_default_context(cafile=certifi.where())
 
         # Phase 1: POST to /v1/rt/connect with the Bearer token to
         # mint a per-session WebSocket URL. The response carries the
         # full wss:// URL including the token UUID baked into the
         # path; we don't need to construct it ourselves.
-        async with aiohttp.ClientSession() as http:
+        connector = aiohttp.TCPConnector(ssl=ssl_ctx)
+        async with aiohttp.ClientSession(connector=connector) as http:
             async with http.post(
                 _RT_CONNECT_URL,
                 headers={
@@ -291,10 +304,12 @@ class RealtimeListener:
         # message and no client heartbeats — the Tidal web client
         # sends `USER_ACTION` frames on page user-action events but
         # they're not required for connection liveness, so we skip
-        # them.
+        # them. Same certifi CA bundle as the token POST so the WS
+        # handshake doesn't trip the same system-CA issue.
         async with websockets.connect(
             ws_url,
             open_timeout=_CONNECT_TIMEOUT_SEC,
+            ssl=ssl_ctx,
         ) as ws:
             self._status.phase = "connected"
             self._status.last_error = None
