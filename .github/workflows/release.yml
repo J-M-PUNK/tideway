@@ -290,138 +290,14 @@ jobs:
           if-no-files-found: error
 
   # -------------------------------------------------------------------
-  # Linux AppImage. Produces Tideway-<version>-x86_64.AppImage — a
-  # single executable users can chmod +x and run on any glibc-based
-  # distro. EXPERIMENTAL: no maintainer Linux test environment, so
-  # cold-launch issues are user-reported rather than caught in CI.
-  # README marks the install as experimental and lists the runtime
-  # system deps the AppImage relies on (GTK3, WebKit2GTK, PortAudio,
-  # libnotify) rather than bundling them.
-  # -------------------------------------------------------------------
-  build-linux:
-    runs-on: ubuntu-22.04
-    # Pinned to 22.04 deliberately. AppImage's portability story is
-    # "build on the oldest glibc you want to support, run on anything
-    # newer." 22.04 ships glibc 2.35; that covers Ubuntu 22.04+,
-    # Debian 12+, Fedora 36+, openSUSE Leap 15.5+. Building on
-    # ubuntu-latest (24.04, glibc 2.39) would silently break users
-    # on anything older than ~Ubuntu 24.04.
-    steps:
-      - uses: actions/checkout@v6
-        with:
-          ref: ${{ github.event.inputs.tag || github.ref }}
-
-      - uses: actions/setup-python@v6
-        with:
-          python-version: ${{ env.PYTHON_VERSION }}
-
-      - uses: actions/setup-node@v6
-        with:
-          node-version: ${{ env.NODE_VERSION }}
-          cache: npm
-          cache-dependency-path: web/package-lock.json
-
-      - name: Install Linux build + runtime dependencies
-        # Build-time: dev headers for the libs PyInstaller's static
-        # analyzer dlopens, plus libfuse2 because appimagetool's
-        # runtime is a FUSE-based AppImage itself.
-        # Runtime: GTK3 + WebKit2GTK 4.1 (pywebview), libportaudio2
-        # (sounddevice), libnotify4. These are also installed so
-        # PyInstaller's import probes succeed; on the user's machine
-        # they need to install equivalents for their distro (README
-        # lists them).
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libgtk-3-dev \
-            libwebkit2gtk-4.1-dev \
-            libportaudio2 \
-            libnotify4 \
-            libfuse2 \
-            xvfb
-
-      - name: Install Python dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install -r requirements.txt
-
-      - name: Build web bundle
-        working-directory: web
-        run: |
-          npm ci
-          npm run build
-
-      - name: Run PyInstaller
-        run: pyinstaller Tideway-linux.spec --noconfirm
-
-      - name: Build AppImage
-        # appimagetool needs to call FUSE; on the GitHub Actions
-        # runner FUSE is loadable but appimagetool's own AppImage
-        # runtime can't always self-mount. APPIMAGE_EXTRACT_AND_RUN
-        # tells it to extract to a temp dir and run from there
-        # instead — slower but doesn't depend on /dev/fuse perms.
-        env:
-          APPIMAGE_EXTRACT_AND_RUN: "1"
-        run: bash scripts/build_appimage.sh
-
-      - name: Smoke-test the AppImage browser fallback
-        # The Linux AppImage has no pywebview backend (frozen Python
-        # can't import system gi), so it must fall back to opening a
-        # browser. A packaging bug leaked the bundle's LD_LIBRARY_PATH
-        # into that launch and /bin/sh died with "undefined symbol:
-        # rl_trim_arg_from_keyseq", so the app served nothing. Run the
-        # freshly built AppImage headless on the runner (a real x86_64
-        # Linux box) and fail the release if that crash recurs or the
-        # server never comes up. This can't prove a GUI opens; it
-        # proves the packaging regression stays dead, every release,
-        # without anyone needing a Linux machine.
-        env:
-          APPIMAGE_EXTRACT_AND_RUN: "1"
-        run: |
-          set -uo pipefail
-          APP=$(ls dist/Tideway-*-x86_64.AppImage | head -1)
-          chmod +x "$APP"
-          "$APP" >appimage_smoke.log 2>&1 &
-          APP_PID=$!
-          ok=0
-          for _ in $(seq 1 60); do
-            if curl -fsS http://127.0.0.1:47823/api/health 2>/dev/null \
-                 | grep -q tidal-downloader; then
-              ok=1
-              break
-            fi
-            kill -0 "$APP_PID" 2>/dev/null || break
-            sleep 1
-          done
-          kill "$APP_PID" 2>/dev/null || true
-          wait "$APP_PID" 2>/dev/null || true
-          echo "----- appimage_smoke.log -----"
-          cat appimage_smoke.log || true
-          echo "------------------------------"
-          if grep -qE 'symbol lookup error|rl_trim_arg_from_keyseq' \
-               appimage_smoke.log; then
-            echo "FAIL: the Linux subprocess symbol-lookup crash recurred"
-            exit 1
-          fi
-          if [ "$ok" -ne 1 ]; then
-            echo "FAIL: server never became reachable; AppImage did not come up"
-            exit 1
-          fi
-          echo "PASS: AppImage served headless with no symbol-lookup crash"
-
-      - uses: actions/upload-artifact@v7
-        with:
-          name: Tideway-Linux
-          path: dist/Tideway-*-x86_64.AppImage
-          if-no-files-found: error
-
-  # -------------------------------------------------------------------
-  # Linux Flatpak — the native-window path. The AppImage above falls
-  # back to opening the app in the system browser because a frozen
-  # PyInstaller build can't import the host's PyGObject/WebKit2GTK.
-  # The Flatpak builds under the GNOME 49 runtime (Python 3.13, GTK 3,
-  # WebKit2 4.1), so pywebview picks the GTK backend and the user
-  # gets a real native window. See docs/linux-flatpak.md.
+  # Linux Flatpak — the native-window path. Replaced the frozen
+  # PyInstaller AppImage in v1.11.0 because the AppImage couldn't
+  # import the host's PyGObject/WebKit2GTK and pywebview fell back
+  # to opening the app in the system browser, which was not
+  # acceptable. The Flatpak builds under the GNOME 49 runtime
+  # (Python 3.13, GTK 3, WebKit2 4.1), so pywebview picks the GTK
+  # backend and the user gets a real native window. See
+  # docs/linux-flatpak.md.
   #
   # We install flatpak-builder + the GNOME 49 runtime on a stock
   # ubuntu-22.04 runner rather than running inside a
@@ -624,7 +500,7 @@ jobs:
   # artifacts but doesn't create a release.
   # -------------------------------------------------------------------
   publish:
-    needs: [build-macos, build-windows, build-windows-arm64, build-linux, build-linux-flatpak]
+    needs: [build-macos, build-windows, build-windows-arm64, build-linux-flatpak]
     runs-on: ubuntu-latest
     if: startsWith(github.ref, 'refs/tags/v')
     permissions:
@@ -655,10 +531,6 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           name: Tideway-Windows-arm64
-          path: artifacts
-      - uses: actions/download-artifact@v8
-        with:
-          name: Tideway-Linux
           path: artifacts
       - uses: actions/download-artifact@v8
         with:
@@ -725,7 +597,6 @@ jobs:
           files: |
             artifacts/Tideway-*.dmg
             artifacts/Tideway-setup-*.exe
-            artifacts/Tideway-*-x86_64.AppImage
             artifacts/Tideway-*.flatpak
           # draft: true so the maintainer can review the auto-populated
           # notes (and edit / restructure if needed) before publishing.

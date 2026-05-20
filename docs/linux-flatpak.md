@@ -1,10 +1,12 @@
 # Linux: native Flatpak
 
-The Linux AppImage has no bundled webview, so pywebview falls back
-to opening the app in the system browser. That was deemed not
-acceptable. This doc covers the Flatpak that replaces it with a
-real native window — the scope, the architecture, and the staged
-build that got it from manifest scaffold to a GitHub-Pages-hosted
+The PyInstaller-frozen Linux AppImage had no bundled webview, so
+pywebview fell back to opening the app in the system browser.
+That was deemed not acceptable. The Flatpak built under the GNOME
+49 runtime replaces it with a real native window. The AppImage
+build was retired in v1.11.0 once the Flatpak shipped — this doc
+covers the Flatpak's scope, architecture, and the staged build
+that got it from manifest scaffold to a GitHub-Pages-hosted
 auto-updating remote.
 
 ## Why Flatpak
@@ -20,7 +22,7 @@ backend giving a real native window. Flatpak therefore *replaces
 PyInstaller for Linux* — there is no freeze step in this path.
 
 macOS and Windows are unaffected: they keep their PyInstaller
-specs and the existing signed-AppImage-free pipeline.
+specs and the existing release pipeline.
 
 ## Architecture
 
@@ -98,8 +100,7 @@ it.
 3. Distribution + auto-updater + CI. **Done.** Self-hosted over
    Flathub: keeps release control on the existing tag-driven
    GitHub Actions cadence; no external review treadmill. AppImage
-   stays attached as a fallback artifact — same release page, same
-   pipeline — but the Flatpak is what the README recommends.
+   was retired in v1.11.0; the Flatpak is the only Linux artifact.
    - **3a — In-app updater.** `_running_in_flatpak()` (server.py)
      checks `/.flatpak-info` and `$FLATPAK_ID`. The
      `/api/update-check` response carries `kind` (`"flatpak"` or
@@ -116,7 +117,7 @@ it.
      extension from Flathub, runs the manifest with `--repo=repo`,
      and produces two artifacts: a `.flatpak` bundle (attached to
      the GitHub Release, signed by `sign-release.sh` alongside the
-     DMG / .exe / AppImage) and the OSTree repo directory.
+     DMG / .exe) and the OSTree repo directory.
    - **3c — Distribution.** `publish-flatpak-repo` deploys the
      OSTree repo to the `gh-pages` branch on every tag via
      `peaceiris/actions-gh-pages`. GitHub Pages serves it at
@@ -141,9 +142,9 @@ wheel selection matches the new runtime's Python ABI, rebuild.
 The published repo is served over HTTPS from GitHub Pages, so
 content authenticity rides on GitHub's TLS chain. The `.flatpak`
 bundle attached to each release is also minisign-signed by the
-same `scripts/sign-release.sh` step that signs the DMG / .exe /
-AppImage, so direct-bundle installs from the release page are
-end-to-end verifiable.
+same `scripts/sign-release.sh` step that signs the DMG and .exe,
+so direct-bundle installs from the release page are end-to-end
+verifiable.
 
 Signing OSTree commits with a project GPG key closes the remaining
 gap (a compromised gh-pages host could otherwise substitute
@@ -153,10 +154,3 @@ job — it's gated on the `OSTREE_GPG_KEY_ID` secret being present
 and is a no-op until you do the one-time setup. See
 [docs/flatpak-gpg-signing.md](flatpak-gpg-signing.md) for the
 key-generation, secret-stashing, and validation steps.
-
-## Note
-
-The AppImage `/api/open-external` fix (PR #163) is irrelevant to
-the Flatpak path — with a native window the browser-fallback /
-external-open seam isn't taken. It still matters for the AppImage
-until/unless the AppImage is retired in a future release.

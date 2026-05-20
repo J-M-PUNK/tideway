@@ -9,8 +9,8 @@
 #   assets/icon.icns  (macOS — picked up by Tideway-mac.spec)
 #   assets/icon.ico   (Windows — picked up by Tideway-win.spec
 #                      and scripts/Tideway.iss)
-#   assets/icon.png   (Linux AppImage — picked up by
-#                      scripts/build_appimage.sh)
+#   assets/icon.png   (Linux — picked up by the Flatpak manifest
+#                      at flatpak/com.tidaldownloader.Tideway.yaml)
 #
 # Prereqs: `iconutil` (ships with Xcode Command Line Tools) and
 # either ImageMagick (`brew install imagemagick`) or `sips` (ships
@@ -92,9 +92,9 @@ print("Wrote: assets/icon.ico")
 PY
 
 # --- Linux .png ----------------------------------------------------------
-# AppImage's .desktop file references `Icon=tideway` and the build
-# script (scripts/build_appimage.sh) installs whatever lives at
-# assets/icon.png as that icon. 256x256 is the size hicolor wants
-# at that path; AppImage launchers downsample as needed for menus.
-sips -z 256 256 "$SRC" --out assets/icon.png > /dev/null
+# The Flatpak manifest installs assets/icon.png as
+# share/icons/hicolor/512x512/apps/com.tidaldownloader.Tideway.png
+# inside the sandbox; GNOME Software and KDE Discover render it
+# on the app card. 512x512 is the hicolor "high" target size.
+sips -z 512 512 "$SRC" --out assets/icon.png > /dev/null
 echo "Wrote: assets/icon.png"

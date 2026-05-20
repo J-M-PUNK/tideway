@@ -1,7 +1,7 @@
 name: Release Signing Guard
 
 # Fires the moment a GitHub release is published. Verifies that
-# every installer asset (.dmg, .exe, .AppImage) has a paired
+# every installer asset (.dmg, .exe, .flatpak) has a paired
 # `.minisig` sidecar. If any are missing, the release is auto-
 # rolled-back to draft and an issue is opened tagging the
 # missing artifacts.
