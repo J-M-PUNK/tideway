@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { Link } from "react-router-dom";
-import { Music, Star } from "lucide-react";
+import { AlertTriangle, Music, Star } from "lucide-react";
 import type { AotyAlbum, Album } from "@/api/types";
 import { useApi } from "@/hooks/useApi";
 import { useColumnCount } from "@/hooks/useColumnCount";
@@ -29,8 +29,13 @@ import { imageProxy } from "@/lib/utils";
  */
 export function AotyHomeSection() {
   const year = useMemo(() => new Date().getFullYear(), []);
+  // Scraper status. When AOTY's Cloudflare layer is blocking us
+  // the rows render nothing (silent-by-design); the notice below
+  // tells the user that's why, with a link to file an issue.
+  const { data: status } = useApi(() => api.aoty.status(), []);
   return (
     <div>
+      {status?.blocked && <AotyBlockedNotice issuesUrl={status.issues_url} />}
       <AotyRow
         title="New album releases"
         fetch={() => api.aoty.recentReleases(60)}
@@ -41,6 +46,37 @@ export function AotyHomeSection() {
         fetch={() => api.aoty.topOfYear({ limit: 30 })}
         viewMoreTo="/aoty/top-of-year"
       />
+    </div>
+  );
+}
+
+/**
+ * Shown above the AOTY rows when albumoftheyear.org is actively
+ * serving us a Cloudflare challenge instead of HTML. Without this
+ * the rows just disappear, which is what made the original outage
+ * confusing to triage — same visible symptom whether the scraper
+ * is broken or AOTY happens to have nothing for the week.
+ */
+function AotyBlockedNotice({ issuesUrl }: { issuesUrl: string }) {
+  return (
+    <div className="mt-8 flex items-start gap-3 rounded-md border border-amber-500/40 bg-amber-500/5 p-4 text-sm">
+      <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
+      <div className="min-w-0">
+        <p className="font-semibold">Album of the Year rows unavailable</p>
+        <p className="mt-1 text-muted-foreground">
+          AlbumOfTheYear.org is blocking our scraper, likely because their
+          anti-bot layer changed. Please{" "}
+          <a
+            href={issuesUrl}
+            target="_blank"
+            rel="noreferrer"
+            className="underline underline-offset-2 hover:text-foreground"
+          >
+            open a GitHub issue
+          </a>{" "}
+          so we can push a fix.
+        </p>
+      </div>
     </div>
   );
 }

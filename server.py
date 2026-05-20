@@ -4203,6 +4203,23 @@ def aoty_genre_releases(genre: str, limit: int = 60) -> list[dict]:
     return aoty_resolver.resolve_listing(listing)
 
 
+@app.get("/api/aoty/status")
+def aoty_status() -> dict:
+    """Scraper health for the AOTY Home rows.
+
+    `blocked` flips to True when the scraper sees a Cloudflare
+    challenge response, and stays True for ten minutes. The Home
+    page reads this to render a "report on GitHub" notice instead
+    of letting the AOTY rows silently disappear when our
+    impersonation profile ages out of Cloudflare's good graces.
+    """
+    _require_auth()
+    return {
+        "blocked": aoty_module.is_scraper_blocked(),
+        "issues_url": aoty_module.ISSUE_TRACKER_URL,
+    }
+
+
 _weekly_scrobbles_cache: dict[str, tuple[float, list]] = {}
 _weekly_scrobbles_lock = threading.Lock()
 _WEEKLY_SCROBBLES_TTL_SEC = 900.0  # 15 minutes — cheap enough to refresh.

@@ -32,6 +32,25 @@ scale.
 Failures are silent: HTTP errors, layout changes, or a missing
 selector return an empty list rather than raising. The caller
 sees zero results and renders a fallback empty state.
+
+Cloudflare note (added 2026-05-20): AOTY put their entire site
+behind Cloudflare's anti-bot challenge. Every request from a
+stock HTTP client now returns 403 with `cf-mitigated: challenge`
+and the JS interstitial. Plain `requests` can't pass it; the
+homepage sections silently emptied out as the existing in-memory
+cache aged out. We switched the fetch path to `curl_cffi` with
+browser-fingerprinted TLS (`impersonate="chrome120"`), which gets
+back HTTP 200 with the full HTML. curl_cffi is already a project
+dependency — used for Tidal's anti-bot path — so no new deps.
+
+Block detection: when `_fetch` sees a Cloudflare challenge
+response it sets a module-level `_blocked_at` timestamp and
+emits a high-signal `print(...)` line. `is_scraper_blocked()`
+exposes that state, and `server.py`'s `/api/aoty/status`
+endpoint surfaces it to the frontend so the Home page can show
+a "report this on GitHub" notice instead of silently dropping
+the AOTY rows. The Chrome-120 impersonation profile will go
+stale eventually; this is the early-warning system.
 """
 from __future__ import annotations
 
@@ -43,21 +62,23 @@ from dataclasses import dataclass, asdict, field
 from typing import Optional
 from urllib.parse import urljoin
 
-import requests
 from bs4 import BeautifulSoup
+from curl_cffi import requests as cffi_requests
 
 log = logging.getLogger(__name__)
 
 _BASE_URL = "https://www.albumoftheyear.org"
 
-# A modern desktop UA — the page returns a 403 for an empty UA and
-# returns the mobile layout for some bot-string defaults. Plain
-# Chrome desktop matches what an actual browser sends and gives us
-# the desktop HTML the rest of this module is parsing for.
-_USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-)
+# Browser to impersonate at the TLS / HTTP/2 / header layer.
+# curl_cffi sets the full Chrome 120 fingerprint when this is
+# active — including the User-Agent, every `sec-ch-ua-*` client
+# hint, `Accept-Language`, and the order of headers. Passing our
+# own `User-Agent` override (or any other header curl_cffi already
+# sets) breaks Cloudflare's consistency check: a Chrome TLS hello
+# paired with an inconsistent set of HTTP headers reads as bot
+# automation. So _fetch() below deliberately sends NO custom
+# headers — the impersonate profile is the whole story.
+_CFFI_IMPERSONATE = "chrome120"
 
 _HTTP_TIMEOUT_SEC = 15.0
 
@@ -65,6 +86,25 @@ _HTTP_TIMEOUT_SEC = 15.0
 # different cadences without fighting over a single TTL constant.
 _cache_lock = threading.Lock()
 _cache: dict[str, tuple[float, list[dict]]] = {}
+
+# Cloudflare block detection. `_blocked_at` is wall-clock epoch
+# seconds of the most recent challenge response. We expose it via
+# `is_scraper_blocked()` so the frontend can render a one-line
+# "report on GitHub" notice when AOTY rows would otherwise just
+# silently disappear. Wall-clock (not monotonic) because the
+# frontend's polling cadence reads it across process boundaries
+# through a separate endpoint; monotonic is meaningless across
+# restarts.
+_block_lock = threading.Lock()
+_blocked_at: Optional[float] = None
+# How long after a challenge we keep reporting "blocked" to the
+# UI. Long enough that a single transient retry doesn't flip the
+# notice off, short enough that a real fix becomes visible
+# without restarting the server.
+_BLOCK_WINDOW_SEC = 600.0
+# The GitHub repo the notice links to. Hardcoded — moving repos
+# is rare enough that a constant is fine.
+ISSUE_TRACKER_URL = "https://github.com/J-M-PUNK/tideway/issues"
 
 # Default TTLs. Top-rated lists turn over slowly (the order changes
 # only as users rate over time); the releases page is a bit more
@@ -323,22 +363,80 @@ def _cache_set(key: str, payload: list[dict]) -> None:
         _cache[key] = (time.monotonic(), payload)
 
 
+def is_scraper_blocked() -> bool:
+    """True if the scraper saw a Cloudflare challenge within
+    `_BLOCK_WINDOW_SEC` seconds.
+
+    The Home page reads this through `/api/aoty/status` to
+    distinguish "AOTY had no entries" from "AOTY is actively
+    blocking our scraper". The first is a non-event; the second
+    needs a code change (bump the curl_cffi impersonation
+    profile, or move to a browser-based fetcher) and should be
+    surfaced to the user with a link to the issue tracker.
+    """
+    with _block_lock:
+        ts = _blocked_at
+    if ts is None:
+        return False
+    return (time.time() - ts) < _BLOCK_WINDOW_SEC
+
+
+def _mark_blocked() -> None:
+    global _blocked_at
+    with _block_lock:
+        _blocked_at = time.time()
+
+
+def _looks_like_cf_challenge(status_code: int, headers) -> bool:
+    """Cloudflare's anti-bot challenge stamps the response with a
+    `cf-mitigated: challenge` header and a 403/503 status. Header
+    lookup is case-insensitive on curl_cffi's Response object
+    (matches `requests`), so a plain `.get(...)` is enough.
+    """
+    if status_code not in (403, 503):
+        return False
+    mitigated = ""
+    try:
+        mitigated = (headers.get("cf-mitigated") or "").lower()
+    except Exception:
+        mitigated = ""
+    return mitigated == "challenge"
+
+
 def _fetch(url: str) -> Optional[str]:
     try:
-        r = requests.get(
+        # No `headers=` kwarg. curl_cffi's impersonate profile sets
+        # the entire Chrome-120 header set (UA, every sec-ch-ua-*,
+        # Accept, Accept-Language, header order) consistent with the
+        # TLS hello it sends. Overriding any of those — even a
+        # nominally identical User-Agent — breaks Cloudflare's
+        # cross-check and earns a 403.
+        r = cffi_requests.get(
             url,
-            headers={
-                "User-Agent": _USER_AGENT,
-                "Accept": "text/html,application/xhtml+xml",
-                "Accept-Language": "en-US,en;q=0.9",
-            },
+            impersonate=_CFFI_IMPERSONATE,
             timeout=_HTTP_TIMEOUT_SEC,
         )
     except Exception as exc:
         log.warning("aoty fetch %s failed: %s", url, exc)
         return None
     if r.status_code != 200:
-        log.warning("aoty fetch %s returned %d", url, r.status_code)
+        if _looks_like_cf_challenge(r.status_code, r.headers):
+            _mark_blocked()
+            # High-signal: this is the "the scraper needs updating"
+            # message future-you wants to see in the dev console
+            # without grepping a logfile. Uses the print pattern
+            # the rest of the app uses for user/dev-visible state
+            # changes (see CLAUDE.md Logging section).
+            print(
+                f"[aoty] Cloudflare challenge on {url} "
+                f"(status {r.status_code}) — the chrome120 "
+                f"impersonation profile has aged out. Bump "
+                f"_CFFI_IMPERSONATE in app/aoty.py or file: "
+                f"{ISSUE_TRACKER_URL}",
+                flush=True,
+            )
+        else:
+            log.warning("aoty fetch %s returned %d", url, r.status_code)
         return None
     # AOTY serves UTF-8 but doesn't always declare a charset in
     # Content-Type, which makes requests fall back to ISO-8859-1

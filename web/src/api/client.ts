@@ -355,6 +355,12 @@ export const api = {
       req<AotyAlbum[]>(
         `/api/aoty/genre-releases?genre=${encodeURIComponent(slug)}&limit=${limit}`,
       ),
+    /** Scraper health. `blocked` is true when AOTY has recently
+     *  served us a Cloudflare challenge instead of HTML — the
+     *  Home page reads this to render a "report on GitHub" notice
+     *  rather than silently hiding the AOTY rows. */
+    status: () =>
+      req<{ blocked: boolean; issues_url: string }>(`/api/aoty/status`),
   },
   spotify: {
     /** Spotify's global play count for a recording identified by
