@@ -668,6 +668,41 @@ def main(argv: Optional[list[str]] = None) -> int:
         except Exception:
             pass
 
+        # Linux-only force-exit. pywebview's WebKitGTK backend has a
+        # long-standing issue where `webview.start()` doesn't always
+        # return after the window is destroyed; the Flatpak sandbox
+        # makes this more reliable to hit, leaving the process alive
+        # with no UI and the user having to kill it from a terminal.
+        # The `closed` event still fires inside the stuck GTK loop, so
+        # we hook it, run the same graceful shutdown the post-start()
+        # path runs, and hard-exit. A guard makes it safe if start()
+        # *does* return naturally — the finally block's call is a no-op.
+        if sys.platform.startswith("linux"):
+            _shutdown_done = threading.Event()
+
+            def _shutdown_once() -> None:
+                if _shutdown_done.is_set():
+                    return
+                _shutdown_done.set()
+                try:
+                    _graceful_shutdown(server)
+                except Exception:
+                    pass
+
+            def _on_closed_linux() -> None:
+                _shutdown_once()
+                # os._exit (not sys.exit) so finalizers / atexit hooks
+                # can't reintroduce the hang they were trying to avoid
+                # — sounddevice's atexit Pa_Terminate has hung on
+                # Linux/Flatpak too, and at this point the window is
+                # already gone so the user has decided to quit.
+                os._exit(0)
+
+            try:
+                window.events.closed += _on_closed_linux
+            except Exception:
+                pass
+
     # Mini-player state. Held here so a second request doesn't spawn a
     # duplicate window — we just focus the existing one. We don't try
     # to share state with the main window beyond URL routing; both
