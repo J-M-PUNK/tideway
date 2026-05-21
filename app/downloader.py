@@ -1294,6 +1294,27 @@ class Downloader:
                 if not tag_error:
                     tag_error = f"tagging failed: {exc}"
 
+            # Drop a cover.jpg next to the track when the track lives
+            # in a per-album (or per-playlist) subfolder. Most music
+            # managers (Plex, foobar2000, mpd, Roon, etc.) will use a
+            # cover.jpg in the album dir as a fallback when an entry
+            # has no embedded art, and it's the convention the user
+            # asked for in the feature request. Skip when the track
+            # lands directly in the output_dir (no subfolder = lone-
+            # track download, leaving stray cover.jpg files there
+            # would be noise). Write-once to avoid clobbering covers
+            # the user dropped in by hand and to skip the rewrite per
+            # additional track in the same album.
+            try:
+                _maybe_write_album_cover(out_path, Path(s.output_dir), cover)
+            except Exception as exc:
+                print(
+                    f"[downloader] cover.jpg write failed id={item.item_id[:8]}: "
+                    f"{exc}",
+                    file=_sys.stderr,
+                    flush=True,
+                )
+
             item.file_path = str(out_path)
             item.status = DownloadStatus.COMPLETE
             if tag_error:
@@ -1972,6 +1993,51 @@ def _build_path(item: DownloadItem, settings, ext: str) -> Path:
         # fall through — the parent mkdir will surface real issues.
         pass
     return final
+
+
+def _maybe_write_album_cover(
+    out_path: Path, output_dir: Path, cover_bytes: Optional[bytes]
+) -> None:
+    """Drop a cover.jpg in the album/playlist subfolder so external
+    music managers (Plex, Roon, mpd, foobar2000, etc.) can find the
+    artwork without parsing every track's embedded picture frame. We
+    only write when:
+
+      - the track has cover bytes that the fetcher returned (no point
+        writing a zero-byte placeholder),
+      - the track lives in a SUBFOLDER of `output_dir` (a lone-track
+        download with no per-album/playlist nesting would scatter
+        cover.jpg files across the root and pollute it),
+      - the cover.jpg doesn't already exist (skip-clobber: respects
+        anything the user dropped in by hand and avoids one rewrite
+        per track in the same album).
+
+    `cover.jpg` is the de-facto filename convention (every major music
+    manager picks it up by default). Tidal serves JPEG. We don't
+    re-encode the bytes; even if Tidal switches to a different format
+    on some track, the bytes already work for embedding so they'll
+    work in a file too.
+    """
+    if not cover_bytes:
+        return
+    try:
+        out_resolved = out_path.resolve(strict=False)
+        root_resolved = output_dir.resolve(strict=False)
+    except Exception:
+        return
+    parent = out_resolved.parent
+    if parent == root_resolved:
+        return
+    # Defensive: only write into a directory that's actually under the
+    # configured output root, never outside it.
+    try:
+        parent.relative_to(root_resolved)
+    except ValueError:
+        return
+    cover_path = parent / "cover.jpg"
+    if cover_path.exists():
+        return
+    cover_path.write_bytes(cover_bytes)
 
 
 def _find_existing(item: DownloadItem, settings) -> Optional[Path]:
