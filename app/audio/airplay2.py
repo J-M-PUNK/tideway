@@ -1566,9 +1566,16 @@ class AirPlay2Manager:
             master_clock_id_int = clock_id & 0xFFFFFFFFFFFFFFFF
 
         cipher = Chacha20Cipher8byteNonce(s["shk"], s["shk"])
-        data_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        # Buffered AirPlay 2 audio is TCP, not UDP. Each RTP packet
+        # is preceded by a 16-bit big-endian length on the stream.
+        # The receiver's serve() loop in airplay2-receiver does
+        # `conn.recv(2)` for the length and `conn.recv(data_len)`
+        # for the body; owntone's airplay.c does the same. UDP audio
+        # only applies to the realtime/screen-sharing mode (type 96).
+        data_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        data_sock.connect((remote_ip, data_port))
+        data_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
         control_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        data_addr = (remote_ip, data_port)
         control_addr = (remote_ip, control_port)
 
         sr = 44100
@@ -1624,7 +1631,9 @@ class AirPlay2Manager:
 
                 nonce = cipher.out_nonce
                 ct = cipher.encrypt(alac_frame, aad=bytes(header[4:12]))
-                data_sock.sendto(bytes(header) + ct + nonce[-8:], data_addr)
+                # Length-prefixed RTP packet on the TCP audio stream.
+                pkt = bytes(header) + ct + nonce[-8:]
+                data_sock.sendall(len(pkt).to_bytes(2, "big") + pkt)
 
                 seqnum = (seqnum + 1) & 0xFFFF
                 pos = (pos + spf) & 0xFFFFFFFF

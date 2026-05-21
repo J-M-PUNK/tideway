@@ -479,6 +479,64 @@ still silent, fall back to owntone-source comparison for the
 SET_PARAMETER `progress` line and the DELAY_REQ-driven offset
 correction.
 
+### Stage 5 follow-up (2026-05-21): ALAC works in form, audio
+### transport is TCP not UDP
+
+Two more pieces landed.
+
+First, the ALAC question. PyAV's ALAC encoder is fixed at 4096
+samples per frame and refuses to be reconfigured. Worse, the
+airplay2-receiver code wires up its libav decoder with the
+default `AudioSetup(spf=352)` extradata regardless of what spf
+the SETUP body negotiated. So 4096-sample ALAC frames decode to
+silence on the receiver even when the protocol layer accepted
+them. We hand-rolled a 352-sample verbatim ALAC encoder
+(`app/audio/alac_verbatim.py`): 23-bit fixed header plus 32-bit
+frame_size plus raw interleaved s16 audio plus the ID_END
+marker, padded to a byte boundary. 1416 bytes per frame for
+stereo s16, ~13% larger than properly compressed ALAC but
+accepted by any libav-based decoder. The Hisense session stayed
+silent with this in place too, so the codec was not the last
+gap on its own.
+
+Second, the actual blocker. Running our sender against the
+patched airplay2-receiver test rig (had to fix one PyAV
+read-only `channels` write in `connections/audio.py:503`,
+unrelated bug in the upstream project), the verbose log showed
+the receiver doing `conn, addr = self.socket.accept()` on the
+dataPort. That's a **TCP** socket. The whole time the Stage 4
+spike has been doing `socket.SOCK_DGRAM` and `sendto()` on the
+data port. AirPlay 2 buffered audio runs over a TCP stream
+where each RTP packet is preceded by a 16-bit big-endian length
+prefix; only the realtime/mirroring mode uses UDP audio. owntone
+opens the same TCP connection. This is why every previous run
+saw the receiver allocate audio ports but never log a single
+incoming packet: we were yelling into a UDP socket nobody was
+listening on.
+
+`_stream_tone_alac` now connects TCP to dataPort, sets
+TCP_NODELAY, and `sendall`s each `len.to_bytes(2, 'big') + pkt`.
+The 8 s tone test against the Hisense ran clean — 1002 framed
+packets, no errors. Whether it produces sound on the Hisense is
+the gate to check at the start of the next session.
+
+### What's left
+
+  - **Confirm audible output** against the Hisense with TCP +
+    PTP slave + SET_PARAMETER + ALAC verbatim. If we hear the
+    tone, every protocol-layer wall has been cleared.
+  - **Live PCM path (Stage 5).** Replace the pre-encoded
+    looping tone with a real-time encode-and-send loop fed by
+    `push_pcm()` from the Tideway player. The ALAC verbatim
+    encoder already does single-frame encoding; the streaming
+    loop in `_stream_tone_alac` is the template.
+  - **Lifecycle (Stage 6).** Volume changes via SET_PARAMETER,
+    flush on track change, teardown on output device switch,
+    reconnect on transient network blips, and a fail-safe
+    isolation layer so a sender crash can never bring down
+    local playback. Then wire AirPlay 2 devices into the
+    output device picker on the same line as Cast and DLNA.
+
 Stage 1 finding: the target Hisense TV advertises
 `SupportsAirPlayAudio + SupportsBufferedAudio + SupportsPTP` and
 mandatory pairing, but does NOT advertise the CoreUtils/transient
