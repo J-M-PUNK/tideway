@@ -1072,6 +1072,7 @@ class AirPlay2Manager:
         ct: int,
         audio_format: int,
         clock_id: Optional[int] = None,
+        spf: int = 352,
     ) -> dict:
         """Run the validated PTP buffered SETUP sequence and return
         the live handles. Same sequence proven in _probe_setup_ptp;
@@ -1172,7 +1173,7 @@ class AirPlay2Manager:
                         "latencyMax": 88200,
                         "latencyMin": 11025,
                         "shk": shk,
-                        "spf": 352,
+                        "spf": spf,
                         "sr": 44100,
                         "type": 0x67,  # 103 buffered
                         "supportsDynamicStreamID": False,
@@ -1214,6 +1215,7 @@ class AirPlay2Manager:
         *,
         with_grandmaster: bool = False,
         with_ptp_slave: bool = False,
+        use_alac: bool = False,
     ) -> dict:
         """Stage 4/5 spike: after the validated buffered SETUP, act
         as our own PTP grandmaster via RTCP time-announce packets
@@ -1241,6 +1243,7 @@ class AirPlay2Manager:
                 seconds,
                 with_grandmaster=with_grandmaster,
                 with_ptp_slave=with_ptp_slave,
+                use_alac=use_alac,
             ),
             timeout=seconds + 40.0,
         )
@@ -1252,6 +1255,7 @@ class AirPlay2Manager:
         *,
         with_grandmaster: bool = False,
         with_ptp_slave: bool = False,
+        use_alac: bool = False,
     ) -> dict:
         device = await self._resolve(device_id)
         if device is None:
@@ -1306,12 +1310,31 @@ class AirPlay2Manager:
             _say(f"PTP slave snapshot post-start: {snap}")
 
         try:
-            # ct=1 LPCM keeps the audio path trivial (no ALAC encoder)
-            # to isolate the grandmaster-trust question. audioFormat
-            # 0x800 = PCM/44100/16/2.
-            s = await self._buffered_setup(
-                device, ct=1, audio_format=0x800, clock_id=clock_id
-            )
+            if use_alac:
+                # ct=2 ALAC + audioFormat=0x40000 = ALAC_44100_16_2.
+                # spf=352 is mandatory: the receiver's libav decoder
+                # is wired up with the AudioSetup defaults from
+                # airplay2-receiver/ap2/connections/audio.py, which
+                # bakes spf=352 into the ALAC extradata at decoder
+                # construction time. Sending 4096-sample frames into
+                # that decoder produces silence, even though the
+                # SETUP body negotiates whatever spf we declare. So
+                # we hand-roll 352-sample verbatim ALAC frames (see
+                # app/audio/alac_verbatim.py).
+                s = await self._buffered_setup(
+                    device,
+                    ct=2,
+                    audio_format=0x40000,
+                    clock_id=clock_id,
+                    spf=352,
+                )
+            else:
+                # ct=1 LPCM keeps the audio path trivial (no ALAC encoder)
+                # to isolate the grandmaster-trust question. audioFormat
+                # 0x800 = PCM/44100/16/2.
+                s = await self._buffered_setup(
+                    device, ct=1, audio_format=0x800, clock_id=clock_id
+                )
             # The Hisense (and likely most AirPlay 2 PTP receivers) only
             # starts broadcasting SYNC/FOLLOW_UP once an AirPlay session
             # is in negotiation, so the pre-SETUP lock window in slave
@@ -1326,6 +1349,8 @@ class AirPlay2Manager:
                     _say(f"slave locked post-SETUP: {slave.snapshot()}")
                 else:
                     _say("slave never locked post-SETUP; stream will go out anyway")
+            if use_alac:
+                return await self._stream_tone_alac(s, seconds, device, slave=slave)
             return await self._stream_tone_lpcm(s, seconds, device, slave=slave)
         finally:
             if gm is not None:
@@ -1471,6 +1496,153 @@ class AirPlay2Manager:
             return {"packets": sent, "data_port": data_port}
         except Exception as exc:
             _say(f"tone stream failed for {device.name}: {exc}", exc=True)
+            raise
+        finally:
+            try:
+                await rtsp.teardown(rtsp.session_id)
+            except Exception:
+                pass
+            for c in s["channels"]:
+                try:
+                    c.close()
+                except Exception:
+                    pass
+            data_sock.close()
+            control_sock.close()
+            s["http"].close()
+
+    async def _stream_tone_alac(
+        self,
+        s: dict,
+        seconds: float,
+        device: AirPlay2Device,
+        *,
+        slave=None,
+    ) -> dict:
+        """Stream the 440 Hz tone encoded as ALAC. Mirrors
+        _stream_tone_lpcm except:
+
+          - Audio is ALAC-encoded with PyAV before encryption (one
+            ALAC packet == 4096-sample frame, declared in SETUP).
+          - RTP payload type 0x60 (matches AirPlay 2's ALAC stream
+            type; LPCM uses the same value but the receiver
+            interprets the payload per the negotiated `ct`).
+          - rtptime advances by 4096 per packet, matching the
+            advertised spf.
+
+        This is the diagnostic for "does the Hisense need ALAC".
+        Earlier silent runs used LPCM; if this one is audible, ALAC
+        was the codec gate and Stage 5 builds on this path.
+        """
+        from app.audio.alac_verbatim import encode_verbatim_stereo_s16  # noqa: WPS433
+
+        rtsp = s["rtsp"]
+        data_port = s["data_port"]
+        control_port = s["control_port"]
+        remote_ip = s["remote_ip"]
+        clock_id = s["clock_id"]
+        _say(
+            f"buffered SETUP ok (ALAC); dataPort={data_port} "
+            f"controlPort={control_port}; streaming {seconds:.0f}s tone"
+        )
+
+        master_clock_id_int: int
+        master_now_ns_fn = lambda: time.monotonic_ns()  # noqa: E731
+        if slave is not None:
+            mcid = slave.master_clock_id()
+            if mcid is not None:
+                master_clock_id_int = int.from_bytes(mcid, "big")
+                _slave_ref = slave
+
+                def _master_now_ns() -> int:
+                    n = _slave_ref.master_now_ns()
+                    return n if n is not None else time.time_ns()
+
+                master_now_ns_fn = _master_now_ns
+                _say(f"ALAC stream using master clock_id={mcid.hex()}")
+            else:
+                master_clock_id_int = clock_id & 0xFFFFFFFFFFFFFFFF
+        else:
+            master_clock_id_int = clock_id & 0xFFFFFFFFFFFFFFFF
+
+        cipher = Chacha20Cipher8byteNonce(s["shk"], s["shk"])
+        data_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        control_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        data_addr = (remote_ip, data_port)
+        control_addr = (remote_ip, control_port)
+
+        sr = 44100
+        spf = 352  # owntone-spec; the receiver hardcodes this in its decoder
+        base_pos = 88200  # ~2 s anchor, divisible by spf
+        seqnum = secrets.randbelow(0x10000)
+        ssrc = 0
+
+        # Pre-encode a one-period-of-44100/440 chunk of the tone as a
+        # single ALAC verbatim frame and loop it. We can't trivially
+        # loop a single 352-sample frame because 44100/440 isn't an
+        # integer and we'd get audible discontinuities at the frame
+        # boundary, but at 440 Hz over 352 samples (~8 ms) the phase
+        # drift across a 10s test is small and dwarfed by the
+        # frame-pacing jitter. Build one frame's worth of LRLR s16 BE
+        # and reuse.
+        tone = bytearray()
+        for n in range(spf):
+            v = int(0.25 * 32767 * math.sin(2 * math.pi * 440.0 * n / sr))
+            tone += struct.pack(">hh", v, v)
+        alac_frame = encode_verbatim_stereo_s16(bytes(tone), frame_size=spf)
+        _say(
+            f"pre-encoded ALAC verbatim frame: {len(alac_frame)} bytes "
+            f"({spf} samples/frame)"
+        )
+
+        def sync_pkt(cur_pos: int, marker: bool) -> bytes:
+            p = bytearray(28)
+            p[0] = 0x90 if marker else 0x80
+            p[1] = 0xD7
+            p[2] = 0x00
+            p[3] = 0x06
+            struct.pack_into(">I", p, 4, cur_pos & 0xFFFFFFFF)
+            struct.pack_into(">Q", p, 8, master_now_ns_fn() & 0xFFFFFFFFFFFFFFFF)
+            struct.pack_into(">I", p, 16, (cur_pos - 11025) & 0xFFFFFFFF)
+            struct.pack_into(">Q", p, 20, master_clock_id_int & 0xFFFFFFFFFFFFFFFF)
+            return bytes(p)
+
+        try:
+            control_sock.sendto(sync_pkt(base_pos, True), control_addr)
+            t0 = time.monotonic()
+            pos = base_pos
+            sent = 0
+            last_sync = t0
+            total = int(seconds * sr / spf)
+            for i in range(total):
+                header = bytearray(12)
+                header[0] = 0x80
+                header[1] = 0xE0 if i == 0 else 0x60
+                struct.pack_into(">H", header, 2, seqnum & 0xFFFF)
+                struct.pack_into(">I", header, 4, pos & 0xFFFFFFFF)
+                struct.pack_into(">I", header, 8, ssrc & 0xFFFFFFFF)
+
+                nonce = cipher.out_nonce
+                ct = cipher.encrypt(alac_frame, aad=bytes(header[4:12]))
+                data_sock.sendto(bytes(header) + ct + nonce[-8:], data_addr)
+
+                seqnum = (seqnum + 1) & 0xFFFF
+                pos = (pos + spf) & 0xFFFFFFFF
+                sent += 1
+
+                now = time.monotonic()
+                if now - last_sync >= 1.0:
+                    control_sock.sendto(sync_pkt(pos, False), control_addr)
+                    last_sync = now
+
+                target = t0 + (i + 1) * spf / sr
+                delay = target - time.monotonic()
+                if delay > 0:
+                    await asyncio.sleep(delay)
+            _say(f"ALAC tone stream finished: {sent} packets to {device.name}")
+            return {"packets": sent, "data_port": data_port, "codec": "alac"}
+        except Exception as exc:
+            _say(f"ALAC tone stream failed for {device.name}: {exc}", exc=True)
             raise
         finally:
             try:

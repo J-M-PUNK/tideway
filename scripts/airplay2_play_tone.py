@@ -55,6 +55,14 @@ def main() -> int:
             "onto the master's clock. Matches owntone+nqptp behaviour."
         ),
     )
+    ap.add_argument(
+        "--alac",
+        action="store_true",
+        help=(
+            "encode the tone as ALAC (ct=2, audioFormat=0x40000, "
+            "spf=4096) instead of LPCM. Pairs with --with-ptp-slave."
+        ),
+    )
     args = ap.parse_args()
 
     m = manager()
@@ -87,6 +95,7 @@ def main() -> int:
             seconds=args.seconds,
             with_grandmaster=args.with_grandmaster,
             with_ptp_slave=args.with_ptp_slave,
+            use_alac=args.alac,
         )
         print(f"DONE: {res}")
         print(
