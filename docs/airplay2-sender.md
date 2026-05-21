@@ -388,6 +388,97 @@ flips from gPTP-confirmed-required to gPTP-stack-works, and
 Stage 5 (live PCM + ALAC bitstream packetizer + lifecycle) is
 the only remaining novel work.
 
+### Stage 4b result (2026-05-20): the gPTP topology was BACKWARDS
+
+Built `app/audio/airplay2_ptp.py::PtpGrandmaster` per the plan
+above and ran probe_play_tone --with-grandmaster against the
+Hisense. Still silent. Adding inbound traffic tracing to the
+grandmaster's recv loops surfaced the corrective finding:
+
+  general <- 192.168.1.53:320 ANNOUNCE seq=18 bytes=76
+            clock=e0d8c4fffe74f41c
+  event   <- 192.168.1.53:319 SYNC    seq=140 bytes=44
+            clock=e0d8c4fffe74f41c
+  general <- 192.168.1.53:320 FOLLOW_UP seq=140 bytes=76
+            clock=e0d8c4fffe74f41c
+
+The Hisense was broadcasting its own ANNOUNCE / SYNC /
+FOLLOW_UP at the Apple-profile cadence (1 s / 125 ms / 125 ms)
+with its own EUI-64 clock_id derived from MAC `e0:d8:c4:74:f4:1c`.
+**The receiver IS the gPTP grandmaster. The sender slaves to it.**
+nqptp's job in owntone is to LISTEN for the receiver's master
+clock on the LAN and feed owntone the running offset so it can
+project its outgoing RTP/RTCP timestamps onto the receiver's
+clock frame. There is no sender-side grandmaster.
+
+The RTCP TIME_ANNOUNCE format from earlier in this doc reads
+correctly under this lens:
+
+  data[8:16] = be64(cur_ns)  # MASTER clock time, derived from
+                              # offset = master - local. Not OUR
+                              # monotonic clock as the comment said.
+  data[20:28]= be64(ptp_clock_id)  # MASTER's clock_id (the one
+                                    # the receiver itself is
+                                    # broadcasting), not a
+                                    # self-assigned value.
+
+### PtpSlave + post-SETUP lock-wait + SET_PARAMETER
+
+Three changes flipped the session from invisible to visibly
+real on the TV's UI:
+
+  - `PtpSlave` (same file as PtpGrandmaster): passive listener
+    on 319/320. Captures ANNOUNCE for the master's clock_id
+    and FOLLOW_UP for the running clock offset. No transmit
+    side at all — we never compete in BMCA. master_clock_id()
+    and master_now_ns() give the audio path what it needs for
+    the RTCP TIME_ANNOUNCE packets.
+  - The Hisense only starts broadcasting once an AirPlay
+    session is in negotiation. So the slave's pre-SETUP window
+    almost always times out. Added a post-SETUP wait_for_lock
+    in `_play_tone` that holds the boot RTCP TIME_ANNOUNCE
+    packet until the first FOLLOW_UP has been processed —
+    that boot packet sets the rtptime/clock anchor for the
+    whole session and has to carry valid master time.
+  - `SET_PARAMETER volume 0.000000` after the stream SETUP.
+    The doc's canonical NTP sequence had this; the PTP path
+    we'd built skipped it. Empirically: with SET_PARAMETER,
+    the TV's volume OSD responds to our value — direct evidence
+    the receiver has promoted the session to "active". Without
+    SET_PARAMETER the session stayed in the "wirelessly share
+    content" idle screen no matter what else we did.
+
+### Still silent (open at the end of 2026-05-20)
+
+LPCM packets, RTCP TIME_ANNOUNCE on master clock, SET_PARAMETER
+volume confirmed visible on the TV, and the session is real on
+the receiver. But there's no audio output yet. The remaining
+diagnostic axes:
+
+  - **Codec.** owntone uses ALAC unconditionally. The Hisense
+    may accept the LPCM SETUP body but silently drop LPCM frames
+    in favour of ALAC. PyAV's ALAC encoder is fixed at 4096
+    samples per frame, AirPlay wants 352; that means a ctypes
+    bind of libalac or a hand-rolled minimal ALAC bitstream
+    encoder. Multi-day but bounded.
+  - **Packet shape.** Our LPCM payload is raw int16 BE stereo.
+    Some receivers expect a specific framing or interleaving.
+  - **DELAY_REQ.** We don't send DELAY_REQ to the master, so
+    our offset_ns has zero path-delay correction. The
+    buffered-audio latency window (11025-88200 samples) ought
+    to swallow this, but maybe the Hisense rejects packets
+    when the offset is "obviously" stale.
+  - **Other RTSP messages.** owntone sends progress and FLUSH;
+    we don't. Maybe progress is what cues "actually play",
+    matching how Apple Music behaves when streaming.
+
+Next session: try ALAC first (highest probability blocker per
+owntone's behaviour), with the existing PTP-slave + SET_PARAMETER
+plumbing. If ALAC plays, write Stage 5 against that. If ALAC
+still silent, fall back to owntone-source comparison for the
+SET_PARAMETER `progress` line and the DELAY_REQ-driven offset
+correction.
+
 Stage 1 finding: the target Hisense TV advertises
 `SupportsAirPlayAudio + SupportsBufferedAudio + SupportsPTP` and
 mandatory pairing, but does NOT advertise the CoreUtils/transient
