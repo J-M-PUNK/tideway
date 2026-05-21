@@ -36,6 +36,25 @@ def main() -> int:
     ap.add_argument(
         "seconds", nargs="?", type=float, default=6.0, help="tone duration"
     )
+    ap.add_argument(
+        "--with-grandmaster",
+        action="store_true",
+        help=(
+            "boot a real IEEE 1588 v2 grandmaster on UDP 319/320 next to "
+            "the tone stream. Historical: the doc's Stage 4b spike. Real "
+            "AirPlay 2 receivers ARE the grandmaster so this almost "
+            "never helps; use --with-ptp-slave instead."
+        ),
+    )
+    ap.add_argument(
+        "--with-ptp-slave",
+        action="store_true",
+        help=(
+            "passively listen for the receiver's gPTP master, derive a "
+            "clock offset, and project the RTCP TIME_ANNOUNCE packet "
+            "onto the master's clock. Matches owntone+nqptp behaviour."
+        ),
+    )
     args = ap.parse_args()
 
     m = manager()
@@ -63,7 +82,12 @@ def main() -> int:
         f"LISTEN TO THE TV."
     )
     try:
-        res = m.probe_play_tone(match.id, seconds=args.seconds)
+        res = m.probe_play_tone(
+            match.id,
+            seconds=args.seconds,
+            with_grandmaster=args.with_grandmaster,
+            with_ptp_slave=args.with_ptp_slave,
+        )
         print(f"DONE: {res}")
         print(
             "Did you hear a tone? Yes -> grandmaster gate PASSES. "

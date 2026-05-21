@@ -1067,11 +1067,23 @@ class AirPlay2Manager:
     # -- buffered session + tone spike (Stage 4/5) ------------------
 
     async def _buffered_setup(
-        self, device: AirPlay2Device, ct: int, audio_format: int
+        self,
+        device: AirPlay2Device,
+        ct: int,
+        audio_format: int,
+        clock_id: Optional[int] = None,
     ) -> dict:
         """Run the validated PTP buffered SETUP sequence and return
         the live handles. Same sequence proven in _probe_setup_ptp;
-        centralised so the audio path can reuse it."""
+        centralised so the audio path can reuse it.
+
+        `clock_id` is the 64-bit PTP grandmaster identifier we'll
+        advertise to the receiver in `timingPeerInfo.ClockID`. Pass an
+        explicit value when running a real gPTP grandmaster alongside
+        so the receiver's slave looks for our ANNOUNCEs under the same
+        identity — leaving it None mints a fresh random id, which is
+        the right call for protocol-only probes that don't run real
+        PTP."""
         BPLIST = "application/x-apple-binary-plist"
         loop = asyncio.get_event_loop()
         http = await http_connect(device.address, device.port)
@@ -1082,7 +1094,8 @@ class AirPlay2Manager:
         rb = secrets.token_bytes(6)
         device_id_colon = "02:" + ":".join(f"{b:02X}" for b in rb[1:])
         clock_uuid = str(uuid.uuid4())
-        clock_id = int.from_bytes(secrets.token_bytes(8), "big")
+        if clock_id is None:
+            clock_id = int.from_bytes(secrets.token_bytes(8), "big")
         session_uuid = str(uuid.uuid4()).upper()
         group_uuid = str(uuid.uuid4()).upper()
 
@@ -1169,6 +1182,20 @@ class AirPlay2Manager:
             }
         )
         stream = decode_bplist_from_body(stream_resp)["streams"][0]
+
+        # SET_PARAMETER is part of owntone's canonical session-start
+        # sequence (doc: "SETUP(session) -> RECORD -> SETUP(stream) ->
+        # SET_PARAMETER"). The receiver appears to treat the stream as
+        # inactive until at least the volume parameter has been set,
+        # which is why our streams negotiated audio ports but never got
+        # promoted to a visible AirPlay session on the Hisense's UI.
+        # 0.0 dB is full volume (TV mixes it under its own volume).
+        # Errors here are non-fatal — some receivers may not require
+        # this; we want to learn that empirically rather than abort.
+        try:
+            await rtsp.set_parameter("volume", "0.000000")
+        except Exception as exc:
+            _say(f"SET_PARAMETER volume failed (continuing): {exc!r}")
         return {
             "http": http,
             "rtsp": rtsp,
@@ -1180,19 +1207,52 @@ class AirPlay2Manager:
             "control_port": stream.get("controlPort"),
         }
 
-    def probe_play_tone(self, device_id: str, seconds: float = 6.0) -> dict:
+    def probe_play_tone(
+        self,
+        device_id: str,
+        seconds: float = 6.0,
+        *,
+        with_grandmaster: bool = False,
+        with_ptp_slave: bool = False,
+    ) -> dict:
         """Stage 4/5 spike: after the validated buffered SETUP, act
         as our own PTP grandmaster via RTCP time-announce packets
-        and stream a 440 Hz test tone (LPCM) to the dataPort. The
-        empirical gate: does the Hisense actually emit sound off our
-        self-assigned grandmaster, with no real gPTP exchange?"""
+        and stream a 440 Hz test tone (LPCM) to the dataPort.
+
+        `with_grandmaster=False` is the original Stage 4 spike: only
+        the per-stream RTCP TIME_ANNOUNCE packets are sent, no real
+        gPTP. That run was silent on the Hisense (see
+        docs/airplay2-sender.md), which is the doc's gPTP-required
+        branch.
+
+        `with_grandmaster=True` boots a real IEEE 1588 v2 grandmaster
+        on UDP 319/320 (`app.audio.airplay2_ptp`) alongside the tone
+        stream. The same 8-byte clock identifier goes into both the
+        RTSP `timingPeerInfo.ClockID` AND the PTP ANNOUNCE/SYNC
+        messages so the receiver's slave finds a matching grandmaster
+        on the wire. This is the diagnostic that flips the Stage 4
+        gate to GO (or proves the receiver wants something else
+        entirely)."""
         if AirPlayV2 is None or Chacha20Cipher8byteNonce is None:
             raise RuntimeError(_STREAM_ERROR or "pyatv stream engine missing")
         return self._run_coro(
-            self._play_tone(device_id, seconds), timeout=seconds + 40.0
+            self._play_tone(
+                device_id,
+                seconds,
+                with_grandmaster=with_grandmaster,
+                with_ptp_slave=with_ptp_slave,
+            ),
+            timeout=seconds + 40.0,
         )
 
-    async def _play_tone(self, device_id: str, seconds: float) -> dict:
+    async def _play_tone(
+        self,
+        device_id: str,
+        seconds: float,
+        *,
+        with_grandmaster: bool = False,
+        with_ptp_slave: bool = False,
+    ) -> dict:
         device = await self._resolve(device_id)
         if device is None:
             raise RuntimeError(f"device {device_id} not found on network")
@@ -1201,10 +1261,98 @@ class AirPlay2Manager:
         # genuinely require a PIN pair flow.
         _credentials_for(device)
 
-        # ct=1 LPCM keeps the audio path trivial (no ALAC encoder)
-        # to isolate the grandmaster-trust question. audioFormat
-        # 0x800 = PCM/44100/16/2.
-        s = await self._buffered_setup(device, ct=1, audio_format=0x800)
+        # Resolve our local interface IP from a fresh socket to the
+        # receiver — same trick _buffered_setup uses internally to
+        # learn local_ip, but we need it before SETUP so the
+        # grandmaster can bind to it. Doing it here keeps that knowledge
+        # in one place.
+        gm = None
+        slave = None
+        clock_id = None
+        if with_grandmaster or with_ptp_slave:
+            probe = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                probe.connect((device.address, device.port))
+                local_ip = probe.getsockname()[0]
+            finally:
+                probe.close()
+
+        if with_grandmaster:
+            from app.audio import airplay2_ptp
+
+            clock_id = int.from_bytes(secrets.token_bytes(8), "big")
+            gm = airplay2_ptp.PtpGrandmaster(
+                clock_id=clock_id.to_bytes(8, "big"),
+                interface_ip=local_ip,
+            )
+            gm.start()
+            await asyncio.sleep(1.5)
+            _say(
+                f"PTP grandmaster running on {local_ip} for {seconds:.0f}s "
+                f"tone; clock_id={clock_id:#018x}"
+            )
+
+        if with_ptp_slave:
+            from app.audio import airplay2_ptp
+
+            slave = airplay2_ptp.PtpSlave(interface_ip=local_ip)
+            # `start()` blocks ~4s waiting for the master's first
+            # FOLLOW_UP. Logs a warning if it doesn't come — the tone
+            # still runs in that case, just without master-clock
+            # projection (so we have a clean fallback if the master
+            # disappears mid-stream).
+            slave.start()
+            snap = slave.snapshot()
+            _say(f"PTP slave snapshot post-start: {snap}")
+
+        try:
+            # ct=1 LPCM keeps the audio path trivial (no ALAC encoder)
+            # to isolate the grandmaster-trust question. audioFormat
+            # 0x800 = PCM/44100/16/2.
+            s = await self._buffered_setup(
+                device, ct=1, audio_format=0x800, clock_id=clock_id
+            )
+            # The Hisense (and likely most AirPlay 2 PTP receivers) only
+            # starts broadcasting SYNC/FOLLOW_UP once an AirPlay session
+            # is in negotiation, so the pre-SETUP lock window in slave
+            # .start() is almost always going to time out. Wait HERE,
+            # after SETUP, for the slave to actually see a FOLLOW_UP
+            # before we send the boot RTCP TIME_ANNOUNCE — that first
+            # outgoing sync packet sets the rtptime/clock anchor for
+            # the whole session, so it needs to carry valid master
+            # time, not local time + offset_ns=0.
+            if slave is not None:
+                if slave.wait_for_lock(timeout=5.0):
+                    _say(f"slave locked post-SETUP: {slave.snapshot()}")
+                else:
+                    _say("slave never locked post-SETUP; stream will go out anyway")
+            return await self._stream_tone_lpcm(s, seconds, device, slave=slave)
+        finally:
+            if gm is not None:
+                gm.stop()
+            if slave is not None:
+                slave.stop()
+
+    async def _stream_tone_lpcm(
+        self,
+        s: dict,
+        seconds: float,
+        device: AirPlay2Device,
+        *,
+        slave=None,
+    ) -> dict:
+        """The actual LPCM/RTP send loop, factored out of _play_tone so
+        the try/finally around the slave/grandmaster lifecycle wraps
+        it cleanly.
+
+        When `slave` is provided AND it has locked onto a master, the
+        RTCP TIME_ANNOUNCE packet carries the receiver's master
+        clock_id and a time on the master's clock — what the receiver
+        actually expects per the empirical finding that AirPlay 2
+        receivers ARE the grandmaster and senders slave. With no slave
+        (or one that hasn't locked), the packet falls back to our
+        local clock + our own clock_id, the original Stage 4 spike
+        behaviour."""
         rtsp = s["rtsp"]
         data_port = s["data_port"]
         control_port = s["control_port"]
@@ -1214,6 +1362,40 @@ class AirPlay2Manager:
             f"buffered SETUP ok (LPCM); dataPort={data_port} "
             f"controlPort={control_port}; streaming {seconds:.0f}s tone"
         )
+
+        # Resolve the master clock identity / time source ONCE at the
+        # top of the stream. If the slave is locked, every sync packet
+        # quotes the receiver's own clock_id and a current-time on the
+        # receiver's clock. Otherwise we fall back to our local
+        # clock_id and monotonic time, matching the original spike.
+        master_clock_id_int: int
+        master_now_ns_fn = lambda: time.monotonic_ns()  # noqa: E731
+        if slave is not None:
+            mcid = slave.master_clock_id()
+            if mcid is not None:
+                master_clock_id_int = int.from_bytes(mcid, "big")
+                # Capture the slave reference for closure: each sync
+                # packet pulls a fresh master_now_ns so the offset
+                # tracking includes the latest FOLLOW_UPs.
+                _slave_ref = slave
+
+                def _master_now_ns() -> int:
+                    n = _slave_ref.master_now_ns()
+                    return n if n is not None else time.time_ns()
+
+                master_now_ns_fn = _master_now_ns
+                _say(
+                    f"using master clock_id={mcid.hex()} for RTCP sync; "
+                    f"offset_ns={slave.snapshot()}"
+                )
+            else:
+                master_clock_id_int = clock_id & 0xFFFFFFFFFFFFFFFF
+                _say(
+                    "PTP slave never locked; falling back to local "
+                    "clock_id + monotonic clock for RTCP sync"
+                )
+        else:
+            master_clock_id_int = clock_id & 0xFFFFFFFFFFFFFFFF
 
         cipher = Chacha20Cipher8byteNonce(s["shk"], s["shk"])
         data_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -1234,9 +1416,9 @@ class AirPlay2Manager:
             p[2] = 0x00
             p[3] = 0x06
             struct.pack_into(">I", p, 4, cur_pos & 0xFFFFFFFF)
-            struct.pack_into(">Q", p, 8, time.monotonic_ns() & 0xFFFFFFFFFFFFFFFF)
+            struct.pack_into(">Q", p, 8, master_now_ns_fn() & 0xFFFFFFFFFFFFFFFF)
             struct.pack_into(">I", p, 16, (base_pos - 11025) & 0xFFFFFFFF)
-            struct.pack_into(">Q", p, 20, clock_id & 0xFFFFFFFFFFFFFFFF)
+            struct.pack_into(">Q", p, 20, master_clock_id_int & 0xFFFFFFFFFFFFFFFF)
             return bytes(p)
 
         # Pre-generate one second of 440 Hz sine, int16 BE stereo,
