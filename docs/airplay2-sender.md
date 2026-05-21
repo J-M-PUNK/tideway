@@ -318,6 +318,76 @@ ALAC encoder, the RTP packetizer reusing pyatv's cipher, a pacing
 loop), then the empirical grandmaster-trust gate, then the live
 PCM feed and lifecycle.
 
+### Stage 4/5 gate result on the Hisense: SILENT (2026-05-20)
+
+`probe_play_tone` ran the validated PTP buffered SETUP and
+streamed 1002 ChaCha20-Poly1305-encrypted LPCM packets to the
+negotiated `dataPort=41601` over 8 seconds, with our own
+monotonic-clock 28-byte RTCP TIME_ANNOUNCE packets sent to the
+controlPort once per second. The Hisense produced no audio. Its
+AirPlay UI showed "nothing connected" throughout, even though
+SETUP completed and audio packets flowed. The receiver accepted
+the negotiation but never promoted us to a visible streaming
+source.
+
+Sanity checks before concluding gPTP:
+
+- `audio_format=0x800` is correct for PCM_44100_16_2 (confirmed
+  against `airplay2-receiver/ap2/connections/audio.py`
+  `AirplayAudFmt` enum). Not a wrong-constant bug.
+- ALAC variant deliberately not tried first: PyAV's ALAC encoder
+  is fixed at 4096-sample frames and AirPlay's SETUP advertises
+  spf=352, so an ALAC spike needs hand-rolled framing (libalac
+  via ctypes, or a minimal ALAC bitstream encoder). Multi-day.
+  Skipped because the gPTP path is more decisive.
+- Mac AirPlay receivers reject our transient auth across all
+  four pair-setup variants the diagnostic tries
+  (PairSetup/PairSetupWithAuth/Flags=Transient/verify), so they
+  are not a usable oracle without an Apple-account-bound auth
+  path that is out of scope for this project.
+- nqptp does not build on macOS as-is (Linux/FreeBSD only,
+  README explicit) and the dev box doesn't have autoconf
+  installed, so running the canonical C grandmaster in-place
+  isn't a same-day option.
+
+Conclusion: implement a minimal pure-Python IEEE 1588 v2
+grandmaster. The Hisense almost certainly runs a gPTP slave that
+won't promote a session to active streaming until it locks to a
+real grandmaster on UDP 319/320. nqptp under `.airplay2-test/`
+is the C line reference.
+
+### Stage 4b plan: minimal Python gPTP grandmaster
+
+The spike's job is to satisfy the Hisense's gPTP lock check,
+not to be a production-grade IEEE 1588 implementation. Scope is
+intentionally tight:
+
+- UDP socket on `224.0.1.129:319` (event) and `:320` (general),
+  multicast, joined on the same interface we already chose for
+  the RTSP session.
+- Periodic ANNOUNCE every 1 s with our existing `clock_id` from
+  the RTSP SETUP body (so the receiver sees the same grandmaster
+  it was promised). ClockClass = 248, ClockAccuracy = 0xFE,
+  OffsetScaledLogVariance = 0xFFFF, priority1/2 = 128/128 -
+  defaults that announce us as a reasonable BMCA winner against
+  any other grandmaster the receiver might see.
+- Periodic SYNC every 125 ms (logSyncInterval = -3), one-step
+  disabled so we can pair SYNC with FOLLOW_UP. originTimestamp =
+  our monotonic clock projected onto IEEE 1588 epoch.
+- DELAY_REQ from the Hisense answered with DELAY_RESP on UDP 319.
+- No path delay correction. No BMCA negotiation. No PI
+  servo. Just enough to satisfy the receiver's "I see a healthy
+  grandmaster" check.
+- ~400-800 LOC for the spike. nqptp in `.airplay2-test/nqptp/`
+  is the line reference for byte layouts; the Python spike
+  mirrors `nqptp-message-handlers.c` shapes verbatim.
+
+Verification path: run the Python grandmaster, then re-run
+`probe_play_tone`. If the LPCM tone is now audible, the gate
+flips from gPTP-confirmed-required to gPTP-stack-works, and
+Stage 5 (live PCM + ALAC bitstream packetizer + lifecycle) is
+the only remaining novel work.
+
 Stage 1 finding: the target Hisense TV advertises
 `SupportsAirPlayAudio + SupportsBufferedAudio + SupportsPTP` and
 mandatory pairing, but does NOT advertise the CoreUtils/transient
