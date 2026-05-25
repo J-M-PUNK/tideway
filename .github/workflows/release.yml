@@ -406,7 +406,7 @@ jobs:
         # wrong set of module hashes; flatpak-builder usually
         # detects this and rebuilds the affected module, but only
         # *usually*. Exact match or cold build.
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             .flatpak-builder

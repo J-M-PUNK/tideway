@@ -63,7 +63,7 @@ jobs:
       - name: Restore flatpak-builder cache
         # Same key as release.yml so a release rebuild after this
         # check can reuse the cached state.
-        uses: actions/cache@v4
+        uses: actions/cache@v5
         with:
           path: |
             .flatpak-builder
