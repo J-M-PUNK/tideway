@@ -418,11 +418,18 @@ class PCMPlayer:
         # 1-per-callback log every 100 ticks confirms the callback
         # is actually running + advancing.
         self._callback_counter = 0
-        # Seq-bump counter for the audio callback's position-tick
-        # nudges. Bumped every callback; emits a fresh seq every
-        # 20 callbacks (~4-5 Hz at typical 86 Hz callback rate) so
-        # the SSE position-update path lets the snapshot through.
-        self._seq_bump_counter = 0
+        # Last-bump timestamp for the audio callback's position-tick
+        # nudges. The callback bumps `_seq` from here on a wall-clock
+        # cadence (~5 Hz) so the SSE polling rate (4 Hz) always sees
+        # a fresh seq, regardless of how often the callback itself
+        # fires. The earlier "every 20 callbacks" scheme assumed an
+        # 86 Hz callback rate (44.1k / 512 frames); at lower callback
+        # rates — large buffers, hi-res-output configurations,
+        # exclusive-mode WASAPI on devices that prefer 2048-frame
+        # buffers — seq fell behind 4 Hz, the frontend's seq-dedup
+        # in usePlayer kicked in, and the scrubber updated only
+        # every couple of seconds instead of every 250 ms.
+        self._seq_last_bump_t: float = 0.0
 
         # Stall watchdog. The realtime callback updates _cb_last_t
         # on every invocation (even paused/seeking — it still fires
@@ -2650,10 +2657,15 @@ class PCMPlayer:
                     # advance samples_emitted below so the scrubber
                     # keeps moving through the underrun window —
                     # otherwise position would freeze on every
-                    # hiccup.
+                    # hiccup. Bump seq on the same wall-clock cadence
+                    # as the main path so the frontend's seq-dedup
+                    # actually lets the position update through.
                     self._log_callback_starvation()
                     outdata[written:] = 0
                     self._samples_emitted += frames
+                    if now - self._seq_last_bump_t >= 0.2:
+                        self._seq += 1
+                        self._seq_last_bump_t = now
                     return
                 self._callback_carry = chunk
 
@@ -2747,10 +2759,9 @@ class PCMPlayer:
             # Bump seq so the frontend's position scrubber still
             # advances even though local is silent — playback is
             # still happening, just on the remote.
-            self._seq_bump_counter += 1
-            if self._seq_bump_counter >= 20:
+            if now - self._seq_last_bump_t >= 0.2:
                 self._seq += 1
-                self._seq_bump_counter = 0
+                self._seq_last_bump_t = now
             return
 
         # DSP stages: ReplayGain (scalar gain) → EQ (10-band biquad
@@ -2830,13 +2841,19 @@ class PCMPlayer:
         # measurement (see the jitter check at the top).
         self._cb_prev_audio = True
         # Bump seq so the frontend's SSE dedupe lets through the
-        # position update. The callback fires ~90Hz at 44.1k /512
-        # frames, so ~every 20th call keeps us close to 4-5Hz —
-        # smooth for a scrubber, cheap on CPU.
-        self._seq_bump_counter += 1
-        if self._seq_bump_counter >= 20:
+        # position update. Wall-clock cadence (5 Hz) — independent of
+        # the callback's own rate. PortAudio's frames-per-callback
+        # depends on the device + buffer configuration: ~512 on a
+        # 44.1k Mac (~86 Hz callback), but as low as ~10 Hz callback
+        # for hi-res-output configs that prefer larger buffers.
+        # The earlier "/20" scheme tracked the 86 Hz case and
+        # silently regressed everywhere else — the frontend's
+        # seq-dedup would drop multiple 4 Hz SSE pollings between
+        # consecutive seq bumps, so the scrubber jumped multiple
+        # seconds at a time instead of sliding smoothly.
+        if now - self._seq_last_bump_t >= 0.2:
             self._seq += 1
-            self._seq_bump_counter = 0
+            self._seq_last_bump_t = now
 
     def _adopt_preload_locked(self, pre: _Preload) -> PlayerSnapshot:
         """Synchronous version of the callback's gapless swap,
