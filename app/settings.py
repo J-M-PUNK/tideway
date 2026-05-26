@@ -42,6 +42,16 @@ class Settings:
     videos_dir: str = field(default_factory=_default_videos_dir)
     filename_template: str = "{artist} - {title}"
     create_album_folders: bool = True
+    # When `create_album_folders` is on, prefix the folder name with
+    # the album artist: "<Artist> - <Album>/" instead of just
+    # "<Album>/". Matches the "Artist - Album" convention Plex / Roon /
+    # foobar use for sideloaded libraries. Off by default so existing
+    # users' libraries don't fragment on upgrade — flipping it on only
+    # affects subsequent downloads. Album artist is preferred over the
+    # per-track artist so compilation entries don't pick up a featured
+    # name from track 1; falls back to the per-track artist when no
+    # album artist is set.
+    album_folder_includes_artist: bool = False
     # When downloading a playlist, group its tracks under a folder
     # named after the playlist (parallel to create_album_folders for
     # albums). The {playlist_num} template token then numbers them in

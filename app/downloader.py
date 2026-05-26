@@ -1969,7 +1969,24 @@ def _build_path(item: DownloadItem, settings, ext: str) -> Path:
         ):
             base = base / _sanitize_segment(item.playlist_name)
         elif settings.create_album_folders and item.album:
-            base = base / _sanitize_segment(item.album)
+            # Optional "<Artist> - <Album>" layout for users who
+            # sideload the downloaded library into Plex / Roon /
+            # foobar and want the artist visible at the folder
+            # level. Album-artist is preferred so a compilation
+            # entry doesn't pick up a featured name from track 1;
+            # we fall back to the per-track artist (which is the
+            # only name we have for older catalog entries that lack
+            # the album_artist field).
+            if getattr(settings, "album_folder_includes_artist", False):
+                folder_artist = item.album_artist or item.artist
+                folder_name = (
+                    f"{folder_artist} - {item.album}"
+                    if folder_artist
+                    else item.album
+                )
+            else:
+                folder_name = item.album
+            base = base / _sanitize_segment(folder_name)
 
     *dirs, last = safe_segments
     final = base

@@ -49,12 +49,14 @@ def _settings(
     output_dir,
     create_album_folders=True,
     create_playlist_folders=True,
+    album_folder_includes_artist=False,
 ):
     return SimpleNamespace(
         filename_template=template,
         output_dir=str(output_dir),
         create_album_folders=create_album_folders,
         create_playlist_folders=create_playlist_folders,
+        album_folder_includes_artist=album_folder_includes_artist,
     )
 
 
@@ -214,6 +216,81 @@ def test_build_path_single_segment_with_album_folder_toggle(tmp_path):
     item = _item(album="Astroworld", artist="Travis Scott", title="Sicko Mode")
     settings = _settings(
         "{artist} - {title}", output_dir=tmp_path, create_album_folders=True
+    )
+
+    out = _build_path(item, settings, ".flac")
+
+    assert out == tmp_path / "Astroworld" / "Travis Scott - Sicko Mode.flac"
+
+
+def test_build_path_album_folder_with_artist_prefix(tmp_path):
+    """`album_folder_includes_artist=True` changes the album folder from
+    "<Album>" to "<Artist> - <Album>". The filename is unchanged."""
+    item = _item(
+        album="Astroworld",
+        album_artist="Travis Scott",
+        artist="Travis Scott, Drake",
+        title="Sicko Mode",
+    )
+    settings = _settings(
+        "{artist} - {title}",
+        output_dir=tmp_path,
+        create_album_folders=True,
+        album_folder_includes_artist=True,
+    )
+
+    out = _build_path(item, settings, ".flac")
+
+    assert out == (
+        tmp_path
+        / "Travis Scott - Astroworld"
+        / "Travis Scott, Drake - Sicko Mode.flac"
+    )
+
+
+def test_build_path_album_folder_with_artist_prefix_falls_back_to_track_artist(
+    tmp_path,
+):
+    """When album_artist is empty (older catalog entries), the folder
+    prefix uses the per-track artist so the toggle still produces a
+    sensible folder rather than degrading to "- Album"."""
+    item = _item(
+        album="Astroworld",
+        album_artist="",
+        artist="Travis Scott",
+        title="Sicko Mode",
+    )
+    settings = _settings(
+        "{artist} - {title}",
+        output_dir=tmp_path,
+        create_album_folders=True,
+        album_folder_includes_artist=True,
+    )
+
+    out = _build_path(item, settings, ".flac")
+
+    assert out == (
+        tmp_path
+        / "Travis Scott - Astroworld"
+        / "Travis Scott - Sicko Mode.flac"
+    )
+
+
+def test_build_path_album_folder_artist_prefix_off_by_default(tmp_path):
+    """Existing users: omitting the new toggle keeps the layout exactly
+    where it was before this feature shipped (no library fragmentation
+    on upgrade)."""
+    item = _item(
+        album="Astroworld",
+        album_artist="Travis Scott",
+        artist="Travis Scott",
+        title="Sicko Mode",
+    )
+    settings = _settings(
+        "{artist} - {title}",
+        output_dir=tmp_path,
+        create_album_folders=True,
+        # album_folder_includes_artist defaults to False in _settings
     )
 
     out = _build_path(item, settings, ".flac")
