@@ -960,11 +960,6 @@ export function usePlayer() {
   }, [playAtIndex, endOfQueueAdvance]);
 
   const prev = useCallback(() => {
-    // >3s in: restart the current track, matching Spotify/Apple Music.
-    if (stateRef.current.currentTime > 3) {
-      void api.player.seek(0).catch(() => {});
-      return;
-    }
     // Same stale-stateRef guard as `next`; see comment there.
     const s = stateRef.current;
     const intendedId = expectedTrackIdRef.current;
@@ -973,7 +968,20 @@ export function usePlayer() {
       : -1;
     const fromIdx = intendedIdx >= 0 ? intendedIdx : s.queueIndex;
     const p = pickPrevIndex({ ...s, queueIndex: fromIdx });
-    if (p !== null) playAtIndex(p);
+    // Restart-and-return when:
+    //   - >3s into the current track (Spotify / Apple Music convention),
+    //     so a casual press rewinds without flying back to the prior
+    //     track most users didn't mean to revisit, OR
+    //   - there's no previous track to skip to. The button is still
+    //     enabled in this case (see hasPrev below) because a "restart
+    //     this song" affordance is what users expect from the back
+    //     button on the first track of an album — a no-op press would
+    //     read as a bug.
+    if (s.currentTime > 3 || p === null) {
+      void api.player.seek(0).catch(() => {});
+      return;
+    }
+    playAtIndex(p);
   }, [playAtIndex]);
 
   const seek = useCallback((t: number) => {
@@ -1140,7 +1148,12 @@ export function usePlayer() {
   return {
     ...state,
     hasNext: state.queueIndex >= 0 && state.queueIndex < state.queue.length - 1,
-    hasPrev: state.queueIndex > 0,
+    // True whenever ANY track is loaded — pressing prev on the first
+    // track restarts it (see the `prev` callback above), so the button
+    // shouldn't be disabled in that state. Matches Spotify, Apple Music,
+    // and Tidal's own player behaviour. The pre-existing `queueIndex > 0`
+    // gate broke that affordance for the first track of every album.
+    hasPrev: state.queueIndex >= 0,
     sleepRemaining,
     play,
     toggle,
