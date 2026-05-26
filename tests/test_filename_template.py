@@ -276,6 +276,80 @@ def test_build_path_album_folder_with_artist_prefix_falls_back_to_track_artist(
     )
 
 
+def test_build_path_album_folder_artist_uses_frozen_value_over_track_artist(
+    tmp_path,
+):
+    """User report: with `album_folder_includes_artist` on, some tracks
+    of one album landed in a separate folder named after the track's
+    primary artist instead of the album's canonical artist. Root cause:
+    a track restored from disk after a crash (or fetched as a single)
+    has `album_artist` set to its own primary artist, because tidalapi
+    sets `track.album.artist` from the track's first listed artist
+    rather than the parent album's. The fix freezes the canonical
+    album artist onto the item at album-enqueue time as
+    `album_folder_artist`, and _build_path prefers that value over the
+    per-track field for folder naming. Pin that here so a future
+    refactor can't silently re-introduce the per-track split."""
+    item = _item(
+        album="We the Best Forever",
+        # album_artist is the per-track album_artist field — for a
+        # track-only fetch tidalapi populates this from the track's
+        # own primary artist (one of the featured contributors), not
+        # the canonical album credit.
+        album_artist="Drake",
+        artist="DJ Khaled, Drake",
+        title="I'm On One",
+        # The frozen value, set at album-enqueue time from the parent
+        # Album's `.artist.name`. This is the value that should win.
+        album_folder_artist="DJ Khaled",
+    )
+    settings = _settings(
+        "{artist} - {title}",
+        output_dir=tmp_path,
+        create_album_folders=True,
+        album_folder_includes_artist=True,
+    )
+
+    out = _build_path(item, settings, ".flac")
+
+    # Folder must use "DJ Khaled" (frozen canonical), NOT "Drake"
+    # (per-track album_artist) — so this track lands in the same
+    # folder as the rest of the album.
+    assert out == (
+        tmp_path
+        / "DJ Khaled - We the Best Forever"
+        / "DJ Khaled, Drake - I'm On One.flac"
+    )
+
+
+def test_build_path_album_folder_artist_empty_falls_back_to_album_artist(tmp_path):
+    """Backward compat: items predating this fix (or single-track
+    submits we deliberately don't stamp) have an empty
+    `album_folder_artist`. The folder name then falls back to
+    `album_artist or artist`, preserving the existing behaviour."""
+    item = _item(
+        album="Astroworld",
+        album_artist="Travis Scott",
+        artist="Travis Scott, Drake",
+        title="Sicko Mode",
+        album_folder_artist="",  # explicitly empty — the fallback path
+    )
+    settings = _settings(
+        "{artist} - {title}",
+        output_dir=tmp_path,
+        create_album_folders=True,
+        album_folder_includes_artist=True,
+    )
+
+    out = _build_path(item, settings, ".flac")
+
+    assert out == (
+        tmp_path
+        / "Travis Scott - Astroworld"
+        / "Travis Scott, Drake - Sicko Mode.flac"
+    )
+
+
 def test_build_path_album_folder_artist_prefix_off_by_default(tmp_path):
     """Existing users: omitting the new toggle keeps the layout exactly
     where it was before this feature shipped (no library fragmentation

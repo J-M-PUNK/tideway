@@ -262,6 +262,17 @@ class DownloadItem:
     # per-playlist folder. 0 / "" means "not from a playlist".
     playlist_index: int = 0
     playlist_name: str = ""
+    # Frozen at enqueue time: the canonical album artist used to build
+    # the `<Artist> - <Album>` folder when `album_folder_includes_artist`
+    # is on. When non-empty, _build_path uses this verbatim instead of
+    # recomputing from `album_artist or artist` — guarantees every track
+    # of one album lands in the same folder even when individual tracks
+    # were resolved via different paths (e.g. restored from disk after
+    # a crash, where tidalapi's `track.album.artist` falls back to the
+    # track's primary artist rather than the canonical album artist).
+    # Empty for single-track and playlist enqueues where the album
+    # folder isn't the organizing unit.
+    album_folder_artist: str = ""
 
 
 class Downloader:
@@ -323,6 +334,16 @@ class Downloader:
         # remembering it wouldn't help. Keyed by item_id for O(1) update.
         self._pending_meta: Dict[str, dict] = {}
         self._pending_lock = threading.Lock()
+        # Side-channel for restore(): when a pending item carries an
+        # `album_folder_artist` value persisted from its original album
+        # enqueue, restore() stages it here keyed by tidal track id. The
+        # enqueue path consumes it after _populate_item_from_track runs,
+        # so the resumed item lands in the SAME folder as its album-
+        # mates rather than a per-track-artist folder (which is what
+        # tidalapi's `track.album.artist` would give us for a track
+        # re-fetched on its own — see _album_artist_name).
+        self._restore_overrides: Dict[str, str] = {}
+        self._restore_overrides_lock = threading.Lock()
         # Sweep any stale `.part` files left behind by a previous crash
         # before workers start — otherwise the user's output folder
         # slowly fills with orphans a skip-existing scan won't touch.
@@ -349,6 +370,42 @@ class Downloader:
     def _track_map_has(self, item_id: str) -> bool:
         with self._track_map_lock:
             return item_id in self._track_map
+
+    def _stamp_album_folder_artist(
+        self,
+        item: DownloadItem,
+        track,
+        album_obj,
+        is_album_enqueue: bool,
+    ) -> None:
+        """Freeze the folder-naming album artist onto the item.
+
+        Two sources, in order:
+          1. A restore override staged by restore() under the track's
+             tidal id — wins because it carries the canonical name from
+             the ORIGINAL album enqueue, before the crash that put us
+             here. Without this, a track re-fetched on its own would
+             use tidalapi's `track.album.artist` (which is set to the
+             track's primary artist, not the album's), so a feature on
+             track 5 would split into "Feature - AlbumName" while the
+             rest of the album sat in "MainArtist - AlbumName".
+          2. The parent album object's artist, only when we KNOW we're
+             enqueuing as part of an album (kind=album). For single-
+             track and playlist enqueues, leave it empty so _build_path
+             keeps its per-track fallback behaviour.
+        """
+        tid = getattr(track, "id", None)
+        if tid is not None:
+            key = str(tid)
+            with self._restore_overrides_lock:
+                override = self._restore_overrides.pop(key, None)
+            if override:
+                item.album_folder_artist = override
+                return
+        if is_album_enqueue and album_obj is not None:
+            name = getattr(getattr(album_obj, "artist", None), "name", None)
+            if name:
+                item.album_folder_artist = name
 
     def submit(self, url: str, quality: Optional[str] = None):
         threading.Thread(target=self._expand_and_enqueue, args=(url, quality), daemon=True).start()
@@ -441,6 +498,7 @@ class Downloader:
             file=_sys.stderr,
             flush=True,
         )
+        is_album_enqueue = content_type == "album"
         for track, album_obj, pl_idx in pairs:
             item = DownloadItem(item_id=str(uuid.uuid4()), url="")
             _populate_item_from_track(
@@ -450,6 +508,9 @@ class Downloader:
                 quality,
                 playlist_index=pl_idx,
                 playlist_name=playlist_name,
+            )
+            self._stamp_album_folder_artist(
+                item, track, album_obj, is_album_enqueue
             )
             self._track_map_put(item.item_id, (track, album_obj))
             self.on_add(item)
@@ -469,6 +530,7 @@ class Downloader:
                         "title": item.title,
                         "artist": item.artist,
                         "album": item.album,
+                        "album_folder_artist": item.album_folder_artist,
                     },
                 )
             self._work_queue.put(item)
@@ -600,6 +662,7 @@ class Downloader:
             self.on_update(placeholder)
             return
 
+        is_album_enqueue = content_type == "album"
         if len(pairs) == 1:
             track, album_obj, pl_idx = pairs[0]
             _populate_item_from_track(
@@ -609,6 +672,9 @@ class Downloader:
                 quality,
                 playlist_index=pl_idx,
                 playlist_name=playlist_name,
+            )
+            self._stamp_album_folder_artist(
+                placeholder, track, album_obj, is_album_enqueue
             )
             self._track_map_put(placeholder.item_id, (track, album_obj))
             self.on_update(placeholder)
@@ -623,6 +689,7 @@ class Downloader:
                         "title": placeholder.title,
                         "artist": placeholder.artist,
                         "album": placeholder.album,
+                        "album_folder_artist": placeholder.album_folder_artist,
                     },
                 )
             self._work_queue.put(placeholder)
@@ -640,6 +707,9 @@ class Downloader:
                     playlist_index=pl_idx,
                     playlist_name=playlist_name,
                 )
+                self._stamp_album_folder_artist(
+                    item, track, album_obj, is_album_enqueue
+                )
                 self._track_map_put(item.item_id, (track, album_obj))
                 self.on_add(item)
                 tid = getattr(track, "id", None)
@@ -653,6 +723,7 @@ class Downloader:
                             "title": item.title,
                             "artist": item.artist,
                             "album": item.album,
+                            "album_folder_artist": item.album_folder_artist,
                         },
                     )
                 self._work_queue.put(item)
@@ -846,6 +917,15 @@ class Downloader:
                 url = f"https://tidal.com/browse/playlist/{obj_id}"
             else:
                 url = f"https://tidal.com/browse/{kind}/{obj_id}"
+            # Stage the folder-naming album artist BEFORE the resubmit:
+            # the expand thread will hit _stamp_album_folder_artist
+            # before populating the item, which is where the override
+            # is consumed. If we set it after submit() returns the work
+            # has already started in another thread.
+            album_folder_artist = entry.get("album_folder_artist") or ""
+            if kind == "track" and album_folder_artist:
+                with self._restore_overrides_lock:
+                    self._restore_overrides[str(obj_id)] = album_folder_artist
             try:
                 self.submit(url, quality=quality)
                 count += 1
@@ -1978,7 +2058,16 @@ def _build_path(item: DownloadItem, settings, ext: str) -> Path:
             # only name we have for older catalog entries that lack
             # the album_artist field).
             if getattr(settings, "album_folder_includes_artist", False):
-                folder_artist = item.album_artist or item.artist
+                # Prefer the value frozen at album-enqueue time so every
+                # track of one album lands in the same folder, even when
+                # a particular track was resolved via a path that lost
+                # the canonical album artist (single-track fetch,
+                # restore-after-crash). See DownloadItem.album_folder_artist.
+                folder_artist = (
+                    item.album_folder_artist
+                    or item.album_artist
+                    or item.artist
+                )
                 folder_name = (
                     f"{folder_artist} - {item.album}"
                     if folder_artist
