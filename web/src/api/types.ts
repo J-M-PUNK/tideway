@@ -291,6 +291,10 @@ export interface Settings {
   videos_dir: string;
   filename_template: string;
   create_album_folders: boolean;
+  /** When `create_album_folders` is on, prefix the album folder with
+   *  the artist name so the layout is `<Artist> - <Album>/` instead of
+   *  `<Album>/`. Off by default. */
+  album_folder_includes_artist: boolean;
   skip_existing: boolean;
   concurrent_downloads: number;
   offline_mode: boolean;

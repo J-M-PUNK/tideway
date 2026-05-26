@@ -10087,6 +10087,7 @@ class SettingsPayload(BaseModel):
     videos_dir: Optional[str] = None
     filename_template: Optional[str] = None
     create_album_folders: Optional[bool] = None
+    album_folder_includes_artist: Optional[bool] = None
     skip_existing: Optional[bool] = None
     concurrent_downloads: Optional[int] = None
     offline_mode: Optional[bool] = None

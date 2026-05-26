@@ -354,6 +354,12 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
                 hint="Only takes effect when the filename template doesn't already contain a folder separator (/). With a multi-segment template the template itself defines the folder structure."
               />
               <Toggle
+                checked={settings.album_folder_includes_artist}
+                onChange={(v) => patch({ album_folder_includes_artist: v })}
+                label="Include the artist name in the album folder"
+                hint='Folder becomes "Artist - Album" instead of just "Album". Matches the convention Plex, Roon, and foobar expect for sideloaded libraries. Only applies to new downloads; existing folders stay where they are.'
+              />
+              <Toggle
                 checked={settings.create_playlist_folders}
                 onChange={(v) => patch({ create_playlist_folders: v })}
                 label="Create a subfolder per playlist"
