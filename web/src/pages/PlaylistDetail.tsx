@@ -2,9 +2,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   AlertTriangle,
+  ArrowDownAZ,
+  ArrowUpDown,
+  Check,
+  Clock,
   Folder,
   FolderMinus,
   Loader2,
+  ListOrdered,
   Pencil,
   Trash2,
 } from "lucide-react";
@@ -60,9 +65,31 @@ export function PlaylistDetail({ onDownload }: { onDownload: OnDownload }) {
   } = useApi(() => api.playlist(id), [id, refreshTick]);
   // Local optimistic copy of tracks so removing a track feels instant.
   const [localTracks, setLocalTracks] = useState<Track[] | null>(null);
+  // Per-playlist sort, persisted to localStorage so a return visit
+  // keeps whichever ordering the user picked. `playlist` = the
+  // original Tidal order (what the user / curator authored, which
+  // is meaningful for hand-crafted playlists where sequencing
+  // matters); `recent` = newest-added first, only useful on
+  // user-curated playlists where Tidal hands us the `created`
+  // timestamps; `alpha` / `artist` are conveniences for finding
+  // a song fast on bigger playlists.
+  const [sort, setSort] = useState<PlaylistSort>(() => loadSort(id));
+  useEffect(() => {
+    // Re-read the per-playlist preference when the user navigates
+    // between playlists. Without this, the initial-state value would
+    // stick across navigations and override whichever sort the user
+    // previously picked on the new playlist.
+    setSort(loadSort(id));
+  }, [id]);
+  useEffect(() => {
+    saveSort(id, sort);
+  }, [id, sort]);
   const toast = useToast();
 
-  const tracks = localTracks ?? playlist?.tracks ?? [];
+  const tracks = useMemo(() => {
+    const base = localTracks ?? playlist?.tracks ?? [];
+    return sortTracks(base, sort);
+  }, [localTracks, playlist?.tracks, sort]);
 
   // Warm the stream-manifest cache for every track on the playlist so
   // a click on any row skips the Tidal playbackinfo round-trip. Only
@@ -223,6 +250,7 @@ export function PlaylistDetail({ onDownload }: { onDownload: OnDownload }) {
               />
             )}
             <div className="ml-auto flex items-center gap-6">
+              <PlaylistSortMenu sort={sort} onSort={setSort} />
               {!playlist.owned && (
                 <AddToLibraryButton kind="playlist" id={playlist.id} />
               )}
@@ -276,7 +304,15 @@ export function PlaylistDetail({ onDownload }: { onDownload: OnDownload }) {
           tracks={tracks}
           onDownload={onDownload}
           onRemove={playlist.owned ? onRemove : undefined}
-          onReorder={playlist.owned ? onReorder : undefined}
+          // Reorder only makes sense in the original playlist order
+          // — dragging a row when the list is sorted alphabetically
+          // (or by date added) doesn't have a sensible mapping to an
+          // insert position in the underlying Tidal playlist.
+          // Switching the sort menu back to "Playlist order" re-
+          // enables it.
+          onReorder={
+            playlist.owned && sort === "playlist" ? onReorder : undefined
+          }
           source={{ type: "PLAYLIST", id: playlist.id }}
         />
       </div>
@@ -538,5 +574,140 @@ function DeletePlaylistButton({
         </DialogContent>
       </Dialog>
     </>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Sort
+// ---------------------------------------------------------------------------
+
+type PlaylistSort = "playlist" | "recent" | "alpha" | "artist";
+
+const SORT_OPTIONS: Array<{
+  value: PlaylistSort;
+  label: string;
+  icon: typeof ListOrdered;
+}> = [
+  { value: "playlist", label: "Playlist order", icon: ListOrdered },
+  { value: "recent", label: "Recently added", icon: Clock },
+  { value: "alpha", label: "Title (A–Z)", icon: ArrowDownAZ },
+  { value: "artist", label: "Artist (A–Z)", icon: ArrowDownAZ },
+];
+
+// Per-playlist persistence so a return visit keeps whichever sort the
+// user picked. Stored as `tideway:playlist-sort:<id>` so the value
+// can't bleed across playlists if the user has different preferences
+// for different collections.
+const SORT_STORAGE_PREFIX = "tideway:playlist-sort:";
+
+function loadSort(id: string): PlaylistSort {
+  if (!id || typeof window === "undefined") return "playlist";
+  try {
+    const raw = window.localStorage.getItem(SORT_STORAGE_PREFIX + id);
+    if (raw && SORT_OPTIONS.some((o) => o.value === raw)) {
+      return raw as PlaylistSort;
+    }
+  } catch {
+    // localStorage can throw in some sandboxes (Safari private). Treat
+    // as "no stored value" and fall through to the default.
+  }
+  return "playlist";
+}
+
+function saveSort(id: string, sort: PlaylistSort): void {
+  if (!id || typeof window === "undefined") return;
+  try {
+    if (sort === "playlist") {
+      window.localStorage.removeItem(SORT_STORAGE_PREFIX + id);
+    } else {
+      window.localStorage.setItem(SORT_STORAGE_PREFIX + id, sort);
+    }
+  } catch {
+    // Same Safari-private rationale — never fail the UI for storage.
+  }
+}
+
+function sortTracks(tracks: Track[], sort: PlaylistSort): Track[] {
+  if (sort === "playlist") return tracks;
+  // Stable sort by spreading first — Array.prototype.sort is stable
+  // on all engines we target, but the spread avoids mutating the
+  // upstream array (which would clobber the playlist owner's
+  // "original order" reference if they reorder later).
+  const copy = [...tracks];
+  if (sort === "recent") {
+    // Newest-added first. Tracks without an `added_at` (editorial
+    // playlists where Tidal doesn't expose per-entry timestamps)
+    // sink to the bottom in their original relative order.
+    copy.sort((a, b) => {
+      const ta = a.added_at ? Date.parse(a.added_at) : NaN;
+      const tb = b.added_at ? Date.parse(b.added_at) : NaN;
+      const aMissing = Number.isNaN(ta);
+      const bMissing = Number.isNaN(tb);
+      if (aMissing && bMissing) return 0;
+      if (aMissing) return 1;
+      if (bMissing) return -1;
+      return tb - ta;
+    });
+    return copy;
+  }
+  if (sort === "alpha") {
+    copy.sort((a, b) => a.name.localeCompare(b.name));
+    return copy;
+  }
+  if (sort === "artist") {
+    copy.sort((a, b) => {
+      const aArt = a.artists[0]?.name ?? "";
+      const bArt = b.artists[0]?.name ?? "";
+      const byArtist = aArt.localeCompare(bArt);
+      if (byArtist !== 0) return byArtist;
+      // Same artist → break ties by title so the per-artist clump
+      // stays human-readable instead of jumping around.
+      return a.name.localeCompare(b.name);
+    });
+    return copy;
+  }
+  return copy;
+}
+
+function PlaylistSortMenu({
+  sort,
+  onSort,
+}: {
+  sort: PlaylistSort;
+  onSort: (s: PlaylistSort) => void;
+}) {
+  const active = SORT_OPTIONS.find((o) => o.value === sort) ?? SORT_OPTIONS[0];
+  return (
+    <DropdownMenu>
+      <DropdownMenuTrigger asChild>
+        <button
+          className="flex flex-col items-center gap-1 text-muted-foreground transition-colors hover:text-foreground data-[state=open]:text-primary"
+          title="Sort tracks"
+          aria-label="Sort tracks"
+        >
+          <ArrowUpDown className="h-5 w-5" />
+          <div className="text-xs font-semibold">{active.label}</div>
+        </button>
+      </DropdownMenuTrigger>
+      <DropdownMenuContent align="end">
+        <DropdownMenuLabel>Sort by</DropdownMenuLabel>
+        <DropdownMenuSeparator />
+        {SORT_OPTIONS.map((opt) => {
+          const Icon = opt.icon;
+          const selected = opt.value === sort;
+          return (
+            <DropdownMenuItem
+              key={opt.value}
+              onSelect={() => onSort(opt.value)}
+              className="flex items-center gap-2"
+            >
+              <Icon className="h-4 w-4" />
+              <span className="flex-1">{opt.label}</span>
+              {selected && <Check className="h-4 w-4 text-primary" />}
+            </DropdownMenuItem>
+          );
+        })}
+      </DropdownMenuContent>
+    </DropdownMenu>
   );
 }
