@@ -17,7 +17,11 @@ import {
   DOWNLOAD_GATE_TOOLTIP,
   useSubscription,
 } from "@/hooks/useSubscription";
-import { effectiveFormatLabel, filterAvailableQualities } from "@/lib/quality";
+import {
+  effectiveFormatLabel,
+  filterAvailableQualities,
+  unionTrackMediaTags,
+} from "@/lib/quality";
 import { cn } from "@/lib/utils";
 
 /**
@@ -46,7 +50,20 @@ export function DownloadAlbumButton({
   // album. Picking Max on a non-hi-res album just downloads the
   // same FLAC the Lossless tier would; better to not offer the
   // illusion of a choice in the first place.
-  const qualities = filterAvailableQualities(allQualities, mediaTags);
+  //
+  // We aggregate the per-track media_tags here in addition to the
+  // album-level field because Tidal's album.media_tags is unreliable:
+  // it sometimes comes back empty even when individual tracks carry
+  // HIRES_LOSSLESS / LOSSLESS, and the fail-open behaviour of
+  // filterAvailableQualities then shows Max on releases where Max
+  // wouldn't give a different file. The union across tracks is the
+  // truth — if ANY track is HIRES_LOSSLESS, Max is real (the rest
+  // fall back to Lossless); if every track has only LOSSLESS, Max
+  // is the same FLAC. Truly lossy-only releases still carry no tags
+  // at any level, which preserves the existing fail-open path for
+  // them.
+  const effectiveTags = unionTrackMediaTags(mediaTags, tracks);
+  const qualities = filterAvailableQualities(allQualities, effectiveTags);
   const sub = useSubscription();
   const [open, setOpen] = useState(false);
 
@@ -115,7 +132,7 @@ export function DownloadAlbumButton({
         <DropdownMenuLabel>Download quality</DropdownMenuLabel>
         <DropdownMenuSeparator />
         {qualities.map((q) => {
-          const effective = effectiveFormatLabel(q.value, mediaTags);
+          const effective = effectiveFormatLabel(q.value, effectiveTags);
           return (
             <DropdownMenuItem
               key={q.value}

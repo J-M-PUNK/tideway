@@ -1,4 +1,4 @@
-import type { QualityOption } from "@/api/types";
+import type { QualityOption, Track } from "@/api/types";
 
 /**
  * Does this track/album benefit from the Max tier? Returns a short
@@ -57,4 +57,45 @@ export function filterAvailableQualities(
   return qualities.filter((q) =>
     q.value === "hi_res_lossless" ? !cdOnly : true,
   );
+}
+
+
+/**
+ * Union the album's media_tags with the per-track media_tags so the
+ * download menu's quality filter sees the truth. Tidal's
+ * album.media_tags is unreliable — it sometimes comes back empty even
+ * when individual tracks carry HIRES_LOSSLESS / LOSSLESS — and using
+ * just the album-level field caused the album-page download menu to
+ * offer Max on releases where Max doesn't deliver a different file.
+ *
+ * The union semantics are right for the "should we offer Max?"
+ * question:
+ *   - If ANY track is HIRES_LOSSLESS, Max is meaningful (you get a
+ *     real hi-res FLAC for that track; the rest fall back to
+ *     Lossless's CD-res FLAC).
+ *   - If every track has only LOSSLESS, Max is the same file as
+ *     Lossless and should be hidden.
+ *   - If nothing has any tags (truly lossy-only release), we return
+ *     an empty array so filterAvailableQualities falls through to its
+ *     existing fail-open behaviour — which preserves the surface area
+ *     of older fixes (e.g. Thriller's Atmos-only tagging where the
+ *     stereo lossless downmix is still real).
+ *
+ * Tags are normalised to upper-case in the output so callers don't
+ * have to.
+ */
+export function unionTrackMediaTags(
+  albumTags: string[] | undefined,
+  tracks: Pick<Track, "media_tags">[] | undefined,
+): string[] {
+  const out = new Set<string>();
+  for (const tag of albumTags ?? []) {
+    if (tag) out.add(tag.toUpperCase());
+  }
+  for (const t of tracks ?? []) {
+    for (const tag of t.media_tags ?? []) {
+      if (tag) out.add(tag.toUpperCase());
+    }
+  }
+  return Array.from(out);
 }
