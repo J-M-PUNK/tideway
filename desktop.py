@@ -659,6 +659,19 @@ def main(argv: Optional[list[str]] = None) -> int:
         # exits, so geometry has to be captured here, in the closing
         # event, while the window is still alive. Returning True lets
         # the close proceed unchanged.
+        #
+        # On Linux, the `closing` handler ALSO schedules a hard exit
+        # — see the watchdog block below. The v1.13.2 fix added a
+        # `closed` event handler that called `os._exit(0)` once
+        # pywebview reported the window was destroyed, but the Linux
+        # Flatpak user reported quitting still hangs. Most likely
+        # pywebview's WebKitGTK backend isn't emitting `closed` at
+        # all under the Flatpak sandbox — its event-bus binding to
+        # the underlying GTK destroy signal is brittle and a sandbox
+        # restriction (or the start() loop being stuck) can swallow
+        # it. The `closing` event is more reliable since it fires
+        # synchronously when pywebview itself processes the X-button
+        # click, before any of the GTK teardown begins.
         def _on_closing_win_linux() -> bool:
             _save_window_geometry()
             return True
@@ -668,15 +681,6 @@ def main(argv: Optional[list[str]] = None) -> int:
         except Exception:
             pass
 
-        # Linux-only force-exit. pywebview's WebKitGTK backend has a
-        # long-standing issue where `webview.start()` doesn't always
-        # return after the window is destroyed; the Flatpak sandbox
-        # makes this more reliable to hit, leaving the process alive
-        # with no UI and the user having to kill it from a terminal.
-        # The `closed` event still fires inside the stuck GTK loop, so
-        # we hook it, run the same graceful shutdown the post-start()
-        # path runs, and hard-exit. A guard makes it safe if start()
-        # *does* return naturally — the finally block's call is a no-op.
         if sys.platform.startswith("linux"):
             _shutdown_done = threading.Event()
 
@@ -690,16 +694,49 @@ def main(argv: Optional[list[str]] = None) -> int:
                     pass
 
             def _on_closed_linux() -> None:
+                # First-line defence: fires when pywebview successfully
+                # reports the window destroyed. The v1.13.2 fix.
                 _shutdown_once()
-                # os._exit (not sys.exit) so finalizers / atexit hooks
-                # can't reintroduce the hang they were trying to avoid
-                # — sounddevice's atexit Pa_Terminate has hung on
-                # Linux/Flatpak too, and at this point the window is
-                # already gone so the user has decided to quit.
                 os._exit(0)
 
             try:
                 window.events.closed += _on_closed_linux
+            except Exception:
+                pass
+
+            # Belt-and-suspenders watchdog: fires when the user clicks
+            # the X (which pywebview captures BEFORE talking to GTK at
+            # all), starts a background thread that gives the natural
+            # close path 1.5 seconds to complete, and then hard-exits
+            # regardless. If `closed` did fire and ran os._exit, we
+            # already exited and the watchdog timer never runs.
+            # If `closed` never fires (the v1.13.2-doesn't-work case),
+            # the timer runs and terminates the process.
+            #
+            # The brief grace period lets WebKitGTK finish its window
+            # destroy animation visibly, so the user sees the window
+            # disappear instead of the process flickering out
+            # mid-animation. 1500 ms is generous; we'd rather wait an
+            # extra second than ship another silent-hang.
+            def _force_exit_after_delay(delay_sec: float) -> None:
+                time.sleep(delay_sec)
+                _shutdown_once()
+                os._exit(0)
+
+            def _on_closing_linux_watchdog() -> bool:
+                threading.Thread(
+                    target=_force_exit_after_delay,
+                    args=(1.5,),
+                    daemon=True,
+                    name="quit-watchdog",
+                ).start()
+                # Allow the close to proceed — we return True so
+                # geometry / `closed` paths still get their normal
+                # behavior on every desktop where they DO work.
+                return True
+
+            try:
+                window.events.closing += _on_closing_linux_watchdog
             except Exception:
                 pass
 
