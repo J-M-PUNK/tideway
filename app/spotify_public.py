@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import sqlite3
 import threading
 import time
@@ -142,7 +143,21 @@ _db_path = user_data_dir() / "spotify_public_cache.db"
 #      monthly listeners going blank because his top-N tracks on
 #      Tidal are all feature credits). Wipe to force re-resolution
 #      under the new code paths.
-_CACHE_SCHEMA_VERSION = 4
+#   5: artist-search response-shape fix + feat-aware title match.
+#      _search_artist_by_name was reading items[N].item.data but
+#      Spotify's artist-search response puts the artist data at
+#      items[N].data directly (only track search has the `item`
+#      wrapper). Every fallback artist lookup silently returned
+#      None, so any artist whose top-N Tidal tracks were feature
+#      credits OR whose ISRCs didn't match got null monthly
+#      listeners. _resolve_canonical_track separately rejected any
+#      track whose Spotify title carried a feat. suffix the Tidal
+#      title didn't (Mac Miller's "Weekend" stored on Tidal,
+#      Spotify has "Weekend (feat. Miguel)"); the strict equality
+#      check capped playcount at None for such tracks. Wipe both
+#      track-playcount and artist-mapping rows so the corrected
+#      resolvers re-fill from scratch.
+_CACHE_SCHEMA_VERSION = 5
 
 
 def _db() -> sqlite3.Connection:
@@ -434,8 +449,17 @@ def _search_artist_by_name(name: str) -> Optional[str]:
         .get("items")
         or []
     )
+    # NOTE: Spotify's track-search response wraps each hit in an
+    # `item.data` envelope, but the artist-search response puts the
+    # artist data at `entry.data` directly (no `item` wrapper). We
+    # used to read `entry.item.data` for both and that silently
+    # produced None for every artist search, breaking the
+    # name-fallback path of `_resolve_artist_via_name_match` — every
+    # artist whose top-N Tidal tracks were feature credits (Justin
+    # Bieber, Mac Miller v2 entry, etc.) ended up with no Spotify
+    # mapping and so no monthly-listeners on the artist page.
     for entry in items:
-        item = (entry.get("item") or {}).get("data") or {}
+        item = entry.get("data") or {}
         uri = item.get("uri") or ""
         if not uri.startswith("spotify:artist:"):
             continue
@@ -959,6 +983,45 @@ def _search_track_candidates(query: str) -> list[tuple[str, str]]:
     return out
 
 
+_FEAT_SUFFIX_RE = re.compile(
+    # `(feat. Miguel)`, `[featuring X]`, `- ft Y`, etc. Anchored to
+    # whitespace so we don't eat a substring of the actual title.
+    # We deliberately do NOT strip version markers (Live / Remaster
+    # / Edit) — those mark real alternate masters with their own
+    # playcounts, and the strict-equality rejection of "Thriller
+    # (Live)" vs "Thriller" was the original intent of the title
+    # filter. Only the feat.-suffix mismatch was over-rejecting.
+    r"\s*[\(\[\-]\s*(?:feat|featuring|ft)[\.\s][^\)\]\-]*[\)\]]?",
+    re.IGNORECASE,
+)
+
+
+def _normalise_track_title(name: str) -> str:
+    """Strip feat. / featuring / ft. parentheticals, lowercase,
+    collapse whitespace. The result is what we compare across Tidal
+    and Spotify when picking the canonical track for playcount
+    lookup. See `_resolve_canonical_track` for why an exact compare
+    was too strict (Tidal stores "Weekend" where Spotify has
+    "Weekend (feat. Miguel)")."""
+    if not name:
+        return ""
+    cleaned = _FEAT_SUFFIX_RE.sub("", name)
+    return " ".join(cleaned.lower().split())
+
+
+def _track_titles_match(candidate: str, wanted: str) -> bool:
+    """True when two track titles refer to the same song after
+    normalisation. Order-insensitive: returns true if either side
+    contains the other after `feat.` and version-suffix stripping —
+    that covers both directions (Tidal title is a prefix of Spotify's,
+    or Spotify's is a prefix of Tidal's, both happen in practice)."""
+    cand_norm = _normalise_track_title(candidate)
+    want_norm = _normalise_track_title(wanted)
+    if not cand_norm or not want_norm:
+        return False
+    return cand_norm == want_norm
+
+
 def _track_primary_artist_name(payload: Mapping[str, Any]) -> str:
     """Pull the primary-artist display name out of a getTrack payload.
     Handles both shapes the GraphQL response has shipped — the newer
@@ -1018,7 +1081,17 @@ def _resolve_canonical_track(
         # always echo the same display name verbatim, and we want
         # to skip "Thriller (Live)" / "Thriller - Remastered" before
         # paying for a getTrack round trip.
-        if name.lower() != wanted_title:
+        #
+        # The strict-equality test rejects "Weekend (feat. Miguel)"
+        # when Tidal stores the title as plain "Weekend" — which is
+        # how Tidal renders most featured-collab tracks: the
+        # feature credit lives in the artists list, not the title.
+        # Spotify on the other hand often inlines the feat. in the
+        # title. Normalising both sides (drop `feat./featuring/ft.`
+        # parentheticals and any trailing `- Remastered` / `- Live`
+        # markers) lets us match the canonical track without losing
+        # the rejection on alt-versions.
+        if not _track_titles_match(name, wanted_title):
             continue
         try:
             payload = _song_info(tid)
