@@ -1,4 +1,6 @@
+import { useCallback, useState } from "react";
 import { ChevronDown, Download } from "lucide-react";
+import { api } from "@/api/client";
 import type { ContentKind } from "@/api/types";
 import { Button, type ButtonProps } from "@/components/ui/button";
 import {
@@ -14,7 +16,11 @@ import {
   DOWNLOAD_GATE_TOOLTIP,
   useSubscription,
 } from "@/hooks/useSubscription";
-import { effectiveFormatLabel, filterAvailableQualities } from "@/lib/quality";
+import {
+  effectiveFormatLabel,
+  filterAvailableQualities,
+  unionTrackMediaTags,
+} from "@/lib/quality";
 import { cn } from "@/lib/utils";
 
 interface Props {
@@ -50,8 +56,60 @@ export function DownloadButton({
   mediaTags,
 }: Props) {
   const allQualities = useQualities() ?? [];
-  const qualities = filterAvailableQualities(allQualities, mediaTags);
+  // Effective tags: start with what the caller passed; lazy-fetch the
+  // album detail on dropdown open to surface per-track tags when the
+  // album-level tags don't conclusively answer "is Max real here". The
+  // canonical bad case is Tidal returning an empty media_tags array at
+  // the album level on a CD-quality release — without the per-track
+  // union, filterAvailableQualities fails open and offers Max even
+  // though picking it would just deliver the same FLAC as Lossless.
+  const [resolvedTags, setResolvedTags] = useState<string[] | undefined>(
+    mediaTags,
+  );
+  const [fetched, setFetched] = useState(false);
+  const tagsAreConclusive = useCallback((tags: string[] | undefined) => {
+    // The filter only acts on LOSSLESS / HIRES_LOSSLESS. Any tag set
+    // that contains either of those is enough for the filter to make
+    // the right call. Empty / immersive-only / undefined isn't.
+    if (!tags || tags.length === 0) return false;
+    const upper = tags.map((t) => t.toUpperCase());
+    return upper.includes("HIRES_LOSSLESS") || upper.includes("LOSSLESS");
+  }, []);
   const sub = useSubscription();
+
+  const handleOpenChange = useCallback(
+    (open: boolean) => {
+      onOpenChange?.(open);
+      if (
+        !open ||
+        kind !== "album" ||
+        fetched ||
+        tagsAreConclusive(resolvedTags)
+      ) {
+        return;
+      }
+      setFetched(true);
+      // Lazy-resolve via the album detail endpoint. SWR-cached
+      // server-side and re-uses prefetch.album results, so this is a
+      // one-shot cost per album per session. On failure we leave the
+      // existing (probably empty) tags alone — the menu still works,
+      // it just offers Max when it shouldn't, exactly the pre-fix
+      // behaviour.
+      api
+        .album(id)
+        .then((detail) => {
+          setResolvedTags(
+            unionTrackMediaTags(detail.media_tags, detail.tracks),
+          );
+        })
+        .catch(() => {
+          /* leave resolvedTags as-is; menu degrades to album-only filter */
+        });
+    },
+    [onOpenChange, kind, id, fetched, resolvedTags, tagsAreConclusive],
+  );
+
+  const qualities = filterAvailableQualities(allQualities, resolvedTags);
 
   const stop = (e: React.SyntheticEvent) => {
     e.preventDefault();
@@ -74,7 +132,7 @@ export function DownloadButton({
   }
 
   return (
-    <DropdownMenu onOpenChange={onOpenChange}>
+    <DropdownMenu onOpenChange={handleOpenChange}>
       <DropdownMenuTrigger asChild onClick={stop}>
         <Button
           variant={variant}
@@ -99,7 +157,7 @@ export function DownloadButton({
         <DropdownMenuLabel>Download quality</DropdownMenuLabel>
         <DropdownMenuSeparator />
         {qualities.map((q) => {
-          const effective = effectiveFormatLabel(q.value, mediaTags);
+          const effective = effectiveFormatLabel(q.value, resolvedTags);
           return (
             <DropdownMenuItem
               key={q.value}

@@ -83,6 +83,13 @@ export function MediaListRow({
             kind={item.kind}
             id={item.id}
             onPick={onDownload}
+            // Forward the album-level media_tags so the quality menu
+            // hides Max on releases Tidal flags as Lossless-only. Without
+            // this prop, filterAvailableQualities fails open and offered
+            // Max on every row in list view, including albums where Max
+            // would just deliver the same FLAC as High. Playlists carry
+            // no album-level tags, so this is a no-op for them.
+            mediaTags={item.kind === "album" ? item.media_tags : undefined}
             iconOnly
             variant="ghost"
             size="sm"
