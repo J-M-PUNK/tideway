@@ -183,6 +183,21 @@ function Section({
             ? "grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 min-[1920px]:grid-cols-7 min-[2400px]:grid-cols-8"
             : "grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6 min-[1920px]:grid-cols-7 min-[2400px]:grid-cols-8",
         )}
+        // When a single-row section has fewer items than the
+        // breakpoint's column count (Custom mixes typically returns
+        // 5-6 items but the breakpoint goes up to 8), the trailing
+        // grid columns sit empty and the row looks like it's only
+        // half-filling the container. Override to a tight N-column
+        // grid so the cards expand to fill the available width.
+        // Capped at columnCount so wider breakpoints still respect
+        // the responsive sizing chain.
+        style={
+          singleRow && visible.length > 0 && visible.length < columnCount
+            ? {
+                gridTemplateColumns: `repeat(${visible.length}, minmax(0, 1fr))`,
+              }
+            : undefined
+        }
       >
         {visible.map((it, idx) => (
           <PageItemCard
