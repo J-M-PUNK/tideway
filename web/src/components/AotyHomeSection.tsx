@@ -1,14 +1,16 @@
 import { useMemo } from "react";
 import { Link } from "react-router-dom";
-import { AlertTriangle, Music, Star } from "lucide-react";
+import { AlertTriangle, Heart, Music, Star } from "lucide-react";
 import type { AotyAlbum, Album } from "@/api/types";
 import { useApi } from "@/hooks/useApi";
 import { useColumnCount } from "@/hooks/useColumnCount";
+import { useFavorites } from "@/hooks/useFavorites";
+import { useHeartPop } from "@/components/HeartButton";
 import { api } from "@/api/client";
 import { Grid, ViewMoreLink } from "@/components/Grid";
 import { GridSkeleton } from "@/components/Skeletons";
 import { PlayMediaButton } from "@/components/PlayMediaButton";
-import { imageProxy } from "@/lib/utils";
+import { cn, imageProxy } from "@/lib/utils";
 
 /**
  * Two AOTY-backed rows on the Home page: the year's highest-user-rated
@@ -229,6 +231,10 @@ export function AotyCard({
         <div className="absolute bottom-2 left-2 opacity-0 transition-all duration-200 ease-out group-hover:opacity-100 focus-within:opacity-100">
           <PlayMediaButton kind="album" id={album.id} className="h-10 w-10" />
         </div>
+        <AotyHeart
+          albumId={album.id}
+          className="absolute bottom-2 right-2 opacity-0 transition-all duration-200 ease-out group-hover:opacity-100 focus-within:opacity-100"
+        />
       </div>
       <div className="min-w-0">
         <div className="truncate font-semibold">{album.name}</div>
@@ -240,5 +246,50 @@ export function AotyCard({
         </div>
       </div>
     </Link>
+  );
+}
+
+/**
+ * Self-contained heart button for the AOTY card overlay. Mirrors the
+ * InlineHeart used inside MediaCard — the AOTY rows skip MediaCard
+ * because they need the AOTY score / must-hear overlays, but they
+ * still want the same hover-reveal like-toggle every other album
+ * card on the app has. Stops propagation so the click doesn't follow
+ * the parent Link to /album/<id>.
+ */
+function AotyHeart({
+  albumId,
+  className,
+}: {
+  albumId: string;
+  className?: string;
+}) {
+  const favs = useFavorites();
+  const liked = favs.has("album", albumId);
+  const popping = useHeartPop(liked);
+  return (
+    <button
+      type="button"
+      onClick={(e) => {
+        e.preventDefault();
+        e.stopPropagation();
+        void favs.toggle("album", albumId);
+      }}
+      aria-pressed={liked}
+      aria-label={liked ? "Unlike album" : "Like album"}
+      title={liked ? "Unlike album" : "Like album"}
+      className={cn(
+        "flex h-10 w-10 items-center justify-center rounded-full bg-black/70 text-white shadow-lg transition-colors hover:bg-black/90",
+        className,
+      )}
+    >
+      <Heart
+        className={cn(
+          "h-5 w-5",
+          liked && "fill-primary stroke-primary",
+          popping && "animate-heart-pop",
+        )}
+      />
+    </button>
   );
 }
