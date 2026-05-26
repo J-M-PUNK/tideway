@@ -317,6 +317,19 @@ export function usePlayer() {
   const lastSeqRef = useRef(-1);
   const expectedTrackIdRef = useRef<string | null>(null);
   const endOfTrackPendingRef = useRef(false);
+  // Set to true while an `endOfQueueAdvance` is awaiting the
+  // Artist Radio fetch. Stops a second "ended" SSE event from
+  // re-entering the takeover concurrently — the network call to
+  // `api.artistRadio` takes 50-300ms during which the SSE can fire
+  // another "ended" snapshot (or the user can hit Next manually).
+  // Without the guard the player has been observed to play exactly
+  // one radio track after the album finishes and then hang at its
+  // end, which is consistent with two parallel takeovers each
+  // appending the same radio list and racing on the resulting
+  // setState — the second commit lands AFTER the first
+  // pickNextIndex read it, leaving advanceRef stranded with a
+  // stale queue snapshot.
+  const takeoverInProgressRef = useRef(false);
   // advanceRef is set by a later effect so the SSE "ended" handler can
   // call pickNextIndex against the freshest state without reinstalling
   // the subscription every queue change.
@@ -854,33 +867,44 @@ export function usePlayer() {
   // control which "last track" seeds the takeover.
   const endOfQueueAdvance = useCallback(
     async (cur: PlayerState) => {
-      const stopAndClear = () => {
-        api.player.stop().catch(() => {});
-        setState((s) => ({
-          ...s,
-          playing: false,
-          loading: false,
-          currentTime: 0,
-          queueIndex: -1,
-          track: null,
-        }));
-      };
-      const fallbackOff = () => {
-        if (cur.source?.type === "ALBUM" && cur.queue.length > 0) {
-          loadAtIndexPaused(0);
-        } else {
-          stopAndClear();
-        }
-      };
+      // Re-entry guard. See `takeoverInProgressRef` for the long
+      // version; the short version is a second concurrent takeover
+      // races with the first one's setState commit and the result is
+      // a queue the auto-advance reads as "I'm at the end" even
+      // though radio tracks were appended.
+      if (takeoverInProgressRef.current) return;
+      takeoverInProgressRef.current = true;
+      try {
+        const stopAndClear = () => {
+          api.player.stop().catch(() => {});
+          setState((s) => ({
+            ...s,
+            playing: false,
+            loading: false,
+            currentTime: 0,
+            queueIndex: -1,
+            track: null,
+          }));
+        };
+        const fallbackOff = () => {
+          if (cur.source?.type === "ALBUM" && cur.queue.length > 0) {
+            loadAtIndexPaused(0);
+          } else {
+            stopAndClear();
+          }
+        };
 
-      if (continuePlayingRef.current) {
-        const takeover = await fetchRadioTakeover(cur);
-        if (takeover) {
-          playAtIndex(takeover.index, takeover.newQueue, takeover.source);
-          return;
+        if (continuePlayingRef.current) {
+          const takeover = await fetchRadioTakeover(cur);
+          if (takeover) {
+            playAtIndex(takeover.index, takeover.newQueue, takeover.source);
+            return;
+          }
         }
+        fallbackOff();
+      } finally {
+        takeoverInProgressRef.current = false;
       }
-      fallbackOff();
     },
     [playAtIndex, loadAtIndexPaused, continuePlayingRef],
   );
