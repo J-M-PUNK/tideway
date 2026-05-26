@@ -36,6 +36,14 @@ export interface Track {
    *  monthly listeners). Null/missing for obscure catalog entries
    *  that lack an ISRC registration. */
   isrc?: string | null;
+  /** ISO timestamp the track was added to the containing playlist.
+   *  Only populated when the Track came through a playlist detail
+   *  fetch and Tidal returned a `created` value (user-curated
+   *  playlists). Null on editorial / collaborative playlists where
+   *  Tidal doesn't expose per-entry timestamps, and on any Track
+   *  fetched outside of a playlist context. Drives PlaylistDetail's
+   *  "Recently added" sort option. */
+  added_at?: string | null;
 }
 
 export interface Album {

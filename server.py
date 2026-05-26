@@ -9102,6 +9102,78 @@ def mix_detail(mix_id: str) -> dict:
     return result
 
 
+def _fetch_playlist_items_with_added_at(
+    playlist_id: str, playlist
+) -> list[dict]:
+    """Walk Tidal's playlist /items endpoint and merge each track's
+    `created` timestamp (when the user added it to the playlist) into
+    the track dict.
+
+    tidalapi's `Playlist.tracks()` parses the raw response into Track
+    objects and drops the per-item wrapper, so `dateAdded` is
+    inaccessible through the regular path. We make the same request
+    by hand here so the playlist-detail page can offer "Recently
+    added" as a sort option (matching what we already have for liked
+    albums / tracks). Pages 100 items at a time — same limit
+    tidalapi uses internally.
+
+    `playlist` is the already-fetched tidalapi Playlist object. We
+    take it as a parameter (instead of looking it up) so the caller's
+    one `tidal.session.playlist(id)` call stays the only one — the
+    detail endpoint's cache + tests expect a single lookup per call.
+
+    Returns a list of `track_to_dict` shapes with an extra `added_at`
+    field (ISO timestamp string, null when Tidal didn't return one).
+    Falls back to `playlist.tracks()` when the raw fetch fails so the
+    page still renders.
+    """
+    out: list[dict] = []
+    page_size = 100
+    offset = 0
+    while True:
+        try:
+            resp = tidal.session.request.request(
+                "GET",
+                f"playlists/{playlist_id}/items",
+                params={"limit": page_size, "offset": offset},
+            )
+            payload = resp.json()
+        except Exception:
+            # Raw endpoint failed (auth expired / rate limit /
+            # network drop). Fall back to the plain tracks() path so
+            # the page still loads without added_at.
+            try:
+                tracks = list(playlist.tracks())
+            except Exception:
+                tracks = []
+            return [
+                {**track_to_dict(t), "added_at": None} for t in tracks
+            ]
+
+        items = payload.get("items") or []
+        if not items:
+            break
+        for entry in items:
+            raw = (entry or {}).get("item")
+            if not raw:
+                continue
+            try:
+                # tidalapi's parser converts a raw track dict into a
+                # Track. We reuse it here so track_to_dict stays the
+                # single source of truth for the response shape.
+                track_obj = tidal.session.parse_track(raw)
+            except Exception:
+                continue
+            track_dict = track_to_dict(track_obj)
+            created = (entry or {}).get("created")
+            track_dict["added_at"] = str(created) if created else None
+            out.append(track_dict)
+        if len(items) < page_size:
+            break
+        offset += page_size
+    return out
+
+
 @app.get("/api/playlist/{playlist_id}")
 def playlist_detail(playlist_id: str) -> dict:
     _require_auth()
@@ -9114,12 +9186,15 @@ def playlist_detail(playlist_id: str) -> dict:
     except Exception as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     try:
-        tracks = list(playlist.tracks())
+        tracks = _fetch_playlist_items_with_added_at(playlist_id, playlist)
     except Exception:
+        # Top-level safety net: any unexpected failure in the
+        # raw-items path falls back to an empty list so the page
+        # still renders the header and the user can retry.
         tracks = []
     result = {
         **playlist_to_dict(playlist),
-        "tracks": [track_to_dict(t) for t in tracks],
+        "tracks": tracks,
     }
     _store_detail_cache(cache_key, result)
     return result
