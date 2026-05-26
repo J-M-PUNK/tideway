@@ -1869,8 +1869,13 @@ class PCMPlayer:
         if self._local_lookup is not None:
             local_path = self._local_lookup(track_id)
             if local_path and os.path.exists(local_path):
-                info = _probe_local_stream_info(local_path)
-                return (local_path, None, info or StreamInfo(source="local"), {})
+                info, duration_s = _probe_local_stream_info(local_path)
+                return (
+                    local_path,
+                    duration_s,
+                    info or StreamInfo(source="local"),
+                    {},
+                )
 
         session = self._session_getter()
         if quality and self._quality_clamp is not None:
@@ -3512,17 +3517,29 @@ def _build_source(
     return SegmentReader(spec, prefetched=prefetched)
 
 
-def _probe_local_stream_info(path: str) -> Optional[StreamInfo]:
+def _probe_local_stream_info(
+    path: str,
+) -> tuple[Optional[StreamInfo], Optional[float]]:
+    """Read codec/duration metadata for a local file. Returns
+    `(info, duration_seconds)`; either or both can be None when
+    mutagen can't read the file.
+
+    The duration is what makes seek work on local files. Before
+    this returned just the StreamInfo, `_resolve_source` passed
+    `None` for duration to the player, which left
+    `_current_duration_ms = 0` and made `PCMPlayer.seek` bail at
+    its `duration_ms <= 0` guard — the user dragged the scrubber
+    and the audio kept playing wherever it was."""
     try:
         from mutagen import File as MutagenFile  # type: ignore
     except Exception:
-        return None
+        return None, None
     try:
         m = MutagenFile(path)
     except Exception:
-        return None
+        return None, None
     if m is None or getattr(m, "info", None) is None:
-        return None
+        return None, None
     info = m.info
     codec: Optional[str] = None
     mime_list = getattr(info, "mime", None) or []
@@ -3532,7 +3549,12 @@ def _probe_local_stream_info(path: str) -> Optional[StreamInfo]:
         ext = os.path.splitext(path)[1].lstrip(".").lower()
         codec = _normalize_codec(ext)
     rg = _read_local_replaygain(m)
-    return StreamInfo(
+    raw_length = getattr(info, "length", None)
+    try:
+        duration_s = float(raw_length) if raw_length else None
+    except (TypeError, ValueError):
+        duration_s = None
+    stream_info = StreamInfo(
         source="local",
         codec=codec,
         bit_depth=_safe_int(getattr(info, "bits_per_sample", None)),
@@ -3542,6 +3564,7 @@ def _probe_local_stream_info(path: str) -> Optional[StreamInfo]:
         album_replay_gain_db=rg.album_gain_db,
         album_peak=rg.album_peak,
     )
+    return stream_info, duration_s
 
 
 def _read_local_replaygain(m) -> ReplayGainTags:
