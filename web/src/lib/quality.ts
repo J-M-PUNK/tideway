@@ -59,7 +59,6 @@ export function filterAvailableQualities(
   );
 }
 
-
 /**
  * Union the album's media_tags with the per-track media_tags so the
  * download menu's quality filter sees the truth. Tidal's

@@ -152,9 +152,9 @@ describe("unionTrackMediaTags", () => {
     // existing behaviour for those.
     expect(unionTrackMediaTags(undefined, undefined)).toEqual([]);
     expect(unionTrackMediaTags([], [])).toEqual([]);
-    expect(
-      unionTrackMediaTags([], [_track(undefined), _track([])]),
-    ).toEqual([]);
+    expect(unionTrackMediaTags([], [_track(undefined), _track([])])).toEqual(
+      [],
+    );
   });
 
   it("normalises every tag to upper case", () => {
@@ -181,10 +181,7 @@ describe("unionTrackMediaTags", () => {
     // filter fail-open, showing Max. Now the per-track LOSSLESS
     // shows up in the union and filterAvailableQualities hides Max.
     expect(
-      unionTrackMediaTags(
-        [],
-        [_track(["LOSSLESS"]), _track(["LOSSLESS"])],
-      ),
+      unionTrackMediaTags([], [_track(["LOSSLESS"]), _track(["LOSSLESS"])]),
     ).toEqual(["LOSSLESS"]);
   });
 
