@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 
-import type { QualityOption } from "@/api/types";
-import { effectiveFormatLabel, filterAvailableQualities } from "./quality";
+import type { QualityOption, Track } from "@/api/types";
+import {
+  effectiveFormatLabel,
+  filterAvailableQualities,
+  unionTrackMediaTags,
+} from "./quality";
 
 const ALL_QUALITIES: QualityOption[] = [
   {
@@ -131,5 +135,71 @@ describe("filterAvailableQualities", () => {
     expect(
       values(filterAvailableQualities(ALL_QUALITIES, ["lossless"])),
     ).toEqual(["low_96k", "low_320k", "high_lossless"]);
+  });
+});
+
+// Helper: build a stub Track with only the field unionTrackMediaTags
+// reads. Casting through unknown so we don't have to spell out every
+// required Track field for a unit test that touches one.
+function _track(tags: string[] | undefined): Pick<Track, "media_tags"> {
+  return { media_tags: tags } as Pick<Track, "media_tags">;
+}
+
+describe("unionTrackMediaTags", () => {
+  it("returns an empty array when nothing has any tags", () => {
+    // Truly lossy-only release: filterAvailableQualities will then
+    // fall through its empty-tags fail-open path, preserving the
+    // existing behaviour for those.
+    expect(unionTrackMediaTags(undefined, undefined)).toEqual([]);
+    expect(unionTrackMediaTags([], [])).toEqual([]);
+    expect(unionTrackMediaTags([], [_track(undefined), _track([])])).toEqual(
+      [],
+    );
+  });
+
+  it("normalises every tag to upper case", () => {
+    expect(
+      unionTrackMediaTags(["lossless"], [_track(["hires_lossless"])]).sort(),
+    ).toEqual(["HIRES_LOSSLESS", "LOSSLESS"]);
+  });
+
+  it("includes a HIRES_LOSSLESS tag from any track in the album union", () => {
+    // The motivating case for the union path: album.media_tags is
+    // empty (Tidal didn't surface anything at the album level) but
+    // one track is hi-res, so Max IS meaningful and shouldn't be
+    // hidden.
+    expect(
+      unionTrackMediaTags(
+        [],
+        [_track(["LOSSLESS"]), _track(["HIRES_LOSSLESS"])],
+      ).sort(),
+    ).toEqual(["HIRES_LOSSLESS", "LOSSLESS"]);
+  });
+
+  it("returns only LOSSLESS when every track and the album are CD-only", () => {
+    // This is the bug fix: previously album.media_tags=[] left the
+    // filter fail-open, showing Max. Now the per-track LOSSLESS
+    // shows up in the union and filterAvailableQualities hides Max.
+    expect(
+      unionTrackMediaTags([], [_track(["LOSSLESS"]), _track(["LOSSLESS"])]),
+    ).toEqual(["LOSSLESS"]);
+  });
+
+  it("de-duplicates tags across album and per-track sources", () => {
+    expect(
+      unionTrackMediaTags(
+        ["LOSSLESS"],
+        [_track(["LOSSLESS"]), _track(["LOSSLESS"])],
+      ),
+    ).toEqual(["LOSSLESS"]);
+  });
+
+  it("filters falsy tag entries out (defensive against bad upstream data)", () => {
+    expect(
+      unionTrackMediaTags(
+        ["", "LOSSLESS"],
+        [_track(["", "HIRES_LOSSLESS"])],
+      ).sort(),
+    ).toEqual(["HIRES_LOSSLESS", "LOSSLESS"]);
   });
 });
