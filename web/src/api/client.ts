@@ -50,14 +50,29 @@ import type {
 // the OS's TCP timeout (~30s–2min on Windows), which makes the UI look
 // frozen after a drop. 15s is generous enough that slow-but-alive
 // Tidal endpoints still succeed while dropped connections fail fast.
+// Known-slow endpoints (server-side fan-outs that take ~18s+ cold)
+// pass an opts.timeoutMs override; see `chartTopTracksResolved`.
 const DEFAULT_TIMEOUT_MS = 15_000;
 
-async function req<T>(path: string, init?: RequestInit): Promise<T> {
+/** Optional per-call overrides for `req()`. */
+interface ReqOptions {
+  /** Override the default 15-second request timeout. Use for
+   *  endpoints documented to take longer than 15s on a cold call
+   *  (currently `chart-top-tracks-resolved` at ~18s). */
+  timeoutMs?: number;
+}
+
+async function req<T>(
+  path: string,
+  init?: RequestInit,
+  opts?: ReqOptions,
+): Promise<T> {
   // Compose the caller's AbortSignal (if any) with our timeout so we
   // respect both. AbortSignal.any is available in every modern browser
   // we target; falling back to the timeout alone keeps behavior sane
   // on the rare UA where it isn't.
-  const timeoutSignal = AbortSignal.timeout(DEFAULT_TIMEOUT_MS);
+  const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const timeoutSignal = AbortSignal.timeout(timeoutMs);
   const signal =
     init?.signal && typeof AbortSignal.any === "function"
       ? AbortSignal.any([init.signal, timeoutSignal])
@@ -293,7 +308,17 @@ export const api = {
     /** Last.fm top tracks pre-resolved to Tidal Track objects. One
      *  round-trip instead of the N+1 resolve-on-client pattern. */
     chartTopTracksResolved: (limit = 50) =>
-      req<Track[]>(`/api/lastfm/chart/top-tracks-resolved?limit=${limit}`),
+      // Cold-load takes ~18s server-side (Last.fm chart fetch + N
+      // parallel Tidal search resolves for each entry). The default
+      // 15s timeout aborts before the server finishes, so the
+      // Popular Tracks tab always errored on first load. The
+      // resolved list is cached for an hour after that first
+      // resolve, so the 60s budget is paid at most once per hour.
+      req<Track[]>(
+        `/api/lastfm/chart/top-tracks-resolved?limit=${limit}`,
+        undefined,
+        { timeoutMs: 60_000 },
+      ),
     chartTopTags: (limit = 50) =>
       req<LastFmChartTag[]>(`/api/lastfm/chart/top-tags?limit=${limit}`),
     nowPlaying: (track: {
