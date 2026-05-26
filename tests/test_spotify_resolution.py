@@ -600,18 +600,22 @@ def test_search_limit_is_widened(isolated_cache, fake_clients):
 
 def _artist_search_payload(*candidates: dict) -> dict:
     """Build a queryV2 artist-search response. Each candidate is
-    `{"id": "<spotify_artist_id>", "name": "<display name>"}`."""
+    `{"id": "<spotify_artist_id>", "name": "<display name>"}`.
+
+    The artist-search response shape has the candidate at
+    `items[N].data` (no `item` wrapper) — see the
+    `_search_artist_by_name` shape note. We mirror that here so
+    the test fixture matches the real Spotify payload structure
+    instead of papering over the resolver bug."""
     return {
         "data": {
             "searchV2": {
                 "artists": {
                     "items": [
                         {
-                            "item": {
-                                "data": {
-                                    "uri": f"spotify:artist:{c['id']}",
-                                    "profile": {"name": c["name"]},
-                                }
+                            "data": {
+                                "uri": f"spotify:artist:{c['id']}",
+                                "profile": {"name": c["name"]},
                             }
                         }
                         for c in candidates
@@ -701,3 +705,60 @@ def test_artist_name_search_rejects_non_matching_results(
         "match exactly — should have returned None"
     )
     artist.get_artist.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# _track_titles_match — featured-suffix-aware comparison
+# ---------------------------------------------------------------------------
+
+
+def test_track_titles_match_strips_feat_suffix():
+    """Tidal stores featured collabs as plain titles + artists list;
+    Spotify often inlines `(feat. X)` into the title. The strict
+    equality check was rejecting Mac Miller's "Weekend" against
+    Spotify's "Weekend (feat. Miguel)" and capping the playcount
+    at None. The normalisation now matches them."""
+    assert spotify_public._track_titles_match(
+        "Weekend (feat. Miguel)", "Weekend"
+    )
+    assert spotify_public._track_titles_match(
+        "Weekend", "Weekend (feat. Miguel)"
+    )
+    assert spotify_public._track_titles_match(
+        "Track (featuring Other Artist)", "Track"
+    )
+    assert spotify_public._track_titles_match("Title - ft. Other", "Title")
+
+
+def test_track_titles_match_still_rejects_alt_versions():
+    """The version-marker rejection is the original intent of the
+    title filter — Thriller (Live) is a different recording with its
+    own playcount, and matching it to plain "Thriller" would surface
+    the wrong number on the artist page. Make sure the looser feat.
+    suffix path doesn't accidentally relax Live / Remaster /
+    Edit too."""
+    assert not spotify_public._track_titles_match(
+        "Thriller (Live)", "Thriller"
+    )
+    assert not spotify_public._track_titles_match(
+        "Hello - 2014 Remaster", "Hello"
+    )
+    assert not spotify_public._track_titles_match(
+        "Song (Radio Edit)", "Song"
+    )
+
+
+def test_track_titles_match_rejects_unrelated_titles():
+    """The matcher must not be so loose that any title containing
+    the wanted title's words passes ("Weekend Wars" vs "Weekend")."""
+    assert not spotify_public._track_titles_match("Weekend Wars", "Weekend")
+    assert not spotify_public._track_titles_match("Hello World", "Hello")
+    assert not spotify_public._track_titles_match("Self", "Self Care")
+
+
+def test_track_titles_match_handles_empty_input():
+    """Defensive: a missing title on either side falls back to no
+    match (rather than crashing or returning a vacuous True)."""
+    assert not spotify_public._track_titles_match("", "Title")
+    assert not spotify_public._track_titles_match("Title", "")
+    assert not spotify_public._track_titles_match("", "")
