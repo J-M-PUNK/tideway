@@ -88,6 +88,8 @@ def stub_player(monkeypatch):
     server.settings.eq_bypass = False
     server.settings.eq_enabled = False
     server.settings.eq_bands = []
+    server.settings.eq_parametric_bands = []
+    server.settings.eq_preamp = None
     server.settings.eq_active_profile_id = ""
     server.settings.crossfeed_amount = 0
     server.settings.exclusive_mode = True
@@ -156,10 +158,29 @@ def test_not_bit_perfect_with_eq_active(stub_player):
     import server
     server.settings.eq_mode = "manual"
     server.settings.eq_enabled = True
-    server.settings.eq_bands = [1.0] * 10
+    server.settings.eq_parametric_bands = [
+        {"type": "PK", "freq": 1000.0, "gain": 1.0, "q": 1.0, "enabled": True}
+    ]
     out = server.player_signal_path()
     assert out["bit_perfect"] is False
     assert out["eq"]["active"] is True
+
+
+def test_flat_manual_bands_stay_bit_perfect(stub_player):
+    """A seeded-but-flat parametric layout (all 0 dB) doesn't touch the
+    audio, so it must not flip the bit-perfect badge off."""
+    import server
+
+    server.settings.eq_mode = "manual"
+    server.settings.eq_enabled = True
+    server.settings.eq_parametric_bands = [
+        {"type": "LSC", "freq": 105.0, "gain": 0.0, "q": 0.7, "enabled": True},
+        {"type": "PK", "freq": 1000.0, "gain": 0.0, "q": 1.0, "enabled": True},
+        {"type": "HSC", "freq": 10000.0, "gain": 0.0, "q": 0.7, "enabled": True},
+    ]
+    out = server.player_signal_path()
+    assert out["eq"]["active"] is False
+    assert out["bit_perfect"] is True
 
 
 def test_eq_bypass_keeps_bit_perfect(stub_player):
@@ -167,7 +188,9 @@ def test_eq_bypass_keeps_bit_perfect(stub_player):
     import server
     server.settings.eq_mode = "manual"
     server.settings.eq_enabled = True
-    server.settings.eq_bands = [1.0] * 10
+    server.settings.eq_parametric_bands = [
+        {"type": "PK", "freq": 1000.0, "gain": 1.0, "q": 1.0, "enabled": True}
+    ]
     server.settings.eq_bypass = True
     out = server.player_signal_path()
     assert out["bit_perfect"] is True

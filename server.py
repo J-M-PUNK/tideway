@@ -45,6 +45,14 @@ from app import aoty as aoty_module
 from app import aoty_resolver
 from app import deezer_import
 from app import global_keys as global_keys_mod
+from app.audio.eq import (
+    default_parametric_bands,
+    manual_eq_alters_audio,
+    manual_eq_config,
+    MANUAL_GAIN_ABS_MAX_DB,
+    parametric_presets,
+    parse_parametric_bands,
+)
 from app.audio.macos_now_playing import MacOSNowPlayingBridge
 from app.audio.player import PCMPlayer
 from app import playlist_import
@@ -4887,9 +4895,21 @@ class _PlayerMutedRequest(BaseModel):
     muted: bool
 
 
+class _ParametricBandModel(BaseModel):
+    # One manual parametric EQ band. `type` is PK / LSC / HSC.
+    # Range validation (freq/gain/q bounds, type membership) happens
+    # in the handler via `parametric_band_from_dict` so the error
+    # message matches the engine's own bounds — one source of truth.
+    type: str
+    freq: float
+    gain: float
+    q: float
+    enabled: bool = True
+
+
 class _PlayerEqRequest(BaseModel):
     # Empty list disables EQ entirely.
-    bands: list[float]
+    bands: list[_ParametricBandModel]
     preamp: Optional[float] = None
 
 
@@ -4989,10 +5009,20 @@ def _native_player() -> PCMPlayer:
                 except Exception:
                     log = logging.getLogger("autoeq.bootstrap")
                     log.exception("autoeq profile restore failed")
-            elif settings.eq_enabled and settings.eq_bands:
-                _pcm_player_singleton.apply_equalizer(
-                    settings.eq_bands, preamp=settings.eq_preamp
-                )
+            elif settings.eq_enabled and settings.eq_parametric_bands:
+                # Guarded like the profile restore above: a persisted
+                # band that fails validation (hand-edited file, bounds
+                # changed across versions) must degrade to a flat EQ,
+                # not abort the bootstrap — the device / crossfeed /
+                # ReplayGain restores below still have to run.
+                try:
+                    _pcm_player_singleton.apply_equalizer(
+                        settings.eq_parametric_bands,
+                        preamp=settings.eq_preamp,
+                    )
+                except ValueError:
+                    log = logging.getLogger("eq.bootstrap")
+                    log.exception("manual EQ restore failed")
             # Restore A/B bypass flag (Phase 4) — `apply_equalizer`
             # / `apply_equalizer_profile` above don't touch it, so
             # the persisted bypass value gets re-applied on top.
@@ -5433,7 +5463,13 @@ def player_signal_path() -> dict:
     eq_mode = settings.eq_mode
     eq_bypass = settings.eq_bypass
     eq_profile = settings.eq_active_profile_id or None
-    if eq_mode == "manual" and settings.eq_bands and settings.eq_enabled:
+    if (
+        eq_mode == "manual"
+        and settings.eq_enabled
+        and manual_eq_alters_audio(
+            settings.eq_parametric_bands, settings.eq_preamp
+        )
+    ):
         eq_active = not eq_bypass
     elif eq_mode == "profile" and eq_profile:
         eq_active = not eq_bypass
@@ -5800,31 +5836,50 @@ def player_muted(req: _PlayerMutedRequest) -> dict:
 
 @app.get("/api/player/eq")
 def player_eq_state() -> dict:
-    """Current EQ: persisted bands + preamp + enabled flag + the static
-    list of presets + band frequencies so the frontend can render
-    sliders.
-
-    The active engine reports its own band layout + presets. The PCM
-    engine's stub matches VLC's 10-band shape so the slider UI keeps
-    rendering; presets will be empty until Phase 5 ships.
-    """
+    """Current manual parametric EQ: persisted bands + preamp +
+    enabled flag, the editable bounds / allowed filter types so the
+    UI clamps to the same ranges the server validates, and the
+    parametric presets for the preset row."""
     _require_local_access()
     return {
         "enabled": settings.eq_enabled,
-        "bands": list(settings.eq_bands),
+        "bands": list(settings.eq_parametric_bands),
         "preamp": settings.eq_preamp,
-        "band_count": PCMPlayer.eq_bands_count(),
-        "frequencies": PCMPlayer.eq_band_frequencies(),
-        "presets": PCMPlayer.eq_presets(),
+        "config": manual_eq_config(),
+        # Starting layout the editor seeds when the user has no saved
+        # bands yet — grabbable flat nodes instead of an empty graph.
+        "default_bands": [b.to_dict() for b in default_parametric_bands()],
+        "presets": parametric_presets(),
     }
+
+
+def _validated_eq_request(req: _PlayerEqRequest) -> list:
+    """Coerce + range-validate the request's bands and preamp against
+    the engine's own bounds, returning ParametricBand objects. Raises
+    HTTP 400 (not 500) on a bad value so the client gets a useful
+    message instead of a stack trace."""
+    # `not <=` instead of `>`: NaN compares False both ways, so the
+    # `>` form would accept a NaN preamp (json/Pydantic both pass the
+    # bare literal through) and 10**(nan/20) would silence the audio.
+    if req.preamp is not None and not (
+        abs(req.preamp) <= MANUAL_GAIN_ABS_MAX_DB
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=f"preamp {req.preamp} dB exceeds ±{MANUAL_GAIN_ABS_MAX_DB} dB",
+        )
+    try:
+        return parse_parametric_bands([b.model_dump() for b in req.bands])
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/api/player/eq")
 def player_eq_set(req: _PlayerEqRequest) -> dict:
-    """Persist new band amplitudes. Only pushes them to the audio
-    engine when the EQ is enabled — if disabled, the sliders can
-    still move (user previewing a curve) but playback stays flat
-    until they toggle on.
+    """Persist new parametric bands. Only pushes them to the audio
+    engine when the EQ is enabled — if disabled, the editor still
+    updates (user previewing a curve) but playback stays flat until
+    they toggle on.
 
     Save-then-apply order: if the engine ever throws, persisted
     state still matches what the UI shows. The reverse ordering
@@ -5833,23 +5888,26 @@ def player_eq_set(req: _PlayerEqRequest) -> dict:
     """
     _require_local_access()
     player = _native_player()
-    settings.eq_bands = list(req.bands)
+    bands = _validated_eq_request(req)
+    settings.eq_parametric_bands = [b.to_dict() for b in bands]
     settings.eq_preamp = req.preamp
     save_settings(settings)
     if settings.eq_enabled:
-        player.apply_equalizer(req.bands, preamp=req.preamp)
+        # Pass the already-validated ParametricBand objects — the
+        # player skips re-parsing for those.
+        player.apply_equalizer(bands, preamp=req.preamp)
     return {
         "ok": True,
         "enabled": settings.eq_enabled,
-        "bands": settings.eq_bands,
+        "bands": settings.eq_parametric_bands,
         "preamp": settings.eq_preamp,
     }
 
 
 @app.post("/api/player/eq/preset")
 def player_eq_preset(req: _PlayerEqPresetRequest) -> dict:
-    """Apply a named preset. Returns the resolved bands so the
-    frontend's sliders can snap to the preset curve. Persists the
+    """Apply a named preset. Returns the resolved parametric bands so
+    the frontend's editor can snap to the preset curve. Persists the
     bands so a relaunch keeps the same sound. Only pushes to the
     engine when the EQ is enabled.
 
@@ -5867,7 +5925,7 @@ def player_eq_preset(req: _PlayerEqPresetRequest) -> dict:
     _require_local_access()
     player = _native_player()
     bands = player.apply_equalizer_preset(req.preset)
-    settings.eq_bands = bands
+    settings.eq_parametric_bands = bands
     settings.eq_preamp = None
     save_settings(settings)
     if not settings.eq_enabled:
@@ -5879,14 +5937,22 @@ def player_eq_preset(req: _PlayerEqPresetRequest) -> dict:
 def player_eq_enabled(req: _PlayerEqEnabledRequest) -> dict:
     """Master EQ on/off switch. Turning off bypasses the filter
     entirely; turning back on re-applies the stored bands so the
-    user's curve survives the off → on → off cycle."""
+    user's curve survives the off → on → off cycle.
+
+    Apply-then-persist order (same rationale as the /api/eq/mode
+    handler): if the engine throws — e.g. persisted bands fail
+    validation — settings.eq_enabled is untouched in memory and on
+    disk, instead of the two diverging."""
     _require_local_access()
     player = _native_player()
-    settings.eq_enabled = bool(req.enabled)
-    if settings.eq_enabled and settings.eq_bands:
-        player.apply_equalizer(settings.eq_bands, preamp=settings.eq_preamp)
+    new_enabled = bool(req.enabled)
+    if new_enabled and settings.eq_parametric_bands:
+        player.apply_equalizer(
+            settings.eq_parametric_bands, preamp=settings.eq_preamp
+        )
     else:
         player.apply_equalizer([])
+    settings.eq_enabled = new_enabled
     save_settings(settings)
     return {"ok": True, "enabled": settings.eq_enabled}
 
@@ -5976,7 +6042,7 @@ def autoeq_state() -> dict:
         "bypass": settings.eq_bypass,
         "active_profile_id": settings.eq_active_profile_id,
         "active_profile": active_profile,
-        "manual_bands": list(settings.eq_bands),
+        "manual_bands": list(settings.eq_parametric_bands),
         "manual_preamp_db": settings.eq_preamp,
         "profile_catalog_size": INDEX.count(),
         "tilt": {
@@ -6570,9 +6636,9 @@ def autoeq_set_mode(req: _AutoEqModeRequest) -> dict:
             player.apply_equalizer([])
         elif req.mode == "manual":
             new_enabled = True
-            if settings.eq_bands:
+            if settings.eq_parametric_bands:
                 player.apply_equalizer(
-                    settings.eq_bands, preamp=settings.eq_preamp
+                    settings.eq_parametric_bands, preamp=settings.eq_preamp
                 )
             else:
                 player.apply_equalizer([])

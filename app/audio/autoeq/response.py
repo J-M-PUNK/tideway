@@ -30,7 +30,8 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
-from scipy.signal import sosfreqz  # type: ignore
+
+from app.audio.eq import cascade_magnitude_db, log_frequency_grid
 
 from .apply import TiltConfig, cascade_with_tilt
 from .profiles import AutoEqProfile
@@ -52,16 +53,6 @@ class FrequencyResponse:
     raw_db: Optional[list[float]]
     target_db: Optional[list[float]]
     post_eq_db: list[float]
-
-
-def log_frequency_grid(
-    points: int = 512,
-    f_min: float = 20.0,
-    f_max: float = 20_000.0,
-) -> np.ndarray:
-    """Geometric series from `f_min` to `f_max` — the natural
-    spacing for an audio frequency-response chart."""
-    return np.logspace(np.log10(f_min), np.log10(f_max), int(points))
 
 
 def _measurement_csv_path(profile: AutoEqProfile, data_root: Path) -> Optional[Path]:
@@ -163,18 +154,11 @@ def compute_response(
             post_eq_db=[0.0] * len(freqs_list),
         )
 
-    # Cascade response in dB at each grid point.
+    # Cascade response in dB at each grid point. The master preamp
+    # (linear scalar applied once before the biquads) folds in as a
+    # dB offset — magnitudes multiply, so dB add.
     sos, total_preamp_db = cascade_with_tilt(profile, sample_rate, tilt)
-    if sos.size == 0:
-        cascade_db = np.zeros_like(grid)
-    else:
-        _, h = sosfreqz(sos, worN=grid, fs=sample_rate)
-        # Add the master preamp (linear scalar applied once before
-        # the biquads). Magnitudes multiply → dB add.
-        magnitude = np.abs(h)
-        # Avoid log(0) for any band that lands at the Nyquist edge.
-        cascade_db = 20.0 * np.log10(np.maximum(magnitude, 1e-12))
-        cascade_db = cascade_db + total_preamp_db
+    cascade_db = cascade_magnitude_db(sos, total_preamp_db, grid, sample_rate)
 
     # Raw + target — interpolate onto the same grid if available.
     # User-imported profiles typically don't ship a measurement CSV

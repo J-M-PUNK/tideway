@@ -111,6 +111,13 @@ class Settings:
     # `eq_preamp` is None no preamp gain is applied.
     eq_bands: list[float] = field(default_factory=list)
     eq_preamp: Optional[float] = None
+    # Manual parametric EQ bands. Each entry is a dict
+    # {type, freq, gain, q, enabled} (see ParametricBand in
+    # app/audio/eq.py). This is the manual EQ's storage — the legacy
+    # fixed-frequency `eq_bands` above is kept only as a one-time
+    # migration source (see `_migrate_eq_to_parametric`). Empty list =
+    # flat / off.
+    eq_parametric_bands: list[dict] = field(default_factory=list)
     # EQ mode. Defaults off so a fresh install plays bit-perfect
     # audio — the user opts into the EQ stage explicitly via the
     # Settings picker rather than discovering one is silently
@@ -293,6 +300,32 @@ def _migrate_default_paths(s: Settings) -> bool:
     return changed
 
 
+def _migrate_eq_to_parametric(s: Settings) -> bool:
+    """One-time migration of the legacy fixed-frequency `eq_bands`
+    curve into the new parametric band list. Runs only when the user
+    has a graphic curve but no parametric bands yet (i.e. the first
+    launch after this upgrade). Each non-flat band becomes a peaking
+    band at its ISO frequency with the old constant Q, so the user's
+    sound carries over unchanged; flat bands are dropped. Returns True
+    if it wrote anything so the caller re-saves.
+
+    `eq_bands` is emptied once consumed — nothing writes it anymore,
+    and leaving it populated would re-run this migration (and
+    resurrect the old curve) any time the user later empties their
+    parametric band list.
+
+    Imported lazily to keep the audio engine off settings.py's import
+    path (settings loads very early in startup)."""
+    if s.eq_parametric_bands or not s.eq_bands:
+        return False
+    from app.audio.eq import graphic_gains_to_parametric
+
+    bands = graphic_gains_to_parametric(s.eq_bands)
+    s.eq_bands = []
+    s.eq_parametric_bands = [b.to_dict() for b in bands]
+    return True
+
+
 def load_settings() -> Settings:
     if SETTINGS_FILE.exists():
         try:
@@ -300,17 +333,23 @@ def load_settings() -> Settings:
                 data = json.load(f)
             valid = {k: v for k, v in data.items() if k in Settings.__dataclass_fields__}
             settings = Settings(**valid)
-            if _migrate_default_paths(settings):
-                try:
-                    save_settings(settings)
-                except Exception:
-                    # Migration is cosmetic — if we can't re-save
-                    # right now, let the next genuine save pick up
-                    # the updated values.
-                    pass
-            return settings
         except Exception:
-            pass
+            return Settings()
+        # Migrations run OUTSIDE the parse try-block: a bug in a
+        # migration must surface as a startup error, not get caught
+        # by the broad except above and silently replace the user's
+        # entire settings file with defaults.
+        changed = _migrate_default_paths(settings)
+        changed = _migrate_eq_to_parametric(settings) or changed
+        if changed:
+            try:
+                save_settings(settings)
+            except Exception:
+                # Migration is cosmetic — if we can't re-save
+                # right now, let the next genuine save pick up
+                # the updated values.
+                pass
+        return settings
     return Settings()
 
 
