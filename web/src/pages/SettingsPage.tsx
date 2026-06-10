@@ -1,4 +1,12 @@
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type PointerEvent as ReactPointerEvent,
+  type ReactNode,
+} from "react";
 import { Link } from "react-router-dom";
 import {
   Bell,
@@ -19,12 +27,19 @@ import {
   Moon,
   Music2,
   Palette,
+  Plus,
   Power,
   Settings as SettingsIcon,
   Sun,
+  X,
 } from "lucide-react";
 import { api } from "@/api/client";
-import type { QualityOption, Settings } from "@/api/types";
+import type {
+  ManualEqConfig,
+  ParametricBand,
+  QualityOption,
+  Settings,
+} from "@/api/types";
 import { type AutoEqMode, type AutoEqState } from "@/hooks/useAutoEqState";
 import {
   TEMPLATE_TOKENS,
@@ -52,6 +67,7 @@ import {
 } from "@/hooks/useUiPreferences";
 import { Skeleton } from "@/components/Skeletons";
 import { cn } from "@/lib/utils";
+import { computeEqCurve, logFrequencyGrid } from "@/lib/eqCurve";
 
 type SaveStatus = "idle" | "saving" | "saved" | "error";
 
@@ -1131,20 +1147,27 @@ function EqField() {
     }
   };
 
-  const toggleBypass = async () => {
-    if (state.active_profile === null) return;
-    const next = !state.bypass;
-    setState({ ...state, bypass: next });
+  // A/B bypass is mode-agnostic in the backend (the audio callback
+  // honours `eq_bypass` whether the active stage is manual or a
+  // profile), so both the manual editor and the profile card share
+  // this. Optimistic flip with rollback on failure.
+  const applyBypass = async (next: boolean) => {
+    setState((s) => (s ? { ...s, bypass: next } : s));
     try {
       await api.player.autoEqSetBypass(next);
     } catch (err) {
-      setState({ ...state, bypass: !next });
+      setState((s) => (s ? { ...s, bypass: !next } : s));
       toast.show({
         kind: "error",
         title: "Couldn't toggle bypass",
         description: err instanceof Error ? err.message : String(err),
       });
     }
+  };
+
+  const toggleBypass = () => {
+    if (state.active_profile === null) return; // nothing to compare against
+    void applyBypass(!state.bypass);
   };
 
   const hasActive = state.active_profile !== null;
@@ -1168,7 +1191,7 @@ function EqField() {
           mode="manual"
           active={state.mode === "manual"}
           label="Manual"
-          description="10-band parametric EQ. Drag sliders or pick a preset."
+          description="Parametric EQ. Drag bands on the graph, tweak type / frequency / Q, or pick a preset."
           onSelect={() => switchMode("manual")}
         />
         <ModeCard
@@ -1181,7 +1204,10 @@ function EqField() {
 
         {state.mode === "manual" && (
           <div className="mt-2">
-            <ManualEqSliders />
+            <ParametricEqEditor
+              bypassed={state.bypass}
+              onToggleBypass={() => void applyBypass(!state.bypass)}
+            />
           </div>
         )}
 
@@ -1262,19 +1288,10 @@ function EqField() {
                   >
                     Tilt &amp; graph
                   </button>
-                  <button
-                    type="button"
-                    onClick={() => void toggleBypass()}
-                    className={cn(
-                      "rounded-md border px-3 py-1.5 text-xs font-semibold transition-colors",
-                      state.bypass
-                        ? "border-amber-500/40 bg-amber-500/10 text-amber-500 hover:bg-amber-500/20"
-                        : "border-input bg-secondary text-foreground hover:bg-accent",
-                    )}
-                    title="A/B compare with the EQ off without losing your selection."
-                  >
-                    {state.bypass ? "Bypassed (A/B)" : "Bypass A/B"}
-                  </button>
+                  <EqBypassButton
+                    bypassed={state.bypass}
+                    onToggle={() => void toggleBypass()}
+                  />
                 </>
               )}
               <button
@@ -1397,24 +1414,85 @@ function ModeCard({
 }
 
 /**
- * 10-band parametric EQ surface. Self-contained: fetches its own
- * state from /api/player/eq, renders the preset dropdown + sliders,
- * commits changes on slider release. Only mounted when EQ mode is
- * "manual" — outside that mode the UI doesn't render at all, so
- * there's no risk of confusing "are these sliders doing anything?"
- * questions.
+ * A/B-bypass toggle shared by the profile card and the manual
+ * parametric editor — the backend flag (`eq_bypass`) is
+ * mode-agnostic, so the button is too. Amber when bypassed so the
+ * "EQ is configured but not running" state is unmissable.
  */
-function ManualEqSliders() {
+function EqBypassButton({
+  bypassed,
+  onToggle,
+}: {
+  bypassed: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      className={cn(
+        "rounded-md border px-3 py-1.5 text-xs font-semibold transition-colors",
+        bypassed
+          ? "border-amber-500/40 bg-amber-500/10 text-amber-500 hover:bg-amber-500/20"
+          : "border-input bg-secondary text-foreground hover:bg-accent",
+      )}
+      title="A/B compare with the EQ off without losing your settings."
+    >
+      {bypassed ? "Bypassed (A/B)" : "Bypass A/B"}
+    </button>
+  );
+}
+
+/**
+ * Manual parametric EQ surface. Self-contained: fetches its own
+ * state from /api/player/eq, renders a draggable response graph + a
+ * per-band control list, and commits on edit. Only mounted when EQ
+ * mode is "manual".
+ *
+ * The engine (app/audio/eq.py) runs an arbitrary biquad cascade, so
+ * each band carries its own type (peak / low-shelf / high-shelf),
+ * frequency, gain, and Q — a true parametric EQ, not a fixed-band
+ * graphic one.
+ */
+// Graph geometry + axis range, shared by the editor's graph and the
+// preset mini-curves. The vertical half-range is a display choice;
+// bands can be set beyond it via the row inputs (up to the server's
+// gain cap) and the drawn curve/nodes simply clamp to the box.
+const EQ_F_MIN = 20;
+const EQ_F_MAX = 20000;
+const EQ_DISPLAY_DB = 15;
+
+const EQ_TYPE_LABEL: Record<ParametricBand["type"], string> = {
+  PK: "Peak",
+  LSC: "Low shelf",
+  HSC: "High shelf",
+};
+const EQ_TYPE_COLOR: Record<ParametricBand["type"], string> = {
+  PK: "rgb(96, 165, 250)",
+  LSC: "rgb(74, 222, 128)",
+  HSC: "rgb(251, 146, 60)",
+};
+
+function clampNum(v: number, lo: number, hi: number) {
+  return Math.min(hi, Math.max(lo, v));
+}
+
+export function ParametricEqEditor({
+  bypassed = false,
+  onToggleBypass,
+}: {
+  bypassed?: boolean;
+  onToggleBypass?: () => void;
+} = {}) {
   const toast = useToast();
-  const [eq, setEq] = useState<{
-    enabled: boolean;
-    bands: number[];
-    preamp: number | null;
-    band_count: number;
-    frequencies: number[];
-    presets: { index: number; name: string; bands: number[] }[];
-  } | null>(null);
-  const [localBands, setLocalBands] = useState<number[] | null>(null);
+  const [config, setConfig] = useState<ManualEqConfig | null>(null);
+  const [presets, setPresets] = useState<
+    { index: number; name: string; bands: ParametricBand[] }[]
+  >([]);
+  const [bands, setBands] = useState<ParametricBand[]>([]);
+  const [defaultBands, setDefaultBands] = useState<ParametricBand[]>([]);
+  const [preamp, setPreamp] = useState<number | null>(null);
+  const [hovered, setHovered] = useState<number | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -1422,7 +1500,17 @@ function ManualEqSliders() {
       try {
         const e = await api.player.eq();
         if (cancelled) return;
-        setEq(e);
+        setPresets(e.presets);
+        setDefaultBands(e.default_bands);
+        // Seed the default layout when the user has no saved bands
+        // yet, so they get grabbable nodes instead of an empty graph.
+        // The defaults are flat (0 dB), so this stays bit-perfect
+        // until they shape a band — nothing is persisted until an
+        // edit, and the flat curve matches the on-axis nodes.
+        setBands(e.bands.length ? e.bands : e.default_bands);
+        setPreamp(e.preamp);
+        // Last: config doubles as the "loaded" gate for the render.
+        setConfig(e.config);
       } catch {
         /* engine not available */
       }
@@ -1432,32 +1520,124 @@ function ManualEqSliders() {
     };
   }, []);
 
-  useEffect(() => {
-    if (eq)
-      setLocalBands(
-        eq.bands.length ? eq.bands : new Array(eq.band_count).fill(0),
-      );
-  }, [eq]);
+  // The response curve is computed in the browser (see lib/eqCurve)
+  // so it tracks a node live as it's dragged, with no server round-
+  // trip. Recomputes whenever bands / preamp change — including the
+  // optimistic live updates mid-drag.
+  const grid = useMemo(() => logFrequencyGrid(384), []);
+  const curveDb = useMemo(
+    () => computeEqCurve(bands, preamp, grid),
+    [bands, preamp, grid],
+  );
 
-  if (!eq || localBands === null) return null;
+  const commit = useCallback(
+    async (nextBands: ParametricBand[], nextPreamp: number | null) => {
+      setBands(nextBands);
+      setPreamp(nextPreamp);
+      try {
+        await api.player.setEq(nextBands, nextPreamp);
+      } catch (err) {
+        toast.show({
+          kind: "error",
+          title: "Couldn't apply EQ",
+          description: err instanceof Error ? err.message : String(err),
+        });
+      }
+    },
+    [toast],
+  );
 
-  const flush = async (bands: number[]) => {
-    setLocalBands(bands);
-    try {
-      await api.player.setEq(bands, null);
-    } catch (err) {
-      toast.show({
-        kind: "error",
-        title: "Couldn't apply EQ",
-        description: err instanceof Error ? err.message : String(err),
+  // Highlight a preset whose bands match the current curve exactly.
+  // Memoized on [presets, bands] so hover-driven re-renders (which
+  // fire at pointer rates) skip the presets × bands scan.
+  const activePresetIdx = useMemo(() => {
+    for (const p of presets) {
+      if (p.bands.length !== bands.length) continue;
+      const same = p.bands.every((pb, i) => {
+        const b = bands[i];
+        return (
+          b &&
+          b.type === pb.type &&
+          b.enabled === pb.enabled &&
+          Math.abs(b.freq - pb.freq) < 0.5 &&
+          Math.abs(b.gain - pb.gain) < 0.05 &&
+          Math.abs(b.q - pb.q) < 0.01
+        );
       });
+      if (same) return p.index;
     }
+    return null;
+  }, [presets, bands]);
+
+  if (!config) return null;
+
+  const setBandLive = (i: number, patch: Partial<ParametricBand>) =>
+    setBands((prev) => prev.map((b, j) => (j === i ? { ...b, ...patch } : b)));
+
+  const commitBand = (i: number, patch: Partial<ParametricBand>) =>
+    commit(
+      bands.map((b, j) => (j === i ? { ...b, ...patch } : b)),
+      preamp,
+    );
+
+  const addBand = () => {
+    if (bands.length >= config.max_bands) return;
+    commit(
+      [...bands, { type: "PK", freq: 1000, gain: 0, q: 1, enabled: true }],
+      preamp,
+    );
   };
+
+  // Double-click on empty graph space drops a peaking band right
+  // where the cursor is (frequency + gain), the standard add gesture
+  // in parametric EQs.
+  const addBandAt = (freq: number, gain: number) => {
+    if (bands.length >= config.max_bands) return;
+    commit(
+      [
+        ...bands,
+        {
+          type: "PK",
+          freq: Math.round(clampNum(freq, config.freq_min, config.freq_max)),
+          gain:
+            Math.round(
+              clampNum(gain, -config.gain_abs_max, config.gain_abs_max) * 10,
+            ) / 10,
+          q: 1,
+          enabled: true,
+        },
+      ],
+      preamp,
+    );
+  };
+
+  const removeBand = (i: number) => {
+    // Clear the hover index — the hovered node may be the one being
+    // removed (its pointerleave never fires on unmount), and a stale
+    // index would highlight, and wheel-edit, whichever band shifts
+    // into its slot.
+    setHovered(null);
+    commit(
+      bands.filter((_, j) => j !== i),
+      preamp,
+    );
+  };
+
+  // Reset returns to the flat default layout (not an empty graph),
+  // so the user still has grabbable bands afterwards.
+  const reset = () => commit(defaultBands, null);
 
   const pickPreset = async (idx: number) => {
     try {
       const res = await api.player.setEqPreset(idx);
-      setLocalBands(res.bands);
+      setHovered(null);
+      // The "Flat" preset resolves to zero bands — show the default
+      // layout's grabbable nodes instead of an empty graph, the same
+      // fallback the initial load and Reset use. The server persisted
+      // [] either way; these flat defaults are display-only until
+      // the user edits one.
+      setBands(res.bands.length ? res.bands : defaultBands);
+      setPreamp(null);
     } catch (err) {
       toast.show({
         kind: "error",
@@ -1467,47 +1647,28 @@ function ManualEqSliders() {
     }
   };
 
-  const reset = () => {
-    const flat = new Array(eq.band_count).fill(0);
-    flush(flat);
-  };
-
-  // Match a preset against current sliders so the active preset's
-  // card highlights as "selected." Compare with a small epsilon
-  // because sliders snap to 0.5 dB but presets are integer dB.
-  const activePresetIdx = (() => {
-    for (const p of eq.presets) {
-      if (p.bands.length !== localBands.length) continue;
-      let same = true;
-      for (let i = 0; i < p.bands.length; i++) {
-        if (Math.abs(p.bands[i] - localBands[i]) > 0.05) {
-          same = false;
-          break;
-        }
-      }
-      if (same) return p.index;
-    }
-    return null;
-  })();
-
   return (
     <div className="flex flex-col gap-3">
       <div className="flex items-center justify-between">
         <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
           Presets
         </div>
-        <Button size="sm" variant="outline" onClick={reset}>
-          Reset
-        </Button>
+        <div className="flex items-center gap-2">
+          {onToggleBypass && (
+            <EqBypassButton bypassed={bypassed} onToggle={onToggleBypass} />
+          )}
+          <Button size="sm" variant="outline" onClick={reset}>
+            Reset
+          </Button>
+        </div>
       </div>
 
-      {/* Horizontal scroll of preset cards. Each card shows the
-          name plus a tiny SVG of the band gains, so the user can
-          eyeball "this one boosts bass and treble" without applying
-          and reverting. Click to apply. */}
+      {/* Horizontal scroll of preset cards — each draws a mini version
+          of its response curve so the shape is recognisable at a
+          glance. */}
       <div className="flex gap-2 overflow-x-auto pb-1">
-        {eq.presets.map((p) => (
-          <PresetCard
+        {presets.map((p) => (
+          <ParametricPresetCard
             key={p.index}
             name={p.name}
             bands={p.bands}
@@ -1517,61 +1678,393 @@ function ManualEqSliders() {
         ))}
       </div>
 
-      <div className="flex items-end gap-3">
-        {localBands.map((v, i) => (
-          <EqSlider
-            key={i}
-            value={v}
-            freq={eq.frequencies[i]}
-            onChange={(nv) => {
-              const next = [...localBands];
-              next[i] = nv;
-              setLocalBands(next);
-            }}
-            onCommit={(nv) => {
-              const next = [...localBands];
-              next[i] = nv;
-              flush(next);
-            }}
+      {/* When bypassed, dim the editor to signal the EQ isn't
+          touching the audio right now — the bands are preserved. */}
+      <div
+        className={cn(
+          "flex flex-col gap-3 transition-opacity",
+          bypassed && "opacity-50",
+        )}
+      >
+        <ParametricEqGraph
+          bands={bands}
+          freqs={grid}
+          curveDb={curveDb}
+          config={config}
+          hovered={hovered}
+          onHover={setHovered}
+          onDragBand={setBandLive}
+          onCommitBand={commitBand}
+          onAddAt={addBandAt}
+          onRemoveBand={removeBand}
+        />
+
+        <div className="flex flex-col gap-1.5">
+          {bands.length === 0 && (
+            <div className="rounded-md border border-dashed border-input px-3 py-4 text-center text-xs text-muted-foreground">
+              No bands yet — double-click the graph, add one, or pick a preset
+              to start shaping the sound.
+            </div>
+          )}
+          {bands.map((b, i) => (
+            <BandRow
+              key={i}
+              band={b}
+              config={config}
+              highlighted={hovered === i}
+              onHover={(on) => setHovered(on ? i : null)}
+              onChange={(patch) => commitBand(i, patch)}
+              onRemove={() => removeBand(i)}
+            />
+          ))}
+        </div>
+      </div>
+
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={addBand}
+          disabled={bands.length >= config.max_bands}
+        >
+          <Plus className="mr-1 h-3.5 w-3.5" />
+          Add band
+        </Button>
+        <div className="flex items-center gap-2 text-xs font-medium text-muted-foreground">
+          <span className="uppercase tracking-wide">Preamp</span>
+          <BandNumberField
+            label="dB"
+            value={preamp ?? 0}
+            min={-config.gain_abs_max}
+            max={config.gain_abs_max}
+            step={0.5}
+            width="w-10"
+            onCommit={(v) => commit(bands, v)}
           />
-        ))}
+        </div>
       </div>
     </div>
   );
 }
 
 /**
- * One preset in the manual-EQ preset row. Renders the name plus a
- * tiny bar chart of the preset's band gains — green bars for boost
- * (positive gain), red for cut, neutral for flat. Lets the user
- * recognise "Bass Boost" at a glance because the leftmost bars
- * are taller, instead of having to apply and revert to discover
- * what each name actually does.
- *
- * SVG dimensions are deliberately small (90x32 ish); the row is
- * horizontally scrollable so adding more presets doesn't break
- * the Settings page width.
+ * Draggable frequency-response graph. The curve is computed in the
+ * browser (lib/eqCurve) so it tracks live as a node is dragged. Each
+ * band is a node:
+ *   - drag           → frequency (x) + gain (y)
+ *   - scroll/wheel   → Q (narrower / wider)
+ *   - double-click   → remove the band
+ * Double-clicking empty space adds a band there. Type and exact
+ * values are also editable in the row below.
  */
-function PresetCard({
+function ParametricEqGraph({
+  bands,
+  freqs,
+  curveDb,
+  config,
+  hovered,
+  onHover,
+  onDragBand,
+  onCommitBand,
+  onAddAt,
+  onRemoveBand,
+}: {
+  bands: ParametricBand[];
+  freqs: number[];
+  curveDb: number[];
+  config: ManualEqConfig;
+  hovered: number | null;
+  onHover: (i: number | null) => void;
+  onDragBand: (i: number, patch: Partial<ParametricBand>) => void;
+  onCommitBand: (i: number, patch: Partial<ParametricBand>) => void;
+  onAddAt: (freq: number, gain: number) => void;
+  onRemoveBand: (i: number) => void;
+}) {
+  const svgRef = useRef<SVGSVGElement | null>(null);
+  const [drag, setDrag] = useState<number | null>(null);
+
+  const W = 480;
+  const H = 180;
+  const PAD_L = 30;
+  const PAD_R = 8;
+  const PAD_T = 8;
+  const PAD_B = 20;
+  const innerW = W - PAD_L - PAD_R;
+  const innerH = H - PAD_T - PAD_B;
+
+  const xLogMin = Math.log10(EQ_F_MIN);
+  const xLogRange = Math.log10(EQ_F_MAX) - xLogMin;
+
+  const px = (f: number) =>
+    PAD_L + ((Math.log10(f) - xLogMin) / xLogRange) * innerW;
+  const py = (db: number) =>
+    PAD_T +
+    (1 -
+      (clampNum(db, -EQ_DISPLAY_DB, EQ_DISPLAY_DB) + EQ_DISPLAY_DB) /
+        (2 * EQ_DISPLAY_DB)) *
+      innerH;
+  const freqFromX = (x: number) =>
+    Math.pow(10, xLogMin + clampNum((x - PAD_L) / innerW, 0, 1) * xLogRange);
+  const dbFromY = (y: number) =>
+    EQ_DISPLAY_DB * (1 - 2 * clampNum((y - PAD_T) / innerH, 0, 1));
+
+  const toViewBox = (e: { clientX: number; clientY: number }) => {
+    const svg = svgRef.current;
+    if (!svg) return { x: 0, y: 0 };
+    const r = svg.getBoundingClientRect();
+    return {
+      x: ((e.clientX - r.left) / r.width) * W,
+      y: ((e.clientY - r.top) / r.height) * H,
+    };
+  };
+
+  const startDrag = (i: number) => (e: ReactPointerEvent<SVGCircleElement>) => {
+    e.preventDefault();
+    e.currentTarget.setPointerCapture(e.pointerId);
+    setDrag(i);
+  };
+  const moveDrag = (e: ReactPointerEvent<SVGSVGElement>) => {
+    if (drag === null) return;
+    const { x, y } = toViewBox(e);
+    const freq = Math.round(
+      clampNum(freqFromX(x), config.freq_min, config.freq_max),
+    );
+    const gain =
+      Math.round(
+        clampNum(dbFromY(y), -config.gain_abs_max, config.gain_abs_max) * 10,
+      ) / 10;
+    onDragBand(drag, { freq, gain });
+  };
+  const endDrag = () => {
+    if (drag === null) return;
+    const i = drag;
+    setDrag(null);
+    onCommitBand(i, {}); // persist whatever the live drag left in place
+  };
+
+  // Wheel-to-Q. React registers onWheel as a passive listener, so we
+  // attach our own non-passive one to be able to preventDefault (stop
+  // the settings page scrolling while the cursor is over a node). The
+  // band under the cursor is whatever's hovered; live-update Q and
+  // commit once the wheel goes idle.
+  const stateRef = useRef({ bands, hovered, onDragBand, onCommitBand });
+  stateRef.current = { bands, hovered, onDragBand, onCommitBand };
+  const commitTimer = useRef<number | null>(null);
+  useEffect(() => {
+    const svg = svgRef.current;
+    if (!svg) return;
+    const onWheel = (e: WheelEvent) => {
+      const { hovered: i, bands: bs, onDragBand: drag2 } = stateRef.current;
+      if (i === null || !bs[i]) return;
+      e.preventDefault();
+      const factor = e.deltaY < 0 ? 1.1 : 1 / 1.1; // up = narrower (higher Q)
+      const q = clampNum(bs[i].q * factor, config.q_min, config.q_max);
+      drag2(i, { q: Math.round(q * 100) / 100 });
+      if (commitTimer.current) window.clearTimeout(commitTimer.current);
+      commitTimer.current = window.setTimeout(() => {
+        stateRef.current.onCommitBand(i, {});
+      }, 250);
+    };
+    svg.addEventListener("wheel", onWheel, { passive: false });
+    return () => {
+      svg.removeEventListener("wheel", onWheel);
+      // Drop any pending commit: firing it after unmount would POST
+      // the manual bands and clobber whatever the user just switched
+      // to (e.g. a freshly-applied AutoEQ profile).
+      if (commitTimer.current) window.clearTimeout(commitTimer.current);
+    };
+  }, [config.q_min, config.q_max]);
+
+  const onBackgroundDoubleClick = (e: ReactPointerEvent<SVGSVGElement>) => {
+    const { x, y } = toViewBox(e);
+    onAddAt(freqFromX(x), dbFromY(y));
+  };
+
+  // Path strings rebuild only when the curve actually changes —
+  // hover-driven re-renders (pointer rate) reuse the memo.
+  const { curvePath, areaPath } = useMemo(() => {
+    const curve = freqs
+      .map(
+        (f, i) =>
+          `${i === 0 ? "M" : "L"} ${px(f).toFixed(1)} ${py(curveDb[i]).toFixed(1)}`,
+      )
+      .join(" ");
+    // Filled area under the curve down to the 0 dB line — gives the
+    // response some body without obscuring the grid.
+    const area = `${curve} L ${px(EQ_F_MAX).toFixed(1)} ${py(0).toFixed(
+      1,
+    )} L ${px(EQ_F_MIN).toFixed(1)} ${py(0).toFixed(1)} Z`;
+    return { curvePath: curve, areaPath: area };
+    // px/py are pure functions of module constants; safe to omit.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [freqs, curveDb]);
+
+  const xTicks = [100, 1000, 10000];
+  const yTicks = [-12, -6, 0, 6, 12];
+  const tickLabel = (f: number) => (f >= 1000 ? `${f / 1000}k` : `${f}`);
+
+  return (
+    <div className="rounded-md border border-input bg-secondary/40 p-3">
+      <svg
+        ref={svgRef}
+        viewBox={`0 0 ${W} ${H}`}
+        className="h-44 w-full touch-none select-none"
+        onPointerMove={moveDrag}
+        onPointerUp={endDrag}
+        onPointerLeave={endDrag}
+        onPointerCancel={endDrag}
+        onDoubleClick={onBackgroundDoubleClick}
+      >
+        {yTicks.map((v) => {
+          const y = py(v);
+          return (
+            <g key={`y${v}`}>
+              <line
+                x1={PAD_L}
+                x2={W - PAD_R}
+                y1={y}
+                y2={y}
+                stroke="currentColor"
+                strokeOpacity={v === 0 ? 0.4 : 0.1}
+                strokeWidth={v === 0 ? 1 : 0.5}
+              />
+              <text
+                x={PAD_L - 4}
+                y={y + 3}
+                textAnchor="end"
+                className="fill-muted-foreground text-[8px]"
+              >
+                {v > 0 ? `+${v}` : v}
+              </text>
+            </g>
+          );
+        })}
+        {xTicks.map((f) => {
+          const x = px(f);
+          return (
+            <g key={`x${f}`}>
+              <line
+                x1={x}
+                x2={x}
+                y1={PAD_T}
+                y2={H - PAD_B}
+                stroke="currentColor"
+                strokeOpacity={0.08}
+                strokeWidth={0.5}
+              />
+              <text
+                x={x}
+                y={H - PAD_B + 12}
+                textAnchor="middle"
+                className="fill-muted-foreground text-[8px]"
+              >
+                {tickLabel(f)}
+              </text>
+            </g>
+          );
+        })}
+
+        <path d={areaPath} fill="hsl(var(--primary))" fillOpacity={0.08} />
+        <path
+          d={curvePath}
+          fill="none"
+          stroke="hsl(var(--primary))"
+          strokeWidth={1.5}
+        />
+
+        {bands.map((b, i) => {
+          const cx = px(clampNum(b.freq, EQ_F_MIN, EQ_F_MAX));
+          const cy = py(b.gain);
+          const active = drag === i || hovered === i;
+          return (
+            <g key={i}>
+              {active && (
+                <line
+                  x1={cx}
+                  x2={cx}
+                  y1={PAD_T}
+                  y2={H - PAD_B}
+                  stroke={EQ_TYPE_COLOR[b.type]}
+                  strokeOpacity={0.3}
+                  strokeWidth={0.75}
+                />
+              )}
+              <circle
+                cx={cx}
+                cy={cy}
+                r={active ? 7 : 5}
+                fill={b.enabled ? EQ_TYPE_COLOR[b.type] : "transparent"}
+                stroke={EQ_TYPE_COLOR[b.type]}
+                strokeWidth={1.5}
+                opacity={b.enabled ? 0.9 : 0.5}
+                className="cursor-grab touch-none"
+                onPointerDown={startDrag(i)}
+                onPointerEnter={() => onHover(i)}
+                onPointerLeave={() => onHover(null)}
+                onDoubleClick={(e) => {
+                  e.stopPropagation(); // don't also add a band here
+                  onRemoveBand(i);
+                }}
+              >
+                <title>{`${EQ_TYPE_LABEL[b.type]} · ${Math.round(
+                  b.freq,
+                )} Hz · ${b.gain >= 0 ? "+" : ""}${b.gain.toFixed(
+                  1,
+                )} dB · Q ${b.q.toFixed(2)}  (scroll = Q, double-click = remove)`}</title>
+              </circle>
+            </g>
+          );
+        })}
+      </svg>
+    </div>
+  );
+}
+
+/**
+ * One preset in the manual-EQ preset row. Draws a miniature of the
+ * preset's actual response curve (same client-side computation as the
+ * main graph), so "Bass Boost" reads as a recognisable shape rather
+ * than a scatter of dots.
+ *
+ * SVG dimensions are deliberately small; the row is horizontally
+ * scrollable so adding more presets doesn't break the page width.
+ */
+function ParametricPresetCard({
   name,
   bands,
   active,
   onClick,
 }: {
   name: string;
-  bands: number[];
+  bands: ParametricBand[];
   active: boolean;
   onClick: () => void;
 }) {
-  const w = 80;
-  const h = 28;
-  const barGap = 1;
-  const barW =
-    bands.length > 0 ? (w - (bands.length - 1) * barGap) / bands.length : 0;
-  // Bands clamp to ±12 dB at the slider level. Use that as the
-  // chart's vertical range so a "Bass Boost +6" preset renders as
-  // bars half the chart height — predictable scale across presets.
-  const maxAbs = 12;
+  const w = 84;
+  const h = 30;
+  // Curve + path memoized together: the editor re-renders at pointer
+  // rate during a node drag, and each of the ~13 cards would
+  // otherwise rebuild its 48-segment path string every time for
+  // identical output (its preset bands never change).
+  const path = useMemo(() => {
+    const grid = logFrequencyGrid(48);
+    const curve = computeEqCurve(bands, null, grid);
+    // Tie the vertical range to the curve so subtle presets still
+    // show shape, but never zoom in past ±3 dB (avoids exaggerating
+    // noise).
+    const peak = Math.max(3, ...curve.map((v) => Math.abs(v)));
+    const xLogMin = Math.log10(EQ_F_MIN);
+    const xLogRange = Math.log10(EQ_F_MAX) - xLogMin;
+    const cx = (f: number) =>
+      ((Math.log10(clampNum(f, EQ_F_MIN, EQ_F_MAX)) - xLogMin) / xLogRange) * w;
+    const cy = (db: number) => h / 2 - clampNum(db / peak, -1, 1) * (h / 2 - 2);
+    return grid
+      .map(
+        (f, i) =>
+          `${i === 0 ? "M" : "L"} ${cx(f).toFixed(1)} ${cy(curve[i]).toFixed(1)}`,
+      )
+      .join(" ");
+  }, [bands]);
 
   return (
     <button
@@ -1601,37 +2094,17 @@ function PresetCard({
           strokeOpacity={0.2}
           strokeWidth={1}
         />
-        {bands.map((g, i) => {
-          const norm = Math.max(-1, Math.min(1, g / maxAbs));
-          const barH = (Math.abs(norm) * h) / 2;
-          const x = i * (barW + barGap);
-          const y = norm >= 0 ? h / 2 - barH : h / 2;
-          // Green-ish for boost, red-ish for cut, muted for flat.
-          // Using rgb literals because Tailwind's `fill-emerald-500`
-          // etc. aren't reachable from inline SVG without arbitrary
-          // class plumbing — direct values are simpler and stable.
-          const color =
-            Math.abs(g) < 0.1
-              ? "rgb(120, 120, 120)"
-              : g > 0
-                ? "rgb(74, 222, 128)"
-                : "rgb(248, 113, 113)";
-          return (
-            <rect
-              key={i}
-              x={x}
-              y={y}
-              width={barW}
-              height={Math.max(barH, 0.5)}
-              fill={color}
-              opacity={0.85}
-            />
-          );
-        })}
+        <path
+          d={path}
+          fill="none"
+          stroke={active ? "hsl(var(--primary))" : "currentColor"}
+          strokeOpacity={active ? 1 : 0.55}
+          strokeWidth={1.25}
+        />
       </svg>
       <div
         className={cn(
-          "max-w-[80px] truncate text-[10px] font-medium",
+          "max-w-[84px] truncate text-[10px] font-medium",
           active ? "text-primary" : "text-foreground/80",
         )}
       >
@@ -1641,51 +2114,174 @@ function PresetCard({
   );
 }
 
-function EqSlider({
-  value,
-  freq,
+/**
+ * One row of band controls under the graph: enable toggle, filter
+ * type, and frequency / gain / Q number fields, plus a remove button.
+ * The graph handles frequency + gain spatially; this row is where the
+ * user sets type and Q and dials in precise values.
+ */
+function BandRow({
+  band,
+  config,
+  highlighted,
+  onHover,
   onChange,
+  onRemove,
+}: {
+  band: ParametricBand;
+  config: ManualEqConfig;
+  highlighted: boolean;
+  onHover: (on: boolean) => void;
+  onChange: (patch: Partial<ParametricBand>) => void;
+  onRemove: () => void;
+}) {
+  return (
+    <div
+      onPointerEnter={() => onHover(true)}
+      onPointerLeave={() => onHover(false)}
+      className={cn(
+        "flex flex-wrap items-center gap-2 rounded-md border px-2.5 py-2 text-xs transition-colors",
+        band.enabled
+          ? "border-input bg-secondary/40"
+          : "border-input/60 bg-secondary/20 opacity-60",
+        highlighted && "border-primary/60 bg-secondary/70",
+      )}
+    >
+      <input
+        type="checkbox"
+        checked={band.enabled}
+        onChange={(e) => onChange({ enabled: e.target.checked })}
+        title="Enable / bypass this band"
+        className="h-3.5 w-3.5 cursor-pointer accent-primary"
+      />
+      <span
+        className="h-2.5 w-2.5 flex-shrink-0 rounded-full"
+        style={{ backgroundColor: EQ_TYPE_COLOR[band.type] }}
+      />
+      <select
+        value={band.type}
+        onChange={(e) =>
+          onChange({ type: e.target.value as ParametricBand["type"] })
+        }
+        className="h-7 w-24 cursor-pointer rounded-md border border-input bg-background px-2 text-xs outline-none transition-colors focus:border-ring focus:ring-1 focus:ring-ring"
+      >
+        {config.filter_types.map((t) => (
+          <option key={t} value={t}>
+            {EQ_TYPE_LABEL[t]}
+          </option>
+        ))}
+      </select>
+      <BandNumberField
+        label="Hz"
+        value={band.freq}
+        min={config.freq_min}
+        max={config.freq_max}
+        step={1}
+        width="w-12"
+        onCommit={(v) => onChange({ freq: v })}
+      />
+      <BandNumberField
+        label="dB"
+        value={band.gain}
+        min={-config.gain_abs_max}
+        max={config.gain_abs_max}
+        step={0.5}
+        width="w-10"
+        onCommit={(v) => onChange({ gain: v })}
+      />
+      <BandNumberField
+        label="Q"
+        value={band.q}
+        min={config.q_min}
+        max={config.q_max}
+        step={0.1}
+        width="w-10"
+        onCommit={(v) => onChange({ q: v })}
+      />
+      <button
+        type="button"
+        onClick={onRemove}
+        title="Remove band"
+        className="ml-auto rounded p-1 text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+      >
+        <X className="h-3.5 w-3.5" />
+      </button>
+    </div>
+  );
+}
+
+/**
+ * Labeled number input that commits on blur / Enter (not per
+ * keystroke), clamping into [min, max]. Committing on blur rather
+ * than onChange avoids firing a network request — and an audible
+ * coefficient rebuild — for each intermediate value while the user
+ * types "1200".
+ */
+function BandNumberField({
+  label,
+  value,
+  min,
+  max,
+  step,
+  width,
   onCommit,
 }: {
+  label: string;
   value: number;
-  freq: number;
-  onChange: (v: number) => void;
+  min: number;
+  max: number;
+  step: number;
+  width: string;
   onCommit: (v: number) => void;
 }) {
-  const label =
-    freq >= 1000 ? `${Math.round(freq / 100) / 10}k` : `${Math.round(freq)}`;
+  const [text, setText] = useState(String(value));
+  useEffect(() => {
+    setText(String(value));
+  }, [value]);
+
+  const commit = () => {
+    const v = parseFloat(text);
+    if (Number.isFinite(v)) {
+      const clamped = clampNum(v, min, max);
+      // Resync the text here, not just via the [value] effect: when
+      // the clamped value equals the current value (typing 99999
+      // into a field already at max), the parent state doesn't
+      // change and the effect never fires — the field would keep
+      // displaying the raw out-of-range text.
+      setText(String(clamped));
+      onCommit(clamped);
+    } else {
+      setText(String(value));
+    }
+  };
+
   return (
-    <div className="flex flex-col items-center gap-2">
-      <div className="text-xs tabular-nums text-muted-foreground">
-        {value >= 0 ? "+" : ""}
-        {value.toFixed(1)}
-      </div>
+    <label className="flex h-7 items-center gap-1 rounded-md border border-input bg-background pl-2 pr-1.5 transition-colors focus-within:border-ring focus-within:ring-1 focus-within:ring-ring">
       <input
-        type="range"
-        min={-20}
-        max={20}
-        step={0.5}
-        value={value}
-        onChange={(e) => onChange(parseFloat(e.target.value))}
-        onMouseUp={(e) =>
-          onCommit(parseFloat((e.target as HTMLInputElement).value))
-        }
-        onTouchEnd={(e) =>
-          onCommit(parseFloat((e.target as HTMLInputElement).value))
-        }
-        onKeyUp={(e) =>
-          onCommit(parseFloat((e.target as HTMLInputElement).value))
-        }
-        className="eq-slider h-32 w-4 accent-primary"
-        style={
-          {
-            writingMode: "vertical-lr",
-            direction: "rtl",
-          } as React.CSSProperties
-        }
+        type="number"
+        inputMode="decimal"
+        value={text}
+        min={min}
+        max={max}
+        step={step}
+        onChange={(e) => setText(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") (e.target as HTMLInputElement).blur();
+        }}
+        className={cn(
+          // Hide the native number spinners — they look cluttered in
+          // the dark theme and eat horizontal space. Value stays
+          // right-aligned + tabular so digits don't jitter.
+          "bg-transparent text-right tabular-nums text-foreground outline-none",
+          "[appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none",
+          width,
+        )}
       />
-      <div className="text-xs text-muted-foreground">{label}</div>
-    </div>
+      <span className="select-none text-[10px] font-medium uppercase tracking-wide text-muted-foreground">
+        {label}
+      </span>
+    </label>
   );
 }
 
@@ -1693,9 +2289,9 @@ function EqSlider({
  * Headphone-profile section — Phase 2 of the AutoEQ work.
  *
  * Shows a mode toggle (Off / Manual / Profile) and, when in
- * profile mode, a search input + result list. Manual mode keeps
- * the existing 10-band sliders below; the two modes coexist via
- * the backend `eq_mode` setting.
+ * profile mode, a search input + result list. Manual mode renders
+ * the parametric EQ editor below; the two modes coexist via the
+ * backend `eq_mode` setting.
  *
  * Search is server-side (the backend has rapidfuzz when
  * available; falls back to substring match). We re-fetch on
