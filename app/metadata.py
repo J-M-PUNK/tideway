@@ -220,10 +220,35 @@ def _tag_m4a(path: Path, track, cover_data: Optional[bytes], album_obj=None):
 
 
 def _artist_names(track) -> str:
+    """The track-level ARTIST tag credit: MAIN-credit artists,
+    comma-joined. FEATURED credits are excluded — Tidal already
+    carries the featuring in the track title ("… (feat. Jack)"), and
+    including them in the artist string makes strict-grouping players
+    (iPods, iTunes, Rockbox) mint a phantom "John, Jack" artist for
+    every featured track instead of filing it under John.
+
+    True collaborations credit every artist as MAIN, so duets still
+    list everyone. Credits without role information (older payloads,
+    objects from other code paths) are kept — dropping a credit is
+    worse than the grouping nit this fixes.
+    """
     try:
-        return ", ".join(a.name for a in track.artists)
+        artists = [a for a in track.artists if getattr(a, "name", None)]
     except Exception:
-        pass
+        artists = []
+    if artists:
+        def _role_value(artist) -> Optional[str]:
+            role = getattr(artist, "role", None)
+            # tidalapi's Role enum (`role.value` is "MAIN"/"FEATURED")
+            # or a raw string, depending on the payload's vintage.
+            value = getattr(role, "value", role)
+            return str(value).upper() if value is not None else None
+
+        mains = [a for a in artists if _role_value(a) != "FEATURED"]
+        # Defensive: a payload crediting ONLY featured artists still
+        # needs an artist tag — better the old joined string than an
+        # empty field.
+        return ", ".join(a.name for a in (mains or artists))
     try:
         return track.artist.name
     except Exception:
