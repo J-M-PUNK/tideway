@@ -183,6 +183,11 @@ def _tag_flac(path: Path, track, cover_data: Optional[bytes], album_obj=None):
     num_tracks = _safe(getattr(track, "album", None), "num_tracks")
     if num_tracks:
         audio["totaltracks"] = str(num_tracks)
+    release_date = _release_date_str(track, album_obj)
+    if release_date:
+        # Vorbis `DATE` is the field Mp3Tag / foobar2000 / Picard
+        # derive their "Year" column from (issue #196).
+        audio["date"] = release_date
 
     track_id = getattr(track, "id", None)
     if track_id is not None:
@@ -208,6 +213,11 @@ def _tag_m4a(path: Path, track, cover_data: Optional[bytes], album_obj=None):
     audio["aART"] = _album_artist_name(track, album_obj)
     num_tracks = _safe(getattr(track, "album", None), "num_tracks") or 0
     audio["trkn"] = [(getattr(track, "track_num", 0), num_tracks)]
+    release_date = _release_date_str(track, album_obj)
+    if release_date:
+        # ©day is MP4's release-date atom — same "Year" column
+        # source as FLAC's DATE (issue #196).
+        audio["\xa9day"] = release_date
 
     track_id = getattr(track, "id", None)
     if track_id is not None:
@@ -267,6 +277,44 @@ def _album_artist_name(track, album_obj=None) -> str:
         return track.artist.name
     except Exception:
         return ""
+
+
+def _release_date_str(track, album_obj=None) -> str:
+    """The release date for the FLAC `DATE` / MP4 `©day` tag —
+    `YYYY-MM-DD` when the full date is known, a bare `YYYY` when only
+    the year is. Taggers (Mp3Tag, foobar2000, Picard) derive their
+    "Year" column from these fields, which is what issue #196 asks
+    for.
+
+    Source preference mirrors the downloader's `_album_year` (used
+    for the `{year}` filename token): the editorial `release_date`
+    over `tidal_release_date` — back-catalog reissues should carry
+    the year users expect, not the date Tidal first hosted the
+    stream. And like `_album_artist_name`, the resolved `album_obj`
+    is preferred over the per-track `track.album` blob, which isn't
+    consistent across an album.
+    """
+    for source in (album_obj, getattr(track, "album", None)):
+        if source is None:
+            continue
+        for attr in ("release_date", "tidal_release_date"):
+            dt = _safe(source, attr)
+            if dt is None:
+                continue
+            try:
+                if getattr(dt, "year", None):
+                    return f"{int(dt.year):04d}-{int(dt.month):02d}-{int(dt.day):02d}"
+            except Exception:
+                continue
+        # tidalapi also exposes a plain `year` int on some album
+        # payloads when the full date is missing.
+        year = _safe(source, "year")
+        try:
+            if year:
+                return str(int(year))
+        except Exception:
+            pass
+    return ""
 
 
 def _safe(obj, attr: str):
