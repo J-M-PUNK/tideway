@@ -269,22 +269,38 @@ def _run_uvicorn_in_thread() -> "uvicorn.Server":  # type: ignore[name-defined]
     return server
 
 
+# Flipped by the first _graceful_shutdown call. Makes it idempotent —
+# the post-start() path, the Linux closed-event path, and the exit
+# watchdog can all call it without double-flushing state — and lets
+# the watchdog's diagnostics say whether the clean path ever ran.
+_graceful_ran = threading.Event()
+
+
 def _graceful_shutdown(server: "uvicorn.Server") -> None:  # type: ignore[name-defined]
-    """Signal uvicorn to stop and give in-flight requests a brief grace
-    period to drain. Runs on the main thread after the pywebview window
-    closes."""
+    """Signal uvicorn to stop and flush state to disk. Runs on the main
+    thread after the pywebview window closes (or from the Linux closed
+    handler / exit watchdog).
+
+    Every step prints a trace line. Quit-hang reports arrive as
+    "terminal prints nothing", which is only diagnosable if the
+    shutdown path narrates how far it got."""
+    if _graceful_ran.is_set():
+        return
+    _graceful_ran.set()
+    print("[desktop] shutdown: signaling uvicorn", file=sys.stderr, flush=True)
     try:
         server.should_exit = True
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"[desktop] shutdown: uvicorn signal failed: {exc!r}", file=sys.stderr, flush=True)
     # Flush the downloader's pending-queue snapshot so a reopen picks up
     # where we left off. The worker threads are daemons and will be
     # killed on process exit; the state on disk is what matters.
+    print("[desktop] shutdown: persisting download queue", file=sys.stderr, flush=True)
     try:
         import server as _server
         _server.downloader._persist_pending()  # type: ignore[attr-defined]
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"[desktop] shutdown: download-queue persist failed: {exc!r}", file=sys.stderr, flush=True)
 
     # Tear down the macOS Now Playing integration before the
     # interpreter finalizes. MediaRemote retains our nowPlayingInfo
@@ -294,13 +310,14 @@ def _graceful_shutdown(server: "uvicorn.Server") -> None:  # type: ignore[name-d
     # ("Tideway quit unexpectedly", crash thread on
     # com.apple.MediaRemote...serialQueue). stop() removes every Python
     # object from Apple's side so a late callback has nothing to call.
+    print("[desktop] shutdown: stopping Now Playing bridge", file=sys.stderr, flush=True)
     try:
         import server as _server
         bridge = getattr(_server, "macos_now_playing_bridge", None)
         if bridge is not None:
             bridge.stop()
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"[desktop] shutdown: Now Playing stop failed: {exc!r}", file=sys.stderr, flush=True)
 
     # Close the audio OutputStream before the interpreter exits.
     # sounddevice registers an atexit Pa_Terminate(); if a stream is
@@ -311,13 +328,66 @@ def _graceful_shutdown(server: "uvicorn.Server") -> None:  # type: ignore[name-d
     # terminated the process. stop() does the ordered teardown
     # (abort + close the stream, stop the decoder thread) so
     # Pa_Terminate has nothing left to free.
+    print("[desktop] shutdown: stopping audio engine", file=sys.stderr, flush=True)
     try:
         import server as _server
         player = getattr(_server, "_pcm_player_singleton", None)
         if player is not None:
             player.stop()
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"[desktop] shutdown: audio stop failed: {exc!r}", file=sys.stderr, flush=True)
+    print("[desktop] shutdown: state flushed", file=sys.stderr, flush=True)
+
+
+# Ensures only one watchdog thread starts no matter how many close
+# paths try to arm it.
+_watchdog_armed = threading.Event()
+
+
+def _arm_exit_watchdog(
+    server: "uvicorn.Server",  # type: ignore[name-defined]
+    deadline_s: float = 10.0,
+) -> None:
+    """Guarantee the process dies once a window close has begun.
+
+    The geometry-cache fix removes the known close-path deadlock, but
+    pywebview's GTK backend has a wider history of the loop wedging
+    during teardown (r0x0r/pywebview #95, #690, #793) — and any wedge
+    between the `closing` event and the `closed` event leaves the
+    Linux closed-handler's os._exit unreachable. Armed from `closing`
+    (the first thing pywebview fires when a close starts). If the
+    process is still alive `deadline_s` later, log a diagnostic naming
+    which threads are alive and whether the clean shutdown ever ran,
+    flush state, and force-exit. State is safe: `_graceful_shutdown`
+    is idempotent and every worker thread is a daemon designed to die
+    with the process.
+
+    On the normal path the process exits within moments of the close
+    and the (daemon) watchdog dies with it, having done nothing.
+    """
+    if _watchdog_armed.is_set():
+        return
+    _watchdog_armed.set()
+
+    def _watch() -> None:
+        time.sleep(deadline_s)
+        clean = _graceful_ran.is_set()
+        print(
+            f"[desktop] exit watchdog: still alive {deadline_s:.0f}s after the "
+            f"window close began (clean shutdown ran: {clean}) — forcing exit. "
+            "If you are reporting a quit hang, include the lines above.",
+            file=sys.stderr,
+            flush=True,
+        )
+        alive = ", ".join(
+            f"{t.name}{'' if t.daemon else ' (non-daemon)'}"
+            for t in threading.enumerate()
+        )
+        print(f"[desktop] exit watchdog: threads alive: {alive}", file=sys.stderr, flush=True)
+        _graceful_shutdown(server)
+        os._exit(0)
+
+    threading.Thread(target=_watch, daemon=True, name="exit-watchdog").start()
 
 
 def _enable_webview_media_prefs() -> None:
@@ -514,31 +584,71 @@ def main(argv: Optional[list[str]] = None) -> int:
         easy_drag=False,
     )
 
+    # Live geometry cache, fed by pywebview's resized / moved events.
+    # _save_window_geometry used to read window.width/.height/.x/.y at
+    # close time, but on the GTK backend those getters marshal to the
+    # main loop via glib.idle_add and then BLOCK on a semaphore until
+    # the idle callback runs. The `closing` event's handlers execute
+    # synchronously ON that same main loop (it's a should_lock Event,
+    # fired from close_window), so the geometry read deadlocked the
+    # loop against itself: it sat in semaphore.acquire() waiting for
+    # an idle callback that only the blocked loop could run. Nothing
+    # after the deadlock ever happened — no destroy, no `closed`
+    # event, no shutdown logs, webview.start() never returned — which
+    # is exactly the Linux "window closes but the process survives
+    # until killed" report. Caching the values as the events deliver
+    # them costs an int store per resize/move and makes the close
+    # path entirely backend-free.
+    _geom = {"w": _win_w, "h": _win_h, "x": _win_x, "y": _win_y}
+
+    def _on_window_resized(width: int, height: int) -> None:
+        _geom["w"], _geom["h"] = int(width), int(height)
+
+    def _on_window_moved(x: int, y: int) -> None:
+        _geom["x"], _geom["y"] = int(x), int(y)
+
+    try:
+        window.events.resized += _on_window_resized
+        window.events.moved += _on_window_moved
+    except Exception as exc:
+        # Geometry restore degrades to the last persisted values —
+        # visible but not load-bearing. Log it: a backend that stops
+        # delivering these events is worth knowing about.
+        print(
+            f"[desktop] geometry event hooks failed: {exc!r}",
+            file=sys.stderr,
+            flush=True,
+        )
+
     def _save_window_geometry() -> None:
-        """Capture the window's current size + position into settings
-        so the next launch restores it. Best-effort: reading geometry
-        off a window that's already torn down (or a backend that
-        doesn't report it) must not break the close path. Called
-        while the window is still alive — the macOS hide path and the
-        Win/Linux closing event, before destroy."""
+        """Persist the cached size + position so the next launch
+        restores it. Reads ONLY the event-fed cache — never the
+        window object — so it is safe to call from any thread,
+        including inside the `closing` event on the GUI loop (see the
+        deadlock note above the cache)."""
         try:
             from app.settings import save_settings as _save_settings
 
-            w = int(window.width)
-            h = int(window.height)
-            x = int(window.x)
-            y = int(window.y)
+            w, h = int(_geom["w"]), int(_geom["h"])
             # A minimized/zero-size read is junk; keep the last good
             # geometry rather than persisting a collapsed window.
             if w < 800 or h < 600:
                 return
             _server.settings.window_width = w
             _server.settings.window_height = h
-            _server.settings.window_x = x
-            _server.settings.window_y = y
+            # x/y stay None until the first moved event (fresh install
+            # that was never dragged) — keep the persisted values
+            # untouched rather than writing a fake origin.
+            if _geom["x"] is not None and _geom["y"] is not None:
+                _server.settings.window_x = int(_geom["x"])
+                _server.settings.window_y = int(_geom["y"])
             _save_settings(_server.settings)
-        except Exception:
-            pass
+        except Exception as exc:
+            print(
+                f"[desktop] window geometry save failed: {exc!r}",
+                file=sys.stderr,
+                flush=True,
+            )
 
     # Close behavior. On Windows / Linux the X destroys the window and
     # the process exits. On macOS we follow the platform convention:
@@ -569,11 +679,19 @@ def main(argv: Optional[list[str]] = None) -> int:
         # Used by the in-app Quit menu's /api/_internal/quit
         # endpoint. Bypasses the closing-to-hide path on macOS by
         # calling destroy directly, so capture geometry first.
+        print("[desktop] quit requested from app menu", file=sys.stderr, flush=True)
         _save_window_geometry()
         try:
             window.destroy()
-        except Exception:
-            pass
+        except Exception as exc:
+            # A destroy that fails means the Quit click "did nothing"
+            # from the user's perspective — log the actual error so a
+            # report contains it instead of silence.
+            print(
+                f"[desktop] quit: window destroy failed: {exc!r}",
+                file=sys.stderr,
+                flush=True,
+            )
 
     if sys.platform == "darwin":
         def _on_closing_macos() -> bool:
@@ -657,10 +775,22 @@ def main(argv: Optional[list[str]] = None) -> int:
     else:
         # Windows / Linux: the X destroys the window and the process
         # exits, so geometry has to be captured here, in the closing
-        # event, while the window is still alive. Returning True lets
-        # the close proceed unchanged.
+        # event, while the window is still alive. The save reads only
+        # the event-fed cache — it must NOT touch the window object,
+        # because this handler runs synchronously on the GUI loop (see
+        # the deadlock note above the cache). Returning True lets the
+        # close proceed unchanged.
         def _on_closing_win_linux() -> bool:
+            print(
+                "[desktop] window close requested",
+                file=sys.stderr,
+                flush=True,
+            )
             _save_window_geometry()
+            # Arm the watchdog at the earliest moment of the close —
+            # any wedge between here and the `closed` event would
+            # otherwise leave the process alive with no recourse.
+            _arm_exit_watchdog(server)
             return True
 
         try:
@@ -675,22 +805,20 @@ def main(argv: Optional[list[str]] = None) -> int:
         # with no UI and the user having to kill it from a terminal.
         # The `closed` event still fires inside the stuck GTK loop, so
         # we hook it, run the same graceful shutdown the post-start()
-        # path runs, and hard-exit. A guard makes it safe if start()
-        # *does* return naturally — the finally block's call is a no-op.
+        # path runs, and hard-exit. _graceful_shutdown is idempotent,
+        # so this is safe when start() *does* return naturally — the
+        # finally block's call becomes a no-op.
         if sys.platform.startswith("linux"):
-            _shutdown_done = threading.Event()
-
-            def _shutdown_once() -> None:
-                if _shutdown_done.is_set():
-                    return
-                _shutdown_done.set()
+            def _on_closed_linux() -> None:
+                print(
+                    "[desktop] window closed; exiting",
+                    file=sys.stderr,
+                    flush=True,
+                )
                 try:
                     _graceful_shutdown(server)
                 except Exception:
                     pass
-
-            def _on_closed_linux() -> None:
-                _shutdown_once()
                 # os._exit (not sys.exit) so finalizers / atexit hooks
                 # can't reintroduce the hang they were trying to avoid
                 # — sounddevice's atexit Pa_Terminate has hung on
@@ -1455,7 +1583,9 @@ def main(argv: Optional[list[str]] = None) -> int:
             except KeyboardInterrupt:
                 pass
     finally:
+        print("[desktop] GUI loop ended; shutting down", file=sys.stderr, flush=True)
         _graceful_shutdown(server)
+        print("[desktop] shutdown complete; exiting", file=sys.stderr, flush=True)
 
     return 0
 
