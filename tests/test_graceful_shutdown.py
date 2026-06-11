@@ -13,8 +13,20 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import pytest
+
 import desktop
 import server
+
+
+@pytest.fixture(autouse=True)
+def reset_graceful_latch():
+    """_graceful_shutdown is idempotent via a module-level latch (the
+    post-start() path, the Linux closed handler, and the exit watchdog
+    all call it). Clear it so each test exercises a fresh shutdown."""
+    desktop._graceful_ran.clear()
+    yield
+    desktop._graceful_ran.clear()
 
 
 def test_graceful_shutdown_stops_audio_player(monkeypatch):
