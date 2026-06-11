@@ -210,6 +210,11 @@ class Settings:
     # blast the user at 100 %. Restored onto the player at startup;
     # the /api/player/volume endpoint writes it back on every change.
     volume: int = 100
+    # Scroll-wheel volume step in percent (1..25). One wheel tick over
+    # the player bar's volume control changes the volume by this much;
+    # holding Shift always steps by 1 % for fine adjustment. 5 matches
+    # what most desktop players use per tick.
+    volume_scroll_step_pct: int = 5
     # When the user's queue runs out — last track on an album,
     # playlist, mix, single-track play, anything — take over with an
     # Artist Radio mix seeded from the last track's primary artist.

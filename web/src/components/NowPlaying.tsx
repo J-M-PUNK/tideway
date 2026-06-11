@@ -46,6 +46,7 @@ import { HeartButton } from "@/components/HeartButton";
 import { OutputDevicePicker } from "@/components/OutputDevicePicker";
 import { SignalPathDialog } from "@/components/SignalPathDialog";
 import { SleepTimerButton } from "@/components/SleepTimerButton";
+import { useAudioOptions } from "@/hooks/useAudioOptions";
 import { useIsDownloaded } from "@/hooks/useDownloadedSet";
 import { useRecordPlays } from "@/hooks/useRecentlyPlayed";
 import {
@@ -584,7 +585,7 @@ function StreamingQualityPicker({
   );
 }
 
-function VolumeControl({
+export function VolumeControl({
   value,
   onChange,
   disabled,
@@ -622,6 +623,53 @@ function VolumeControl({
   const muted = value === 0;
   const Icon = muted ? VolumeX : value < 0.5 ? Volume1 : Volume2;
 
+  // Scroll-wheel volume (issue #195): a wheel tick anywhere over the
+  // control — icon or popover — nudges the volume by the configured
+  // step; Shift+scroll always steps 1 % for fine adjustment. The
+  // hover that precedes any wheel gesture has already opened the
+  // popover, so the slider + percent readout double as live feedback.
+  //
+  // Attached as a native non-passive listener: React registers
+  // `onWheel` passively, and a passive handler can't preventDefault
+  // the page scroll that would otherwise run underneath the player
+  // bar. The handler reads its inputs through a ref so the listener
+  // installs once instead of detaching/reattaching mid-gesture every
+  // time a tick changes the volume.
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const { volumeScrollStepPct } = useAudioOptions();
+  const wheelState = useRef({
+    value,
+    onChange,
+    disabled,
+    stepPct: volumeScrollStepPct,
+  });
+  wheelState.current = {
+    value,
+    onChange,
+    disabled,
+    stepPct: volumeScrollStepPct,
+  };
+  useEffect(() => {
+    const el = rootRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      const cur = wheelState.current;
+      if (cur.disabled || e.deltaY === 0) return;
+      e.preventDefault();
+      // Work in integer percent so repeated ticks land on clean
+      // values (0.05 float steps accumulate representation error).
+      const stepPct = e.shiftKey ? 1 : cur.stepPct;
+      const pct = Math.round(cur.value * 100);
+      const next = Math.max(
+        0,
+        Math.min(100, pct + (e.deltaY < 0 ? stepPct : -stepPct)),
+      );
+      if (next !== pct) cur.onChange(next / 100);
+    };
+    el.addEventListener("wheel", onWheel, { passive: false });
+    return () => el.removeEventListener("wheel", onWheel);
+  }, []);
+
   const cancelClose = () => {
     if (closeTimer.current !== null) {
       window.clearTimeout(closeTimer.current);
@@ -656,6 +704,7 @@ function VolumeControl({
 
   return (
     <div
+      ref={rootRef}
       className={cn("relative", disabled && "opacity-50")}
       onMouseEnter={() => {
         cancelClose();
@@ -705,7 +754,11 @@ function VolumeControl({
           onMouseEnter={cancelClose}
           onMouseLeave={scheduleClose}
         >
-          <div className="flex h-32 w-9 items-center justify-center rounded-full border border-border bg-popover shadow-md animate-in fade-in-0 zoom-in-95 duration-150">
+          {/* h-40 (vs the slider's visual 96px) leaves a clear band
+           *  at the bottom for the percent readout — the rotated
+           *  input is centered, so its visual span stays inside
+           *  y=32..128 and the label at bottom-2 never overlaps. */}
+          <div className="relative flex h-40 w-9 items-center justify-center rounded-full border border-border bg-popover shadow-md animate-in fade-in-0 zoom-in-95 duration-150">
             <input
               type="range"
               min={0}
@@ -725,12 +778,20 @@ function VolumeControl({
               // maps 0..1 the same way.
               className="h-1.5 w-24 cursor-pointer appearance-none rounded-full bg-secondary accent-primary disabled:cursor-not-allowed"
               style={{
-                transform: "rotate(-90deg)",
+                // translateY lifts the slider's visual span to
+                // y=24..120 inside the h-40 pill, clearing the
+                // percent readout pinned at the bottom.
+                transform: "translateY(-8px) rotate(-90deg)",
                 background: `linear-gradient(to right, hsl(var(--primary)) ${value * 100}%, hsl(var(--secondary)) ${value * 100}%)`,
               }}
               aria-label="Volume"
               aria-orientation="vertical"
             />
+            {/* Live percent readout (issue #195's "display volume
+             *  text") — doubles as feedback for wheel scrolling. */}
+            <span className="pointer-events-none absolute bottom-2 text-[10px] font-medium tabular-nums text-muted-foreground">
+              {Math.round(value * 100)}
+            </span>
           </div>
         </div>
       )}
