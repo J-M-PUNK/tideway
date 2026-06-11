@@ -322,6 +322,10 @@ export interface Settings {
    *  DAC, speakers, or OS volume instead. Avoids software scaling
    *  that would otherwise throw away bit-depth under Exclusive Mode. */
   force_volume: boolean;
+  /** Scroll-wheel volume step in percent (1..25). One wheel tick over
+   *  the player bar's volume control moves the volume by this much;
+   *  Shift+scroll always steps by 1 % for fine adjustment. */
+  volume_scroll_step_pct: number;
   /** When the user's queue runs out — last track on an album,
    *  playlist, mix, single-track play, anything — take over with an
    *  Artist Radio mix seeded from the last track's primary artist.

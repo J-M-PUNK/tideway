@@ -20,6 +20,9 @@ export interface AudioOptions {
   current: string;
   exclusiveMode: boolean;
   forceVolume: boolean;
+  /** Scroll-wheel volume step in percent (1..25). Consumed by the
+   *  player bar's volume control; Shift+scroll always steps 1 %. */
+  volumeScrollStepPct: number;
   loaded: boolean;
 }
 
@@ -28,6 +31,7 @@ const initial: AudioOptions = {
   current: "",
   exclusiveMode: false,
   forceVolume: false,
+  volumeScrollStepPct: 5,
   loaded: false,
 };
 
@@ -43,6 +47,7 @@ function setState(next: AudioOptions): void {
     next.current === state.current &&
     next.exclusiveMode === state.exclusiveMode &&
     next.forceVolume === state.forceVolume &&
+    next.volumeScrollStepPct === state.volumeScrollStepPct &&
     next.loaded === state.loaded &&
     next.devices === state.devices
   ) {
@@ -76,6 +81,7 @@ async function loadOnce(): Promise<void> {
         current: d.current,
         exclusiveMode: !!s.exclusive_mode,
         forceVolume: !!s.force_volume,
+        volumeScrollStepPct: s.volume_scroll_step_pct ?? 5,
         loaded: true,
       });
     } catch {
@@ -168,5 +174,22 @@ export function useAudioOptions() {
     [],
   );
 
-  return { ...snap, setDevice, setExclusiveMode, setForceVolume, refresh };
+  const setVolumeScrollStep = useCallback((pct: number) => {
+    // Clamp client-side to the same [1, 25] bound the PUT validates,
+    // so a fat-fingered input degrades to the nearest legal step
+    // instead of a 400 toast.
+    const clamped = Math.max(1, Math.min(25, Math.round(pct)));
+    return applyOptimistic("volumeScrollStepPct", clamped, () =>
+      api.settings.put({ volume_scroll_step_pct: clamped }),
+    );
+  }, []);
+
+  return {
+    ...snap,
+    setDevice,
+    setExclusiveMode,
+    setForceVolume,
+    setVolumeScrollStep,
+    refresh,
+  };
 }

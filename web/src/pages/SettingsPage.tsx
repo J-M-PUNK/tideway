@@ -42,6 +42,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { useToast } from "@/components/toast";
+import { useAudioOptions } from "@/hooks/useAudioOptions";
 import { useDebouncedSettingsPut } from "@/hooks/useDebouncedSettingsPut";
 import { useOfflineMode } from "@/hooks/useOfflineMode";
 import {
@@ -272,6 +273,7 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
                 </select>
               </Field>
               <AudioEngineFields />
+              <VolumeScrollStepField />
               <Field
                 label="Explicit content"
                 hint="Tidal returns both clean and explicit edits of the same album or track. Pick which copy you want to see when both exist."
@@ -747,6 +749,55 @@ function ThemePicker({
  * matching slider curve immediately). Manual slider changes POST
  * the full band array with `preamp` = null ("no explicit preamp").
  */
+/**
+ * Scroll-wheel volume step (issue #195). Lives on the audio-options
+ * store rather than the page's settings copy so the player bar's
+ * volume control — which consumes the cached value — picks up a
+ * change the moment it's saved, not on the next app load.
+ */
+function VolumeScrollStepField() {
+  const toast = useToast();
+  const opts = useAudioOptions();
+
+  // Stock choices plus whatever the user currently has (a value set
+  // via the API directly may not be in the stock list — the select
+  // must still display it rather than appearing blank).
+  const choices = Array.from(
+    new Set([1, 2, 5, 10, 15, 20, 25, opts.volumeScrollStepPct]),
+  ).sort((a, b) => a - b);
+
+  const setStep = async (v: number) => {
+    try {
+      await opts.setVolumeScrollStep(v);
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: "Couldn't update volume step",
+        description: err instanceof Error ? err.message : String(err),
+      });
+    }
+  };
+
+  return (
+    <Field
+      label="Scroll-wheel volume step"
+      hint="How much one mouse-wheel tick over the player bar's volume control changes the volume. Hold Shift while scrolling to always step by 1%."
+    >
+      <select
+        value={String(opts.volumeScrollStepPct)}
+        onChange={(e) => void setStep(Number(e.target.value))}
+        className="h-10 rounded-md border border-input bg-secondary px-3 text-sm"
+      >
+        {choices.map((v) => (
+          <option key={v} value={String(v)}>
+            {v}%
+          </option>
+        ))}
+      </select>
+    </Field>
+  );
+}
+
 function AudioEngineFields() {
   const toast = useToast();
   const [devices, setDevices] = useState<{

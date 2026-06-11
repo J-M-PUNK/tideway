@@ -62,6 +62,23 @@ def test_put_force_volume_persists(client):
     assert r.json()["force_volume"] is True
 
 
+def test_put_volume_scroll_step_persists_and_validates(client):
+    """Scroll-wheel volume step (issue #195): round-trips through PUT
+    and rejects out-of-range values instead of silently coercing —
+    the player bar consumes this verbatim per wheel tick."""
+    r = client.put("/api/settings", json={"volume_scroll_step_pct": 10})
+    assert r.status_code == 200
+    assert r.json()["volume_scroll_step_pct"] == 10
+    r2 = client.get("/api/settings")
+    assert r2.json()["volume_scroll_step_pct"] == 10
+
+    for bad in (0, 26, -5):
+        r = client.put("/api/settings", json={"volume_scroll_step_pct": bad})
+        assert r.status_code == 400, r.text
+    # Rejections didn't clobber the stored value.
+    assert client.get("/api/settings").json()["volume_scroll_step_pct"] == 10
+
+
 def test_put_explicit_content_preference_persists(client):
     for value in ("clean", "both", "explicit"):
         r = client.put(

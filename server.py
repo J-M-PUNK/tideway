@@ -10192,6 +10192,7 @@ class SettingsPayload(BaseModel):
     replaygain_preamp_db: Optional[float] = None
     replaygain_prevent_clipping: Optional[bool] = None
     volume: Optional[int] = None
+    volume_scroll_step_pct: Optional[int] = None
     create_playlist_folders: Optional[bool] = None
     downconvert_hires_downloads: Optional[bool] = None
     window_x: Optional[int] = None
@@ -10243,6 +10244,14 @@ def update_settings(payload: SettingsPayload) -> dict:
                 detail="replaygain_preamp_db must be in [-10, 10]",
             )
         patch["replaygain_preamp_db"] = value
+
+    if "volume_scroll_step_pct" in patch:
+        step = patch["volume_scroll_step_pct"]
+        if not isinstance(step, int) or not (1 <= step <= 25):
+            raise HTTPException(
+                status_code=400,
+                detail="volume_scroll_step_pct must be an integer in [1, 25]",
+            )
 
     # Validate output_dir: must be an existing writable directory. Without
     # this, a PUT with `{"output_dir": "/"}` would quietly persist and all
