@@ -46,10 +46,11 @@ import tidalapi
 from app.audio.decoder import Decoder
 from app.audio.crossfeed import Crossfeed
 from app.audio.eq import (
-    BAND_FREQUENCIES_HZ as EQ_BAND_FREQUENCIES,
     Equalizer,
-    PRESETS as EQ_PRESETS,
-    preset_bands as eq_preset_bands,
+    ParametricBand,
+    build_parametric_sos,
+    parametric_band_from_dict,
+    parametric_preset,
 )
 from app.audio.manifest_cache import ManifestCache
 from app.audio.replaygain import (
@@ -349,11 +350,15 @@ class PCMPlayer:
         # new sample rate. Remembered user settings (bands / preamp)
         # survive the rebuild.
         self._eq: Optional[Equalizer] = None
-        self._eq_bands: list[float] = []
+        # Manual parametric EQ — the user's editable band list +
+        # master preamp. Remembered (not just the compiled SOS) so a
+        # stream reopen recompiles coefficients at the new sample
+        # rate without losing the curve.
+        self._eq_parametric_bands: list[ParametricBand] = []
         self._eq_preamp: Optional[float] = None
         # AutoEQ headphone-profile mode (see
         # docs/autoeq-headphone-profiles-scope.md). Mutually
-        # exclusive with `_eq_bands` — switching modes clears
+        # exclusive with `_eq_parametric_bands` — switching modes clears
         # whichever isn't active. Held here (rather than just an
         # SOS) so the stream-reopen path can recompile coefficients
         # at the new sample rate.
@@ -1348,58 +1353,36 @@ class PCMPlayer:
     # bands + preamp are remembered on the player and re-applied
     # each rebuild.
 
-    @staticmethod
-    def eq_presets() -> list[dict]:
-        # `bands` ships with each preset so the Settings UI can
-        # render mini-curve previews next to the preset name without
-        # a second round-trip per preset. The same data is what
-        # `apply_equalizer` would receive if the user picked the
-        # preset, so the preview is exact, not a redrawing.
-        return [
-            {
-                "index": p["index"],
-                "name": p["name"],
-                "bands": list(p.get("bands") or []),
-            }
-            for p in EQ_PRESETS
-        ]
-
-    @staticmethod
-    def eq_bands_count() -> int:
-        return len(EQ_BAND_FREQUENCIES)
-
-    @staticmethod
-    def eq_band_frequencies() -> list[float]:
-        return list(EQ_BAND_FREQUENCIES)
-
     def apply_equalizer(
-        self, bands: list[float], preamp: Optional[float] = None
+        self, bands: list, preamp: Optional[float] = None
     ) -> None:
-        """Apply band gains (dB) to the active EQ. Empty `bands` OR
-        a flat curve with no preamp disables filtering entirely —
-        no point paying 10 biquad operations per sample when the
-        curve is unity.
+        """Apply a manual parametric band list to the active EQ.
 
-        Remembered so that a stream reopen (cross-rate bridge,
-        track load) rebuilds the EQ coefficients against the new
-        sample rate without losing the user's curve.
+        `bands` is a list of `ParametricBand` (or band dicts, which
+        are validated/coerced here). Flat and disabled bands compile
+        to no biquads; `set_sos` handles the empty-cascade cases —
+        full bypass when the preamp is also unity, a preamp-only
+        stage otherwise (the user's preamp must stay audible even
+        when every band is flat).
 
-        Calling this also clears any active AutoEQ profile —
-        manual and profile modes are mutually exclusive in the
-        player.
+        Remembered so that a stream reopen (cross-rate bridge, track
+        load) rebuilds the EQ coefficients against the new sample
+        rate without losing the user's curve.
+
+        Calling this also clears any active AutoEQ profile — manual
+        and profile modes are mutually exclusive in the player.
         """
-        is_flat = bands and all(abs(b) < 1e-6 for b in bands) and (
-            preamp is None or abs(preamp) < 1e-6
-        )
+        coerced = [
+            b if isinstance(b, ParametricBand) else parametric_band_from_dict(b)
+            for b in bands
+        ]
         with self._lock:
-            self._eq_bands = list(bands)
+            self._eq_parametric_bands = coerced
             self._eq_preamp = preamp
             self._eq_profile = None
             if self._eq is not None:
-                if bands and not is_flat:
-                    self._eq.set_bands(list(bands), preamp_db=preamp)
-                else:
-                    self._eq.clear()
+                sos = build_parametric_sos(coerced, self._eq.sample_rate())
+                self._eq.set_sos(sos, preamp_db=preamp)
 
     def set_equalizer_bypass(self, bypassed: bool) -> None:
         """Toggle the A/B bypass flag without touching the active
@@ -1520,7 +1503,7 @@ class PCMPlayer:
         )
 
         with self._lock:
-            self._eq_bands = []
+            self._eq_parametric_bands = []
             self._eq_preamp = None
             self._eq_profile = profile
             tilt = self._eq_tilt or TiltConfig()
@@ -1559,13 +1542,13 @@ class PCMPlayer:
             else:
                 self._eq.set_sos(sos, preamp_db=preamp_db)
 
-    def apply_equalizer_preset(self, preset_index: int) -> list[float]:
+    def apply_equalizer_preset(self, preset_index: int) -> list[dict]:
         """Apply a preset by index, push its curve to the live EQ,
-        and return the resolved band amplitudes so the frontend's
-        sliders can snap to it."""
-        bands = eq_preset_bands(preset_index)
+        and return the resolved parametric bands (as dicts) so the
+        frontend can snap its editor to the preset."""
+        bands = parametric_preset(preset_index)
         self.apply_equalizer(bands, preamp=None)
-        return bands
+        return [b.to_dict() for b in bands]
 
     # --- Device selection -------------------------------------------
 
@@ -2332,9 +2315,15 @@ class PCMPlayer:
             except Exception:
                 log.exception("autoeq profile coefficient build failed")
                 self._eq.clear()
-        elif self._eq_bands:
+        elif self._eq_parametric_bands or self._eq_preamp is not None:
+            # `or preamp` — a preamp-only curve (no bands) must
+            # survive the reopen too; set_sos installs the
+            # preamp-only stage for an empty cascade.
             try:
-                self._eq.set_bands(self._eq_bands, preamp_db=self._eq_preamp)
+                sos = build_parametric_sos(
+                    self._eq_parametric_bands, sample_rate
+                )
+                self._eq.set_sos(sos, preamp_db=self._eq_preamp)
             except Exception:
                 log.exception("eq coefficient build failed")
                 self._eq.clear()

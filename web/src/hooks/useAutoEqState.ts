@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { api } from "@/api/client";
+import type { ParametricBand } from "@/api/types";
 
 /**
  * Fetches the current AutoEQ state (mode, active profile, bypass
@@ -37,7 +38,7 @@ export interface AutoEqState {
   bypass: boolean;
   active_profile_id: string;
   active_profile: AutoEqProfileSummary | null;
-  manual_bands: number[];
+  manual_bands: ParametricBand[];
   manual_preamp_db: number | null;
   profile_catalog_size: number;
   tilt: AutoEqTilt;

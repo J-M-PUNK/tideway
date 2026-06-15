@@ -29,6 +29,8 @@ import type {
   LocalVideo,
   Lyrics,
   MixDetail,
+  ManualEqConfig,
+  ParametricBand,
   PlayerSnapshot,
   Playlist,
   PlaylistFolder,
@@ -1010,24 +1012,24 @@ export const api = {
     eq: () =>
       req<{
         enabled: boolean;
-        bands: number[];
+        bands: ParametricBand[];
         preamp: number | null;
-        band_count: number;
-        frequencies: number[];
-        presets: { index: number; name: string; bands: number[] }[];
+        config: ManualEqConfig;
+        default_bands: ParametricBand[];
+        presets: { index: number; name: string; bands: ParametricBand[] }[];
       }>("/api/player/eq"),
-    setEq: (bands: number[], preamp: number | null) =>
+    setEq: (bands: ParametricBand[], preamp: number | null) =>
       req<{
         ok: boolean;
         enabled: boolean;
-        bands: number[];
+        bands: ParametricBand[];
         preamp: number | null;
       }>("/api/player/eq", {
         method: "POST",
         body: JSON.stringify({ bands, preamp }),
       }),
     setEqPreset: (preset: number) =>
-      req<{ ok: boolean; enabled: boolean; bands: number[] }>(
+      req<{ ok: boolean; enabled: boolean; bands: ParametricBand[] }>(
         "/api/player/eq/preset",
         { method: "POST", body: JSON.stringify({ preset }) },
       ),
@@ -1066,7 +1068,7 @@ export const api = {
           preamp_db: number;
           band_count: number;
         } | null;
-        manual_bands: number[];
+        manual_bands: ParametricBand[];
         manual_preamp_db: number | null;
         profile_catalog_size: number;
         tilt: {

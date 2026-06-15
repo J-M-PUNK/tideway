@@ -68,10 +68,20 @@ stream and bridge across roughly fifty milliseconds, which is the
 same limitation Tidal desktop and foobar2000 have.
 
 A parametric equalizer runs in three modes. **Off** bypasses the
-EQ stage entirely, leaving the audio bit-perfect. **Manual** gives
-you a 10-band parametric EQ with presets (each shown with a tiny
-SVG curve preview so you can recognise the shape), a preamp, and
-shelf filters at the ends. **Profile** loads a per-headphone
+EQ stage entirely, leaving the audio bit-perfect. **Manual** is a
+full parametric EQ: every band carries its own filter type (peaking,
+low shelf, or high shelf), frequency, gain, and Q, and you add or
+remove bands freely. You shape them on a live frequency-response
+graph — drag a node to set frequency and gain, scroll over it to
+tighten or widen its Q, double-click empty space to drop a new band
+or a node to delete it — or type exact values in the per-band rows.
+The curve redraws in real time as you drag, computed with the same
+RBJ biquad math the audio engine runs. A fresh install seeds six
+flat bands so there's something to grab, and flat bands compile to
+nothing, so the audio stays bit-perfect until you actually shape
+one. Presets render as miniature response curves, a master preamp
+keeps headroom for boosts, and an A/B bypass flips the whole EQ off
+and on without losing your bands. **Profile** loads a per-headphone
 [AutoEQ](https://github.com/jaakkopasanen/AutoEq) correction file
 so your headphones target neutral, Harman, or B&K. Profiles are
 user-imported (`ParametricEQ.txt` from AutoEQ or `.txt` from
@@ -97,6 +107,8 @@ each active stage to the output device, so you can confirm a stream
 really is bit-perfect.
 
 ![Settings, Playback tab](assets/screenshots/settings-playback.png)
+
+![Parametric EQ editor](assets/screenshots/parametric-eq.png)
 
 ![AutoEQ profile tone graph](assets/screenshots/eq-autoeq.png)
 

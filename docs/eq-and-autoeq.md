@@ -13,12 +13,19 @@ The EQ mode lives in **Settings → EQ**. There are three options:
   DAC unmodified. This is the default for new installs and the
   right choice if you're chasing bit-perfect output or if your
   DAC / headphone amp already has its own correction.
-- **Manual** — a 10-band parametric EQ with an integer dB preamp
-  and a small library of named presets (Bass Boost, Classical,
-  Vocal Boost, etc.). Each preset shows a curve preview in the
-  picker so you can recognise the shape without applying it.
-  Bands at the extremes use shelf filters; the middle bands are
-  peaking filters.
+- **Manual** — a full parametric EQ. Each band has its own filter
+  type (peaking, low shelf, or high shelf), centre frequency, gain
+  (±24 dB), and Q, and you can add or remove bands freely (up to
+  32). Edit on the live frequency-response graph — drag a node for
+  frequency/gain, scroll over it for Q, double-click empty space to
+  add a band, double-click a node to remove it — or type exact
+  values in the per-band rows. A fresh install seeds six flat bands
+  (shelves on the ends, peaks in the middle); flat bands compile to
+  nothing, so the audio stays bit-perfect until you shape one. A
+  master preamp and a small library of named presets (Bass Boost,
+  Classical, Vocal Boost, etc.) round it out, each preset shown as a
+  curve preview in the picker, plus an A/B bypass to compare EQ
+  on/off without losing your bands.
 - **Profile** — load an AutoEQ correction file targeting a
   specific pair of headphones. See the next section for how to
   get one.

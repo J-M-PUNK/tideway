@@ -290,6 +290,31 @@ export interface VideoDownloadJob {
   progress?: number | null;
 }
 
+/** One band of the manual parametric EQ. `type` is a biquad filter
+ *  code: "PK" (peaking), "LSC" (low shelf), or "HSC" (high shelf).
+ *  Frequency in Hz, gain in dB, Q dimensionless. `enabled` lets the
+ *  editor keep a band's settings while taking it out of the cascade. */
+export interface ParametricBand {
+  type: "PK" | "LSC" | "HSC";
+  freq: number;
+  gain: number;
+  q: number;
+  enabled: boolean;
+}
+
+/** Editable bounds + allowed filter types for the manual parametric
+ *  EQ, served by GET /api/player/eq so the editor clamps to the same
+ *  ranges the server validates against. */
+export interface ManualEqConfig {
+  filter_types: ("PK" | "LSC" | "HSC")[];
+  freq_min: number;
+  freq_max: number;
+  gain_abs_max: number;
+  q_min: number;
+  q_max: number;
+  max_bands: number;
+}
+
 export interface Settings {
   output_dir: string;
   /** Where music videos land. Kept separate from output_dir so video

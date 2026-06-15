@@ -202,6 +202,7 @@ _FIELDS_MANAGED_ELSEWHERE: dict[str, str] = {
     # PCMPlayer's coefficient-rebuild path, so it stays out.
     "eq_enabled": "/api/player/eq",
     "eq_bands": "/api/player/eq",
+    "eq_parametric_bands": "/api/player/eq",
     "eq_preamp": "/api/player/eq",
     # Output device — set via POST /api/player/output-device,
     # which has to coordinate with stream replacement.
