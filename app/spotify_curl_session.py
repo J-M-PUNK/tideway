@@ -162,6 +162,15 @@ class CurlSpotifyClient:
         # build its User-Agent. The real impersonation comes from the
         # curl-cffi profile name.
         self.client_identifier = profile
+        # spotapi 1.2.8 renamed the field BaseClient reads from
+        # `client_identifier` to `impersonate` — it does
+        # `re.search(r"\d+", self.client.impersonate)` to pull the
+        # Chrome major version for its headers. Without this attribute
+        # 1.2.8's BaseClient construction raises AttributeError and
+        # ALL Spotify enrichment (playcounts AND artist stats) dies.
+        # Expose both names so we work with 1.2.7 and 1.2.8+ alike;
+        # `_DEFAULT_PROFILE` ("chrome131") carries the right digits.
+        self.impersonate = _DEFAULT_PROFILE
         self._session = _CurlSession(impersonate=_DEFAULT_PROFILE)
 
         if proxy:
