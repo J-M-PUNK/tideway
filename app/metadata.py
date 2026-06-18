@@ -16,7 +16,18 @@ M4A_TIDAL_ID_KEY = "----:com.tidaldownloader:track_id"
 # don't want the downloader process to start fetching arbitrary URLs and
 # embedding the bytes into the user's files.
 _ALLOWED_COVER_HOSTS = {"resources.tidal.com", "images.tidal.com"}
-_MAX_COVER_BYTES = 5 * 1024 * 1024  # 5 MB — larger than any real Tidal cover
+# 30 MB ceiling. "origin" covers are 3000x3000 and run a few MB; the cap
+# is generous enough not to reject a real one but still guards against a
+# misbehaving server streaming an unbounded payload into memory.
+_MAX_COVER_BYTES = 30 * 1024 * 1024
+
+# Cover-art resolutions tidalapi exposes, largest first. The download
+# path requests the user's chosen size and falls back down this ladder
+# when an album doesn't publish it (origin in particular is missing for
+# some back-catalog releases). Values are exactly what
+# `tidalapi.Album.image()` accepts.
+_COVER_SIZE_LADDER: tuple = ("origin", 1280, 640, 320)
+DEFAULT_COVER_RESOLUTION = "1280"
 
 
 def tag_file(
@@ -140,17 +151,41 @@ def read_track_tags(file_path: Path) -> Optional[dict]:
     return None
 
 
-def fetch_cover_art(album_obj) -> Optional[bytes]:
-    if album_obj is None:
+def _cover_size_ladder(resolution) -> list:
+    """The sizes to try, in order, for a requested resolution: the
+    chosen size first, then every smaller fallback. An unknown
+    resolution falls back to the default so a corrupt setting can't
+    leave a download with no cover."""
+    try:
+        target = int(resolution)
+    except (TypeError, ValueError):
+        target = "origin" if resolution == "origin" else int(DEFAULT_COVER_RESOLUTION)
+    # Keep `origin` (the largest) whenever it's the request; otherwise
+    # drop sizes larger than the target so we never upscale-request
+    # beyond what the user asked for.
+    if target == "origin":
+        return list(_COVER_SIZE_LADDER)
+    return [s for s in _COVER_SIZE_LADDER if s != "origin" and s <= target]
+
+
+def _fetch_cover_at(album_obj, size) -> Optional[bytes]:
+    """Fetch one cover-art size. Returns None (not raises) when the
+    size isn't published, the host check fails, or the byte cap is
+    exceeded, so the caller can try the next size down."""
+    try:
+        # tidalapi raises ValueError for a size the album doesn't
+        # publish; any other error (missing attr, malformed payload)
+        # is just as good a reason to fall through to the next size.
+        url = album_obj.image(size)
+    except Exception:
+        return None
+    parsed = urlparse(url)
+    # Reject non-HTTPS or non-Tidal hosts before touching the network.
+    if parsed.scheme != "https" or parsed.hostname not in _ALLOWED_COVER_HOSTS:
+        return None
+    if parsed.username or parsed.password:
         return None
     try:
-        url = album_obj.image(640)
-        parsed = urlparse(url)
-        # Reject non-HTTPS or non-Tidal hosts before touching the network.
-        if parsed.scheme != "https" or parsed.hostname not in _ALLOWED_COVER_HOSTS:
-            return None
-        if parsed.username or parsed.password:
-            return None
         # Stream + cap size so a misbehaving server can't exhaust memory
         # by advertising (or actually sending) a giant image.
         with SESSION.get(url, timeout=10, stream=True, allow_redirects=False) as resp:
@@ -166,9 +201,24 @@ def fetch_cover_art(album_obj) -> Optional[bytes]:
                 buf.extend(chunk)
                 if len(buf) > _MAX_COVER_BYTES:
                     return None
-            return bytes(buf)
+            return bytes(buf) or None
     except Exception:
         return None
+
+
+def fetch_cover_art(
+    album_obj, resolution: str = DEFAULT_COVER_RESOLUTION
+) -> Optional[bytes]:
+    """Download album cover art at the chosen `resolution`, falling
+    back to smaller sizes when the album doesn't publish it. Returns
+    None when nothing is reachable."""
+    if album_obj is None:
+        return None
+    for size in _cover_size_ladder(resolution):
+        data = _fetch_cover_at(album_obj, size)
+        if data is not None:
+            return data
+    return None
 
 
 def _tag_flac(path: Path, track, cover_data: Optional[bytes], album_obj=None):

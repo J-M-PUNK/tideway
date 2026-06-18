@@ -1364,7 +1364,10 @@ class Downloader:
             tag_error: Optional[str] = None
             resolved_album = album_obj or getattr(track, "album", None)
             try:
-                cover = fetch_cover_art(resolved_album)
+                cover = fetch_cover_art(
+                    resolved_album,
+                    resolution=getattr(s, "cover_art_resolution", "1280"),
+                )
             except Exception as exc:
                 cover = None
                 tag_error = f"cover fetch failed: {exc}"

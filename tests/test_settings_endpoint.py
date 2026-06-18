@@ -62,6 +62,24 @@ def test_put_force_volume_persists(client):
     assert r.json()["force_volume"] is True
 
 
+def test_put_cover_art_resolution_persists_and_validates(client):
+    """Cover-art resolution (issue #204) round-trips and rejects
+    anything outside the tidalapi sizes we support."""
+    for value in ("640", "1280", "origin"):
+        r = client.put("/api/settings", json={"cover_art_resolution": value})
+        assert r.status_code == 200, r.text
+        assert r.json()["cover_art_resolution"] == value
+
+    # Out-of-set strings are rejected by the handler (400); a wrong
+    # type (int) is rejected earlier by Pydantic (422). Both must be
+    # refused, neither silently coerced.
+    for bad in ("3000", "high", ""):
+        r = client.put("/api/settings", json={"cover_art_resolution": bad})
+        assert r.status_code == 400, r.text
+    r = client.put("/api/settings", json={"cover_art_resolution": 1280})
+    assert r.status_code == 422, r.text
+
+
 def test_put_volume_scroll_step_persists_and_validates(client):
     """Scroll-wheel volume step (issue #195): round-trips through PUT
     and rejects out-of-range values instead of silently coercing —

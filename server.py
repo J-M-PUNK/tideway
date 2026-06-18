@@ -10261,6 +10261,7 @@ class SettingsPayload(BaseModel):
     volume_scroll_step_pct: Optional[int] = None
     create_playlist_folders: Optional[bool] = None
     downconvert_hires_downloads: Optional[bool] = None
+    cover_art_resolution: Optional[str] = None
     window_x: Optional[int] = None
     window_y: Optional[int] = None
     window_width: Optional[int] = None
@@ -10317,6 +10318,13 @@ def update_settings(payload: SettingsPayload) -> dict:
             raise HTTPException(
                 status_code=400,
                 detail="volume_scroll_step_pct must be an integer in [1, 25]",
+            )
+
+    if "cover_art_resolution" in patch:
+        if patch["cover_art_resolution"] not in ("640", "1280", "origin"):
+            raise HTTPException(
+                status_code=400,
+                detail="cover_art_resolution must be one of '640', '1280', 'origin'",
             )
 
     # Validate output_dir: must be an existing writable directory. Without
