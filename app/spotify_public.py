@@ -507,6 +507,32 @@ def _write_tidal_artist_mapping(
     )
 
 
+def _fresh_cached_artist_stats(row) -> Optional[ArtistStats]:
+    """Decode a cached `(payload, fetched_at)` artist_stats row, but
+    only return it when still fresh.
+
+    Crucially, a row whose `monthly_listeners` is None is a *miss*,
+    not a real "0 listeners" — it was written when queryArtistOverview
+    failed or came back empty (a transient Spotify hash rotation, a
+    network blip). Honor those only on the short negative TTL (1 day)
+    instead of the full 7-day TTL, so a transient overview failure
+    self-heals on the next day's view rather than blanking every
+    artist's monthly listeners for a week. Real stats ride the full
+    TTL. This mirrors the zeroish-playcount handling elsewhere in the
+    module; the artist_stats read path was the one place that long-
+    cached a null."""
+    if row is None or not row[1]:
+        return None
+    try:
+        stats = ArtistStats(**json.loads(row[0]))
+    except Exception:
+        return None
+    ttl = _STATS_TTL_SEC if stats.monthly_listeners else _NULL_TTL_SEC
+    if (time.time() - row[1]) < ttl:
+        return stats
+    return None
+
+
 def _fetch_artist_overview(
     spotify_artist_id: str,
 ) -> Optional[ArtistStats]:
@@ -522,11 +548,9 @@ def _fetch_artist_overview(
             ).fetchone()
         finally:
             conn.close()
-    if row is not None and row[1] and (time.time() - row[1]) < _STATS_TTL_SEC:
-        try:
-            return ArtistStats(**json.loads(row[0]))
-        except Exception:
-            pass  # fall through and refetch
+    fresh = _fresh_cached_artist_stats(row)
+    if fresh is not None:
+        return fresh
 
     try:
         _, artist = _ensure_client()
@@ -638,11 +662,9 @@ def artist_stats(
             ).fetchone()
         finally:
             conn.close()
-    if row is not None and row[1] and (time.time() - row[1]) < _STATS_TTL_SEC:
-        try:
-            return ArtistStats(**json.loads(row[0]))
-        except Exception:
-            pass  # fall through and refetch
+    fresh = _fresh_cached_artist_stats(row)
+    if fresh is not None:
+        return fresh
 
     try:
         _, artist = _ensure_client()

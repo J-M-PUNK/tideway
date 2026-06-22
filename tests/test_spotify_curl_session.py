@@ -270,6 +270,22 @@ def test_client_identifier_matches_curl_profile_family(mock_curl_session):
     assert digit_suffix.isdigit() and int(digit_suffix) >= 100
 
 
+def test_exposes_impersonate_for_spotapi_128(mock_curl_session):
+    """spotapi 1.2.8's BaseClient reads `self.client.impersonate` and
+    does `re.search(r"\\d+", ...)` to pull the Chrome major version —
+    where 1.2.7 read `client_identifier`. Without an `impersonate`
+    attribute carrying a digit, 1.2.8 raises AttributeError at client
+    construction and ALL Spotify enrichment (playcounts AND artist
+    monthly listeners) dies. Pin that we expose it so a build that
+    pulls 1.2.8 (latest >= our floor) doesn't silently break."""
+    import re
+
+    adapter, _ = _fresh_adapter(mock_curl_session)
+    assert hasattr(adapter, "impersonate")
+    m = re.search(r"\d+", adapter.impersonate)
+    assert m is not None and int(m.group()) >= 100
+
+
 @pytest.mark.parametrize("method", ["get", "post", "put"])
 def test_all_verbs_dispatch_correctly(method, mock_curl_session):
     adapter, sess = _fresh_adapter(mock_curl_session)
