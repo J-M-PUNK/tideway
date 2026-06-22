@@ -85,3 +85,21 @@ def test_successful_fetch_keeps_flag_clear():
         result = aoty._fetch("https://www.albumoftheyear.org/releases/this-week/")
     assert result == "<html></html>"
     assert aoty.is_scraper_blocked() is False
+
+
+def test_impersonate_profile_is_current_and_known_to_curl_cffi():
+    """Guard against shipping a Cloudflare-blocked impersonate
+    profile. `chrome120` is confirmed-403'd by AOTY's Cloudflare;
+    don't let a revert reintroduce it. A fixture test can't verify
+    Cloudflare *accepts* a profile (that needs the live site — see
+    the PR's probe), but it can pin that the configured value isn't
+    the known-bad one and is a profile curl_cffi actually recognises
+    (so a typo like "chorme" fails loudly instead of silently 403'ing
+    every request)."""
+    from curl_cffi.requests.impersonate import normalize_browser_type
+
+    assert aoty._CFFI_IMPERSONATE != "chrome120"
+    # normalize_browser_type resolves the "chrome" alias / a concrete
+    # version to curl_cffi's internal target; an unknown string raises.
+    resolved = normalize_browser_type(aoty._CFFI_IMPERSONATE)
+    assert resolved  # truthy target, not None/empty

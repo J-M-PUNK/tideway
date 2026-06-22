@@ -39,9 +39,15 @@ stock HTTP client now returns 403 with `cf-mitigated: challenge`
 and the JS interstitial. Plain `requests` can't pass it; the
 homepage sections silently emptied out as the existing in-memory
 cache aged out. We switched the fetch path to `curl_cffi` with
-browser-fingerprinted TLS (`impersonate="chrome120"`), which gets
-back HTTP 200 with the full HTML. curl_cffi is already a project
-dependency — used for Tidal's anti-bot path — so no new deps.
+browser-fingerprinted TLS, which gets back HTTP 200 with the full
+HTML. curl_cffi is already a project dependency — used for Tidal's
+anti-bot path — so no new deps.
+
+Profile-staleness note: Cloudflare later started 403'ing the pinned
+`chrome120` profile (the Home rows emptied again). A live probe
+confirmed every newer curl_cffi profile passes, so the impersonate
+target is now the version-tracking `"chrome"` alias — see the
+comment on `_CFFI_IMPERSONATE`.
 
 Block detection: when `_fetch` sees a Cloudflare challenge
 response it sets a module-level `_blocked_at` timestamp and
@@ -70,15 +76,26 @@ log = logging.getLogger(__name__)
 _BASE_URL = "https://www.albumoftheyear.org"
 
 # Browser to impersonate at the TLS / HTTP/2 / header layer.
-# curl_cffi sets the full Chrome 120 fingerprint when this is
-# active — including the User-Agent, every `sec-ch-ua-*` client
-# hint, `Accept-Language`, and the order of headers. Passing our
-# own `User-Agent` override (or any other header curl_cffi already
-# sets) breaks Cloudflare's consistency check: a Chrome TLS hello
-# paired with an inconsistent set of HTTP headers reads as bot
-# automation. So _fetch() below deliberately sends NO custom
-# headers — the impersonate profile is the whole story.
-_CFFI_IMPERSONATE = "chrome120"
+# curl_cffi sets the full Chrome fingerprint when this is active —
+# including the User-Agent, every `sec-ch-ua-*` client hint,
+# `Accept-Language`, and the order of headers. Passing our own
+# `User-Agent` override (or any other header curl_cffi already sets)
+# breaks Cloudflare's consistency check: a Chrome TLS hello paired
+# with an inconsistent set of HTTP headers reads as bot automation.
+# So _fetch() below deliberately sends NO custom headers — the
+# impersonate profile is the whole story.
+#
+# Use the `"chrome"` alias (curl_cffi resolves it to its newest
+# Chrome profile — chrome146 as of curl_cffi 0.15.0) rather than a
+# pinned version. A pinned profile inevitably ages out: Cloudflare
+# tightens its fingerprint allowlist as old Chrome releases fall out
+# of support, and a frozen "chrome120" silently starts getting 403'd
+# (which is exactly what emptied the Home rows, twice — 2026-05-20
+# and again later). The alias means a routine `curl_cffi` dependency
+# bump refreshes the fingerprint for free. The block-detection
+# early-warning below still fires if even the newest profile gets
+# challenged, signalling it's time to upgrade curl_cffi itself.
+_CFFI_IMPERSONATE = "chrome"
 
 _HTTP_TIMEOUT_SEC = 15.0
 
@@ -429,9 +446,10 @@ def _fetch(url: str) -> Optional[str]:
             # changes (see CLAUDE.md Logging section).
             print(
                 f"[aoty] Cloudflare challenge on {url} "
-                f"(status {r.status_code}) — the chrome120 "
-                f"impersonation profile has aged out. Bump "
-                f"_CFFI_IMPERSONATE in app/aoty.py or file: "
+                f"(status {r.status_code}) — the "
+                f"{_CFFI_IMPERSONATE!r} impersonation profile is "
+                f"being blocked. Upgrade curl_cffi (the 'chrome' "
+                f"alias tracks its newest profile) or file: "
                 f"{ISSUE_TRACKER_URL}",
                 flush=True,
             )
