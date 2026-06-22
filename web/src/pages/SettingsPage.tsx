@@ -395,6 +395,27 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
                 label="Skip downloads that already exist on disk"
               />
               <Field
+                label="Cover art resolution"
+                hint="Resolution of the album artwork embedded in downloads and saved as cover.jpg. Higher looks crisper but makes each file larger; Maximum embeds the 3000×3000 master in every track. Falls back to a smaller size when an album doesn't publish the chosen one."
+              >
+                <select
+                  value={settings.cover_art_resolution ?? "1280"}
+                  onChange={(e) =>
+                    patch({
+                      cover_art_resolution: e.target
+                        .value as Settings["cover_art_resolution"],
+                    })
+                  }
+                  className="h-10 rounded-md border border-input bg-secondary px-3 text-sm"
+                >
+                  <option value="640">Standard (640px)</option>
+                  <option value="1280">High (1280px)</option>
+                  <option value="origin">
+                    Maximum (original, up to 3000px)
+                  </option>
+                </select>
+              </Field>
+              <Field
                 label={`Concurrent downloads — ${settings.concurrent_downloads}`}
                 hint="How many tracks download in parallel. Higher = faster, but risks Tidal rate-limiting."
               >

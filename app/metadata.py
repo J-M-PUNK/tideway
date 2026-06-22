@@ -1,6 +1,8 @@
 import os
 import shutil
 import tempfile
+import threading
+from collections import OrderedDict
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
@@ -16,7 +18,32 @@ M4A_TIDAL_ID_KEY = "----:com.tidaldownloader:track_id"
 # don't want the downloader process to start fetching arbitrary URLs and
 # embedding the bytes into the user's files.
 _ALLOWED_COVER_HOSTS = {"resources.tidal.com", "images.tidal.com"}
-_MAX_COVER_BYTES = 5 * 1024 * 1024  # 5 MB — larger than any real Tidal cover
+# 30 MB ceiling. "origin" covers are 3000x3000 and run a few MB; the cap
+# is generous enough not to reject a real one but still guards against a
+# misbehaving server streaming an unbounded payload into memory.
+_MAX_COVER_BYTES = 30 * 1024 * 1024
+
+# Cover-art resolutions tidalapi exposes, largest first. The download
+# path requests the user's chosen size and falls back down this ladder
+# when an album doesn't publish it (origin in particular is missing for
+# some back-catalog releases). Values are exactly what
+# `tidalapi.Album.image()` accepts.
+_COVER_SIZE_LADDER: tuple = ("origin", 1280, 640, 320)
+DEFAULT_COVER_RESOLUTION = "1280"
+
+# Process-lifetime LRU of resolved cover bytes, keyed by
+# (album id, resolution). tag_file embeds the same cover into every
+# track of an album, so without this the full image is re-downloaded
+# — and the fallback ladder re-walked — once per track: 20 redundant
+# fetches for a 20-track album, far worse at "origin" (multi-MB each)
+# or for a cover-less album that 404s the whole ladder every time.
+# Bounded small: concurrent downloads are capped well below this, and
+# an entry is only useful for the lifetime of one album's download
+# burst. None is cached too, so a genuinely cover-less album isn't
+# re-walked per track.
+_cover_cache_lock = threading.Lock()
+_cover_cache: "OrderedDict[tuple[str, str], Optional[bytes]]" = OrderedDict()
+_COVER_CACHE_MAX = 8
 
 
 def tag_file(
@@ -140,17 +167,41 @@ def read_track_tags(file_path: Path) -> Optional[dict]:
     return None
 
 
-def fetch_cover_art(album_obj) -> Optional[bytes]:
-    if album_obj is None:
+def _cover_size_ladder(resolution) -> list:
+    """The sizes to try, in order, for a requested resolution: the
+    chosen size first, then every smaller fallback. An unknown
+    resolution falls back to the default so a corrupt setting can't
+    leave a download with no cover."""
+    # `origin` is the largest size — try it then everything below.
+    if resolution == "origin":
+        return list(_COVER_SIZE_LADDER)
+    try:
+        target = int(resolution)
+    except (TypeError, ValueError):
+        target = int(DEFAULT_COVER_RESOLUTION)
+    # Drop sizes larger than the target so we never request beyond
+    # what the user asked for.
+    return [s for s in _COVER_SIZE_LADDER if s != "origin" and s <= target]
+
+
+def _fetch_cover_at(album_obj, size) -> Optional[bytes]:
+    """Fetch one cover-art size. Returns None (not raises) when the
+    size isn't published, the host check fails, or the byte cap is
+    exceeded, so the caller can try the next size down."""
+    try:
+        # tidalapi raises ValueError for a size the album doesn't
+        # publish; any other error (missing attr, malformed payload)
+        # is just as good a reason to fall through to the next size.
+        url = album_obj.image(size)
+    except Exception:
+        return None
+    parsed = urlparse(url)
+    # Reject non-HTTPS or non-Tidal hosts before touching the network.
+    if parsed.scheme != "https" or parsed.hostname not in _ALLOWED_COVER_HOSTS:
+        return None
+    if parsed.username or parsed.password:
         return None
     try:
-        url = album_obj.image(640)
-        parsed = urlparse(url)
-        # Reject non-HTTPS or non-Tidal hosts before touching the network.
-        if parsed.scheme != "https" or parsed.hostname not in _ALLOWED_COVER_HOSTS:
-            return None
-        if parsed.username or parsed.password:
-            return None
         # Stream + cap size so a misbehaving server can't exhaust memory
         # by advertising (or actually sending) a giant image.
         with SESSION.get(url, timeout=10, stream=True, allow_redirects=False) as resp:
@@ -166,9 +217,43 @@ def fetch_cover_art(album_obj) -> Optional[bytes]:
                 buf.extend(chunk)
                 if len(buf) > _MAX_COVER_BYTES:
                     return None
-            return bytes(buf)
+            return bytes(buf) or None
     except Exception:
         return None
+
+
+def fetch_cover_art(
+    album_obj, resolution: str = DEFAULT_COVER_RESOLUTION
+) -> Optional[bytes]:
+    """Download album cover art at the chosen `resolution`, falling
+    back to smaller sizes when the album doesn't publish it. Returns
+    None when nothing is reachable. Results are cached per
+    (album, resolution) so an album's tracks share one fetch — see
+    `_cover_cache`."""
+    if album_obj is None:
+        return None
+
+    album_id = str(getattr(album_obj, "id", "") or "")
+    cache_key = (album_id, str(resolution)) if album_id else None
+    if cache_key is not None:
+        with _cover_cache_lock:
+            if cache_key in _cover_cache:
+                _cover_cache.move_to_end(cache_key)
+                return _cover_cache[cache_key]
+
+    data: Optional[bytes] = None
+    for size in _cover_size_ladder(resolution):
+        data = _fetch_cover_at(album_obj, size)
+        if data is not None:
+            break
+
+    if cache_key is not None:
+        with _cover_cache_lock:
+            _cover_cache[cache_key] = data
+            _cover_cache.move_to_end(cache_key)
+            while len(_cover_cache) > _COVER_CACHE_MAX:
+                _cover_cache.popitem(last=False)
+    return data
 
 
 def _tag_flac(path: Path, track, cover_data: Optional[bytes], album_obj=None):

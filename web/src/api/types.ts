@@ -430,6 +430,10 @@ export interface Settings {
    *  44.1 kHz FLAC for legacy DAPs (old iPod + Rockbox, etc.).
    *  Off by default; CD-quality and lossy sources are untouched. */
   downconvert_hires_downloads: boolean;
+  /** Resolution of album cover art embedded in downloads and written
+   *  as cover.jpg. "640" / "1280" / "origin" (3000x3000 master).
+   *  Default "1280". */
+  cover_art_resolution: "640" | "1280" | "origin";
   /** Desktop window geometry, persisted on close. -1 = not set yet
    *  (first run uses the platform default). */
   window_x: number;

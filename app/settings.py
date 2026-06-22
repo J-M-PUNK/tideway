@@ -65,6 +65,14 @@ class Settings:
     # the resample is high quality and the bit-depth reduction uses
     # TPDF dither.
     downconvert_hires_downloads: bool = False
+    # Resolution of the album cover art embedded in downloads and
+    # written as cover.jpg. One of "640", "1280", or "origin" (the
+    # 3000x3000 master). Default "1280" — a 4x-area upgrade over the
+    # old fixed 640 that every serious tagger / player renders crisply,
+    # without bloating every embedded copy the way the multi-megabyte
+    # origin master would. The download path falls back to a smaller
+    # size when an album doesn't publish the chosen one.
+    cover_art_resolution: str = "1280"
     skip_existing: bool = True
     # How many downloads may run in parallel. Gated by the Downloader's
     # semaphore so changing this doesn't require a process restart.
