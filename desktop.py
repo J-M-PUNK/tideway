@@ -476,6 +476,56 @@ def _enable_webview_media_prefs() -> None:
     BrowserView.__init__ = patched_init
 
 
+def _guard_cocoa_window_move() -> None:
+    """Stop a macOS 26 (Tahoe) startup crash in pywebview's Cocoa
+    backend (issue #215).
+
+    pywebview sets the window frame inside BrowserView.__init__ —
+    move() when there's a restored position, else center() — and that
+    fires the `windowDidMove_` window-delegate callback. On macOS 26 the
+    NSWindow has not been ordered onto a display yet at that point, so
+    `NSWindow.screen()` returns None and pywebview's handler crashes
+    dereferencing `screen().frame()` (older macOS returned a screen
+    here). The dock icon flashes and the process dies before any window
+    appears, with no recovery.
+
+    Swap pywebview's WindowDelegate for a subclass whose windowDidMove_
+    skips the event while the window has no screen — a "moved" event for
+    a window that isn't on a display yet carries no usable geometry
+    anyway. Subclassing (rather than reassigning the method on the
+    existing class) registers the override cleanly through PyObjC so
+    AppKit actually dispatches to it, and pywebview instantiates the
+    delegate by reference — `BrowserView.WindowDelegate.alloc().init()`
+    — so swapping the class attribute before any window is created is
+    all it takes.
+
+    Best-effort and darwin-only: if a future pywebview restructures its
+    delegate the guard quietly no-ops, leaving the original behaviour
+    rather than introducing a new failure.
+    """
+    if sys.platform != "darwin":
+        return
+    try:
+        from webview.platforms.cocoa import BrowserView
+    except Exception:
+        return
+    base_delegate = getattr(BrowserView, "WindowDelegate", None)
+    if base_delegate is None or not hasattr(base_delegate, "windowDidMove_"):
+        return
+
+    class _GuardedWindowDelegate(base_delegate):  # type: ignore[misc,valid-type]
+        def windowDidMove_(self, notification):  # type: ignore[no-untyped-def]
+            i = BrowserView.get_instance("window", notification.object())
+            if i is not None:
+                win = getattr(i, "window", None)
+                # screen() is None until the window is placed on a
+                # display — which is exactly the __init__-time move that
+                # crashes on macOS 26. Skip it; there's nothing to emit.
+                if win is None or win.screen() is None:
+                    return
+            super(_GuardedWindowDelegate, self).windowDidMove_(notification)
+
+    BrowserView.WindowDelegate = _GuardedWindowDelegate
 
 
 def main(argv: Optional[list[str]] = None) -> int:
@@ -514,6 +564,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     try:
         import webview  # pywebview
         _enable_webview_media_prefs()
+        _guard_cocoa_window_move()
     except ImportError:
         print(
             "[desktop] pywebview not installed; falling back to default browser. "
