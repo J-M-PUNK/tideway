@@ -5,6 +5,7 @@ import { api } from "@/api/client";
 import type { Album, Artist, Track, Video } from "@/api/types";
 import type { OnDownload } from "@/api/download";
 import { useApi } from "@/hooks/useApi";
+import { queryKeys } from "@/api/queryKeys";
 import { useLikedByArtist } from "@/hooks/useLikedByArtist";
 import { useVideoPlayer } from "@/hooks/useVideoPlayer";
 import { Grid } from "@/components/Grid";
@@ -160,7 +161,16 @@ export function ArtistSection({ onDownload }: { onDownload: OnDownload }) {
     id: string;
     section: string;
   }>();
-  const { data: artist, loading, error } = useApi(() => api.artist(id), [id]);
+  // Share ArtistDetail's cache key for the same api.artist(id) fetch, so
+  // arriving here via the artist page's "View more" link is an instant
+  // cache hit instead of re-fetching the artist we just had.
+  const {
+    data: artist,
+    loading,
+    error,
+  } = useApi(() => api.artist(id), [id], {
+    cacheKey: queryKeys.artist(id),
+  });
   const meta = SECTIONS[section as ArtistSectionKey];
   // Liked source: pull from the user's library filtered to this
   // artist. Returns null while the library fetch is loading.
