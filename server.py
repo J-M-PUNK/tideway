@@ -183,7 +183,12 @@ settings: Settings = load_settings()
 # Guards the `settings` rebind + downloader.settings swap so workers never
 # see a torn state (new global, old downloader field or vice versa).
 _settings_lock = threading.Lock()
-tidal.load_session()
+# tidal.load_session() is intentionally NOT called here. It does a Tidal
+# network round-trip (a /sessions call inside load_oauth_session, plus
+# check_login) that used to block the entire module import — and thus
+# uvicorn startup and the app window — on a server response. It now runs
+# on a background boot thread (see `_boot_tidal_session` below); anything
+# that needs the loaded session waits on `_session_ready`.
 
 # Shared single-worker pool for bulk endpoints. Keeping it at max_workers=1
 # serializes Tidal RPCs across all bulk requests — tidalapi isn't
@@ -215,6 +220,15 @@ ALLOWED_IMAGE_HOSTS = {
 _AUTH_CACHE_TTL = 30.0
 _auth_cache: dict[str, Any] = {"at": 0.0, "ok": False}
 _auth_cache_lock = threading.Lock()
+
+# Set once the background boot thread has finished loading the Tidal
+# session from disk (and its initial network validation). `_is_logged_in`
+# waits on this before its first check — otherwise it would inspect a
+# still-empty session, decide "logged out", and cache that for the whole
+# 30s TTL, flashing the login screen on every cold start. Loading the
+# session off the import path is what lets the window open without first
+# waiting on a Tidal round-trip.
+_session_ready = threading.Event()
 
 # Tidal stream URLs are signed and valid for several minutes. Cache the
 # resolved preview URL per track so browser seek/reload doesn't re-hit the
@@ -323,6 +337,13 @@ def _install_stream_cache(key: tuple[int, str], path: Path, mime: str) -> None:
 def _is_logged_in() -> bool:
     import time
 
+    # The session loads on a background thread so the window can open
+    # without blocking on a Tidal round-trip. Wait for that to finish
+    # before the first check, or we'd inspect an empty session and cache
+    # "logged out" for the whole TTL. Bounded so a wedged/slow load can
+    # never hang the auth endpoint — past the timeout we fall through to
+    # check_login(), which does its own network call as before.
+    _session_ready.wait(timeout=15.0)
     now = time.monotonic()
     with _auth_cache_lock:
         if now - _auth_cache["at"] < _AUTH_CACHE_TTL:
@@ -581,22 +602,46 @@ downloader = Downloader(
     on_file_ready=_on_file_ready,
 )
 
-# Re-enqueue anything that was still pending when we shut down. We gate
-# on check_login() because submits that fire without a valid session
-# will each fail in their expand thread and surface as FAILED rows —
-# which is loud, confusing, and not helpful (the user can't do anything
-# about it until they sign in). Instead, leave the queue file alone and
-# let the user's next session's restore pick them up.
-try:
-    if tidal.session.check_login():
-        downloader.restore()
-except Exception as _restore_exc:  # noqa: BLE001
+def _boot_tidal_session() -> None:
+    """Load the persisted Tidal session, then re-enqueue pending
+    downloads — both off the import critical path so the app window can
+    open without waiting on Tidal's session-validation round-trip.
+
+    Signals `_session_ready` as soon as the session is loaded (whether or
+    not it's valid), so `_is_logged_in` unblocks the moment the answer is
+    knowable. The download restore runs afterward; it's gated on a valid
+    session because submits without one each fail in their expand thread
+    and surface as loud FAILED rows the user can't act on until they sign
+    in. load_session() already returned the login result, so we reuse it
+    instead of a second check_login() round-trip.
+    """
     import sys as _sys
-    print(
-        f"[server] downloader.restore() failed: {_restore_exc!r}",
-        file=_sys.stderr,
-        flush=True,
-    )
+
+    logged_in = False
+    try:
+        logged_in = bool(tidal.load_session())
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"[server] load_session() failed: {exc!r}",
+            file=_sys.stderr,
+            flush=True,
+        )
+    finally:
+        _session_ready.set()
+    if logged_in:
+        try:
+            downloader.restore()
+        except Exception as exc:  # noqa: BLE001
+            print(
+                f"[server] downloader.restore() failed: {exc!r}",
+                file=_sys.stderr,
+                flush=True,
+            )
+
+
+threading.Thread(
+    target=_boot_tidal_session, daemon=True, name="tidal-session-boot"
+).start()
 
 
 def _cleanup_part_files(root: Path) -> None:
