@@ -145,6 +145,13 @@ When NOT to use this workflow:
   action — also requires explicit instruction.
 - **Never fast-forward main without explicit instruction.** Even if
   the deploy branch is ready, main moves only when the user says so.
+- **Never close GitHub issues without explicit instruction.** Reading,
+  triaging, commenting on, labelling, or linking an issue to a branch /
+  PR is fine; resolving or closing one is the user's call. This holds
+  even when a fix looks complete — open the PR and let the user decide
+  when the issue is done. (An issue that GitHub closes on its own
+  because a PR's commits landed in main, or a PR GitHub marks "merged"
+  the same way, is GitHub's doing, not a manual close — that's fine.)
 
 ## Commits
 
