@@ -69,6 +69,7 @@ type PlayerActions = Pick<
   | "next"
   | "prev"
   | "seek"
+  | "restart"
   | "stop"
   | "setVolume"
   | "toggleShuffle"
@@ -148,6 +149,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       next: player.next,
       prev: player.prev,
       seek: player.seek,
+      restart: player.restart,
       stop: player.stop,
       setVolume: player.setVolume,
       toggleShuffle: player.toggleShuffle,
@@ -166,6 +168,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       player.next,
       player.prev,
       player.seek,
+      player.restart,
       player.stop,
       player.setVolume,
       player.toggleShuffle,

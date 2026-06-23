@@ -1017,6 +1017,21 @@ export function usePlayer() {
     void api.player.seek(fraction).catch(() => {});
   }, []);
 
+  const restart = useCallback(() => {
+    // Restart the current track from the top — what double-clicking the
+    // already-current row should do (the player's own `play(track)`
+    // no-ops when that track is already loaded). seek(0) alone would
+    // leave a paused track paused, so resume too: the gesture means
+    // "play this from the start". No-op when nothing is loaded.
+    const s = stateRef.current;
+    if (!s.track) return;
+    setState((cur) => ({ ...cur, currentTime: 0 }));
+    void api.player.seek(0).catch(() => {});
+    if (!s.playing) {
+      void api.player.resume().catch(() => {});
+    }
+  }, []);
+
   const stop = useCallback(() => {
     expectedTrackIdRef.current = null;
     void api.player.stop().catch(() => {});
@@ -1184,6 +1199,7 @@ export function usePlayer() {
     next,
     prev,
     seek,
+    restart,
     stop,
     setVolume,
     toggleShuffle,

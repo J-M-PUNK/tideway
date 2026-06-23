@@ -459,7 +459,9 @@ function TrackRow({
             sortable && "cursor-grab touch-none active:cursor-grabbing",
             sort.isDragging && "bg-accent shadow-lg",
           )}
-          onDoubleClick={() => actions.play(track, context, source)}
+          onDoubleClick={() =>
+            isCurrent ? actions.restart() : actions.play(track, context, source)
+          }
           onMouseEnter={() => hoverPrefetch.schedule(track.id)}
           onMouseLeave={hoverPrefetch.cancel}
         >
