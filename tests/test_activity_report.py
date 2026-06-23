@@ -99,6 +99,62 @@ def test_report_includes_required_top_level_keys(client):
         assert key in payload, f"missing top-level key: {key}"
 
 
+def test_audio_section_always_carries_a_health_key(client):
+    # The playback-health counters are how a remote stutter report gets
+    # triaged, so the key must always be present: None when no player
+    # has been constructed, otherwise the counter dict. Either way the
+    # report stays useful in a degraded state.
+    c, _ = client
+    r = c.post("/api/diagnostics/save-activity-report")
+    payload = json.loads(Path(r.json()["path"]).read_text())
+    assert "health" in payload["audio"]
+    health = payload["audio"]["health"]
+    if health is not None and "error" not in health:
+        for k in (
+            "output_underruns",
+            "queue_starvations",
+            "callback_jitter_events",
+            "worst_jitter_late_ms",
+        ):
+            assert k in health, f"health missing counter: {k}"
+
+
+def test_audio_health_is_surfaced_when_a_player_exists(client, monkeypatch):
+    # With a live player the report must carry its counters verbatim so
+    # the reader can see which glitch class dominates.
+    import server
+
+    class _FakePlayer:
+        def list_output_devices(self):
+            return []
+
+        def snapshot(self):
+            return server._pcm_player_singleton  # unused; replaced below
+
+        def audio_health(self):
+            return {
+                "output_underruns": 0,
+                "queue_starvations": 12,
+                "callback_jitter_events": 0,
+                "worst_jitter_late_ms": 0.0,
+                "samples_emitted": 999,
+                "pcm_queue_depth": 3,
+                "pcm_queue_max": 100,
+            }
+
+    fake = _FakePlayer()
+    monkeypatch.setattr(server, "_pcm_player_singleton", fake)
+    # The player section calls snapshot()+_snapshot_dict; stub that path
+    # so this test stays focused on the health wiring.
+    monkeypatch.setattr(server, "_snapshot_dict", lambda _s: {"state": "playing"})
+
+    c, _ = client
+    r = c.post("/api/diagnostics/save-activity-report")
+    payload = json.loads(Path(r.json()["path"]).read_text())
+    assert payload["audio"]["health"]["queue_starvations"] == 12
+    assert payload["audio"]["health"]["samples_emitted"] == 999
+
+
 def test_falls_back_to_home_when_downloads_missing(tmp_path, monkeypatch):
     """If ~/Downloads doesn't exist (locale, custom layout), the
     endpoint should still write somewhere — we want the file even

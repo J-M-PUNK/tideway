@@ -1721,6 +1721,19 @@ def _build_activity_report() -> dict:
             audio["player_devices"] = None
     except Exception as exc:
         audio["player_devices"] = {"error": f"{type(exc).__name__}: {exc}"}
+    # Playback-health counters — cumulative under/overruns, queue
+    # starvations, and callback jitter. This is the section that
+    # answers "why does it stutter": each counter maps to a distinct
+    # cause (driver vs our throughput vs GIL/CPU contention), so a
+    # remote bug report becomes triageable from the report alone
+    # instead of needing the audio.log the reporter usually can't reach.
+    try:
+        if _pcm_player_singleton is not None:
+            audio["health"] = _pcm_player_singleton.audio_health()
+        else:
+            audio["health"] = None
+    except Exception as exc:
+        audio["health"] = {"error": f"{type(exc).__name__}: {exc}"}
     try:
         import sounddevice as sd  # type: ignore
 

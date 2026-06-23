@@ -419,6 +419,17 @@ class PCMPlayer:
         self._cb_jitter_count = 0
         self._cb_jitter_last_print = 0.0
         self._cb_jitter_worst_ms = 0.0
+        # Cumulative (lifetime) totals of the same three glitch classes,
+        # surfaced in the activity report so a stutter bug can be triaged
+        # without anyone hunting for the rate-limited stderr / audio.log
+        # lines. The per-second counters above reset each second; these
+        # never do. Each maps to a distinct cause: status → driver /
+        # exclusive-mode / device; starvation → our decode/network
+        # couldn't keep up; jitter → GIL/CPU contention elsewhere.
+        self._cb_status_total = 0
+        self._cb_starve_total = 0
+        self._cb_jitter_total = 0
+        self._cb_jitter_worst_late_ms = 0.0
         # Heartbeat tick counter, only incremented when _DEBUG is on.
         # 1-per-callback log every 100 ticks confirms the callback
         # is actually running + advancing.
@@ -2410,6 +2421,41 @@ class PCMPlayer:
             except queue.Full:
                 pass
 
+    def audio_health(self) -> dict:
+        """Cumulative playback-health counters since this player was
+        constructed, for the activity report. Each count maps to a
+        distinct stutter cause so a bug report can be triaged without
+        the audio.log:
+
+          output_underruns  — PortAudio flagged an over/underrun
+                              (driver / exclusive-mode / device can't
+                              keep up).
+          queue_starvations — our decoder/network didn't fill the PCM
+                              buffer in time (throughput / CPU).
+          callback_jitter_events — the realtime callback was delivered
+                              late while the queue was full (GIL/CPU
+                              contention elsewhere in the app).
+
+        worst_jitter_late_ms is the largest single late delivery seen.
+        The queue depth/max and samples_emitted give a point-in-time
+        sense of buffer fill and how much has played. All best-effort:
+        the queue may not exist yet if nothing has played.
+        """
+        q = getattr(self, "_pcm_queue", None)
+        try:
+            queue_depth = q.qsize() if q is not None else None
+        except Exception:
+            queue_depth = None
+        return {
+            "output_underruns": self._cb_status_total,
+            "queue_starvations": self._cb_starve_total,
+            "callback_jitter_events": self._cb_jitter_total,
+            "worst_jitter_late_ms": round(self._cb_jitter_worst_late_ms, 1),
+            "samples_emitted": getattr(self, "_samples_emitted", 0),
+            "pcm_queue_depth": queue_depth,
+            "pcm_queue_max": _PCM_QUEUE_MAX,
+        }
+
     def _log_callback_status(self, status) -> None:
         """Rate-limited diagnostic for PortAudio over/underruns
         signalled via the callback's `status` arg. One message + a
@@ -2419,6 +2465,7 @@ class PCMPlayer:
         typically trace back to this path."""
         now = time.monotonic()
         self._cb_status_count += 1
+        self._cb_status_total += 1
         if now - self._cb_status_last_print >= 1.0:
             count = self._cb_status_count
             self._cb_status_count = 0
@@ -2460,6 +2507,7 @@ class PCMPlayer:
         ours (slow disk / network / CPU) rather than driver-side."""
         now = time.monotonic()
         self._cb_starve_count += 1
+        self._cb_starve_total += 1
         if now - self._cb_starve_last_print >= 1.0:
             count = self._cb_starve_count
             self._cb_starve_count = 0
@@ -2487,9 +2535,13 @@ class PCMPlayer:
         mid-playback. One line + worst-case + count per second."""
         now = time.monotonic()
         self._cb_jitter_count += 1
+        self._cb_jitter_total += 1
         gap_ms = gap_s * 1000.0
         if gap_ms > self._cb_jitter_worst_ms:
             self._cb_jitter_worst_ms = gap_ms
+        late_ms = gap_ms - expected_s * 1000.0
+        if late_ms > self._cb_jitter_worst_late_ms:
+            self._cb_jitter_worst_late_ms = late_ms
         if now - self._cb_jitter_last_print >= 1.0:
             count = self._cb_jitter_count
             worst = self._cb_jitter_worst_ms
