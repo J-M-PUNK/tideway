@@ -10,6 +10,7 @@ import {
 } from "lucide-react";
 import type { Track } from "@/api/types";
 import type { OnDownload } from "@/api/download";
+import { prefetch } from "@/api/queryKeys";
 import { formatDuration, imageProxy } from "@/lib/utils";
 import { DownloadButton } from "@/components/DownloadButton";
 import { EmptyState } from "@/components/EmptyState";
@@ -522,7 +523,11 @@ function TrackRow({
                 {track.artists.map((a, i) => (
                   <span key={a.id}>
                     {i > 0 && ", "}
-                    <Link to={`/artist/${a.id}`} className="hover:underline">
+                    <Link
+                      to={`/artist/${a.id}`}
+                      className="hover:underline"
+                      onMouseEnter={() => prefetch.artist(a.id)}
+                    >
                       {a.name}
                     </Link>
                   </span>
@@ -539,14 +544,24 @@ function TrackRow({
           )}
           <div className="truncate text-xs text-muted-foreground">
             {showAlbum && track.album ? (
-              <Link to={`/album/${track.album.id}`} className="hover:underline">
+              <Link
+                to={`/album/${track.album.id}`}
+                className="hover:underline"
+                onMouseEnter={() =>
+                  track.album && prefetch.album(track.album.id)
+                }
+              >
                 {track.album.name}
               </Link>
             ) : (
               track.artists.map((a, i) => (
                 <span key={a.id}>
                   {i > 0 && ", "}
-                  <Link to={`/artist/${a.id}`} className="hover:underline">
+                  <Link
+                    to={`/artist/${a.id}`}
+                    className="hover:underline"
+                    onMouseEnter={() => prefetch.artist(a.id)}
+                  >
                     {a.name}
                   </Link>
                 </span>
