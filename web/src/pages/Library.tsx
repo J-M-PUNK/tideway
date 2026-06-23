@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useApi } from "@/hooks/useApi";
+import { useApi, mutateApiCache } from "@/hooks/useApi";
 import { queryKeys } from "@/api/queryKeys";
 import {
   Disc3,
@@ -104,6 +104,17 @@ const META: Record<
 
 type LibraryItem = Album | Artist | Playlist | Track;
 
+// The SWR cache lane each favorite kind feeds, so an unfavorite can
+// drop the item from the cached list (not just the live render) and a
+// later remount reads the corrected list with no stale-flash. `mix`
+// has no library section, so it's intentionally absent.
+const LIBRARY_CACHE_KEY: Partial<Record<FavoriteKind, string>> = {
+  album: queryKeys.libraryAlbums,
+  artist: queryKeys.libraryArtists,
+  playlist: queryKeys.libraryPlaylists,
+  track: queryKeys.libraryTracks,
+};
+
 export function Library({ onDownload }: { onDownload: OnDownload }) {
   const { section = "albums" } = useParams<{ section: string }>();
   // Guard against stale bookmarks like /library/typo — without this the
@@ -128,10 +139,13 @@ export function Library({ onDownload }: { onDownload: OnDownload }) {
   const [folders, setFolders] = useState<PlaylistFolder[]>([]);
   // Ids the user unfavorited this session, so the card leaves the grid
   // the instant they click instead of lingering until the SWR list's
-  // 30s TTL or a tab refocus refetches. Keyed by `${kind}:${id}` so a
-  // removed album id can't accidentally hide an artist sharing that id.
-  // Re-favoriting deletes the key, so the card returns. Owned playlists
-  // never enter here (they aren't favorite toggles), so they're safe.
+  // 30s TTL or a tab refocus refetches. This drives the *live* render;
+  // the matching SWR cache entry is corrected in parallel (see the
+  // toggle handler) so a remount doesn't flash the card back. Keyed by
+  // `${kind}:${id}` so a removed album id can't accidentally hide an
+  // artist sharing that id. Re-favoriting deletes the key, so the card
+  // returns. Owned playlists never enter here (they aren't favorite
+  // toggles), so they're safe.
   const [removed, setRemoved] = useState<Set<string>>(() => new Set());
   const [filter, setFilter] = useState("");
   const [sort, setSort] = useState<Sort>("recent");
@@ -213,6 +227,18 @@ export function Library({ onDownload }: { onDownload: OnDownload }) {
         else next.add(key);
         return next;
       });
+      // Keep the SWR cache in step on unfavorite so a remount reads a
+      // list that already excludes the item (no flash before the
+      // revalidate). Re-favoriting can't re-add it here — we don't hold
+      // the full item object — but the on-mount revalidate restores it.
+      if (!detail.favorited) {
+        const cacheKey = LIBRARY_CACHE_KEY[detail.kind];
+        if (cacheKey) {
+          mutateApiCache<LibraryItem[]>(cacheKey, (prev) =>
+            prev.filter((it) => String(it.id) !== detail.id),
+          );
+        }
+      }
     };
     window.addEventListener("tideway:favorite-toggled", onToggled);
     return () =>

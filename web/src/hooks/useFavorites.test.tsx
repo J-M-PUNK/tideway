@@ -206,7 +206,13 @@ describe("FavoritesProvider toggle event detail", () => {
   // card in real time, so the detail (kind, id, favorited) is a
   // contract, not incidental.
   async function captureToggle(
-    snapshot: ReturnType<typeof emptySnapshot>,
+    snapshot: {
+      tracks: string[];
+      albums: string[];
+      artists: string[];
+      playlists: string[];
+      mixes: string[];
+    },
     kind: "track",
     id: string,
   ) {
