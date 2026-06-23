@@ -200,3 +200,62 @@ describe("FavoritesProvider visibility refetch", () => {
     expect(snapshotMock).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("FavoritesProvider toggle event detail", () => {
+  // The Library page listens for these and drops/restores the matching
+  // card in real time, so the detail (kind, id, favorited) is a
+  // contract, not incidental.
+  async function captureToggle(
+    snapshot: ReturnType<typeof emptySnapshot>,
+    kind: "track",
+    id: string,
+  ) {
+    snapshotMock.mockResolvedValue(snapshot);
+    addMock.mockResolvedValue({ ok: true });
+    removeMock.mockResolvedValue({ ok: true });
+    const events: Array<{ kind: string; id: string; favorited: boolean }> = [];
+    const listener = (e: Event) => {
+      const d = (e as CustomEvent).detail;
+      if (d) events.push(d);
+    };
+    window.addEventListener("tideway:favorite-toggled", listener);
+    let probe: ProbeHandle | null = null;
+    try {
+      await act(async () => {
+        root.render(
+          <FavoritesProvider>
+            <Probe
+              onMount={(h) => {
+                probe = h;
+              }}
+            />
+          </FavoritesProvider>,
+        );
+        await flush();
+      });
+      await act(async () => {
+        await probe!.toggle(kind, id);
+        await flush();
+      });
+    } finally {
+      window.removeEventListener("tideway:favorite-toggled", listener);
+    }
+    return events;
+  }
+
+  it("reports favorited:true when liking an item", async () => {
+    const events = await captureToggle(emptySnapshot(), "track", "xyz");
+    expect(addMock).toHaveBeenCalledTimes(1);
+    expect(events).toEqual([{ kind: "track", id: "xyz", favorited: true }]);
+  });
+
+  it("reports favorited:false when unliking an item", async () => {
+    const events = await captureToggle(
+      { tracks: ["abc"], albums: [], artists: [], playlists: [], mixes: [] },
+      "track",
+      "abc",
+    );
+    expect(removeMock).toHaveBeenCalledTimes(1);
+    expect(events).toEqual([{ kind: "track", id: "abc", favorited: false }]);
+  });
+});
