@@ -10,7 +10,9 @@ session; these tests pin that contract.
 """
 from __future__ import annotations
 
+import threading
 from datetime import datetime
+from unittest.mock import MagicMock
 
 import pytest
 import tidalapi
@@ -60,9 +62,28 @@ class _Session:
         self.expiry_time = None
 
 
+class _BlockingReqSession(_ReqSession):
+    """A request session whose POST blocks until released, so a test
+    can pin a second thread *inside* the contended window. Records
+    every POST so the test can assert how many actually fired."""
+
+    def __init__(self, resp: _Resp):
+        super().__init__(resp)
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def post(self, url, params):
+        self.entered.set()
+        self.release.wait(timeout=5)
+        return super().post(url, params)
+
+
 def _client(session: _Session) -> TidalClient:
     c = TidalClient.__new__(TidalClient)
     c.session = session
+    # __new__ bypasses __init__, so the lock the refresh paths rely on
+    # isn't created; supply it. Harmless to the direct-call tests.
+    c._refresh_lock = threading.Lock()
     return c
 
 
@@ -147,3 +168,52 @@ def test_non_200_raises_authentication_error():
 
     with pytest.raises(tidalapi.exceptions.AuthenticationError):
         client._token_refresh_capturing("dead_refresh")
+
+
+def test_concurrent_internal_refresh_is_single_flight():
+    """Two parallel 401s through tidalapi's internal refresh path
+    (_token_refresh_and_persist) must collapse to ONE network refresh.
+
+    This is the regression that logs users out every few days: that
+    path used to take no lock, so both threads POSTed the same refresh
+    token. Tidal rotates on the first POST and invalidates the old
+    token; the second POST (or its persisted result) then carries a
+    dead-lineage token, and the next refresh fails. The blocking POST
+    pins the first thread inside the contended window so a lockless
+    regression deterministically fires a second POST.
+    """
+    body = {
+        "access_token": "new_access",
+        "refresh_token": "rotated_refresh",
+        "expires_in": 86400,
+        "token_type": "Bearer",
+    }
+    session = _Session(_Resp(200, body))
+    blocking = _BlockingReqSession(_Resp(200, body))
+    session.request_session = blocking
+    client = _client(session)
+    client.save_session = MagicMock()
+
+    results: list[bool] = []
+
+    def worker():
+        results.append(client._token_refresh_and_persist("old_refresh"))
+
+    t1 = threading.Thread(target=worker, name="refresh-1")
+    t2 = threading.Thread(target=worker, name="refresh-2")
+    t1.start()
+    # t1 is now inside post(), holding _refresh_lock. Start the
+    # contender; it blocks on the lock (fixed) or races into post()
+    # (regressed). Either way, releasing lets the truth show.
+    assert blocking.entered.wait(timeout=5), "first refresh never reached the network"
+    t2.start()
+    blocking.release.set()
+    t1.join(timeout=5)
+    t2.join(timeout=5)
+
+    # Exactly one network refresh; the contender reused the rotated
+    # result rather than re-POSTing the invalidated token.
+    assert len(blocking.calls) == 1
+    assert results == [True, True]
+    assert session.refresh_token == "rotated_refresh"
+    client.save_session.assert_called_once()

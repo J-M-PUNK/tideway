@@ -433,9 +433,13 @@ class TidalClient:
         # within a session, so a long TTL is fine.
         self._sub_cache: tuple[float, Optional[str]] = (0.0, None)
         self._sub_lock = threading.Lock()
-        # Serializes force_refresh calls so concurrent 401s from parallel
-        # workers don't fire two token_refresh RPCs at once (second one
-        # would race and potentially invalidate the first's token).
+        # Serializes EVERY token refresh — the watchdog's force_refresh
+        # AND tidalapi's internal auto-refresh-on-401 — through one lock,
+        # so concurrent 401s from parallel workers can't fire two
+        # token_refresh RPCs at once. With rotating refresh tokens the
+        # second POST would carry a token Tidal just invalidated and then
+        # persist that broken lineage, logging the user out days later.
+        # The single-flight check lives in _refresh_once.
         self._refresh_lock = threading.Lock()
         # Background watchdog: refreshes the token a few minutes before
         # it's due to expire. Without this, a long-running session (user
@@ -558,6 +562,47 @@ class TidalClient:
             session.refresh_token = new_refresh
         return True
 
+    def _refresh_once(self, based_on: Optional[str]) -> bool:
+        """Locked, single-flight refresh shared by every runtime path
+        (the watchdog's force_refresh and tidalapi's internal
+        auto-refresh-on-401). Holding one lock across both is what
+        actually delivers the "no two concurrent refresh RPCs"
+        guarantee: previously only force_refresh took the lock, so two
+        parallel 401s going through tidalapi's path both POSTed the
+        same refresh token. With rotation, the second POST carries a
+        token Tidal just invalidated, and persisting that broken
+        lineage logs the user out a few days later.
+
+        `based_on` is the refresh token the caller observed before
+        contending for the lock. Once we hold the lock, if the
+        session's refresh token has already moved on — another thread
+        refreshed and Tidal rotated — that refresh supersedes this one,
+        so we reuse it instead of re-POSTing the now-dead token. Raises
+        like _token_refresh_capturing (AuthenticationError on a rejected
+        token) so force_refresh's logout-on-auth-failure path is
+        preserved.
+        """
+        with self._refresh_lock:
+            current = getattr(self.session, "refresh_token", None)
+            if not current:
+                return False
+            if based_on is not None and current != based_on:
+                # A parallel refresh already rotated the token we were
+                # going to use; its result stands. Re-POSTing `current`
+                # would be redundant, and re-POSTing `based_on` would
+                # use a token Tidal already invalidated.
+                return True
+            ok = self._token_refresh_capturing(current)
+            if ok:
+                try:
+                    self.save_session()
+                except Exception:
+                    # Best-effort: the in-memory session is already
+                    # valid, and the watchdog / next refresh re-persists.
+                    # Don't fail the refresh over a transient disk error.
+                    pass
+            return ok
+
     def _token_refresh_and_persist(self, refresh_token: str) -> bool:
         """token_refresh that captures rotation AND persists.
 
@@ -566,21 +611,11 @@ class TidalClient:
         tidalapi's native implementation drops a rotated refresh
         token, so a few days later the next refresh fails and the
         user is silently logged out. Routing that internal path
-        through the capturing implementation — and saving the
-        result so a process exit right after a mid-session
-        auto-refresh doesn't lose the rotated token — is what makes
-        the session durable rather than expiring every few days.
+        through _refresh_once captures the rotation, persists it, and
+        — crucially — serializes it against every other refresh path
+        so parallel 401s can't clobber each other's rotated token.
         """
-        ok = self._token_refresh_capturing(refresh_token)
-        if ok:
-            try:
-                self.save_session()
-            except Exception:
-                # Persisting is best-effort here; the in-memory
-                # session is already correct and the watchdog /
-                # explicit force_refresh will re-save shortly.
-                pass
-        return ok
+        return self._refresh_once(based_on=refresh_token)
 
     def _install_capturing_refresh(self) -> None:
         """Shadow tidalapi's Session.token_refresh on this session
@@ -620,34 +655,36 @@ class TidalClient:
         workers don't fire two token_refresh RPCs at once. The second
         caller will see the fresh token after the first finishes.
         """
-        with self._refresh_lock:
-            refresh_token = getattr(self.session, "refresh_token", None)
-            if not refresh_token:
-                _tlog("force_refresh: no refresh_token on session")
-                return False
-            try:
-                ok = self._token_refresh_capturing(refresh_token)
-            except Exception as exc:
-                _tlog(f"force_refresh: token_refresh raised: {exc!r}")
-                # AuthenticationError means the refresh token itself is
-                # dead. Blow the session away so the user is prompted to
-                # log in again rather than chasing 401s forever, and tell
-                # the server to drop its cached auth state so the very
-                # next /auth/status bounces the UI to Login immediately
-                # instead of waiting out the cache TTL.
-                if type(exc).__name__ == "AuthenticationError":
-                    try:
-                        self.logout()
-                    except Exception:
-                        pass
-                    self._notify_auth_lost()
-                return False
-            if not ok:
-                _tlog("force_refresh: token_refresh returned False")
-                return False
-            self.save_session()
-            _tlog("force_refresh: success")
-            return True
+        refresh_token = getattr(self.session, "refresh_token", None)
+        if not refresh_token:
+            _tlog("force_refresh: no refresh_token on session")
+            return False
+        try:
+            # _refresh_once takes _refresh_lock and single-flights: if a
+            # parallel refresh already rotated the token, it reuses that
+            # result instead of re-POSTing this now-stale one. It also
+            # persists on success, so there's no save_session() here.
+            ok = self._refresh_once(based_on=refresh_token)
+        except Exception as exc:
+            _tlog(f"force_refresh: token_refresh raised: {exc!r}")
+            # AuthenticationError means the refresh token itself is
+            # dead. Blow the session away so the user is prompted to
+            # log in again rather than chasing 401s forever, and tell
+            # the server to drop its cached auth state so the very
+            # next /auth/status bounces the UI to Login immediately
+            # instead of waiting out the cache TTL.
+            if type(exc).__name__ == "AuthenticationError":
+                try:
+                    self.logout()
+                except Exception:
+                    pass
+                self._notify_auth_lost()
+            return False
+        if not ok:
+            _tlog("force_refresh: token_refresh returned False")
+            return False
+        _tlog("force_refresh: success")
+        return True
 
     def _refresh_watchdog(self) -> None:
         """Background loop that refreshes the token before it expires.
