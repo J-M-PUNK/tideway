@@ -6,7 +6,13 @@ import { createRoot, type Root } from "react-dom/client";
   globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }
 ).IS_REACT_ACT_ENVIRONMENT = true;
 
-import { useApi, prefetchApi, clearApiCache, __cacheInternals } from "./useApi";
+import {
+  useApi,
+  prefetchApi,
+  mutateApiCache,
+  clearApiCache,
+  __cacheInternals,
+} from "./useApi";
 
 interface State<T> {
   data: T | null;
@@ -397,5 +403,36 @@ describe("prefetchApi", () => {
     prefetchApi("dedup:key", fetcher);
     await flush();
     expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("mutateApiCache", () => {
+  it("updates an existing entry's data and preserves its timestamp", () => {
+    __cacheInternals.cache.set("lib:albums", {
+      data: [{ id: "a" }, { id: "b" }, { id: "c" }],
+      timestamp: 1234,
+    });
+    mutateApiCache<{ id: string }[]>("lib:albums", (prev) =>
+      prev.filter((it) => it.id !== "b"),
+    );
+    expect(__cacheInternals.cache.get("lib:albums")).toEqual({
+      data: [{ id: "a" }, { id: "c" }],
+      timestamp: 1234, // not refreshed — we corrected, didn't refetch
+    });
+  });
+
+  it("is a no-op when the key isn't cached (updater never runs)", () => {
+    let ran = false;
+    mutateApiCache<number[]>("absent", (prev) => {
+      ran = true;
+      return prev;
+    });
+    expect(ran).toBe(false);
+    expect(__cacheInternals.cache.has("absent")).toBe(false);
+  });
+
+  it("ignores an empty cache key", () => {
+    mutateApiCache<number[]>("", (prev) => prev);
+    expect(__cacheInternals.cache.has("")).toBe(false);
   });
 });

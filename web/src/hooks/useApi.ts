@@ -183,6 +183,34 @@ export function prefetchApi<T>(
   inflight.set(cacheKey, p);
 }
 
+/**
+ * Surgically update one cache entry's data in place, if present.
+ *
+ * Used to keep an optimistic mutation consistent with the SWR cache —
+ * e.g. when the user unfavorites an album, drop it from the cached
+ * library list so a later remount reads the corrected list instead of
+ * briefly re-rendering the stale one before the background revalidate
+ * catches up. No-op when the key isn't cached; the next fetch produces
+ * a correct entry anyway. Keeps the original timestamp: we corrected
+ * the data, we didn't refetch it, so this must not extend freshness.
+ *
+ * Note this updates the cache only, not any mounted component's state
+ * (that's a render-time snapshot) — callers that need the current view
+ * to react should also drive their own state.
+ */
+export function mutateApiCache<T>(
+  cacheKey: string,
+  updater: (prev: T) => T,
+): void {
+  if (!cacheKey) return;
+  const entry = cache.get(cacheKey) as CacheEntry<T> | undefined;
+  if (!entry) return;
+  cache.set(cacheKey, {
+    data: updater(entry.data),
+    timestamp: entry.timestamp,
+  });
+}
+
 /** Wipe the whole cache. Used on logout / session reset. */
 export function clearApiCache(): void {
   cache.clear();

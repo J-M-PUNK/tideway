@@ -154,8 +154,14 @@ export function FavoritesProvider({ children }: { children: ReactNode }) {
         // payload (e.g. `useLikedByArtist` on the artist page's
         // "You Liked" section) so they can refetch. The event is a
         // low-cost broadcast; only listeners on a current artist page
-        // actually do anything with it.
-        window.dispatchEvent(new CustomEvent("tideway:favorite-toggled"));
+        // actually do anything with it. The detail carries which item
+        // changed so a surface that lists favorites (the Library page)
+        // can drop/restore that one card in real time without a refetch.
+        window.dispatchEvent(
+          new CustomEvent("tideway:favorite-toggled", {
+            detail: { kind, id, favorited: !already },
+          }),
+        );
       } catch (err) {
         // Only roll back if the current state still reflects *our* optimistic
         // change. A rapid second click may have toggled again between the

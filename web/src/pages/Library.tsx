@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useState } from "react";
-import { useApi } from "@/hooks/useApi";
+import { useApi, mutateApiCache } from "@/hooks/useApi";
 import { queryKeys } from "@/api/queryKeys";
 import {
   Disc3,
@@ -19,6 +19,7 @@ import { api } from "@/api/client";
 import type {
   Album,
   Artist,
+  FavoriteKind,
   Playlist,
   PlaylistFolder,
   Track,
@@ -103,6 +104,17 @@ const META: Record<
 
 type LibraryItem = Album | Artist | Playlist | Track;
 
+// The SWR cache lane each favorite kind feeds, so an unfavorite can
+// drop the item from the cached list (not just the live render) and a
+// later remount reads the corrected list with no stale-flash. `mix`
+// has no library section, so it's intentionally absent.
+const LIBRARY_CACHE_KEY: Partial<Record<FavoriteKind, string>> = {
+  album: queryKeys.libraryAlbums,
+  artist: queryKeys.libraryArtists,
+  playlist: queryKeys.libraryPlaylists,
+  track: queryKeys.libraryTracks,
+};
+
 export function Library({ onDownload }: { onDownload: OnDownload }) {
   const { section = "albums" } = useParams<{ section: string }>();
   // Guard against stale bookmarks like /library/typo — without this the
@@ -113,8 +125,28 @@ export function Library({ onDownload }: { onDownload: OnDownload }) {
   }
   const type = section as Section;
   const { title, emptyHint } = META[type];
+  // Which favorites set this section mirrors, so an unlike / unfollow
+  // on a card here can drop it from the list immediately.
+  const favoriteKind: FavoriteKind =
+    type === "albums"
+      ? "album"
+      : type === "artists"
+        ? "artist"
+        : type === "playlists"
+          ? "playlist"
+          : "track";
 
   const [folders, setFolders] = useState<PlaylistFolder[]>([]);
+  // Ids the user unfavorited this session, so the card leaves the grid
+  // the instant they click instead of lingering until the SWR list's
+  // 30s TTL or a tab refocus refetches. This drives the *live* render;
+  // the matching SWR cache entry is corrected in parallel (see the
+  // toggle handler) so a remount doesn't flash the card back. Keyed by
+  // `${kind}:${id}` so a removed album id can't accidentally hide an
+  // artist sharing that id. Re-favoriting deletes the key, so the card
+  // returns. Owned playlists never enter here (they aren't favorite
+  // toggles), so they're safe.
+  const [removed, setRemoved] = useState<Set<string>>(() => new Set());
   const [filter, setFilter] = useState("");
   const [sort, setSort] = useState<Sort>("recent");
   const [view, setView] = useState<View>(() => loadView(type));
@@ -171,6 +203,48 @@ export function Library({ onDownload }: { onDownload: OnDownload }) {
     setFilter("");
   }, [type]);
 
+  // Real-time removal: when any favorite is toggled — including a card
+  // on this very page — update the `removed` overlay so the grid drops
+  // (or restores) that one card without waiting for a refetch.
+  useEffect(() => {
+    const onToggled = (e: Event) => {
+      const detail = (
+        e as CustomEvent<{
+          kind: FavoriteKind;
+          id: string;
+          favorited: boolean;
+        }>
+      ).detail;
+      if (!detail) return;
+      const key = `${detail.kind}:${detail.id}`;
+      setRemoved((prev) => {
+        const present = prev.has(key);
+        // favorited → key absent; unfavorited → key present. Bail if
+        // already in the right state to avoid a needless re-render.
+        if (detail.favorited === !present) return prev;
+        const next = new Set(prev);
+        if (detail.favorited) next.delete(key);
+        else next.add(key);
+        return next;
+      });
+      // Keep the SWR cache in step on unfavorite so a remount reads a
+      // list that already excludes the item (no flash before the
+      // revalidate). Re-favoriting can't re-add it here — we don't hold
+      // the full item object — but the on-mount revalidate restores it.
+      if (!detail.favorited) {
+        const cacheKey = LIBRARY_CACHE_KEY[detail.kind];
+        if (cacheKey) {
+          mutateApiCache<LibraryItem[]>(cacheKey, (prev) =>
+            prev.filter((it) => String(it.id) !== detail.id),
+          );
+        }
+      }
+    };
+    window.addEventListener("tideway:favorite-toggled", onToggled);
+    return () =>
+      window.removeEventListener("tideway:favorite-toggled", onToggled);
+  }, []);
+
   // Folders are only relevant on /library/playlists. Small payload +
   // mutation-coupled (CreateFolderDialog calls `refreshFolders` after
   // an add), so we leave them on a raw fetch instead of routing them
@@ -221,6 +295,11 @@ export function Library({ onDownload }: { onDownload: OnDownload }) {
             .includes(q),
         )
       : data;
+    // Drop anything the user just unfavorited this session (see
+    // `removed`) so the grid reflects the click without a refetch.
+    if (removed.size > 0) {
+      base = base.filter((item) => !removed.has(`${favoriteKind}:${item.id}`));
+    }
     // Audio-format filter. Only applies to sections whose items have
     // format tags (albums + tracks); artists / playlists ignore it
     // because the tags aren't meaningful at their level.
@@ -235,7 +314,7 @@ export function Library({ onDownload }: { onDownload: OnDownload }) {
       );
     }
     return base; // "recent" — backend already returns newest-first
-  }, [data, filter, sort, format, type]);
+  }, [data, filter, sort, format, type, removed, favoriteKind]);
 
   // Hide the format filter entirely when the dataset has no tagged
   // items — otherwise it'd be a dead row of chips.
