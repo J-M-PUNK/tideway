@@ -506,6 +506,7 @@ def _guard_cocoa_window_move() -> None:
     if sys.platform != "darwin":
         return
     try:
+        import objc
         from webview.platforms.cocoa import BrowserView
     except Exception:
         return
@@ -523,7 +524,7 @@ def _guard_cocoa_window_move() -> None:
                 # crashes on macOS 26. Skip it; there's nothing to emit.
                 if win is None or win.screen() is None:
                     return
-            super(_GuardedWindowDelegate, self).windowDidMove_(notification)
+            objc.super(_GuardedWindowDelegate, self).windowDidMove_(notification)
 
     BrowserView.WindowDelegate = _GuardedWindowDelegate
 
