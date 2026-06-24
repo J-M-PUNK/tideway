@@ -2235,12 +2235,14 @@ class PCMPlayer:
             # the GIL to enter Python) misses its deadline. The user
             # hears that as stutter.
             #
-            # 100ms latency gives the callback ~10x more headroom than
-            # PortAudio's default. The user-perceived cost is 100ms
-            # added on play / seek / pause; for music playback that's
-            # imperceptible. Anyone who later wants tighter latency
-            # for live monitoring or pro-audio use can override here.
-            latency=0.1,
+            # The floor (100ms) gives the callback ~10x more headroom
+            # than PortAudio's default; the user-perceived cost of 100ms
+            # on play / seek / pause is imperceptible for music. But a
+            # fixed 100ms starves a Bluetooth device, whose A2DP pipeline
+            # buffers far deeper — that was a continuous-crackle bug on BT
+            # output. _output_latency_for honours the device's own deeper
+            # latency when it has one, so BT gets the buffer it needs.
+            latency=self._output_latency_for(device),
         )
         if extra_settings is not None:
             stream_kwargs["extra_settings"] = extra_settings
@@ -2365,6 +2367,34 @@ class PCMPlayer:
         if not rate or rate <= 0:
             return fallback
         return int(round(rate))
+
+    # Floor on the requested output latency. This is the headroom the
+    # realtime callback needs to ride out GIL/CPU contention on wired,
+    # low-latency devices — see the long note in _open_output_stream.
+    _OUTPUT_LATENCY_FLOOR_S = 0.1
+
+    @staticmethod
+    def _output_latency_for(device: Optional[int]) -> float:
+        """Suggested PortAudio output latency for `device`.
+
+        The floor (_OUTPUT_LATENCY_FLOOR_S) is what wired/low-latency
+        outputs need for GIL headroom. Bluetooth is different: its A2DP
+        pipeline buffers deeply (~150-300 ms), so asking PortAudio for
+        only the floor starves the device and the user hears continuous
+        crackle on BT output. A device's own `default_high_output_latency`
+        reflects that real pipeline depth, so honour whichever is larger.
+        `device=None` resolves to the default output. Best-effort: any
+        query failure falls back to the floor (the previous fixed value)."""
+        try:
+            info = sd.query_devices(device, kind="output")
+        except Exception:
+            return PCMPlayer._OUTPUT_LATENCY_FLOOR_S
+        high = info.get("default_high_output_latency") if isinstance(info, dict) else None
+        try:
+            high_f = float(high)
+        except (TypeError, ValueError):
+            high_f = 0.0
+        return max(PCMPlayer._OUTPUT_LATENCY_FLOOR_S, high_f)
 
     def _start_decoder_thread(self) -> None:
         # Bind the decoder / queue / flags to the thread's locals at
