@@ -3083,6 +3083,13 @@ class PCMPlayer:
                 carry = chunk
             take = min(n - filled, carry.shape[0])
             src = carry[:take]
+            # Normalize integer PCM to float32 [-1, 1] so the equal-power
+            # mix math works regardless of stream dtype. float32 chunks pass
+            # through as-is (already in range).
+            if src.dtype == np.int32:
+                src = src.astype(np.float32) / 2147483648.0
+            elif src.dtype == np.int16:
+                src = src.astype(np.float32) / 32768.0
             if src.shape[1] == channels:
                 buf[filled : filled + take] = src
             elif src.shape[1] == 2 and channels == 1:
@@ -3106,11 +3113,6 @@ class PCMPlayer:
         called from the audio callback."""
         cf = self._crossfade_s
         if cf <= 0.0 or self._exclusive_mode:
-            return
-        # The mix path assumes float32 PCM (shared-mode output). In
-        # exclusive / integer-dtype modes we leave the gapless cut in
-        # place — crossfade isn't bit-perfect anyway.
-        if self._stream_sd_dtype != "float32":
             return
         rate = self._stream_sample_rate or 0
         if rate <= 0 or self._current_duration_ms <= 0:
@@ -3149,20 +3151,20 @@ class PCMPlayer:
         self._xfade_pos = 0
         self._xfade_total = total
         self._xfade_active = True
-        log.info(
-            "crossfade begin -> incoming=%s over %.1fs (%d samples)",
-            pre.track_id, cf, total,
+        print(
+            f"[crossfade] begin -> incoming={pre.track_id} over {cf:.1f}s ({total} samples)",
+            flush=True,
         )
 
     def _crossfade_fill(self, outdata, frames: int, channels: int) -> None:
         """Fill `outdata` with one callback's equal-power mix of the
         outgoing (current) and incoming (claimed preload) tracks, advance
         the fade, and promote the incoming track to primary once the fade
-        completes or the outgoing track ends. Called only while
-        `_xfade_active`; `outdata` is float32 (the activation gate). Does
-        NOT touch `_samples_emitted` / `_seq` — the shared post-fill below
-        the call site handles those for both the normal and crossfade
-        paths."""
+        completes or the outgoing track ends. Works for any stream dtype
+        (float32, int32, int16): _pull_block normalizes chunks to float32
+        for mixing, then the result is scaled back to the stream dtype
+        before writing to outdata. Does NOT touch `_samples_emitted` /
+        `_seq` — the shared post-fill below the call site handles those."""
         pre = self._xfade_in
         if pre is None:
             # Defensive — never mix without an incoming source.
@@ -3176,9 +3178,20 @@ class PCMPlayer:
         in_buf, self._xfade_carry_in, _if, _in_done = self._pull_block(
             pre.queue, self._xfade_carry_in, pre.done, frames, channels,
         )
-        outdata[:] = mix_crossfade_block(
-            out_buf, in_buf, self._xfade_pos, self._xfade_total
-        )
+        mixed = mix_crossfade_block(out_buf, in_buf, self._xfade_pos, self._xfade_total)
+        # _pull_block normalizes all dtypes to float32 [-1, 1]; scale back
+        # to the stream dtype before writing. float32 streams get a direct
+        # copy; integer streams are scaled and clipped to their full range.
+        if outdata.dtype == np.float32:
+            outdata[:] = mixed
+        elif outdata.dtype == np.int32:
+            outdata[:] = np.clip(
+                mixed * 2147483648.0, -2147483648.0, 2147483647.0
+            ).astype(np.int32)
+        elif outdata.dtype == np.int16:
+            outdata[:] = np.clip(
+                mixed * 32768.0, -32768.0, 32767.0
+            ).astype(np.int16)
         self._xfade_pos += frames
         # Fade complete, or the outgoing track ran out before it finished
         # (the window started a hair late, or a short track) — promote the
@@ -3203,7 +3216,7 @@ class PCMPlayer:
         carry_in = self._xfade_carry_in
         old_decoder = self._decoder
         old_stop = self._stop_flag
-        log.info("crossfade promote -> %s", pre.track_id)
+        print(f"[crossfade] promote -> {pre.track_id}", flush=True)
         self._state = "ended"
         self._seq += 1
         self._emit()
