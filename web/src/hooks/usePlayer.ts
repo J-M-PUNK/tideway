@@ -138,47 +138,83 @@ export function pickNextIndex(
   return null;
 }
 
+/** Fisher-Yates shuffle, returning a new array (never mutates the
+ *  input). Used to vary the end-of-queue autoplay tail so finishing the
+ *  same album twice doesn't queue the same songs in the same order. */
+export function shuffleTracks(tracks: Track[]): Track[] {
+  const out = [...tracks];
+  for (let i = out.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [out[i], out[j]] = [out[j], out[i]];
+  }
+  return out;
+}
+
 /**
- * Compute the queue + jump-target for an Artist Radio takeover at
- * end-of-queue. Pure-ish (only side effect is the
- * `api.artistRadio` HTTP call); returns `null` whenever a
- * takeover can't fire so the caller can fall through to its
- * stop / pause-on-track-0 path.
+ * Compute the queue + jump-target for the end-of-queue autoplay
+ * takeover. Pure-ish (only side effect is the radio HTTP call);
+ * returns `null` whenever a takeover can't fire so the caller can fall
+ * through to its stop / pause-on-track-0 path.
+ *
+ * Seeds TRACK radio from the just-played song — "more songs like this
+ * one", which is what Tidal/Spotify Autoplay do and, crucially, varies
+ * per album: a different last track yields a different continuation.
+ * Artist radio is the fallback when track radio is empty/unavailable;
+ * it's a stable, popularity-ranked list, so seeding it from the same
+ * album every time produced the same continuation — the repetition this
+ * change fixes. The deduped tail is then shuffled so even repeat plays
+ * of the same album vary.
  *
  * Cases that return null:
  *   - Empty queue (nothing to seed the takeover from).
- *   - The just-played track has no artist (rare — search results
- *     for raw uploads sometimes lack artist metadata).
- *   - Tidal's artist radio endpoint failed or returned empty.
- *
- * Dedupes radio tracks against what's already in the queue so we
- * don't immediately replay one of the tracks the user was just
- * listening to. If the dedupe filters EVERYTHING out (the radio
- * is entirely the album we just played), falls back to the
- * unfiltered radio list — better to repeat a song than to stop
- * playback.
+ *   - Track radio empty AND the just-played track has no artist to
+ *     fall back on (rare — raw uploads sometimes lack metadata).
+ *   - Both radio endpoints failed or returned empty.
  */
-async function fetchRadioTakeover(
+export async function fetchRadioTakeover(
   cur: PlayerState,
 ): Promise<{ newQueue: Track[]; index: number; source: PlaySource } | null> {
   if (cur.queue.length === 0) return null;
   const lastTrack = cur.queue[cur.queueIndex];
-  const artistId = lastTrack?.artists?.[0]?.id;
-  if (!artistId) return null;
+  if (!lastTrack) return null;
+  const playedIds = new Set(cur.queue.map((t) => t.id));
+
+  let radio: Track[] | null = null;
+  let source: PlaySource | null = null;
   try {
-    const radio = await api.artistRadio(String(artistId));
-    if (!radio || radio.length === 0) return null;
-    const playedIds = new Set(cur.queue.map((t) => t.id));
-    const fresh = radio.filter((t) => !playedIds.has(t.id));
-    const radioTail = fresh.length > 0 ? fresh : radio;
-    return {
-      newQueue: [...cur.queue, ...radioTail],
-      index: cur.queueIndex + 1,
-      source: { type: "ARTIST", id: String(artistId) },
-    };
+    const tr = await api.trackRadio(String(lastTrack.id));
+    if (tr && tr.length > 0) {
+      radio = tr;
+      source = { type: "TRACK", id: String(lastTrack.id) };
+    }
   } catch {
-    return null;
+    /* fall through to artist radio */
   }
+  if (radio === null) {
+    const artistId = lastTrack.artists?.[0]?.id;
+    if (!artistId) return null;
+    try {
+      const ar = await api.artistRadio(String(artistId));
+      if (ar && ar.length > 0) {
+        radio = ar;
+        source = { type: "ARTIST", id: String(artistId) };
+      }
+    } catch {
+      return null;
+    }
+  }
+  if (radio === null || source === null) return null;
+
+  // Dedupe against what we just played, then shuffle. If the dedupe
+  // removes everything (radio == the album we just played), fall back
+  // to the full list rather than stopping playback.
+  const fresh = radio.filter((t) => !playedIds.has(t.id));
+  const tail = shuffleTracks(fresh.length > 0 ? fresh : radio);
+  return {
+    newQueue: [...cur.queue, ...tail],
+    index: cur.queueIndex + 1,
+    source,
+  };
 }
 
 export function pickPrevIndex(state: PlayerState): number | null {
