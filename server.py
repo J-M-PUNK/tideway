@@ -5125,6 +5125,10 @@ def _native_player() -> PCMPlayer:
                 _pcm_player_singleton.set_crossfeed_amount(
                     settings.crossfeed_amount
                 )
+            if getattr(settings, "crossfade_duration_s", 0) > 0:
+                _pcm_player_singleton.set_crossfade(
+                    settings.crossfade_duration_s
+                )
             rg_mode = getattr(settings, "replaygain_mode", "off")
             if rg_mode != "off":
                 _pcm_player_singleton.set_replaygain(
@@ -10312,6 +10316,7 @@ class SettingsPayload(BaseModel):
     eq_tilt_bass_db: Optional[float] = None
     eq_tilt_treble_db: Optional[float] = None
     crossfeed_amount: Optional[int] = None
+    crossfade_duration_s: Optional[int] = None
     replaygain_mode: Optional[str] = None
     replaygain_preamp_db: Optional[float] = None
     replaygain_prevent_clipping: Optional[bool] = None
@@ -10470,6 +10475,13 @@ def update_settings(payload: SettingsPayload) -> dict:
             )
         except Exception as exc:
             logger.warning("crossfeed amount toggle failed: %s", exc)
+    if "crossfade_duration_s" in patch:
+        try:
+            _native_player().set_crossfade(
+                new_settings.crossfade_duration_s
+            )
+        except Exception as exc:
+            logger.warning("crossfade duration toggle failed: %s", exc)
     if (
         "replaygain_mode" in patch
         or "replaygain_preamp_db" in patch

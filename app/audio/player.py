@@ -44,6 +44,7 @@ import sounddevice as sd  # type: ignore
 import tidalapi
 
 from app.audio.decoder import Decoder
+from app.audio.crossfade import mix_crossfade_block
 from app.audio.crossfeed import Crossfeed
 from app.audio.eq import (
     Equalizer,
@@ -133,6 +134,14 @@ if not audio_log.handlers:
 # safety net.
 # Memory cost is negligible (~800 KB at int32 stereo).
 _PCM_QUEUE_MAX = 100
+
+# Minimum number of decoded chunks the incoming (preloaded) track must
+# have buffered before a crossfade may begin, so the fade-in side doesn't
+# immediately starve. If the preload isn't this far ahead yet, the
+# crossfade simply doesn't start this callback and we re-check on the
+# next one (and if the window closes first, it falls back to the gapless
+# cut). A handful of chunks is a fraction of a second of audio.
+_XFADE_MIN_PREBUFFER_CHUNKS = 4
 
 # Hard ceiling on the two Tidal round-trips in _resolve_source. The
 # transport already bounds each request (app.http.DEFAULT_TIMEOUT,
@@ -391,6 +400,22 @@ class PCMPlayer:
         self._replaygain_mode: ReplayGainMode = "off"
         self._replaygain_preamp_db: float = 0.0
         self._replaygain_prevent_clipping: bool = True
+        # Crossfade duration in seconds for automatic track-to-track
+        # transitions (0 = off). The audio callback drives the actual
+        # fade once a track nears its end and a compatible preload is
+        # ready; when this is 0 that path is never entered, so playback
+        # is exactly the existing gapless behaviour.
+        self._crossfade_s: float = 0.0
+        # In-progress fade state, owned by the audio callback. `_xfade_in`
+        # is the _Preload we've claimed as the incoming track; `_xfade_pos`
+        # / `_xfade_total` track the fade in samples; `_xfade_carry_in` is
+        # the incoming queue's partial-chunk carry (mirrors
+        # `_callback_carry` for the outgoing side).
+        self._xfade_active: bool = False
+        self._xfade_pos: int = 0
+        self._xfade_total: int = 0
+        self._xfade_in: Optional[_Preload] = None
+        self._xfade_carry_in: Optional[np.ndarray] = None
 
         # Audio-callback diagnostics. Each pair is (count, last-print
         # time) for a different rate-limited stderr message:
@@ -954,6 +979,11 @@ class PCMPlayer:
             # CallbackStop and end the stream mid-seek.
             with self._lock:
                 self._seeking = True
+            # Seeking inside the crossfade window invalidates the fade —
+            # the position the user jumped to bears no relation to the
+            # in-progress transition. `_seeking` now silences the callback,
+            # so cancel the fade and dispose the claimed incoming preload.
+            self._abort_crossfade()
             effective_s = target_s
             try:
                 effective_s = self._restart_decoder_at(target_s)
@@ -1427,6 +1457,25 @@ class PCMPlayer:
         with self._lock:
             return self._crossfeed_amount
 
+    def set_crossfade(self, seconds) -> None:
+        """Set the automatic-advance crossfade duration in seconds
+        (clamped 0-12; 0 = off). Stored here; the fade itself is driven
+        from the audio callback when a track nears its end and a
+        compatible, sufficiently-buffered preload is ready. Surface for
+        the Settings page slider."""
+        try:
+            s = float(seconds)
+        except (TypeError, ValueError):
+            s = 0.0
+        s = max(0.0, min(12.0, s))
+        with self._lock:
+            self._crossfade_s = s
+
+    def crossfade_duration(self) -> float:
+        """Current crossfade duration in seconds. 0 means disabled."""
+        with self._lock:
+            return self._crossfade_s
+
     def set_replaygain(
         self,
         mode: str,
@@ -1818,6 +1867,12 @@ class PCMPlayer:
                 file=sys.stderr,
                 flush=True,
             )
+
+        # The stream is aborted, so the audio callback can no longer fire —
+        # safe now to cancel any in-progress crossfade and dispose the
+        # incoming preload we'd claimed (a manual skip / stop landing inside
+        # the fade window). No-op when no crossfade is active.
+        self._abort_crossfade()
 
         thread = self._decoder_thread
         self._decoder_thread = None
@@ -2676,6 +2731,20 @@ class PCMPlayer:
         written = 0
         channels = outdata.shape[1]
 
+        # Crossfade: when enabled and the current track is within the fade
+        # window, mix the next track in instead of cutting to it. Fully
+        # self-contained — when off (the default) or any precondition is
+        # unmet, `_xfade_active` stays False and the normal single-queue
+        # loop below runs unchanged. Setting `written = frames` skips that
+        # loop; the shared output stages (cast/EQ/volume) and the
+        # samples_emitted / seq bump below then apply to the mix exactly as
+        # they do to normal audio.
+        if not self._xfade_active and self._crossfade_s > 0.0:
+            self._maybe_begin_crossfade()
+        if self._xfade_active:
+            self._crossfade_fill(outdata, frames, channels)
+            written = frames
+
         while written < frames:
             if self._callback_carry is None:
                 try:
@@ -2986,6 +3055,222 @@ class PCMPlayer:
 
         self._emit()
         return self.snapshot()
+
+    @staticmethod
+    def _pull_block(q, carry, done_event, n: int, channels: int):
+        """Pull up to `n` frames from (queue, carry) into a fresh
+        (n, channels) float32 buffer for crossfade mixing.
+
+        Returns (buf, new_carry, frames_filled, source_done). Unfilled
+        frames are left as zeros — either a transient underrun or the
+        source ending. `source_done` is True ONLY when the queue is empty
+        AND `done_event` is set (a true end, not a hiccup), which is how
+        the caller distinguishes "fade finished because the outgoing track
+        ran out" from "decoder briefly behind".
+        """
+        buf = np.zeros((n, channels), dtype=np.float32)
+        filled = 0
+        source_done = False
+        while filled < n:
+            if carry is None:
+                try:
+                    chunk = q.get_nowait()
+                except queue.Empty:
+                    chunk = None
+                if chunk is None:
+                    source_done = done_event.is_set()
+                    break
+                carry = chunk
+            take = min(n - filled, carry.shape[0])
+            src = carry[:take]
+            # Normalize integer PCM to float32 [-1, 1] so the equal-power
+            # mix math works regardless of stream dtype. float32 chunks pass
+            # through as-is (already in range).
+            if src.dtype == np.int32:
+                src = src.astype(np.float32) / 2147483648.0
+            elif src.dtype == np.int16:
+                src = src.astype(np.float32) / 32768.0
+            if src.shape[1] == channels:
+                buf[filled : filled + take] = src
+            elif src.shape[1] == 2 and channels == 1:
+                buf[filled : filled + take, 0] = src.mean(axis=1)
+            # else: channel mismatch can't reach here (the crossfade is
+            # gated on the incoming channel count matching the stream);
+            # leave zeros rather than risk a malformed write.
+            filled += take
+            if take >= carry.shape[0]:
+                carry = None
+            else:
+                carry = carry[take:]
+        return buf, carry, filled, source_done
+
+    def _maybe_begin_crossfade(self) -> None:
+        """Start a crossfade if the current track is within the configured
+        fade window and a compatible, sufficiently-buffered preload is
+        ready. Realtime-safe: claims the preload under a NON-blocking lock
+        (same pattern as `_try_gapless_swap`) and bails on any contention
+        or unmet precondition, leaving normal playback untouched. Only ever
+        called from the audio callback."""
+        cf = self._crossfade_s
+        if cf <= 0.0 or self._exclusive_mode:
+            return
+        rate = self._stream_sample_rate or 0
+        if rate <= 0 or self._current_duration_ms <= 0:
+            return
+        total = int(cf * rate)
+        if total <= 0:
+            return
+        track_samples = int(self._current_duration_ms / 1000.0 * rate)
+        if track_samples - self._samples_emitted > total:
+            return  # not in the fade window yet
+        if self._preload is None:
+            return
+        if not self._lock.acquire(blocking=False):
+            return  # contended — try again next callback
+        try:
+            pre = self._preload
+            if pre is None:
+                return
+            if (
+                pre.sample_rate != self._stream_sample_rate
+                or pre.sd_dtype != self._stream_sd_dtype
+                or pre.channels != self._stream_channels
+            ):
+                return  # incompatible — let the gapless/bridge path handle it
+            if (
+                pre.queue.qsize() < _XFADE_MIN_PREBUFFER_CHUNKS
+                and not pre.done.is_set()
+            ):
+                return  # not buffered enough yet; re-check next callback
+            # Claim it: _drop_preload / _try_gapless_swap won't touch it now.
+            self._preload = None
+        finally:
+            self._lock.release()
+        self._xfade_in = pre
+        self._xfade_carry_in = None
+        self._xfade_pos = 0
+        self._xfade_total = total
+        self._xfade_active = True
+        print(
+            f"[crossfade] begin -> incoming={pre.track_id} over {cf:.1f}s ({total} samples)",
+            flush=True,
+        )
+
+    def _crossfade_fill(self, outdata, frames: int, channels: int) -> None:
+        """Fill `outdata` with one callback's equal-power mix of the
+        outgoing (current) and incoming (claimed preload) tracks, advance
+        the fade, and promote the incoming track to primary once the fade
+        completes or the outgoing track ends. Works for any stream dtype
+        (float32, int32, int16): _pull_block normalizes chunks to float32
+        for mixing, then the result is scaled back to the stream dtype
+        before writing to outdata. Does NOT touch `_samples_emitted` /
+        `_seq` — the shared post-fill below the call site handles those."""
+        pre = self._xfade_in
+        if pre is None:
+            # Defensive — never mix without an incoming source.
+            self._xfade_active = False
+            outdata.fill(0)
+            return
+        out_buf, self._callback_carry, _of, out_done = self._pull_block(
+            self._pcm_queue, self._callback_carry, self._decoder_done,
+            frames, channels,
+        )
+        in_buf, self._xfade_carry_in, _if, _in_done = self._pull_block(
+            pre.queue, self._xfade_carry_in, pre.done, frames, channels,
+        )
+        mixed = mix_crossfade_block(out_buf, in_buf, self._xfade_pos, self._xfade_total)
+        # _pull_block normalizes all dtypes to float32 [-1, 1]; scale back
+        # to the stream dtype before writing. float32 streams get a direct
+        # copy; integer streams are scaled and clipped to their full range.
+        if outdata.dtype == np.float32:
+            outdata[:] = mixed
+        elif outdata.dtype == np.int32:
+            outdata[:] = np.clip(
+                mixed * 2147483648.0, -2147483648.0, 2147483647.0
+            ).astype(np.int32)
+        elif outdata.dtype == np.int16:
+            outdata[:] = np.clip(
+                mixed * 32768.0, -32768.0, 32767.0
+            ).astype(np.int16)
+        self._xfade_pos += frames
+        # Fade complete, or the outgoing track ran out before it finished
+        # (the window started a hair late, or a short track) — promote the
+        # incoming track either way.
+        if self._xfade_pos >= self._xfade_total or out_done:
+            self._promote_crossfade_incoming()
+
+    def _promote_crossfade_incoming(self) -> None:
+        """Make the faded-in track the primary pipeline. Mirrors
+        `_try_gapless_swap`'s ended -> swap -> playing emit so the
+        frontend's advance logic wires up the new track, then restores the
+        incoming track's already-elapsed position + carry (which
+        `_swap_pipeline_to` zeroes). Runs on the realtime callback thread,
+        so it never JOINs the outgoing decoder — it signals it and lets the
+        daemon thread exit (the same deadlock avoidance the file relies on
+        everywhere)."""
+        pre = self._xfade_in
+        if pre is None:
+            self._xfade_active = False
+            return
+        elapsed = self._xfade_pos
+        carry_in = self._xfade_carry_in
+        old_decoder = self._decoder
+        old_stop = self._stop_flag
+        print(f"[crossfade] promote -> {pre.track_id}", flush=True)
+        self._state = "ended"
+        self._seq += 1
+        self._emit()
+        self._swap_pipeline_to(pre)
+        # The incoming track already played `elapsed` samples during the
+        # fade; _swap_pipeline_to reset these to 0 / None.
+        self._samples_emitted = elapsed
+        self._callback_carry = carry_in
+        self._state = "playing"
+        self._seq += 1
+        self._emit()
+        self._xfade_active = False
+        self._xfade_in = None
+        self._xfade_carry_in = None
+        self._xfade_pos = 0
+        self._xfade_total = 0
+        # Tear down the outgoing decoder WITHOUT joining (realtime thread).
+        if old_stop is not None:
+            old_stop.set()
+        if old_decoder is not None:
+            try:
+                old_decoder.cancel_source()
+            except Exception:
+                pass
+
+    def _abort_crossfade(self) -> None:
+        """Cancel an in-progress (or claimed-but-not-yet-started)
+        crossfade and dispose the incoming preload we'd claimed. Called
+        from the pipeline-reset paths (teardown / seek). A manual skip,
+        stop, or seek inside the fade window would otherwise leak the
+        claimed decoder and leave stale fade state. Safe to call when no
+        crossfade is active.
+
+        Disposal is by `stop_flag` + `cancel_source` only — both are
+        designed to be called concurrently with the decoder thread (the
+        teardown path does the same on the primary decoder). We do NOT
+        synchronously `close()` the decoder here: a callback could still
+        be reading the claimed preload's already-decoded queue, and the
+        daemon decoder thread exits on the stop flag and GCs on its own."""
+        pre = self._xfade_in
+        self._xfade_active = False
+        self._xfade_in = None
+        self._xfade_carry_in = None
+        self._xfade_pos = 0
+        self._xfade_total = 0
+        if pre is not None:
+            try:
+                pre.stop_flag.set()
+            except Exception:
+                pass
+            try:
+                pre.decoder.cancel_source()
+            except Exception:
+                pass
 
     def _try_gapless_swap(self) -> bool:
         """Called from the audio callback when the current queue is
