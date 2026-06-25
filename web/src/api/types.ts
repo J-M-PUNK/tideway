@@ -407,6 +407,11 @@ export interface Settings {
    *  20-40 is the typical taste range for hard-panned mixes on
    *  headphones. */
   crossfeed_amount: number;
+  /** Crossfade duration in seconds for automatic track-to-track
+   *  transitions (0 = off, max 12). Fades the outgoing track out as the
+   *  incoming one fades in; applies only to natural advances, not
+   *  manual skips. */
+  crossfade_duration_s: number;
   /** ReplayGain loudness leveling mode. "off" preserves bit-perfect
    *  output; "track" applies the per-track gain (best for shuffle);
    *  "album" applies the album-wide gain (best for whole-album

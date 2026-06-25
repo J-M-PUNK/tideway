@@ -178,6 +178,13 @@ class Settings:
     # listening fix for hard-panned mixes. Off by default; user opts
     # in via the Settings → Playback slider.
     crossfeed_amount: int = 0
+    # Crossfade duration in seconds for automatic track-to-track
+    # transitions (0 = off, capped at 12). When > 0 the outgoing track
+    # fades out as the incoming one fades in over this many seconds,
+    # instead of the gapless cut. Spotify-style: applies only to natural
+    # end-of-track advances (not manual skips) and to every transition
+    # while enabled — turn it off for albums meant to play continuously.
+    crossfade_duration_s: int = 0
     # ReplayGain loudness leveling. Off by default to preserve
     # bit-perfect output for users who haven't asked for leveling.
     #   "off"   — bypass; audio plays at the source's native level.

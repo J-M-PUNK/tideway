@@ -391,6 +391,12 @@ class PCMPlayer:
         self._replaygain_mode: ReplayGainMode = "off"
         self._replaygain_preamp_db: float = 0.0
         self._replaygain_prevent_clipping: bool = True
+        # Crossfade duration in seconds for automatic track-to-track
+        # transitions (0 = off). The audio callback drives the actual
+        # fade once a track nears its end and a compatible preload is
+        # ready; when this is 0 that path is never entered, so playback
+        # is exactly the existing gapless behaviour.
+        self._crossfade_s: float = 0.0
 
         # Audio-callback diagnostics. Each pair is (count, last-print
         # time) for a different rate-limited stderr message:
@@ -1426,6 +1432,25 @@ class PCMPlayer:
         """Current crossfeed setting in percent. 0 means bypassed."""
         with self._lock:
             return self._crossfeed_amount
+
+    def set_crossfade(self, seconds) -> None:
+        """Set the automatic-advance crossfade duration in seconds
+        (clamped 0-12; 0 = off). Stored here; the fade itself is driven
+        from the audio callback when a track nears its end and a
+        compatible, sufficiently-buffered preload is ready. Surface for
+        the Settings page slider."""
+        try:
+            s = float(seconds)
+        except (TypeError, ValueError):
+            s = 0.0
+        s = max(0.0, min(12.0, s))
+        with self._lock:
+            self._crossfade_s = s
+
+    def crossfade_duration(self) -> float:
+        """Current crossfade duration in seconds. 0 means disabled."""
+        with self._lock:
+            return self._crossfade_s
 
     def set_replaygain(
         self,
