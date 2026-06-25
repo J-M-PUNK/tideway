@@ -482,6 +482,11 @@ class PCMPlayer:
         # and it dumps every thread's stack so the next freeze
         # diagnoses itself.
         self._stall_dumped = False
+        # Wall-clock the watchdog uses to time how long the player has
+        # sat in "loading"; reset whenever the state isn't loading. A
+        # load that never produces audio (wedged segment fetch, dead
+        # stream id) would otherwise pin the UI in "loading" forever.
+        self._loading_since: Optional[float] = None
         threading.Thread(
             target=self._stall_watchdog,
             name="player-stall-watchdog",
@@ -1810,6 +1815,26 @@ class PCMPlayer:
 
     # --- internals --------------------------------------------------
 
+    @staticmethod
+    def _dispose_pipeline_async(thread, decoder) -> None:
+        """Join a torn-down decoder thread and close its decoder, off the
+        realtime / request path (see the call site in `_teardown`).
+
+        Ordering is load-bearing: the thread must have exited the PyAV
+        container before `close()` frees it, so we join first. The join
+        is bounded — a permanently wedged read can't pin this disposer
+        (and it's a daemon, so it never blocks process exit either). The
+        decoder being disposed here is already detached from the player
+        (`self._decoder`/`self._decoder_thread` were cleared before the
+        spawn), so this can't race the next track's fresh pipeline."""
+        if thread is not None and thread.is_alive():
+            thread.join(timeout=2.0)
+        if decoder is not None:
+            try:
+                decoder.close()
+            except Exception:
+                pass
+
     def _teardown(self) -> None:
         """Stop the pipeline fully. State transitions to idle BEFORE
         we close the stream, so the finished_callback short-circuits
@@ -1874,24 +1899,29 @@ class PCMPlayer:
         # the fade window). No-op when no crossfade is active.
         self._abort_crossfade()
 
+        # Dispose the old decoder thread + decoder OFF this path. The
+        # join blocks until the thread unwinds its wedged Tidal segment
+        # read — ~1s on a contended / slow network even though
+        # cancel_source() above already aborted the in-flight request —
+        # and _teardown runs on the request thread holding the GIL, so a
+        # synchronous join here starves the realtime audio callback for
+        # that whole second: an audible ~1s dropout at every track change
+        # on a loaded machine (visible as the back-to-back
+        # "[perf] teardown thread.join=~1300ms" + "callback jitter late
+        # by ~770ms" pair in audio.log). Hand the join + ordered close
+        # (close must follow the thread leaving the PyAV container) to a
+        # daemon so the next track loads immediately; the old pipeline
+        # finishes unwinding in the background.
         thread = self._decoder_thread
         self._decoder_thread = None
-        if thread is not None and thread.is_alive():
-            t_join0 = time.monotonic()
-            thread.join(timeout=2.0)
-            print(
-                f"[perf] teardown thread.join="
-                f"{(time.monotonic() - t_join0) * 1000.0:.0f}ms",
-                file=sys.stderr,
-                flush=True,
-            )
-
         self._decoder = None
-        if decoder is not None:
-            try:
-                decoder.close()
-            except Exception:
-                pass
+        if thread is not None or decoder is not None:
+            threading.Thread(
+                target=self._dispose_pipeline_async,
+                args=(thread, decoder),
+                daemon=True,
+                name="pcm-dispose",
+            ).start()
 
         with self._lock:
             self._drain_queue_locked()
@@ -2662,8 +2692,27 @@ class PCMPlayer:
         _lock. Fires once per stall; rearms when audio resumes.
         """
         STALL_S = 10.0
+        # A load that never produces audio leaves the player pinned in
+        # "loading" forever. Beyond any plausible real load time (the
+        # [perf] load lines run ~1-2s even on a contended machine),
+        # surface it as an error so the UI stops hanging and — with
+        # "continue playing" on — auto-advances past the dead track.
+        LOAD_STALL_S = 30.0
         while True:
             time.sleep(5.0)
+            try:
+                # Stuck-loading recovery. Tracked here (not via a hook in
+                # the load path) so there's one owner of the timer.
+                if self._state == "loading":
+                    if self._loading_since is None:
+                        self._loading_since = time.monotonic()
+                    elif time.monotonic() - self._loading_since > LOAD_STALL_S:
+                        self._force_load_stall_error()
+                        self._loading_since = None
+                else:
+                    self._loading_since = None
+            except Exception:
+                pass
             try:
                 last = self._cb_last_t
                 active = (
@@ -2708,6 +2757,44 @@ class PCMPlayer:
             except Exception:
                 # The watchdog must never take the process down.
                 pass
+
+    def _force_load_stall_error(self) -> None:
+        """Recover a load wedged in "loading" past LOAD_STALL_S by
+        surfacing an error, so the UI stops hanging and (with continue-
+        playing on) the frontend advances past the dead track.
+
+        Uses a NON-blocking lock acquire to keep the watchdog's
+        survive-a-deadlock invariant: if `_lock` is contended we skip
+        this round rather than park the watchdog. Best-effort and never
+        raises out to the caller."""
+        track = self._current_track_id
+        if not self._lock.acquire(blocking=False):
+            return
+        try:
+            # Re-check under the lock — the load may have just completed.
+            if self._state != "loading":
+                return
+            self._state = "error"
+            self._last_error = "Track load timed out"
+            self._seq += 1
+        finally:
+            self._lock.release()
+        print(
+            f"[pcm] load-stall watchdog: track={track} stuck in 'loading' "
+            f">30s; forced error so playback can recover",
+            file=sys.stderr,
+            flush=True,
+        )
+        try:
+            audio_log.info(
+                "load-stall: track=%s stuck in loading; forced error", track
+            )
+        except Exception:
+            pass
+        try:
+            self._emit()
+        except Exception:
+            pass
 
     def _audio_callback(self, outdata, frames, time_info, status) -> None:
         if status:
