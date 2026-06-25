@@ -896,6 +896,7 @@ function AudioEngineFields() {
       <ReplayGainField />
       <EqField />
       <CrossfeedField />
+      <CrossfadeField />
     </>
   );
 }
@@ -1054,6 +1055,60 @@ function CrossfeedField() {
         onChange={(e) => onChange(Number(e.target.value))}
         className="h-2 w-full cursor-pointer appearance-none rounded-full bg-secondary accent-primary"
         aria-label="Crossfeed amount"
+      />
+    </Field>
+  );
+}
+
+/**
+ * Crossfade slider for automatic track-to-track transitions. Off (0) by
+ * default. Spotify-style: applies only to natural end-of-track advances
+ * (manual skips still cut), and to every transition while enabled — so
+ * it's turned off for albums meant to play continuously. Same
+ * self-contained settings.get/put shape as CrossfeedField.
+ */
+function CrossfadeField() {
+  const [seconds, setSeconds] = useState<number | null>(null);
+  const debouncedPut = useDebouncedSettingsPut();
+
+  useEffect(() => {
+    let cancelled = false;
+    api.settings
+      .get()
+      .then((s) => {
+        if (!cancelled) setSeconds(s.crossfade_duration_s ?? 0);
+      })
+      .catch(() => {
+        if (!cancelled) setSeconds(0);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  if (seconds === null) return null;
+
+  const label = seconds > 0 ? `Crossfade — ${seconds}s` : "Crossfade — off";
+
+  const onChange = (next: number) => {
+    setSeconds(next);
+    debouncedPut({ crossfade_duration_s: next });
+  };
+
+  return (
+    <Field
+      label={label}
+      hint="Fades the outgoing track out as the next fades in, instead of a hard cut, when a track ends on its own. Automatic advances only — manually skipping still cuts instantly — and it applies to every transition while on, so turn it off for albums meant to play gapless (live sets, DJ mixes). 0 disables."
+    >
+      <input
+        type="range"
+        min={0}
+        max={12}
+        step={1}
+        value={seconds}
+        onChange={(e) => onChange(Number(e.target.value))}
+        className="h-2 w-full cursor-pointer appearance-none rounded-full bg-secondary accent-primary"
+        aria-label="Crossfade duration"
       />
     </Field>
   );
