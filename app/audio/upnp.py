@@ -94,11 +94,21 @@ except Exception as _exc:  # pragma: no cover - environment dependent
     _UPNP_AVAILABLE = False
 
 
-# SSDP search target. MediaRenderer is the canonical UPnP-A/V
-# device class for "thing that can play media." Some renderers also
-# advertise vendor-specific device types but every one we care
-# about includes MediaRenderer in its SSDP responses.
+# SSDP search targets. We run two parallel M-SEARCHes:
+#
+#   MediaRenderer:1  — the canonical device-type search. Finds WiiM,
+#                      most Bluesound, Denon AVRs, LG/Samsung TVs, etc.
+#
+#   AVTransport:1    — service-type search. Some renderers (notably
+#                      USB Audio Player PRO on Android) respond only to
+#                      service-type M-SEARCHes, not device-type ones.
+#                      Running both catches the union without sending
+#                      ssdp:all noise across the whole LAN.
+#
+# Both searches feed the same dict keyed by UDN, so a device found
+# by both just deduplicates.
 _ST_MEDIA_RENDERER = "urn:schemas-upnp-org:device:MediaRenderer:1"
+_ST_AVTRANSPORT = "urn:schemas-upnp-org:service:AVTransport:1"
 
 # We only want devices that expose AVTransport. Any service-type URN
 # starting with this prefix qualifies (covers :1, :2, :3 etc.).
@@ -697,14 +707,22 @@ class UpnpManager:
             )
             devices[entry.id] = entry
 
-        try:
-            await async_search(
+        results = await asyncio.gather(
+            async_search(
                 async_callback=_handle_response,
                 search_target=_ST_MEDIA_RENDERER,
                 timeout=timeout,
-            )
-        except Exception as exc:
-            log.warning("upnp ssdp search raised: %s", exc)
+            ),
+            async_search(
+                async_callback=_handle_response,
+                search_target=_ST_AVTRANSPORT,
+                timeout=timeout,
+            ),
+            return_exceptions=True,
+        )
+        for exc in results:
+            if isinstance(exc, Exception):
+                log.warning("upnp ssdp search raised: %s", exc)
 
         for d in devices.values():
             print(
