@@ -8369,7 +8369,11 @@ def artist_detail(artist_id: int) -> dict:
         except Exception:
             artist_id = ""
         explicit = bool(getattr(a, "explicit", False))
-        return (name, version, artist_id, explicit)
+        rd = getattr(a, "release_date", None) or getattr(
+            a, "available_release_date", None
+        )
+        year: Optional[int] = rd.year if rd is not None else None
+        return (name, version, artist_id, explicit, year)
 
     seen_keys: set[tuple] = set()
     seen_ids: set[str] = set()
