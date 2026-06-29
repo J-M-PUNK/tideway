@@ -69,6 +69,20 @@ class TidalBackoffError(Exception):
         )
 
 
+class TransientRefreshError(Exception):
+    """Raised when a token refresh fails for a transient reason — a 429
+    rate-limit, a 5xx from Tidal, or a network error — rather than a
+    genuinely dead refresh token.
+
+    The distinction matters because force_refresh logs the user out and
+    deletes the session file on a *permanent* auth failure
+    (AuthenticationError). A transient failure must NOT do that: the
+    refresh token is still valid, so we keep the session and let the
+    watchdog retry on its next tick. Conflating the two was silently
+    logging users out days later whenever a background refresh happened
+    to land during a rate-limit window or a Tidal outage."""
+
+
 def tidal_backoff_state() -> dict:
     """Snapshot for /api/tidal/backoff so the frontend can surface a
     banner explaining why things are blocked."""
@@ -518,9 +532,15 @@ class TidalClient:
         This mirrors tidalapi's refresh exactly — same OAuth params,
         same config (so device-code and PKCE both stay correct), same
         impersonated transport — but also carries a rotated refresh
-        token back onto the session so the subsequent save persists
-        it. Error semantics match tidalapi's so existing callers
-        (AuthenticationError → logout, False → give up) are unchanged.
+        token back onto the session so the subsequent save persists it.
+
+        Failures are split by cause. A genuine auth rejection (Tidal's
+        `invalid_grant` and friends, or a bare 401) raises
+        AuthenticationError so the caller logs the user out. A transient
+        transport failure (429 rate-limit, 5xx, non-JSON error page)
+        raises TransientRefreshError so the caller keeps the session and
+        retries later. Conflating the two used to delete a valid session
+        whenever a background refresh landed on a rate-limit or outage.
         """
         session = self.session
         config = session.config
@@ -538,14 +558,44 @@ class TidalClient:
             ),
         }
         resp = session.request_session.post(config.api_oauth2_token, params)
-        body = resp.json()
         if resp.status_code != 200:
-            raise tidalapi.exceptions.AuthenticationError(
-                "Authentication failed with error "
-                f"'{body.get('error')}: {body.get('error_description')}'"
+            # Split permanent auth rejection from transient transport
+            # failure. Only the former should log the user out and wipe
+            # the session file (force_refresh's AuthenticationError path).
+            # A 429 rate-limit or a 5xx is "retry shortly" and the refresh
+            # token is still valid — wrongly treating it as a dead token
+            # is what silently logged users out days later when a
+            # background refresh happened to hit a rate-limit window.
+            try:
+                body = resp.json()
+            except ValueError:
+                # Non-JSON body (e.g. an HTML 5xx error page). No OAuth
+                # error code to read; treat as transient.
+                body = {}
+            error = str(body.get("error") or "")
+            desc = body.get("error_description")
+            # The OAuth spec's permanent failure codes, plus a bare 401
+            # (bad client auth). Tidal returns `invalid_grant` when the
+            # refresh token is expired or revoked — the genuine re-login
+            # case. Anything else (429, 5xx, an unrecognized 4xx) is
+            # transient: keep the session and let the watchdog retry.
+            permanent = resp.status_code == 401 or error in (
+                "invalid_grant",
+                "invalid_request",
+                "invalid_client",
+                "unauthorized_client",
+                "unsupported_grant_type",
             )
-        if not resp.ok:
-            return False
+            if permanent:
+                raise tidalapi.exceptions.AuthenticationError(
+                    "Authentication failed with error "
+                    f"'{error}: {desc}'"
+                )
+            raise TransientRefreshError(
+                f"token refresh got HTTP {resp.status_code} "
+                f"(error={error or 'none'}); refresh token kept"
+            )
+        body = resp.json()
         session.access_token = body["access_token"]
         # Naive UTC, matching how tidalapi stores expiry_time
         # everywhere else. Mixing a tz-aware value here would make
@@ -577,10 +627,13 @@ class TidalClient:
         contending for the lock. Once we hold the lock, if the
         session's refresh token has already moved on — another thread
         refreshed and Tidal rotated — that refresh supersedes this one,
-        so we reuse it instead of re-POSTing the now-dead token. Raises
-        like _token_refresh_capturing (AuthenticationError on a rejected
-        token) so force_refresh's logout-on-auth-failure path is
-        preserved.
+        so we reuse it instead of re-POSTing the now-dead token.
+
+        A permanent AuthenticationError propagates so force_refresh's
+        logout-on-auth-failure path runs. A TransientRefreshError (429,
+        5xx, network) is swallowed to a False return: the refresh token
+        is still valid, so we keep the session and let the next watchdog
+        tick retry rather than wiping a good session over a blip.
         """
         with self._refresh_lock:
             current = getattr(self.session, "refresh_token", None)
@@ -592,7 +645,11 @@ class TidalClient:
                 # would be redundant, and re-POSTing `based_on` would
                 # use a token Tidal already invalidated.
                 return True
-            ok = self._token_refresh_capturing(current)
+            try:
+                ok = self._token_refresh_capturing(current)
+            except TransientRefreshError as exc:
+                _tlog(f"refresh: transient failure, session kept: {exc}")
+                return False
             if ok:
                 try:
                     self.save_session()

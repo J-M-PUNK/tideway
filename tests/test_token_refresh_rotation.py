@@ -170,6 +170,77 @@ def test_non_200_raises_authentication_error():
         client._token_refresh_capturing("dead_refresh")
 
 
+def test_400_invalid_grant_is_permanent():
+    # A dead/revoked refresh token comes back as 400 invalid_grant.
+    # That's the genuine re-login case and must raise AuthenticationError.
+    session = _Session(
+        _Resp(400, {"error": "invalid_grant", "error_description": "revoked"})
+    )
+    client = _client(session)
+
+    with pytest.raises(tidalapi.exceptions.AuthenticationError):
+        client._token_refresh_capturing("dead_refresh")
+
+
+def test_429_is_transient_not_auth_error():
+    # A rate-limit during a background refresh must NOT be mistaken for a
+    # dead token. Treating it as permanent is what deleted valid sessions
+    # and logged users out days later.
+    from app.tidal_client import TransientRefreshError
+
+    session = _Session(
+        _Resp(429, {"error": "rate_limit", "error_description": "slow down"})
+    )
+    client = _client(session)
+
+    with pytest.raises(TransientRefreshError):
+        client._token_refresh_capturing("good_refresh")
+    # The refresh token is untouched — it's still valid.
+    assert session.refresh_token == "old_refresh"
+
+
+def test_5xx_is_transient():
+    from app.tidal_client import TransientRefreshError
+
+    session = _Session(_Resp(503, {"error": "server_error"}))
+    client = _client(session)
+
+    with pytest.raises(TransientRefreshError):
+        client._token_refresh_capturing("good_refresh")
+    assert session.refresh_token == "old_refresh"
+
+
+def test_non_json_error_body_is_transient():
+    # A 5xx that returns an HTML error page (resp.json() raises) has no
+    # OAuth error code to read — treat as transient, not a logout.
+    from app.tidal_client import TransientRefreshError
+
+    class _HtmlResp(_Resp):
+        def json(self):
+            raise ValueError("not json")
+
+    session = _Session(_HtmlResp(502, {}))
+    client = _client(session)
+
+    with pytest.raises(TransientRefreshError):
+        client._token_refresh_capturing("good_refresh")
+    assert session.refresh_token == "old_refresh"
+
+
+def test_refresh_once_swallows_transient_to_false():
+    # _refresh_once is the chokepoint force_refresh relies on. A transient
+    # failure must come back as False (give up, keep session) rather than
+    # propagate — force_refresh logs the user out on a raised
+    # AuthenticationError, and a 429 must never reach that branch.
+    session = _Session(_Resp(429, {"error": "rate_limit"}))
+    client = _client(session)
+    client.save_session = MagicMock()
+
+    assert client._refresh_once(based_on="old_refresh") is False
+    assert session.refresh_token == "old_refresh"
+    client.save_session.assert_not_called()
+
+
 def test_concurrent_internal_refresh_is_single_flight():
     """Two parallel 401s through tidalapi's internal refresh path
     (_token_refresh_and_persist) must collapse to ONE network refresh.
