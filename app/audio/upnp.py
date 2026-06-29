@@ -168,6 +168,7 @@ class _SessionState:
     bytes_encoded: int = 0
     media_loaded: bool = False
     stream_url: str = ""
+    encode_failed: bool = False
 
 
 def _filter_dlna_renderer(service_types: tuple[str, ...]) -> bool:
@@ -639,9 +640,29 @@ class UpnpManager:
                 # Same survival posture as Cast: don't crash the
                 # realtime thread, let the session run dry, frontend
                 # surfaces "0 bytes encoded" plateau.
-                log.debug("flac encode failed: %r", exc)
+                #
+                # But surface the FIRST failure loudly. A persistent
+                # encode failure (e.g. PyAV/FFmpeg dying on a device
+                # whose locale makes av.error mis-decode the message)
+                # means the device connects to our stream URL and then
+                # gets silence forever — the exact "stream never plays"
+                # symptom. Burying that at debug level left it
+                # undiagnosable. One print per session, then debug for
+                # the rest so the realtime thread isn't flooded.
+                if not session.encode_failed:
+                    session.encode_failed = True
+                    print(
+                        f"[upnp] flac encode failed (no audio will "
+                        f"reach the device until this clears): {exc!r}",
+                        flush=True,
+                    )
+                else:
+                    log.debug("flac encode failed: %r", exc)
                 return
         if encoded:
+            # A successful encode clears the failure latch so a later
+            # failure episode reports again instead of staying silent.
+            session.encode_failed = False
             session.buffer.write(encoded)
             session.bytes_encoded += len(encoded)
 

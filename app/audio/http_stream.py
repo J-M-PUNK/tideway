@@ -349,6 +349,16 @@ class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
         # with a HEAD before GET to check Content-Type and confirm
         # the stream exists. Answer with the same response line
         # GET uses so they don't fall back or abort.
+        # High-signal: one line per connection (not per chunk), so it
+        # answers "did the renderer ever reach our stream URL?" when a
+        # device reportedly stays silent. UAPP and other Android DLNA
+        # renderers HEAD-probe before pulling; if this line never
+        # prints, the failure is upstream of the stream server.
+        print(
+            f"[http_stream] HEAD {self.path} from "
+            f"{self.client_address[0]}",
+            flush=True,
+        )
         server = self.server  # type: ignore[assignment]
         if not isinstance(server, StreamHTTPServer) or server.buffer is None:
             self.send_error(503, "stream session not ready")
@@ -363,6 +373,16 @@ class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
         self.end_headers()
 
     def do_GET(self) -> None:  # noqa: N802 - stdlib API
+        # High-signal, one line per connection: the receiver's actual
+        # pull. Pairs with the encoder-failure print in UpnpManager so
+        # a "stream never plays" report can be split into "device never
+        # connected" (no line here) vs "device connected but got no
+        # audio" (this line prints, byte counter stays at 0).
+        print(
+            f"[http_stream] GET {self.path} from "
+            f"{self.client_address[0]}",
+            flush=True,
+        )
         server = self.server  # type: ignore[assignment]
         if not isinstance(server, StreamHTTPServer) or server.buffer is None:
             self.send_error(503, "stream session not ready")
