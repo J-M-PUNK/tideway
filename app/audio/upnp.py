@@ -51,10 +51,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import socket
 import threading
 import time
 from dataclasses import dataclass, field
-from typing import Callable, List, Optional
+from typing import Callable, List, Optional, Set, Tuple
 
 import numpy as np
 
@@ -83,36 +84,177 @@ log = logging.getLogger(__name__)
 try:
     from async_upnp_client.aiohttp import AiohttpRequester
     from async_upnp_client.client_factory import UpnpFactory
-    from async_upnp_client.search import async_search
 
     _UPNP_AVAILABLE = True
 except Exception as _exc:  # pragma: no cover - environment dependent
     log.warning("async-upnp-client unavailable: %s", _exc)
     AiohttpRequester = None  # type: ignore
     UpnpFactory = None  # type: ignore
-    async_search = None  # type: ignore
     _UPNP_AVAILABLE = False
 
 
-# SSDP search targets. We run two parallel M-SEARCHes:
-#
-#   MediaRenderer:1  — the canonical device-type search. Finds WiiM,
-#                      most Bluesound, Denon AVRs, LG/Samsung TVs, etc.
-#
-#   AVTransport:1    — service-type search. Some renderers (notably
-#                      USB Audio Player PRO on Android) respond only to
-#                      service-type M-SEARCHes, not device-type ones.
-#                      Running both catches the union without sending
-#                      ssdp:all noise across the whole LAN.
-#
-# Both searches feed the same dict keyed by UDN, so a device found
-# by both just deduplicates.
-_ST_MEDIA_RENDERER = "urn:schemas-upnp-org:device:MediaRenderer:1"
-_ST_AVTRANSPORT = "urn:schemas-upnp-org:service:AVTransport:1"
+# SSDP discovery is done with our own socket rather than
+# async-upnp-client's async_search(). The reason is a real-world
+# interop bug: async_search sends its M-SEARCH from a socket that, on
+# Linux, is never bound to the SSDP port (it binds only on win32), so
+# the OS gives it an ephemeral source port. Spec-compliant renderers
+# reply via unicast to that source port and are heard. But some
+# renderers — notably USB Audio Player PRO and other Android-based
+# devices — always reply to port 1900 of the requester regardless of
+# the M-SEARCH source port. Nothing is listening there, so their reply
+# is dropped and they never appear in the picker. gssdp-discover (the C
+# reference that works against these devices) binds a single socket to
+# 1900 for both send and receive; we mirror that. See GitHub #234 and
+# #220. The v1.18.1 attempt (a second async_search for the AVTransport
+# service type) didn't help because the lost-reply problem is in the
+# socket, not the search target.
+_SSDP_MCAST_ADDR = "239.255.255.250"
+_SSDP_PORT = 1900
+
+# Search targets we burst in one scan. Devices vary in which they
+# answer: most answer the MediaRenderer device type, some Android
+# renderers only answer a service-type or the catch-all queries.
+# Sending all four in one round catches the union; responses are
+# deduplicated by LOCATION before any descriptor fetch.
+_SSDP_SEARCH_TARGETS: Tuple[str, ...] = (
+    "urn:schemas-upnp-org:device:MediaRenderer:1",
+    "urn:schemas-upnp-org:service:AVTransport:1",
+    "upnp:rootdevice",
+    "ssdp:all",
+)
 
 # We only want devices that expose AVTransport. Any service-type URN
 # starting with this prefix qualifies (covers :1, :2, :3 etc.).
 _AVTRANSPORT_PREFIX = "urn:schemas-upnp-org:service:AVTransport:"
+
+
+def _build_msearch(search_target: str, mx: int) -> bytes:
+    """One SSDP M-SEARCH datagram for the given target. MX is the max
+    seconds a device may wait before replying; it must be smaller than
+    our receive window so late repliers still land inside it."""
+    return (
+        "M-SEARCH * HTTP/1.1\r\n"
+        f"HOST: {_SSDP_MCAST_ADDR}:{_SSDP_PORT}\r\n"
+        'MAN: "ssdp:discover"\r\n'
+        f"MX: {mx}\r\n"
+        f"ST: {search_target}\r\n"
+        "\r\n"
+    ).encode("ascii")
+
+
+def _parse_ssdp_location(data: bytes) -> Optional[str]:
+    """Pull the LOCATION header out of an SSDP response or NOTIFY.
+    Returns None for datagrams without one (e.g. byebye NOTIFYs)."""
+    try:
+        text = data.decode("utf-8", "replace")
+    except Exception:
+        return None
+    for line in text.split("\r\n"):
+        if line.lower().startswith("location:"):
+            return line.split(":", 1)[1].strip() or None
+    return None
+
+
+def _collect_ssdp_locations(
+    timeout: float, lan_ip: str
+) -> Tuple[Set[str], bool]:
+    """Blocking single-socket SSDP search. Binds one UDP socket to
+    port 1900, joins the SSDP multicast group, bursts an M-SEARCH for
+    every target, and collects LOCATION URLs from every reply (unicast
+    or multicast) until the timeout elapses.
+
+    Returns the set of discovered descriptor URLs and whether we
+    actually got port 1900. If 1900 is already held (another SSDP
+    listener on the box), we fall back to an ephemeral port: we lose
+    the port-1900-only repliers like UAPP but still find every
+    spec-compliant device via the unicast-to-source-port path, which is
+    strictly better than failing the whole scan.
+    """
+    deadline = time.monotonic() + timeout
+    locations: Set[str] = set()
+
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+    except (AttributeError, OSError):
+        # SO_REUSEPORT is absent on some platforms; without it a second
+        # listener on 1900 just means we take the fallback path.
+        pass
+
+    bound_1900 = True
+    try:
+        sock.bind(("", _SSDP_PORT))
+    except OSError as exc:
+        log.debug("upnp: port %d busy (%s); falling back to ephemeral",
+                  _SSDP_PORT, exc)
+        bound_1900 = False
+        try:
+            sock.bind(("", 0))
+        except OSError as exc2:
+            log.warning("upnp: could not bind any SSDP socket: %s", exc2)
+            sock.close()
+            return locations, False
+
+    # Join the multicast group and pin the outgoing interface to the LAN
+    # IP so the M-SEARCH leaves the right NIC on multi-homed machines.
+    iface = lan_ip if lan_ip and lan_ip != "127.0.0.1" else "0.0.0.0"
+    try:
+        mreq = socket.inet_aton(_SSDP_MCAST_ADDR) + socket.inet_aton(iface)
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+        if iface != "0.0.0.0":
+            sock.setsockopt(
+                socket.IPPROTO_IP,
+                socket.IP_MULTICAST_IF,
+                socket.inet_aton(iface),
+            )
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
+    except OSError as exc:
+        log.debug("upnp: multicast setup partial: %s", exc)
+
+    # MX must be < the receive window. Cap at 5 (the SSDP-recommended
+    # ceiling) and keep at least 1.
+    mx = max(1, min(5, int(timeout) - 1))
+
+    def _burst() -> None:
+        for st in _SSDP_SEARCH_TARGETS:
+            try:
+                sock.sendto(
+                    _build_msearch(st, mx),
+                    (_SSDP_MCAST_ADDR, _SSDP_PORT),
+                )
+            except OSError as exc:
+                log.debug("upnp: M-SEARCH send for %s failed: %s", st, exc)
+
+    print(
+        f"[upnp] ssdp scan: bound_1900={bound_1900} iface={iface} "
+        f"mx={mx} timeout={timeout:.0f}s",
+        flush=True,
+    )
+    _burst()
+    # A second burst partway through helps Android renderers that take a
+    # few seconds to acquire the multicast lock after the first probe.
+    second_burst_at = time.monotonic() + max(1.0, timeout / 2.0)
+    did_second = False
+
+    sock.settimeout(0.5)
+    try:
+        while time.monotonic() < deadline:
+            if not did_second and time.monotonic() >= second_burst_at:
+                _burst()
+                did_second = True
+            try:
+                data, _addr = sock.recvfrom(65535)
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            loc = _parse_ssdp_location(data)
+            if loc:
+                locations.add(loc)
+    finally:
+        sock.close()
+    return locations, bound_1900
 
 # Path the embedded HTTP server exposes for the live FLAC stream.
 # Devices use this as part of the URL we hand them in
@@ -669,29 +811,38 @@ class UpnpManager:
         self._loop_thread = t
 
     async def _discover_async(self, timeout: float) -> List[UpnpDevice]:
-        """SSDP multicast + per-device descriptor parse. Returns
-        only AVTransport-capable devices. Pure OpenHome devices
-        get filtered here so they don't pollute the DLNA picker."""
+        """Single-socket SSDP search + per-device descriptor parse.
+        Returns only AVTransport-capable devices. Pure OpenHome devices
+        get filtered here so they don't pollute the DLNA picker.
+
+        The M-SEARCH/listen step runs on a worker thread (blocking
+        socket bound to port 1900 — see _collect_ssdp_locations for
+        why); the descriptor fetch + parse stays on the asyncio loop so
+        it can reuse async-upnp-client's UpnpFactory.
+        """
         devices: dict[str, UpnpDevice] = {}
         requester = AiohttpRequester()
         factory = UpnpFactory(requester)
 
-        async def _handle_response(headers: dict) -> None:
-            location = headers.get("LOCATION") or headers.get("location")
-            if not location:
-                return
+        loop = asyncio.get_event_loop()
+        lan_ip = primary_lan_ip()
+        locations, _bound_1900 = await loop.run_in_executor(
+            None, _collect_ssdp_locations, timeout, lan_ip
+        )
+
+        for location in locations:
             try:
                 device = await factory.async_create_device(location)
             except Exception as exc:
                 log.debug("upnp: parse %s failed: %s", location, exc)
-                return
+                continue
             service_types = tuple(
                 sorted({s.service_type for s in device.all_services})
             )
             if not _filter_dlna_renderer(service_types):
                 # OpenHome-only or otherwise non-DLNA. Skip; the
                 # tidal_connect module's discovery handles those.
-                return
+                continue
             entry = UpnpDevice(
                 id=device.udn or location,
                 name=(
@@ -706,23 +857,6 @@ class UpnpManager:
                 has_avtransport=True,
             )
             devices[entry.id] = entry
-
-        results = await asyncio.gather(
-            async_search(
-                async_callback=_handle_response,
-                search_target=_ST_MEDIA_RENDERER,
-                timeout=timeout,
-            ),
-            async_search(
-                async_callback=_handle_response,
-                search_target=_ST_AVTRANSPORT,
-                timeout=timeout,
-            ),
-            return_exceptions=True,
-        )
-        for exc in results:
-            if isinstance(exc, Exception):
-                log.warning("upnp ssdp search raised: %s", exc)
 
         for d in devices.values():
             print(

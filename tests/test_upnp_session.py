@@ -29,7 +29,9 @@ from app.audio.upnp import (
     UpnpDevice,
     UpnpManager,
     _SessionState,
+    _build_msearch,
     _filter_dlna_renderer,
+    _parse_ssdp_location,
 )
 
 
@@ -192,6 +194,76 @@ class TestFilterDlnaRenderer:
 
     def test_empty_service_list_rejected(self):
         assert _filter_dlna_renderer(()) is False
+
+
+# ---------------------------------------------------------------------
+# SSDP wire helpers (the UAPP single-socket fix)
+# ---------------------------------------------------------------------
+
+
+class TestParseSsdpLocation:
+    def test_extracts_location_from_msearch_response(self):
+        """A UAPP-style unicast M-SEARCH reply. The LOCATION header is
+        the descriptor URL we feed to the device factory."""
+        resp = (
+            b"HTTP/1.1 200 OK\r\n"
+            b"CACHE-CONTROL: max-age=1800\r\n"
+            b"LOCATION: http://192.168.17.33:36899/upnp/dev/UAPP/desc\r\n"
+            b"ST: urn:schemas-upnp-org:device:MediaRenderer:1\r\n"
+            b"\r\n"
+        )
+        assert (
+            _parse_ssdp_location(resp)
+            == "http://192.168.17.33:36899/upnp/dev/UAPP/desc"
+        )
+
+    def test_extracts_location_from_notify(self):
+        notify = (
+            b"NOTIFY * HTTP/1.1\r\n"
+            b"HOST: 239.255.255.250:1900\r\n"
+            b"LOCATION: http://192.168.1.50:8080/desc.xml\r\n"
+            b"NTS: ssdp:alive\r\n"
+            b"\r\n"
+        )
+        assert _parse_ssdp_location(notify) == "http://192.168.1.50:8080/desc.xml"
+
+    def test_header_name_is_case_insensitive(self):
+        resp = b"HTTP/1.1 200 OK\r\nlocation: http://x/desc\r\n\r\n"
+        assert _parse_ssdp_location(resp) == "http://x/desc"
+
+    def test_no_location_returns_none(self):
+        """A byebye NOTIFY carries no LOCATION; nothing to fetch."""
+        byebye = (
+            b"NOTIFY * HTTP/1.1\r\n"
+            b"NTS: ssdp:byebye\r\n"
+            b"USN: uuid:gone\r\n"
+            b"\r\n"
+        )
+        assert _parse_ssdp_location(byebye) is None
+
+    def test_empty_location_returns_none(self):
+        assert _parse_ssdp_location(b"HTTP/1.1 200 OK\r\nLOCATION: \r\n\r\n") is None
+
+    def test_garbage_bytes_do_not_raise(self):
+        assert _parse_ssdp_location(b"\xff\xfe\x00\x01not http") is None
+
+
+class TestBuildMsearch:
+    def test_targets_multicast_group_and_port(self):
+        msg = _build_msearch("ssdp:all", 3).decode("ascii")
+        assert msg.startswith("M-SEARCH * HTTP/1.1\r\n")
+        assert "HOST: 239.255.255.250:1900\r\n" in msg
+        assert 'MAN: "ssdp:discover"\r\n' in msg
+        assert "MX: 3\r\n" in msg
+        assert "ST: ssdp:all\r\n" in msg
+        # Must terminate with a blank line or devices reject the probe.
+        assert msg.endswith("\r\n\r\n")
+
+    def test_search_target_is_passed_through(self):
+        msg = _build_msearch(
+            "urn:schemas-upnp-org:device:MediaRenderer:1", 5
+        ).decode("ascii")
+        assert "ST: urn:schemas-upnp-org:device:MediaRenderer:1\r\n" in msg
 
 
 # ---------------------------------------------------------------------
