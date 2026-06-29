@@ -9,7 +9,7 @@ requests>=2.34.2
 # response with 150+ dict-comprehensions). Lower GIL hold there
 # means less starvation of the audio callback thread when the user
 # cold-navigates to an artist page mid-playback.
-orjson>=3.10.0
+orjson>=3.11.9
 # TLS-impersonation HTTP client. We patch tidalapi's request_session to
 # use a curl-cffi Session whose ClientHello and HTTP/2 SETTINGS match a
 # real mobile-Chrome stack, so anti-abuse layers can't fingerprint us
