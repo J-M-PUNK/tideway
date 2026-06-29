@@ -44,7 +44,11 @@ export function AlbumDetail({ onDownload }: { onDownload: OnDownload }) {
   const { prefetchMany } = useTrackPrefetch();
   useEffect(() => {
     if (album?.tracks?.length) {
-      prefetchMany(album.tracks.map((t) => t.id));
+      // Cap at 10 tracks to avoid a burst of Tidal API calls on
+      // mount. Standard albums are ≤20 tracks; this covers the
+      // typical listen-start position without the fan-out risk
+      // that full-playlist prefetch carries.
+      prefetchMany(album.tracks.slice(0, 10).map((t) => t.id));
     }
   }, [album, prefetchMany]);
   // Batch-fetch Spotify playcounts for every track on the album in

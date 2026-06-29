@@ -25,11 +25,15 @@ export function MixDetail({ onDownload }: { onDownload: OnDownload }) {
     cacheKey: queryKeys.mix(id),
   });
   const [shuffleIntent, setShuffleIntent] = useState(false);
-  // Warm the stream-manifest cache for every track on this mix so
-  // the next click skips the Tidal playbackinfo round-trip.
+  // Warm the stream-manifest cache for the first handful of tracks so
+  // the next click skips the Tidal playbackinfo round-trip. Capped at
+  // 10: mixes run 50-100 tracks, and prefetching all of them fires 3
+  // Tidal API calls each at once, enough to trigger rate-limiting or a
+  // temporary account suspension. Hover-prefetch covers the rest.
   const { prefetchMany } = useTrackPrefetch();
   useEffect(() => {
-    if (mix?.tracks?.length) prefetchMany(mix.tracks.map((t) => t.id));
+    if (mix?.tracks?.length)
+      prefetchMany(mix.tracks.slice(0, 10).map((t) => t.id));
   }, [mix, prefetchMany]);
 
   if (loading) {
