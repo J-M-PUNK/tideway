@@ -83,7 +83,7 @@ spotapi>=1.2.7
 # uses these PyObjC bindings. Skipped on non-darwin via the
 # environment marker so a Linux / Windows install doesn't pull
 # them.
-pyobjc-framework-MediaPlayer>=10.0; sys_platform == "darwin"
+pyobjc-framework-MediaPlayer>=12.2.1; sys_platform == "darwin"
 # UPnP / DLNA MediaRenderer output. Same library Home Assistant's
 # DLNA integration uses. Covers SSDP discovery, AVTransport control
 # (play/pause/seek), RenderingControl (volume), and OpenHome for
