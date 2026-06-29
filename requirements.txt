@@ -20,7 +20,7 @@ orjson>=3.10.0
 # production transport meant every Tideway install looked like a
 # scraper to Tidal's anti-abuse layer.
 curl-cffi>=0.15.0
-pillow>=10.0.0
+pillow>=12.2.0
 fastapi>=0.110.0
 uvicorn[standard]>=0.47.0
 sse-starlette>=3.4.4
