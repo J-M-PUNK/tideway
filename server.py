@@ -1444,7 +1444,11 @@ def filter_explicit_dupes(items: list, preference: str, *, kind: str) -> list:
         name = _norm_title(getattr(item, "name", None))
         if kind == "album":
             version = (getattr(item, "version", "") or "").strip().lower()
-            return ("album", name, version, primary)
+            rd = getattr(item, "release_date", None) or getattr(
+                item, "available_release_date", None
+            )
+            year = rd.year if rd is not None else None
+            return ("album", name, version, primary, year)
         album_obj = getattr(item, "album", None)
         album_name = _norm_title(getattr(album_obj, "name", None)) if album_obj else ""
         return ("track", name, album_name, primary)
