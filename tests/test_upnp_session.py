@@ -574,6 +574,56 @@ class TestPushPcmEncoderReuse:
         assert sess.encoder_rate == 96000
 
 
+class TestPushPcmEncodeFailureLatch:
+    """A failing encoder (e.g. PyAV/FFmpeg dying on a device whose
+    locale makes av.error mis-decode the error message) leaves the
+    device connected to our stream URL with no audio ever arriving.
+    push_pcm must not crash the realtime thread, but the FIRST failure
+    has to be surfaced loudly so the symptom is diagnosable rather than
+    buried at debug level. The `encode_failed` latch is what gates the
+    one-shot loud report; a later success clears it.
+    """
+
+    def _attach_with_encoder(self, raises: bool):
+        mgr = UpnpManager()
+        sess = _attach_session(mgr)
+        sess.encoder = MagicMock()
+        sess.encoder_rate = 44100
+        sess.encoder_channels = 2
+        sess.encoder_dtype = "int16"
+        if raises:
+            sess.encoder.encode.side_effect = RuntimeError("ffmpeg boom")
+        else:
+            sess.encoder.encode.return_value = b""
+        return mgr, sess
+
+    def test_encode_failure_does_not_raise_and_latches(self):
+        mgr, sess = self._attach_with_encoder(raises=True)
+        pcm = np.zeros((1024, 2), dtype=np.int16)
+        mgr.push_pcm(pcm, sample_rate=44100, dtype="int16")  # no raise
+        assert sess.encode_failed is True
+
+    def test_repeated_failure_stays_latched(self):
+        mgr, sess = self._attach_with_encoder(raises=True)
+        pcm = np.zeros((1024, 2), dtype=np.int16)
+        for _ in range(5):
+            mgr.push_pcm(pcm, sample_rate=44100, dtype="int16")
+        assert sess.encode_failed is True
+
+    def test_successful_encode_clears_latch(self):
+        mgr, sess = self._attach_with_encoder(raises=True)
+        pcm = np.zeros((1024, 2), dtype=np.int16)
+        mgr.push_pcm(pcm, sample_rate=44100, dtype="int16")
+        assert sess.encode_failed is True
+        # Encoder recovers and returns real bytes; the latch clears so
+        # a future failure episode reports again.
+        sess.encoder.encode.side_effect = None
+        sess.encoder.encode.return_value = b"flacbytes"
+        mgr.push_pcm(pcm, sample_rate=44100, dtype="int16")
+        assert sess.encode_failed is False
+        assert sess.bytes_encoded == len(b"flacbytes")
+
+
 class TestPushPcmEmpty:
     def test_empty_array_no_session_is_noop(self):
         mgr = UpnpManager()
