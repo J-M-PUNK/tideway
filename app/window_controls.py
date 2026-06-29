@@ -298,6 +298,9 @@ def enable_native_resize(hwnd: int) -> bool:
 _WM_USER = 0x0400
 _WM_TIDEWAY_NC_DRAG = _WM_USER + 71  # arbitrary; just needs to not clash
 
+_WM_GETMINMAXINFO = 0x0024
+_MONITOR_DEFAULTTONEAREST = 0x00000002
+
 # WndProc subclass state. _wndproc_ref keeps the C callback alive
 # (Python's GC would otherwise free it while Windows still has its
 # function pointer); _prev_wndproc is the original WindowProc we
@@ -331,6 +334,26 @@ def ensure_wndproc_subclass(hwnd: int) -> bool:
         return False
     user32 = ctypes.windll.user32
 
+    class _POINT(ctypes.Structure):
+        _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+    class _MINMAXINFO(ctypes.Structure):
+        _fields_ = [
+            ("ptReserved",    _POINT),
+            ("ptMaxSize",     _POINT),
+            ("ptMaxPosition", _POINT),
+            ("ptMinTrackSize", _POINT),
+            ("ptMaxTrackSize", _POINT),
+        ]
+
+    class _MONITORINFO(ctypes.Structure):
+        _fields_ = [
+            ("cbSize",    wintypes.DWORD),
+            ("rcMonitor", wintypes.RECT),
+            ("rcWork",    wintypes.RECT),
+            ("dwFlags",   wintypes.DWORD),
+        ]
+
     WNDPROC = ctypes.WINFUNCTYPE(
         ctypes.c_long,
         wintypes.HWND,
@@ -356,6 +379,32 @@ def ensure_wndproc_subclass(hwnd: int) -> bool:
     call_wnd_proc.restype = ctypes.c_long
 
     def _wnd_proc(hwnd_arg, msg, wparam, lparam):
+        if msg == _WM_GETMINMAXINFO:
+            # A frameless window with WS_THICKFRAME but no WS_CAPTION
+            # maximizes to the full monitor rect, covering the taskbar.
+            # WM_GETMINMAXINFO lets us constrain ptMaxSize / ptMaxPosition
+            # to the monitor's work area (screen minus taskbar) instead.
+            try:
+                _MonitorFromWindow = user32.MonitorFromWindow
+                _MonitorFromWindow.restype = ctypes.c_void_p
+                hmon = _MonitorFromWindow(
+                    hwnd_arg, _MONITOR_DEFAULTTONEAREST
+                )
+                mi = _MONITORINFO()
+                mi.cbSize = ctypes.sizeof(_MONITORINFO)
+                if user32.GetMonitorInfoW(hmon, ctypes.byref(mi)):
+                    mmi = ctypes.cast(
+                        lparam, ctypes.POINTER(_MINMAXINFO)
+                    ).contents
+                    work = mi.rcWork
+                    mon = mi.rcMonitor
+                    mmi.ptMaxPosition.x = work.left - mon.left
+                    mmi.ptMaxPosition.y = work.top - mon.top
+                    mmi.ptMaxSize.x = work.right - work.left
+                    mmi.ptMaxSize.y = work.bottom - work.top
+                    return 0
+            except Exception:
+                pass
         if msg == _WM_TIDEWAY_NC_DRAG:
             # We're now on the GUI thread. ReleaseCapture genuinely
             # releases the WebView2 child's capture, and the
