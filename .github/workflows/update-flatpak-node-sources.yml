@@ -13,6 +13,8 @@ name: Update flatpak node-sources.json
 # commit step is skipped when there's nothing new to record.
 on:
   push:
+    branches:
+      - "**"
     paths:
       - "web/package-lock.json"
   workflow_dispatch:
