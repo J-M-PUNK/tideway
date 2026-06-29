@@ -9,7 +9,7 @@ requests>=2.34.2
 # response with 150+ dict-comprehensions). Lower GIL hold there
 # means less starvation of the audio callback thread when the user
 # cold-navigates to an artist page mid-playback.
-orjson>=3.10.0
+orjson>=3.11.9
 # TLS-impersonation HTTP client. We patch tidalapi's request_session to
 # use a curl-cffi Session whose ClientHello and HTTP/2 SETTINGS match a
 # real mobile-Chrome stack, so anti-abuse layers can't fingerprint us
@@ -20,9 +20,9 @@ orjson>=3.10.0
 # production transport meant every Tideway install looked like a
 # scraper to Tidal's anti-abuse layer.
 curl-cffi>=0.15.0
-pillow>=10.0.0
+pillow>=12.2.0
 fastapi>=0.110.0
-uvicorn[standard]>=0.47.0
+uvicorn[standard]>=0.49.0
 sse-starlette>=3.4.4
 # Packaged desktop app — pywebview wraps the web UI in a native window.
 # On Windows it requires WebView2 (preinstalled on Win11, auto-installs
@@ -51,7 +51,7 @@ rapidfuzz>=3.14.5
 # Global media-key listener (play-pause / next / prev work when the
 # window is backgrounded). Has platform-specific backends; pynput picks
 # the right one at import time.
-pynput>=1.8.1
+pynput>=1.8.2
 # Spotify public-data enrichment. Wraps Spotify's reverse-engineered
 # GraphQL (the same one the Web Player uses) to pull global play
 # counts + artist monthly listeners. No OAuth — TLS-fingerprinted
@@ -83,7 +83,7 @@ spotapi>=1.2.7
 # uses these PyObjC bindings. Skipped on non-darwin via the
 # environment marker so a Linux / Windows install doesn't pull
 # them.
-pyobjc-framework-MediaPlayer>=10.0; sys_platform == "darwin"
+pyobjc-framework-MediaPlayer>=12.2.1; sys_platform == "darwin"
 # UPnP / DLNA MediaRenderer output. Same library Home Assistant's
 # DLNA integration uses. Covers SSDP discovery, AVTransport control
 # (play/pause/seek), RenderingControl (volume), and OpenHome for
