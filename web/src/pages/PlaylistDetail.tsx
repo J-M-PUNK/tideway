@@ -98,7 +98,12 @@ export function PlaylistDetail({ onDownload }: { onDownload: OnDownload }) {
   const { prefetchMany } = useTrackPrefetch();
   useEffect(() => {
     if (playlist?.tracks?.length) {
-      prefetchMany(playlist.tracks.map((t) => t.id));
+      // Cap at 10 tracks. Playlists can be hundreds of tracks long;
+      // prefetching all of them fires hundreds of Tidal API calls
+      // at once (3 per track) and can trigger rate-limiting or a
+      // temporary account suspension. Hover-prefetch covers the rest
+      // on demand as the user scrolls.
+      prefetchMany(playlist.tracks.slice(0, 10).map((t) => t.id));
     }
   }, [playlist?.tracks, prefetchMany]);
 
