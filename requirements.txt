@@ -51,7 +51,7 @@ rapidfuzz>=3.14.5
 # Global media-key listener (play-pause / next / prev work when the
 # window is backgrounded). Has platform-specific backends; pynput picks
 # the right one at import time.
-pynput>=1.8.1
+pynput>=1.8.2
 # Spotify public-data enrichment. Wraps Spotify's reverse-engineered
 # GraphQL (the same one the Web Player uses) to pull global play
 # counts + artist monthly listeners. No OAuth — TLS-fingerprinted
