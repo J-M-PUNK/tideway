@@ -38,6 +38,7 @@ import socket
 import socketserver
 import threading
 import time
+import urllib.parse
 from typing import Optional
 
 import numpy as np
@@ -325,6 +326,10 @@ class StreamHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     buffer: Optional["RingBuffer"] = None
     stream_path: str = "/stream"
     content_type: str = "audio/flac"
+    # DLNA renderers negotiate transferMode.dlna.org; Cast receivers
+    # don't and shouldn't see the header. Set per session so the
+    # shared handler only emits DLNA-specific headers on DLNA streams.
+    dlna: bool = False
 
 
 class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
@@ -344,60 +349,98 @@ class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
         # drown in per-chunk access-log lines during streaming.
         log.debug("http_stream: " + format, *args)
 
-    def do_HEAD(self) -> None:  # noqa: N802 - stdlib API
-        # Some receivers (and plenty of middleboxes) probe headers
-        # with a HEAD before GET to check Content-Type and confirm
-        # the stream exists. Answer with the same response line
-        # GET uses so they don't fall back or abort.
-        # High-signal: one line per connection (not per chunk), so it
-        # answers "did the renderer ever reach our stream URL?" when a
-        # device reportedly stays silent. UAPP and other Android DLNA
-        # renderers HEAD-probe before pulling; if this line never
-        # prints, the failure is upstream of the stream server.
+    # DLNA renderers carry their intent in these request headers. We
+    # echo/answer the ones a strict renderer (UAPP, Hisense TVs)
+    # checks, and log the lot so a "device stays silent" report comes
+    # with the exact bytes the renderer sent instead of guesswork.
+    _DLNA_REQUEST_HEADERS = (
+        "transferMode.dlna.org",
+        "getcontentFeatures.dlna.org",
+        "getAvailableSeekRange.dlna.org",
+        "getMediaInfo.sec",
+        "Range",
+        "User-Agent",
+    )
+
+    def _request_path(self) -> str:
+        """Path portion of the request, query string stripped.
+
+        Strict renderers append their own query params to the URL we
+        hand them (Hisense pulls `/dlna/stream?mediaPlayerId=1&playMode=2`).
+        Compare on the path alone so those params don't 404 the stream.
+        """
+        return urllib.parse.urlsplit(self.path).path
+
+    def _log_connection(self, method: str) -> None:
+        # One high-signal line per connection (not per chunk): did the
+        # renderer reach our stream URL, and with what DLNA intent?
+        # Pairs with the encoder-failure print in UpnpManager so a
+        # "stream never plays" report splits into "device never
+        # connected" (no line) vs "connected but got no audio" (line
+        # prints, byte counter stays at 0). The header dump turns
+        # "UAPP won't play" into the renderer's literal request.
+        headers = []
+        for name in self._DLNA_REQUEST_HEADERS:
+            value = self.headers.get(name)
+            if value is not None:
+                headers.append(f"{name}={value}")
+        suffix = f" [{', '.join(headers)}]" if headers else ""
         print(
-            f"[http_stream] HEAD {self.path} from "
-            f"{self.client_address[0]}",
+            f"[http_stream] {method} {self.path} from "
+            f"{self.client_address[0]}{suffix}",
             flush=True,
         )
-        server = self.server  # type: ignore[assignment]
-        if not isinstance(server, StreamHTTPServer) or server.buffer is None:
-            self.send_error(503, "stream session not ready")
-            return
-        if self.path != server.stream_path:
-            self.send_error(404, "not found")
-            return
+
+    def _send_stream_headers(self, server: "StreamHTTPServer") -> None:
+        """Send the 200 + headers shared by HEAD and GET.
+
+        Takes the isinstance-validated server so it never reaches
+        through the unnarrowed self.server for the session config.
+        """
         self.send_response(200)
         self.send_header("Content-Type", server.content_type)
+        # Chunked transfer lets us keep writing audio frames as long
+        # as the session is alive. Tells the receiver it's a stream,
+        # not a file with a known length.
         self.send_header("Transfer-Encoding", "chunked")
+        if server.dlna:
+            # DLNA's transferMode.dlna.org negotiation: a renderer asks
+            # for a mode and a compliant server states the mode it
+            # granted. We always serve an open-ended FLAC, which IS
+            # Streaming, so we grant Streaming regardless of what was
+            # requested rather than echoing the request value back
+            # (echoing would both claim a mode we don't honor and
+            # reflect an unvalidated client string into a response
+            # header). Cast receivers aren't DLNA and never see this.
+            self.send_header("transferMode.dlna.org", "Streaming")
         self.send_header("Connection", "close")
         self.end_headers()
 
-    def do_GET(self) -> None:  # noqa: N802 - stdlib API
-        # High-signal, one line per connection: the receiver's actual
-        # pull. Pairs with the encoder-failure print in UpnpManager so
-        # a "stream never plays" report can be split into "device never
-        # connected" (no line here) vs "device connected but got no
-        # audio" (this line prints, byte counter stays at 0).
-        print(
-            f"[http_stream] GET {self.path} from "
-            f"{self.client_address[0]}",
-            flush=True,
-        )
+    def do_HEAD(self) -> None:  # noqa: N802 - stdlib API
+        # Some receivers (and plenty of middleboxes) probe headers
+        # with a HEAD before GET to check Content-Type and confirm
+        # the stream exists. Answer with the same response line GET
+        # uses so they don't fall back or abort.
+        self._log_connection("HEAD")
         server = self.server  # type: ignore[assignment]
         if not isinstance(server, StreamHTTPServer) or server.buffer is None:
             self.send_error(503, "stream session not ready")
             return
-        if self.path != server.stream_path:
+        if self._request_path() != server.stream_path:
             self.send_error(404, "not found")
             return
-        self.send_response(200)
-        self.send_header("Content-Type", server.content_type)
-        # Chunked transfer lets us keep writing audio frames as
-        # long as the session is alive. Tells the receiver it's a
-        # stream, not a file with a known length.
-        self.send_header("Transfer-Encoding", "chunked")
-        self.send_header("Connection", "close")
-        self.end_headers()
+        self._send_stream_headers(server)
+
+    def do_GET(self) -> None:  # noqa: N802 - stdlib API
+        self._log_connection("GET")
+        server = self.server  # type: ignore[assignment]
+        if not isinstance(server, StreamHTTPServer) or server.buffer is None:
+            self.send_error(503, "stream session not ready")
+            return
+        if self._request_path() != server.stream_path:
+            self.send_error(404, "not found")
+            return
+        self._send_stream_headers(server)
         buf = server.buffer
         # Become the sole consumer. A later GET (the Cast per-track
         # reload's new connection) supersedes this one so two threads
@@ -436,6 +479,7 @@ def start_stream_http_server(
     buffer: RingBuffer,
     stream_path: str = "/stream",
     content_type: str = "audio/flac",
+    dlna: bool = False,
 ) -> StreamHTTPServer:
     """Start a stream-serving HTTP listener on an ephemeral port.
 
@@ -443,11 +487,17 @@ def start_stream_http_server(
     out and build the URL handed to the receiver. Caller is
     responsible for `shutdown()` + `server_close()` when the session
     ends.
+
+    Set `dlna=True` for UPnP/DLNA sessions so the handler emits the
+    DLNA-specific response headers (transferMode.dlna.org). Cast
+    sessions leave it False; Chromecast isn't DLNA and shouldn't see
+    those headers.
     """
     server = StreamHTTPServer(("0.0.0.0", 0), _StreamRequestHandler)
     server.buffer = buffer
     server.stream_path = stream_path
     server.content_type = content_type
+    server.dlna = dlna
     thread = threading.Thread(
         target=server.serve_forever,
         name=f"http-stream{stream_path}",
