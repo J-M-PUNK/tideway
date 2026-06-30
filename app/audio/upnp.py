@@ -536,6 +536,7 @@ class UpnpManager:
                 session.buffer,
                 stream_path=_STREAM_PATH,
                 content_type="audio/flac",
+                dlna=True,
             )
             host_port = session.http_server.server_address[1]
             session.stream_url = (

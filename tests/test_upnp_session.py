@@ -157,7 +157,9 @@ def mock_http_server(monkeypatch):
     fake_server = MagicMock()
     fake_server.server_address = ("0.0.0.0", 54321)
 
-    def _fake_start(buffer, stream_path="/stream", content_type="audio/flac"):
+    def _fake_start(
+        buffer, stream_path="/stream", content_type="audio/flac", dlna=False
+    ):
         return fake_server
 
     monkeypatch.setattr("app.audio.upnp.start_stream_http_server", _fake_start)

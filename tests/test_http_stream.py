@@ -296,3 +296,173 @@ class TestStreamHTTPServerProtocol:
             server.shutdown()
             server.server_close()
             buffer.close()
+
+
+# ---------------------------------------------------------------------
+# DLNA HTTP compliance (issue #239)
+# ---------------------------------------------------------------------
+
+
+class TestDlnaHttpCompliance:
+    """A strict DLNA renderer (UAPP, Hisense TVs) appends its own
+    query params to the stream URL and negotiates transferMode.
+    These tests pin the server's compliance behaviour without a real
+    device: spin up a loopback server and read the raw response."""
+
+    @staticmethod
+    def _seeded_server(dlna: bool = True):
+        buffer = RingBuffer()
+        # Seed bytes so do_GET's first buffer.read() returns at once
+        # instead of racing the 2s read timeout.
+        buffer.write(b"\x00" * 256)
+        server = start_stream_http_server(
+            buffer,
+            stream_path="/dlna/stream",
+            content_type="audio/flac",
+            dlna=dlna,
+        )
+        return server, buffer
+
+    @staticmethod
+    def _request(server, raw_request: bytes) -> bytes:
+        import socket as _socket
+
+        port = server.server_address[1]
+        sock = _socket.create_connection(("127.0.0.1", port), timeout=3.0)
+        try:
+            sock.sendall(raw_request)
+            chunks = []
+            # Read just the header block — stop once we've seen the
+            # blank line that terminates the headers.
+            while b"\r\n\r\n" not in b"".join(chunks):
+                part = sock.recv(256)
+                if not part:
+                    break
+                chunks.append(part)
+            return b"".join(chunks)
+        finally:
+            sock.close()
+
+    def test_query_params_do_not_404(self):
+        """Hisense pulls `/dlna/stream?mediaPlayerId=1&playMode=2`.
+        The handler must match on the path alone, not the raw target,
+        or the stream 404s and the device stays silent."""
+        server, buffer = self._seeded_server()
+        try:
+            data = self._request(
+                server,
+                b"GET /dlna/stream?mediaPlayerId=1&playMode=2 HTTP/1.1\r\n"
+                b"Host: localhost\r\n\r\n",
+            )
+            assert data.startswith(b"HTTP/1.1 200"), (
+                f"query-param URL should serve 200, got: {data!r}"
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+            buffer.close()
+
+    def test_transfer_mode_granted_streaming(self):
+        """transferMode.dlna.org negotiation: a compliant server states
+        the mode it granted. We always serve an open-ended FLAC, which
+        IS Streaming, so a renderer that asks for Streaming gets it
+        back. Strict renderers abort when the header is absent."""
+        server, buffer = self._seeded_server()
+        try:
+            data = self._request(
+                server,
+                b"GET /dlna/stream HTTP/1.1\r\n"
+                b"Host: localhost\r\n"
+                b"transferMode.dlna.org: Streaming\r\n\r\n",
+            )
+            assert b"transferMode.dlna.org: Streaming" in data, (
+                f"expected transferMode grant, got: {data!r}"
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+            buffer.close()
+
+    def test_transfer_mode_present_when_unrequested(self):
+        """A renderer that doesn't send transferMode still gets one
+        back — that's what an open-ended FLAC is, and some renderers
+        want it present regardless."""
+        server, buffer = self._seeded_server()
+        try:
+            data = self._request(
+                server,
+                b"GET /dlna/stream HTTP/1.1\r\n"
+                b"Host: localhost\r\n\r\n",
+            )
+            assert b"transferMode.dlna.org: Streaming" in data, (
+                f"expected default transferMode, got: {data!r}"
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+            buffer.close()
+
+    def test_transfer_mode_not_echoed_verbatim(self):
+        """The server grants the mode it actually serves (Streaming),
+        not whatever the client asked for. Echoing the request value
+        would both claim a mode we don't honor and reflect an
+        unvalidated client string into a response header."""
+        server, buffer = self._seeded_server()
+        try:
+            data = self._request(
+                server,
+                b"GET /dlna/stream HTTP/1.1\r\n"
+                b"Host: localhost\r\n"
+                b"transferMode.dlna.org: Interactive\r\n\r\n",
+            )
+            assert b"transferMode.dlna.org: Streaming" in data, (
+                f"expected granted Streaming, got: {data!r}"
+            )
+            assert b"Interactive" not in data, (
+                f"client value must not be reflected, got: {data!r}"
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+            buffer.close()
+
+    def test_transfer_mode_absent_on_non_dlna_stream(self):
+        """Cast sessions register with dlna=False; Chromecast isn't
+        DLNA and must not receive the transferMode.dlna.org header even
+        if a client sends it."""
+        server, buffer = self._seeded_server(dlna=False)
+        try:
+            data = self._request(
+                server,
+                b"GET /dlna/stream HTTP/1.1\r\n"
+                b"Host: localhost\r\n"
+                b"transferMode.dlna.org: Streaming\r\n\r\n",
+            )
+            assert data.startswith(b"HTTP/1.1 200"), (
+                f"expected 200, got: {data!r}"
+            )
+            assert b"transferMode.dlna.org" not in data, (
+                f"non-DLNA stream must not send transferMode, got: {data!r}"
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+            buffer.close()
+
+    def test_wrong_path_still_404s(self):
+        """Query-param tolerance must not turn into matching any
+        path — a genuinely wrong path still 404s."""
+        server, buffer = self._seeded_server()
+        try:
+            data = self._request(
+                server,
+                b"GET /wrong/path?x=1 HTTP/1.1\r\n"
+                b"Host: localhost\r\n\r\n",
+            )
+            assert data.startswith(b"HTTP/1.1 404"), (
+                f"wrong path should 404, got: {data!r}"
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+            buffer.close()
