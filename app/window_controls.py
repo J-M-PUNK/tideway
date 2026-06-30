@@ -301,6 +301,67 @@ _WM_TIDEWAY_NC_DRAG = _WM_USER + 71  # arbitrary; just needs to not clash
 _WM_GETMINMAXINFO = 0x0024
 _MONITOR_DEFAULTTONEAREST = 0x00000002
 
+# GetSystemMetrics indices for the resize-frame thickness a
+# WS_THICKFRAME window reserves in its non-client area. The grabbable
+# border per edge is SM_C?SIZEFRAME plus SM_CXPADDEDBORDER (the padded
+# border is a single value Windows applies in both axes).
+_SM_CXSIZEFRAME = 32
+_SM_CYSIZEFRAME = 33
+_SM_CXPADDEDBORDER = 92
+
+
+def _maximized_rect(work, mon_origin, frame_cx, frame_cy):
+    """Position and size for a maximized WS_THICKFRAME window whose
+    *client* area should fill the monitor work area exactly.
+
+    `work` is the monitor work area as (left, top, right, bottom) in
+    virtual-screen pixels; `mon_origin` is the monitor's (left, top).
+    `frame_cx` / `frame_cy` are the resize-border thickness per edge.
+
+    Returns (ptMaxPosition.x, ptMaxPosition.y, ptMaxSize.x,
+    ptMaxSize.y), with ptMaxPosition relative to the monitor origin as
+    WM_GETMINMAXINFO expects. The window is grown by one frame on every
+    edge so the resize border hangs off the work area (off-screen on
+    top/left, behind the taskbar on the bottom) and the client lands
+    flush with the work area. This mirrors how a standard maximized
+    window parks its non-client frame outside the visible region.
+    Without the frame compensation the window rect equals the work
+    area and the client ends up inset by the border on all four sides,
+    leaving a uniform gap around the maximized content.
+    """
+    work_left, work_top, work_right, work_bottom = work
+    mon_left, mon_top = mon_origin
+    pos_x = (work_left - mon_left) - frame_cx
+    pos_y = (work_top - mon_top) - frame_cy
+    size_x = (work_right - work_left) + 2 * frame_cx
+    size_y = (work_bottom - work_top) + 2 * frame_cy
+    return pos_x, pos_y, size_x, size_y
+
+
+def _resize_frame_thickness(user32, hwnd):
+    """Resize-frame thickness (cx, cy) per edge in physical pixels for
+    the window's current monitor DPI. Prefers the per-DPI metrics so a
+    window on a scaled monitor gets the right border width; falls back
+    to the DPI-unaware GetSystemMetrics on older Windows that lacks
+    GetSystemMetricsForDpi / GetDpiForWindow.
+    """
+    try:
+        dpi = int(user32.GetDpiForWindow(hwnd))
+    except Exception:
+        dpi = 0
+    if dpi > 0:
+        try:
+            metric = user32.GetSystemMetricsForDpi
+            cx = metric(_SM_CXSIZEFRAME, dpi) + metric(_SM_CXPADDEDBORDER, dpi)
+            cy = metric(_SM_CYSIZEFRAME, dpi) + metric(_SM_CXPADDEDBORDER, dpi)
+            return cx, cy
+        except Exception:
+            pass
+    metric = user32.GetSystemMetrics
+    cx = metric(_SM_CXSIZEFRAME) + metric(_SM_CXPADDEDBORDER)
+    cy = metric(_SM_CYSIZEFRAME) + metric(_SM_CXPADDEDBORDER)
+    return cx, cy
+
 # WndProc subclass state. _wndproc_ref keeps the C callback alive
 # (Python's GC would otherwise free it while Windows still has its
 # function pointer); _prev_wndproc is the original WindowProc we
@@ -398,10 +459,19 @@ def ensure_wndproc_subclass(hwnd: int) -> bool:
                     ).contents
                     work = mi.rcWork
                     mon = mi.rcMonitor
-                    mmi.ptMaxPosition.x = work.left - mon.left
-                    mmi.ptMaxPosition.y = work.top - mon.top
-                    mmi.ptMaxSize.x = work.right - work.left
-                    mmi.ptMaxSize.y = work.bottom - work.top
+                    frame_cx, frame_cy = _resize_frame_thickness(
+                        user32, hwnd_arg
+                    )
+                    pos_x, pos_y, size_x, size_y = _maximized_rect(
+                        (work.left, work.top, work.right, work.bottom),
+                        (mon.left, mon.top),
+                        frame_cx,
+                        frame_cy,
+                    )
+                    mmi.ptMaxPosition.x = pos_x
+                    mmi.ptMaxPosition.y = pos_y
+                    mmi.ptMaxSize.x = size_x
+                    mmi.ptMaxSize.y = size_y
                     return 0
             except Exception:
                 pass
