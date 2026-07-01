@@ -1,21 +1,21 @@
 import { useParams } from "react-router-dom";
-import { Flame, Newspaper, TrendingUp } from "lucide-react";
+import { Newspaper } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { api } from "@/api/client";
 import type { OnDownload } from "@/api/download";
 import { useApi } from "@/hooks/useApi";
 import { queryKeys } from "@/api/queryKeys";
 import { PageView } from "@/components/PageView";
-import { ChartsNav } from "@/components/ChartsNav";
 import { ErrorView } from "@/components/ErrorView";
 import { GridSkeleton } from "@/components/Skeletons";
 
 /**
- * Dedicated Rising / New / Top pages. Each maps to one of Tidal's editorial
- * page paths and renders through the generic PageView so layout stays
- * consistent with Explore.
+ * New Releases page. Maps to Tidal's editorial page path and renders
+ * through the generic PageView so layout stays consistent with Explore.
+ * (The former Top / Rising tabs were removed — the useful discovery
+ * surface is the Last.fm-backed Popular page on its own route.)
  */
-type ChartKey = "new" | "rising" | "top";
+type ChartKey = "new";
 
 interface ChartSpec {
   title: string;
@@ -29,16 +29,6 @@ const CHARTS: Record<ChartKey, ChartSpec> = {
     icon: Newspaper,
     path: "pages/explore_new_music",
   },
-  rising: {
-    title: "Tidal Rising",
-    icon: Flame,
-    path: "pages/rising",
-  },
-  top: {
-    title: "Top Charts",
-    icon: TrendingUp,
-    path: "pages/explore_top_music",
-  },
 };
 
 export function ChartsPage({ onDownload }: { onDownload: OnDownload }) {
@@ -50,14 +40,9 @@ export function ChartsPage({ onDownload }: { onDownload: OnDownload }) {
     { cacheKey: queryKeys.charts(spec.path) },
   );
 
-  // New Releases stays standalone; only Top and Rising share the
-  // Charts tab strip (Popular lives on its own route).
-  const showChartsNav = chart === "top" || chart === "rising";
-
   if (loading) {
     return (
       <div>
-        {showChartsNav && <ChartsNav />}
         <GridSkeleton count={12} />
       </div>
     );
@@ -67,7 +52,6 @@ export function ChartsPage({ onDownload }: { onDownload: OnDownload }) {
 
   return (
     <div>
-      {showChartsNav && <ChartsNav />}
       <PageView page={data} onDownload={onDownload} />
     </div>
   );
