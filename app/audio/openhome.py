@@ -37,6 +37,8 @@ from dataclasses import dataclass, field
 from typing import Optional
 from urllib.parse import urljoin
 
+from app.audio.http_stream import DLNA_CONTENT_FEATURES
+
 log = logging.getLogger(__name__)
 
 
@@ -845,10 +847,15 @@ def build_didl_lite(track: TrackMetadata) -> str:
     duration_str = _format_duration(track.duration_s)
     # protocolInfo is a four-field colon-separated string.
     # Standard form: "<protocol>:<network>:<contentFormat>:<additionalInfo>"
-    # `*` in network/additional means "any" — spec-compliant for
-    # an http-get streamable resource where the device negotiates
-    # the rest.
-    protocol_info = f"http-get:*:{track.mime_type}:*"
+    # The first three are protocol, network ("*" = any), and the MIME
+    # content format. The fourth carries the DLNA flags: a bare "*" is
+    # spec-legal, but strict renderers (UAPP) validate the fourth field
+    # against their Sink protocolInfo and silently reject a stream with
+    # no DLNA.ORG_* flags. Advertise the same flags the HTTP layer's
+    # contentFeatures.dlna.org header returns — one source of truth.
+    protocol_info = (
+        f"http-get:*:{track.mime_type}:{DLNA_CONTENT_FEATURES}"
+    )
 
     # Album-art element only emitted when we have a URL; an empty
     # albumArtURI element makes some devices silently reject the
