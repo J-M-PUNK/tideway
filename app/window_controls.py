@@ -301,6 +301,27 @@ _WM_TIDEWAY_NC_DRAG = _WM_USER + 71  # arbitrary; just needs to not clash
 _WM_GETMINMAXINFO = 0x0024
 _MONITOR_DEFAULTTONEAREST = 0x00000002
 
+# SHAppBarMessage — detect an auto-hide taskbar so a maximized window
+# can leave the trigger sliver uncovered on that edge (see
+# _autohide_edges / _maximized_rect).
+_ABM_GETSTATE = 0x00000004
+_ABM_GETTASKBARPOS = 0x00000005
+_ABS_AUTOHIDE = 0x00000001
+_ABE_LEFT = 0
+_ABE_TOP = 1
+_ABE_RIGHT = 2
+_ABE_BOTTOM = 3
+_EDGE_NAMES = {
+    _ABE_LEFT: "left",
+    _ABE_TOP: "top",
+    _ABE_RIGHT: "right",
+    _ABE_BOTTOM: "bottom",
+}
+# One pixel is enough for the shell to keep the auto-hide taskbar's
+# mouse-trigger alive; this matches Chromium's
+# kAutoHideTaskbarThicknessPx.
+_AUTOHIDE_SLIVER_PX = 1
+
 # GetSystemMetrics indices for the resize-frame thickness a
 # WS_THICKFRAME window reserves in its non-client area. The grabbable
 # border per edge is SM_C?SIZEFRAME plus SM_CXPADDEDBORDER (the padded
@@ -310,13 +331,15 @@ _SM_CYSIZEFRAME = 33
 _SM_CXPADDEDBORDER = 92
 
 
-def _maximized_rect(work, mon_origin, frame_cx, frame_cy):
+def _maximized_rect(work, mon, frame_cx, frame_cy, autohide=frozenset()):
     """Position and size for a maximized WS_THICKFRAME window whose
     *client* area should fill the monitor work area exactly.
 
-    `work` is the monitor work area as (left, top, right, bottom) in
-    virtual-screen pixels; `mon_origin` is the monitor's (left, top).
+    `work` and `mon` are the monitor work area and full monitor bounds
+    as (left, top, right, bottom) in virtual-screen pixels.
     `frame_cx` / `frame_cy` are the resize-border thickness per edge.
+    `autohide` is the set of edge names ("left"/"top"/"right"/"bottom")
+    that host an auto-hide taskbar on this monitor.
 
     Returns (ptMaxPosition.x, ptMaxPosition.y, ptMaxSize.x,
     ptMaxSize.y), with ptMaxPosition relative to the monitor origin as
@@ -328,14 +351,100 @@ def _maximized_rect(work, mon_origin, frame_cx, frame_cy):
     Without the frame compensation the window rect equals the work
     area and the client ends up inset by the border on all four sides,
     leaving a uniform gap around the maximized content.
+
+    On an edge with an auto-hide taskbar the window is pulled back by
+    `_AUTOHIDE_SLIVER_PX` from the monitor boundary so it never covers
+    the taskbar's mouse-trigger pixel. Covering that pixel makes the
+    shell treat us as a full-screen "rude" window and stop auto-showing
+    the taskbar — the extension that lands the client flush on a normal
+    taskbar edge is exactly what breaks an auto-hide one.
     """
     work_left, work_top, work_right, work_bottom = work
-    mon_left, mon_top = mon_origin
+    mon_left, mon_top, mon_right, mon_bottom = mon
     pos_x = (work_left - mon_left) - frame_cx
     pos_y = (work_top - mon_top) - frame_cy
     size_x = (work_right - work_left) + 2 * frame_cx
     size_y = (work_bottom - work_top) + 2 * frame_cy
+
+    # Monitor extent in monitor-relative coordinates.
+    mon_w = mon_right - mon_left
+    mon_h = mon_bottom - mon_top
+    s = _AUTOHIDE_SLIVER_PX
+    if "bottom" in autohide:
+        size_y = min(size_y, (mon_h - s) - pos_y)
+    if "right" in autohide:
+        size_x = min(size_x, (mon_w - s) - pos_x)
+    if "top" in autohide:
+        new_pos_y = max(pos_y, s)
+        size_y -= new_pos_y - pos_y
+        pos_y = new_pos_y
+    if "left" in autohide:
+        new_pos_x = max(pos_x, s)
+        size_x -= new_pos_x - pos_x
+        pos_x = new_pos_x
     return pos_x, pos_y, size_x, size_y
+
+
+def _autohide_edges(mon_rect):
+    """Set of edge names that host an auto-hide taskbar on the monitor
+    whose bounds are `mon_rect` (left, top, right, bottom).
+
+    The documented per-monitor query, SHAppBarMessage with
+    ABM_GETAUTOHIDEBAREX, never answers on the Windows 11 taskbar — it
+    returns NULL for every edge even when auto-hide is on. So we use the
+    two queries that do work: ABM_GETSTATE for the global auto-hide flag
+    and ABM_GETTASKBARPOS for the taskbar's edge and rect. We clamp only
+    the monitor whose bounds contain the taskbar, so a second monitor
+    with no taskbar keeps its flush maximize.
+
+    Limitation: ABM_GETTASKBARPOS reports only the primary taskbar, so a
+    per-monitor secondary taskbar set to auto-hide on another display
+    isn't detected. That's the honest ceiling of what the shell exposes
+    here; the common single-taskbar setup is handled correctly. Returns
+    an empty set on any failure so the caller degrades to the normal
+    work-area maximize.
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        shell32 = ctypes.windll.shell32
+        shell32.SHAppBarMessage.restype = ctypes.c_uint64
+        shell32.SHAppBarMessage.argtypes = [wintypes.DWORD, ctypes.c_void_p]
+
+        class _APPBARDATA(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", wintypes.DWORD),
+                ("hWnd", wintypes.HWND),
+                ("uCallbackMessage", wintypes.UINT),
+                ("uEdge", wintypes.UINT),
+                ("rc", wintypes.RECT),
+                ("lParam", ctypes.c_int64),
+            ]
+
+        state = _APPBARDATA()
+        state.cbSize = ctypes.sizeof(_APPBARDATA)
+        flags = shell32.SHAppBarMessage(_ABM_GETSTATE, ctypes.byref(state))
+        if not (flags & _ABS_AUTOHIDE):
+            return set()
+
+        pos = _APPBARDATA()
+        pos.cbSize = ctypes.sizeof(_APPBARDATA)
+        if not shell32.SHAppBarMessage(
+            _ABM_GETTASKBARPOS, ctypes.byref(pos)
+        ):
+            return set()
+
+        left, top, right, bottom = mon_rect
+        mid_x = (pos.rc.left + pos.rc.right) // 2
+        mid_y = (pos.rc.top + pos.rc.bottom) // 2
+        if not (left <= mid_x < right and top <= mid_y < bottom):
+            return set()
+
+        name = _EDGE_NAMES.get(pos.uEdge)
+        return {name} if name else set()
+    except Exception:
+        return set()
 
 
 def _resize_frame_thickness(user32, hwnd):
@@ -462,11 +571,15 @@ def ensure_wndproc_subclass(hwnd: int) -> bool:
                     frame_cx, frame_cy = _resize_frame_thickness(
                         user32, hwnd_arg
                     )
+                    autohide = _autohide_edges(
+                        (mon.left, mon.top, mon.right, mon.bottom)
+                    )
                     pos_x, pos_y, size_x, size_y = _maximized_rect(
                         (work.left, work.top, work.right, work.bottom),
-                        (mon.left, mon.top),
+                        (mon.left, mon.top, mon.right, mon.bottom),
                         frame_cx,
                         frame_cy,
+                        autohide,
                     )
                     mmi.ptMaxPosition.x = pos_x
                     mmi.ptMaxPosition.y = pos_y
