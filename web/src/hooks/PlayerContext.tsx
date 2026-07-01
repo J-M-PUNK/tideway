@@ -27,6 +27,9 @@ interface PlayerMeta {
   loading: boolean;
   error: string | null;
   volume: number;
+  /** Backend mute flag. Volume is preserved while muted, so the icon
+   *  reflects this independently of the slider level. */
+  muted: boolean;
   shuffle: boolean;
   repeat: RepeatMode;
   queue: Track[];
@@ -72,6 +75,7 @@ type PlayerActions = Pick<
   | "restart"
   | "stop"
   | "setVolume"
+  | "toggleMute"
   | "toggleShuffle"
   | "cycleRepeat"
   | "setSleepTimer"
@@ -102,6 +106,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       loading: player.loading,
       error: player.error,
       volume: player.volume,
+      muted: player.muted,
       shuffle: player.shuffle,
       repeat: player.repeat,
       queue: player.queue,
@@ -119,6 +124,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       player.loading,
       player.error,
       player.volume,
+      player.muted,
       player.shuffle,
       player.repeat,
       player.queue,
@@ -152,6 +158,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       restart: player.restart,
       stop: player.stop,
       setVolume: player.setVolume,
+      toggleMute: player.toggleMute,
       toggleShuffle: player.toggleShuffle,
       cycleRepeat: player.cycleRepeat,
       setSleepTimer: player.setSleepTimer,
@@ -171,6 +178,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       player.restart,
       player.stop,
       player.setVolume,
+      player.toggleMute,
       player.toggleShuffle,
       player.cycleRepeat,
       player.setSleepTimer,

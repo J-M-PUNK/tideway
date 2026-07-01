@@ -33,6 +33,7 @@ function _state(overrides: Partial<PlayerState>): PlayerState {
     loading: false,
     error: null,
     volume: 1,
+    muted: false,
     queue: [],
     queueIndex: -1,
     shuffle: false,
