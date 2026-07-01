@@ -77,6 +77,7 @@ export function NowPlaying({
     loading,
     error,
     volume,
+    muted,
     shuffle,
     repeat,
     hasPrev,
@@ -325,7 +326,9 @@ export function NowPlaying({
           <OutputDevicePicker />
           <VolumeControl
             value={volume}
+            muted={muted}
             onChange={actions.setVolume}
+            onToggleMute={actions.toggleMute}
             disabled={forceVolume}
           />
         </div>
@@ -587,11 +590,18 @@ function StreamingQualityPicker({
 
 export function VolumeControl({
   value,
+  muted = false,
   onChange,
+  onToggleMute,
   disabled,
 }: {
   value: number;
+  /** Backend mute flag. Kept separate from `value` so muting doesn't
+   *  zero the volume — unmuting returns to the same level. Optional so
+   *  callers that only need a volume slider (tests) can omit it. */
+  muted?: boolean;
   onChange: (v: number) => void;
+  onToggleMute?: () => void;
   disabled?: boolean;
 }) {
   // Hover-popover pattern. The icon stays inline at its 8x8
@@ -620,8 +630,18 @@ export function VolumeControl({
   const [dragging, setDragging] = useState(false);
   const closeTimer = useRef<number | null>(null);
 
-  const muted = value === 0;
-  const Icon = muted ? VolumeX : value < 0.5 ? Volume1 : Volume2;
+  // Show the muted icon when the backend is muted OR the level is at
+  // zero (dragging the slider to 0 is silence too, even without an
+  // explicit mute).
+  const showMuted = muted || value === 0;
+  const Icon = showMuted ? VolumeX : value < 0.5 ? Volume1 : Volume2;
+
+  // Any deliberate volume adjustment while muted lifts the mute —
+  // otherwise the user drags the slider up and still hears nothing.
+  const handleVolumeChange = (v: number) => {
+    if (muted && v > 0) onToggleMute?.();
+    onChange(v);
+  };
 
   // Scroll-wheel volume (issue #195): a wheel tick anywhere over the
   // control — icon or popover — nudges the volume by the configured
@@ -639,13 +659,13 @@ export function VolumeControl({
   const { volumeScrollStepPct } = useAudioOptions();
   const wheelState = useRef({
     value,
-    onChange,
+    onChange: handleVolumeChange,
     disabled,
     stepPct: volumeScrollStepPct,
   });
   wheelState.current = {
     value,
-    onChange,
+    onChange: handleVolumeChange,
     disabled,
     stepPct: volumeScrollStepPct,
   };
@@ -721,10 +741,10 @@ export function VolumeControl({
         variant="ghost"
         size="icon"
         className="h-8 w-8"
-        onClick={() => onChange(muted ? 1 : 0)}
+        onClick={() => onToggleMute?.()}
         disabled={disabled}
-        title={muted ? "Unmute" : "Mute"}
-        aria-label={muted ? "Unmute" : "Mute"}
+        title={showMuted ? "Unmute" : "Mute"}
+        aria-label={showMuted ? "Unmute" : "Mute"}
       >
         <Icon className="h-4 w-4" />
       </Button>
@@ -765,7 +785,7 @@ export function VolumeControl({
               max={1}
               step={0.01}
               value={value}
-              onChange={(e) => onChange(Number(e.target.value))}
+              onChange={(e) => handleVolumeChange(Number(e.target.value))}
               onMouseDown={() => setDragging(true)}
               onTouchStart={() => setDragging(true)}
               disabled={disabled}

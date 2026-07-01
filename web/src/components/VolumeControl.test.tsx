@@ -49,6 +49,8 @@ afterEach(() => {
 async function mount(props: {
   value: number;
   onChange: (v: number) => void;
+  muted?: boolean;
+  onToggleMute?: () => void;
   disabled?: boolean;
 }) {
   await act(async () => {
@@ -146,5 +148,53 @@ describe("VolumeControl scroll wheel", () => {
     });
     wheel(container.firstElementChild!, { deltaY: -100 });
     expect(onChange).toHaveBeenLastCalledWith(0.6);
+  });
+});
+
+describe("VolumeControl mute", () => {
+  function clickMuteButton() {
+    // The mute toggle is the icon <button> — the first button in the
+    // control's root.
+    const btn = container.querySelector("button");
+    act(() => {
+      btn?.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    });
+  }
+
+  it("mute button toggles the backend mute, not the volume (issue #241)", async () => {
+    const onChange = vi.fn();
+    const onToggleMute = vi.fn();
+    // Volume is a normal low level; the button must NOT rewrite it.
+    await mount({ value: 0.08, muted: false, onChange, onToggleMute });
+
+    clickMuteButton();
+
+    expect(onToggleMute).toHaveBeenCalledTimes(1);
+    // The old bug drove unmute through onChange(1) — volume must be
+    // left entirely alone now.
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("unmute preserves volume — no volume write on the toggle", async () => {
+    const onChange = vi.fn();
+    const onToggleMute = vi.fn();
+    await mount({ value: 0.08, muted: true, onChange, onToggleMute });
+
+    clickMuteButton();
+
+    expect(onToggleMute).toHaveBeenCalledTimes(1);
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("adjusting the volume while muted lifts the mute", async () => {
+    const onChange = vi.fn();
+    const onToggleMute = vi.fn();
+    await mount({ value: 0.08, muted: true, onChange, onToggleMute });
+
+    // A scroll-up tick while muted should both unmute and raise volume.
+    wheel(container.firstElementChild!, { deltaY: -100 });
+
+    expect(onToggleMute).toHaveBeenCalledTimes(1);
+    expect(onChange).toHaveBeenCalledWith(0.13);
   });
 });

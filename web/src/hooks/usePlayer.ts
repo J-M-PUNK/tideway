@@ -66,6 +66,10 @@ export interface PlayerState {
   loading: boolean;
   error: string | null;
   volume: number;
+  /** Mirror of the backend's mute flag. Independent of volume: the
+   *  backend keeps `volume` untouched while muted and just silences
+   *  the output, so unmuting returns to the same level. */
+  muted: boolean;
   queue: Track[];
   queueIndex: number;
   shuffle: boolean;
@@ -96,6 +100,7 @@ const INITIAL: PlayerState = {
   loading: false,
   error: null,
   volume: 1,
+  muted: false,
   queue: [],
   queueIndex: -1,
   shuffle: false,
@@ -388,6 +393,7 @@ export function usePlayer() {
   // localStorage value up — which used to overwrite the restored
   // volume with 100 % whenever pywebview lost localStorage.
   const serverVolumeAdopted = useRef(false);
+  const serverMutedAdopted = useRef(false);
 
   useEffect(() => {
     const url = "/api/player/events";
@@ -501,6 +507,14 @@ export function usePlayer() {
       const volPatch = adoptServerVolume
         ? { volume: Math.max(0, Math.min(1, snap.volume / 100)) }
         : {};
+      // Adopt the server's mute flag on the first snapshot, same as
+      // volume: it's the source of truth on a fresh mount / reload
+      // while a backend session is live. After that the local
+      // toggleMute optimistic update owns it, so later snapshots don't
+      // fight a mute the user just toggled.
+      const adoptServerMuted = !serverMutedAdopted.current;
+      if (adoptServerMuted) serverMutedAdopted.current = true;
+      const mutePatch = adoptServerMuted ? { muted: !!snap.muted } : {};
       setState((s) => {
         const currentTime = snap.position_ms / 1000;
         const duration =
@@ -516,6 +530,7 @@ export function usePlayer() {
             // Keep streamInfo so the quality badge doesn't flicker
             // off in the brief window before the next track loads.
             ...volPatch,
+            ...mutePatch,
           };
         }
         return {
@@ -530,6 +545,7 @@ export function usePlayer() {
           forceVolume: !!snap.force_volume,
           pausedByDevice: snap.paused_by_device ?? null,
           ...volPatch,
+          ...mutePatch,
         };
       });
     };
@@ -1080,6 +1096,21 @@ export function usePlayer() {
     void api.player.volume(Math.round(clamped * 100)).catch(() => {});
   }, []);
 
+  const toggleMute = useCallback(() => {
+    // Flip the backend mute flag, which silences output without
+    // touching volume — so unmuting returns to the exact prior level.
+    // Optimistic so the icon reacts instantly; the snapshot echo of
+    // this same value just confirms it.
+    const s = stateRef.current;
+    const nextMuted = !s.muted;
+    setState((cur) => ({ ...cur, muted: nextMuted }));
+    void api.player.muted(nextMuted).catch(() => {
+      // Roll back on failure so the icon doesn't lie about the
+      // backend's real state.
+      setState((cur) => ({ ...cur, muted: !nextMuted }));
+    });
+  }, []);
+
   const toggleShuffle = useCallback(() => {
     setState((s) => ({ ...s, shuffle: !s.shuffle }));
   }, []);
@@ -1238,6 +1269,7 @@ export function usePlayer() {
     restart,
     stop,
     setVolume,
+    toggleMute,
     toggleShuffle,
     cycleRepeat,
     setSleepTimer,
