@@ -24,9 +24,9 @@ import { useUiPreferences } from "@/hooks/useUiPreferences";
 import { cn } from "@/lib/utils";
 import { prefetch } from "@/api/queryKeys";
 
-// Charts (Popular, Top, Rising, New Releases) live behind a single
-// entry — the destination renders a tab strip so the sidebar doesn't
-// have to. Popular is the default since that's the first tab.
+// The Popular page (Last.fm-backed global charts) is the discovery
+// entry. Tidal's editorial Top / Rising tabs were removed as
+// redundant; New Releases lives on its own route reached from Home.
 //
 // `prefetch` fires on hover so the page's data is already in the
 // useApi cache by the time the click lands. No-op when the cache
@@ -48,7 +48,7 @@ const primary: Array<{
   { to: "/feed", label: "Feed", icon: Rss, prefetch: prefetch.feed },
   {
     to: "/popular",
-    label: "Discover",
+    label: "Popular",
     icon: TrendingUp,
     prefetch: prefetch.popularArtists,
   },

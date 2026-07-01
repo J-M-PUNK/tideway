@@ -18,7 +18,6 @@ import { useToast } from "@/components/toast";
 import { preseedSpotifyPlaycounts } from "@/hooks/useSpotifyEnrichment";
 import { useTidalArt } from "@/hooks/useTidalArt";
 import { useTidalArtistId } from "@/hooks/useTidalResolve";
-import { ChartsNav } from "@/components/ChartsNav";
 import { TrackList } from "@/components/TrackList";
 import { cn, imageProxy } from "@/lib/utils";
 
@@ -62,7 +61,6 @@ export function PopularPage({ onDownload }: { onDownload: OnDownload }) {
   if (hasCredentials === null) {
     return (
       <div>
-        <ChartsNav />
         <Skeleton className="mb-8 h-9 w-64" />
         <Skeleton className="h-96 w-full" />
       </div>
@@ -72,7 +70,6 @@ export function PopularPage({ onDownload }: { onDownload: OnDownload }) {
   if (!hasCredentials) {
     return (
       <div>
-        <ChartsNav />
         <EmptyState
           icon={Radio}
           title="Connect Last.fm to browse global charts"
@@ -91,7 +88,6 @@ export function PopularPage({ onDownload }: { onDownload: OnDownload }) {
 
   return (
     <div>
-      <ChartsNav />
       <TabBar tab={tab} onChange={setTab} />
       <div className="mt-6">
         {tab === "artists" && <ChartArtists />}
