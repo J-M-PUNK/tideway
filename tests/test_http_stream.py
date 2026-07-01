@@ -122,6 +122,101 @@ class TestRingBuffer:
         # returns "" — first read drains).
         assert out == b"alive"
 
+    def test_attach_supersedes_prior_generation(self):
+        """A second attach() bumps the generation so the first
+        consumer sees is_superseded — the single-active-consumer
+        guard that stops two serve loops draining one buffer."""
+        buf = RingBuffer(max_bytes=1024)
+        buf.write(b"data")
+        gen1 = buf.attach()
+        # First consumer serves a chunk, so the next attach won't wait.
+        buf.read(2, timeout=0.1, gen=gen1)
+        gen2 = buf.attach()
+        assert gen2 != gen1
+        assert buf.is_superseded(gen1) is True
+        assert buf.is_superseded(gen2) is False
+
+    def test_attach_waits_for_prior_consumer_to_serve_first_chunk(self):
+        """The UAPP two-GET case: a probe attaches but hasn't been
+        handed bytes yet (buffer idle); the real GET's attach() must
+        hold the supersede until the probe serves one chunk, so the
+        probe connection isn't killed with zero data."""
+        buf = RingBuffer(max_bytes=1024)
+        gen1 = buf.attach()  # probe; buffer empty, nothing served yet
+
+        served = threading.Event()
+
+        def _probe_reads():
+            # Blocks until data arrives, then serves its first chunk.
+            chunk = buf.read(4, timeout=2.0, gen=gen1)
+            if chunk:
+                served.set()
+
+        t = threading.Thread(target=_probe_reads, daemon=True)
+        t.start()
+
+        def _second_attach():
+            # Should block inside attach() until the probe serves.
+            return buf.attach()
+
+        attach_done = threading.Event()
+        result = {}
+
+        def _run_attach():
+            result["gen"] = _second_attach()
+            attach_done.set()
+
+        threading.Thread(target=_run_attach, daemon=True).start()
+        # Give the second attach a moment to reach its wait.
+        time.sleep(0.05)
+        assert not attach_done.is_set(), (
+            "attach() should wait for the probe to serve its first chunk"
+        )
+
+        # Feed a chunk: the probe reads it (marking served), which
+        # releases the waiting attach().
+        buf.write(b"AAAA")
+        assert served.wait(1.0), "probe should have served a chunk"
+        assert attach_done.wait(1.0), (
+            "attach() should return once the probe served a chunk"
+        )
+        assert result["gen"] != gen1
+
+    def test_attach_grace_is_bounded_when_probe_never_serves(self):
+        """If the prior consumer never serves (no bytes ever arrive),
+        attach() still returns after the grace window rather than
+        stalling the real consumer forever."""
+        import app.audio.http_stream as hs
+
+        buf = RingBuffer(max_bytes=1024)
+        buf.attach()  # prior consumer that never reads/serves
+        # Shrink the grace so the test is fast but still exercises the
+        # bounded-wait path.
+        original = hs._SUPERSEDE_GRACE_S
+        hs._SUPERSEDE_GRACE_S = 0.1
+        try:
+            start = time.monotonic()
+            gen2 = buf.attach()
+            elapsed = time.monotonic() - start
+        finally:
+            hs._SUPERSEDE_GRACE_S = original
+        assert gen2 == 2
+        # Waited roughly the grace window, not forever.
+        assert 0.05 <= elapsed < 1.0
+
+    def test_cast_reload_does_not_wait(self):
+        """An already-streaming consumer has served chunks, so the
+        Cast track-change reload's attach() supersedes immediately
+        with no grace delay."""
+        buf = RingBuffer(max_bytes=1024)
+        buf.write(b"streaming")
+        gen1 = buf.attach()
+        buf.read(4, timeout=0.1, gen=gen1)  # served
+        start = time.monotonic()
+        buf.attach()
+        elapsed = time.monotonic() - start
+        assert elapsed < 0.05, "a served consumer must not trigger the grace wait"
+
 
 # ---------------------------------------------------------------------
 # FlacStreamEncoder
@@ -461,6 +556,109 @@ class TestDlnaHttpCompliance:
             )
             assert data.startswith(b"HTTP/1.1 404"), (
                 f"wrong path should 404, got: {data!r}"
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+            buffer.close()
+
+    def test_range_request_gets_206_with_content_range(self):
+        """UAPP probes with `Range: bytes=0-` and aborts on a plain
+        200. The DLNA server answers 206 + a Content-Range against a
+        synthetic total so the renderer's decoder-init proceeds."""
+        server, buffer = self._seeded_server()
+        try:
+            data = self._request(
+                server,
+                b"GET /dlna/stream HTTP/1.1\r\n"
+                b"Host: localhost\r\n"
+                b"Range: bytes=0-\r\n\r\n",
+            )
+            assert data.startswith(b"HTTP/1.1 206"), (
+                f"Range request should get 206, got: {data!r}"
+            )
+            assert b"Content-Range: bytes 0-" in data, (
+                f"expected a Content-Range header, got: {data!r}"
+            )
+            assert b"Accept-Ranges: bytes" in data
+        finally:
+            server.shutdown()
+            server.server_close()
+            buffer.close()
+
+    def test_no_range_header_stays_200(self):
+        """A DLNA GET without a Range header keeps the plain 200
+        chunked stream — 206 is only for explicit Range probes."""
+        server, buffer = self._seeded_server()
+        try:
+            data = self._request(
+                server,
+                b"GET /dlna/stream HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            )
+            assert data.startswith(b"HTTP/1.1 200"), (
+                f"non-Range GET should stay 200, got: {data!r}"
+            )
+            assert b"Content-Range" not in data
+        finally:
+            server.shutdown()
+            server.server_close()
+            buffer.close()
+
+    def test_cast_range_request_stays_200(self):
+        """Range handling is DLNA-scoped. A Cast session (dlna=False)
+        that somehow sent a Range header must still get a plain 200 —
+        no 206, no Content-Range, no DLNA headers."""
+        server, buffer = self._seeded_server(dlna=False)
+        try:
+            data = self._request(
+                server,
+                b"GET /dlna/stream HTTP/1.1\r\n"
+                b"Host: localhost\r\n"
+                b"Range: bytes=0-\r\n\r\n",
+            )
+            assert data.startswith(b"HTTP/1.1 200"), (
+                f"non-DLNA Range request should stay 200, got: {data!r}"
+            )
+            assert b"Content-Range" not in data
+            assert b"contentFeatures.dlna.org" not in data
+        finally:
+            server.shutdown()
+            server.server_close()
+            buffer.close()
+
+    def test_content_features_answered_when_requested(self):
+        """A renderer that sends getcontentFeatures.dlna.org gets the
+        DLNA flags back in a contentFeatures.dlna.org header."""
+        from app.audio.http_stream import DLNA_CONTENT_FEATURES
+
+        server, buffer = self._seeded_server()
+        try:
+            data = self._request(
+                server,
+                b"GET /dlna/stream HTTP/1.1\r\n"
+                b"Host: localhost\r\n"
+                b"getcontentFeatures.dlna.org: 1\r\n\r\n",
+            )
+            assert (
+                b"contentFeatures.dlna.org: " + DLNA_CONTENT_FEATURES.encode()
+                in data
+            ), f"expected contentFeatures header, got: {data!r}"
+        finally:
+            server.shutdown()
+            server.server_close()
+            buffer.close()
+
+    def test_content_features_absent_when_not_requested(self):
+        """The contentFeatures header is conditional — a renderer that
+        doesn't ask for it doesn't get it."""
+        server, buffer = self._seeded_server()
+        try:
+            data = self._request(
+                server,
+                b"GET /dlna/stream HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            )
+            assert b"contentFeatures.dlna.org" not in data, (
+                f"contentFeatures must only be sent when asked, got: {data!r}"
             )
         finally:
             server.shutdown()

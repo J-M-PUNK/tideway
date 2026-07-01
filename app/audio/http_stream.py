@@ -45,6 +45,39 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
+# DLNA `additionalInfo` / `contentFeatures.dlna.org` value for our
+# open-ended FLAC stream. Strict UPnP renderers (USB Audio Player PRO,
+# some TVs) validate this against their Sink protocolInfo and silently
+# reject a bare "*". Shared with app/audio/openhome.py's DIDL builder so
+# the DIDL `protocolInfo` and the HTTP `contentFeatures.dlna.org` header
+# advertise exactly the same thing.
+#   DLNA.ORG_OP=01  byte-range seek supported (we answer Range with 206,
+#                   see _send_stream_headers), no time-seek.
+#   DLNA.ORG_CI=0   content is delivered as-is, not transcoded.
+#   DLNA.ORG_FLAGS  0x05700000 in the top 32 bits, then 96 reserved zero
+#                   bits: SN_INCREASING(26) | STREAMING(24) |
+#                   BACKGROUND(22) | CONNECTION_STALL(21) | DLNA_V15(20).
+#                   This is the flag set philippe44's squeeze2upnp uses
+#                   for a live, non-transcoded stream
+#                   (application/squeezelite/mimetypes.c:format_to_dlna).
+DLNA_CONTENT_FEATURES = (
+    "DLNA.ORG_OP=01;DLNA.ORG_CI=0;"
+    "DLNA.ORG_FLAGS=05700000000000000000000000000000"
+)
+
+# The stream is open-ended, but a strict renderer's Range probe wants a
+# finite total to seek against before its decoder-init proceeds. We
+# advertise a large synthetic size it can never reach (it only reads the
+# live edge and never actually seeks there). 1 TiB, matching the
+# technique squeeze2upnp uses for renderers that reject an open range.
+_STREAM_SYNTHETIC_TOTAL = 1 << 40
+
+# Upper bound on how long attach() waits for the outgoing consumer to
+# serve its first chunk before superseding it. Returns the instant that
+# chunk is served, so this cap only bites when the encoder hasn't
+# produced any bytes yet — see RingBuffer.attach().
+_SUPERSEDE_GRACE_S = 1.0
+
 
 class RingBuffer:
     """A bounded byte buffer with blocking read.
@@ -74,15 +107,38 @@ class RingBuffer:
         # older serve loop sees it move and exits, leaving exactly
         # one consumer.
         self._gen = 0
+        # Whether the current generation's consumer has been handed at
+        # least one non-empty chunk. Strict renderers (UAPP) open two
+        # connections in quick succession — a probe, then the real
+        # fetch. If the second attach() superseded the first before it
+        # served anything, the probe's HTTP client saw an empty
+        # response and treated the whole stream as broken. We hold the
+        # supersede until the outgoing consumer has served a chunk (or a
+        # grace window lapses), so the probe always gets real bytes.
+        self._served = False
 
     def attach(self) -> int:
         """Register as the current consumer and supersede any prior
         one. Returns this consumer's generation token; pass it to
         read()/is_superseded(). Wakes a blocked older reader so it
         notices it's been superseded promptly instead of after its
-        next idle timeout."""
+        next idle timeout.
+
+        If a prior consumer exists that hasn't served a chunk yet, wait
+        (bounded by _SUPERSEDE_GRACE_S) for it to serve one before
+        superseding, so a renderer's probe connection isn't killed with
+        zero bytes. An already-streaming consumer has `_served=True`, so
+        the common Cast track-change reload doesn't wait at all."""
         with self._cv:
+            if self._gen > 0 and not self._served and not self._closed:
+                deadline = time.monotonic() + _SUPERSEDE_GRACE_S
+                while not self._served and not self._closed:
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    self._cv.wait(timeout=remaining)
             self._gen += 1
+            self._served = False
             self._cv.notify_all()
             return self._gen
 
@@ -128,6 +184,11 @@ class RingBuffer:
                 return b""
             chunk = bytes(self._buf[:n])
             del self._buf[: len(chunk)]
+            if chunk and (gen is None or gen == self._gen):
+                # This consumer has now been handed real bytes; a
+                # pending attach() may stop waiting and supersede us.
+                self._served = True
+                self._cv.notify_all()
             return chunk
 
     def flush(self) -> None:
@@ -392,18 +453,38 @@ class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
         )
 
     def _send_stream_headers(self, server: "StreamHTTPServer") -> None:
-        """Send the 200 + headers shared by HEAD and GET.
+        """Send the response line + headers shared by HEAD and GET.
 
         Takes the isinstance-validated server so it never reaches
         through the unnarrowed self.server for the session config.
+
+        DLNA-specific behaviour is gated on `server.dlna`, so Cast
+        sessions (which never send Range / DLNA headers anyway) keep the
+        plain `200` chunked stream unchanged.
         """
-        self.send_response(200)
+        # A strict DLNA renderer (UAPP) probes the stream with
+        # `Range: bytes=0-` and aborts on a plain 200 ("Failed to seek!").
+        # Answer 206 with a Content-Range against a synthetic total so
+        # its decoder-init proceeds; it reads the live edge and never
+        # actually seeks. Scoped to DLNA Range requests only.
+        is_dlna_range = bool(
+            server.dlna and self.headers.get("Range", "").startswith("bytes=")
+        )
+        if is_dlna_range:
+            self.send_response(206)
+            self.send_header(
+                "Content-Range",
+                f"bytes 0-{_STREAM_SYNTHETIC_TOTAL - 1}/{_STREAM_SYNTHETIC_TOTAL}",
+            )
+        else:
+            self.send_response(200)
         self.send_header("Content-Type", server.content_type)
         # Chunked transfer lets us keep writing audio frames as long
         # as the session is alive. Tells the receiver it's a stream,
         # not a file with a known length.
         self.send_header("Transfer-Encoding", "chunked")
         if server.dlna:
+            self.send_header("Accept-Ranges", "bytes")
             # DLNA's transferMode.dlna.org negotiation: a renderer asks
             # for a mode and a compliant server states the mode it
             # granted. We always serve an open-ended FLAC, which IS
@@ -413,6 +494,14 @@ class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
             # reflect an unvalidated client string into a response
             # header). Cast receivers aren't DLNA and never see this.
             self.send_header("transferMode.dlna.org", "Streaming")
+            # When the renderer asks for the content profile, answer it
+            # with the same DLNA flags advertised in the DIDL
+            # protocolInfo. Conditional — only sent when requested —
+            # mirroring squeeze2upnp output_http.c.
+            if self.headers.get("getcontentFeatures.dlna.org"):
+                self.send_header(
+                    "contentFeatures.dlna.org", DLNA_CONTENT_FEATURES
+                )
         self.send_header("Connection", "close")
         self.end_headers()
 

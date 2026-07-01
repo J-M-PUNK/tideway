@@ -159,15 +159,27 @@ class TestBuildDidlLiteContent:
 
     def test_protocol_info_format(self):
         """protocolInfo is four fields colon-separated:
-        protocol:network:contentFormat:additionalInfo. * means any
-        in network/additional. Standard form for an http-fetched
-        FLAC file."""
+        protocol:network:contentFormat:additionalInfo. The fourth
+        field carries the DLNA flags — strict renderers (UAPP) reject
+        a bare "*" there (issue #239)."""
         didl = build_didl_lite(_track(mime_type="audio/flac"))
         assert "protocolInfo=" in didl
         # Note: the colons inside the protocolInfo value may be
         # escaped to entities — match liberally.
         assert "http-get" in didl
         assert "audio/flac" in didl
+
+    def test_protocol_info_carries_dlna_flags(self):
+        """The additionalInfo field advertises the DLNA.ORG_* flags,
+        identical to what the HTTP layer returns in
+        contentFeatures.dlna.org. A bare "*" here made strict UPnP
+        renderers silently reject the stream (issue #239)."""
+        from app.audio.http_stream import DLNA_CONTENT_FEATURES
+
+        didl = build_didl_lite(_track(mime_type="audio/flac"))
+        assert DLNA_CONTENT_FEATURES in didl
+        assert "DLNA.ORG_OP=01" in didl
+        assert "DLNA.ORG_FLAGS=05700000" in didl
 
     def test_duration_in_res(self):
         didl = build_didl_lite(_track(duration_s=240))
