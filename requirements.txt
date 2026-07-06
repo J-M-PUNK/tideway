@@ -102,4 +102,4 @@ pychromecast>=14.0.10
 # Build-only: PyInstaller packages desktop.py + web/dist into a native
 # .exe / .app. Not needed at runtime but bundling keeps the build command
 # documented in a single place.
-pyinstaller>=6.20.0
+pyinstaller>=6.21.0
