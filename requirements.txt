@@ -21,7 +21,7 @@ orjson>=3.11.9
 # scraper to Tidal's anti-abuse layer.
 curl-cffi>=0.15.0
 pillow>=12.2.0
-fastapi>=0.110.0
+fastapi>=0.139.0
 uvicorn[standard]>=0.49.0
 sse-starlette>=3.4.4
 # Packaged desktop app — pywebview wraps the web UI in a native window.
