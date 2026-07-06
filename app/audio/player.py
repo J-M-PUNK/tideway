@@ -61,7 +61,7 @@ from app.audio.replaygain import (
     VALID_MODES as REPLAYGAIN_VALID_MODES,
     compute_gain_db as compute_replaygain_db,
 )
-from app.audio.output_devices import list_output_devices
+from app.audio.output_devices import list_output_devices, resolve_output_device
 from app.audio.segment_reader import SegmentReader
 
 # Optional audio output taps. Imported at module load (not lazily
@@ -2248,15 +2248,22 @@ class PCMPlayer:
             )
 
     def _open_output_stream(self, sample_rate: int, channels: int, dtype: str) -> None:
-        # If the user picked a specific output device, use it;
-        # otherwise pass device=None so sounddevice routes to the
-        # system default.
-        device: Optional[int] = None
-        if self._selected_device_id:
-            try:
-                device = int(self._selected_device_id)
-            except ValueError:
-                device = None
+        # If the user picked a specific output device, resolve its
+        # saved name to a live PortAudio index; otherwise device=None
+        # routes to the system default. When the chosen device is no
+        # longer present as an output (unplugged, or a legacy numeric
+        # id from before device identity was name-based), fall back to
+        # the default instead of hard-failing the load. Issue #245 was
+        # a drifted index landing on an input-only device, where
+        # sd.OutputStream raised "Invalid number of channels".
+        device, available = resolve_output_device(self._selected_device_id)
+        if self._selected_device_id and not available:
+            print(
+                f"[audio] saved output device "
+                f"{self._selected_device_id!r} is not available; "
+                "falling back to system default",
+                flush=True,
+            )
 
         # Decide the rate we'll actually feed sounddevice.
         # ─ Exclusive Mode: push the source rate straight at the device.
@@ -3584,8 +3591,8 @@ class PCMPlayer:
 
           A. The currently-selected device disappeared (headphones
              unplugged, USB DAC removed, AirPods drifted out of
-             range). The reopen on the original device fails; we
-             fall back to the system default.
+             range). resolve_output_device reports it gone, so we
+             drop the selection and reopen on the system default.
 
           B. The device list changed but the selected device is
              still around (a NEW device just plugged in — e.g.
@@ -3652,20 +3659,41 @@ class PCMPlayer:
             except Exception:
                 log.exception("device-recovery: PortAudio reinit failed")
 
-            # First attempt: original device. Succeeds in the
-            # "device list changed but my pick is still around"
-            # case (scenario B above).
+            # _open_output_stream now falls back to the system default
+            # on its own when the saved device is gone (it no longer
+            # raises), so scenario A can't be inferred from an exception
+            # any more. Ask the resolver directly: if the selection
+            # really vanished, drop it up front so the picker and status
+            # stop reporting a device that isn't there, and the reopen
+            # below lands on the default. A present-but-unopenable device
+            # still falls through to the second attempt via the except.
+            _, device_available = resolve_output_device(original_device_id)
+            device_gone = bool(original_device_id) and not device_available
+            if device_gone:
+                with self._lock:
+                    self._selected_device_id = ""
+
+            # First attempt: the resolved device (scenario B), or the
+            # system default when the pick vanished (scenario A).
             try:
                 with self._lock:
                     self._open_output_stream(
                         sample_rate, channels, sd_dtype
                     )
                 self._stream.start()
-                log.info(
-                    "device-recovery: reopened on original device "
-                    "id=%r (rate=%d, channels=%d)",
-                    original_device_id, sample_rate, channels,
-                )
+                if device_gone:
+                    log.info(
+                        "device-recovery: original device id=%r gone; "
+                        "reopened on system default (rate=%d, channels=%d)",
+                        original_device_id, sample_rate, channels,
+                    )
+                else:
+                    log.info(
+                        "device-recovery: reopened on device id=%r "
+                        "(rate=%d, channels=%d)",
+                        self._selected_device_id or "system default",
+                        sample_rate, channels,
+                    )
                 with self._lock:
                     self._replacing_stream = False
                 return

@@ -341,6 +341,34 @@ def _migrate_eq_to_parametric(s: Settings) -> bool:
     return True
 
 
+def _migrate_output_device_index(s: Settings) -> bool:
+    """Clear a legacy PortAudio-index output-device selection.
+
+    Device identity used to be the raw PortAudio enumeration index
+    stored as a string ("0", "1", ...). That index is unstable: it
+    shifts whenever a device connects or disconnects, so a saved index
+    silently drifts onto whatever device now sits in that slot,
+    including input-only ones. Issue #245 was exactly this, a stored
+    "1" landed on a microphone and every play attempt raised "Invalid
+    number of channels".
+
+    Device identity is now the device *name*. A previously-saved
+    numeric value can't be reliably translated, the index it referred
+    to may already point elsewhere, so drop it and fall back to the
+    system default. The user re-picks once, and every pick after that
+    is a stable name. Real CoreAudio / WASAPI device names are always
+    descriptive strings, never bare digits, so a name selection is
+    never mistaken for a legacy index. Empty string (system default)
+    and name selections are left untouched. Returns True if it changed
+    anything so the caller re-saves.
+    """
+    value = s.audio_output_device
+    if value and value.isdigit():
+        s.audio_output_device = ""
+        return True
+    return False
+
+
 def load_settings() -> Settings:
     if SETTINGS_FILE.exists():
         try:
@@ -356,6 +384,7 @@ def load_settings() -> Settings:
         # entire settings file with defaults.
         changed = _migrate_default_paths(settings)
         changed = _migrate_eq_to_parametric(settings) or changed
+        changed = _migrate_output_device_index(settings) or changed
         if changed:
             try:
                 save_settings(settings)

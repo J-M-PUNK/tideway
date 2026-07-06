@@ -6,7 +6,11 @@ smoke tests.
 """
 from pathlib import Path
 
-from app.settings import Settings, _migrate_default_paths
+from app.settings import (
+    Settings,
+    _migrate_default_paths,
+    _migrate_output_device_index,
+)
 
 
 def test_default_tideway_music_path_migrates_to_tidal(monkeypatch, tmp_path):
@@ -75,3 +79,36 @@ def test_migration_is_idempotent(monkeypatch, tmp_path):
     changed_again = _migrate_default_paths(s)  # second is no-op
 
     assert changed_again is False
+
+
+def test_legacy_numeric_output_device_is_cleared():
+    """A saved PortAudio index (issue #245) resets to system default."""
+    s = Settings()
+    s.audio_output_device = "1"
+
+    changed = _migrate_output_device_index(s)
+
+    assert changed is True
+    assert s.audio_output_device == ""
+
+
+def test_system_default_output_device_is_untouched():
+    s = Settings()
+    s.audio_output_device = ""
+
+    changed = _migrate_output_device_index(s)
+
+    assert changed is False
+    assert s.audio_output_device == ""
+
+
+def test_named_output_device_is_untouched():
+    """A name selection under the new scheme is never mistaken for a
+    legacy index, so it survives the migration."""
+    s = Settings()
+    s.audio_output_device = "MacBook Pro Speakers"
+
+    changed = _migrate_output_device_index(s)
+
+    assert changed is False
+    assert s.audio_output_device == "MacBook Pro Speakers"
