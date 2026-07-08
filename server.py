@@ -8198,19 +8198,39 @@ def library_artists() -> list[dict]:
     return [artist_to_dict(a) for a in tidal.get_favorite_artists()]
 
 
-@app.get("/api/library/playlists")
-def library_playlists() -> list[dict]:
-    _require_auth()
+def _owned_and_favorited_playlists() -> list:
+    """Union of the user's own playlists and their favorited playlists,
+    deduped by id (own-playlist entries win on conflict).
+
+    `tidal.get_user_playlists()` wraps tidalapi's legacy, non-paginated
+    `users/{id}/playlists` endpoint — the only playlist call site in the
+    codebase that doesn't go through `_fetch_all_pages`'s ordered /
+    paginated fetch strategies, since that endpoint accepts no query
+    params at all and falls straight to the bare-call fallback. Tidal
+    has been inconsistent about which playlists this legacy endpoint
+    surfaces for a given account. `get_favorite_playlists()` hits the
+    modern, reliably-paginated v2 collection endpoint and lists every
+    playlist (owned or not) the account has favorited, which in
+    practice includes the account's own playlists too — unioning the
+    two here means a gap in the legacy listing doesn't silently drop
+    an owned playlist from view.
+    """
     faves = tidal.get_favorite_playlists()
     mine = tidal.get_user_playlists()
     seen: set[str] = set()
-    out: list[dict] = []
+    out: list = []
     for p in list(mine) + list(faves):
         pid = str(getattr(p, "id", "") or "")
         if pid and pid not in seen:
             seen.add(pid)
-            out.append(playlist_to_dict(p))
+            out.append(p)
     return out
+
+
+@app.get("/api/library/playlists")
+def library_playlists() -> list[dict]:
+    _require_auth()
+    return [playlist_to_dict(p) for p in _owned_and_favorited_playlists()]
 
 
 # ---------------------------------------------------------------------------
@@ -11940,9 +11960,25 @@ class AddTracksRequest(BaseModel):
 
 @app.get("/api/playlists/mine")
 def my_playlists() -> list[dict]:
-    """Just the user's own playlists — used for the Add-to-Playlist menu."""
+    """Just the user's own (mutable) playlists — used for the
+    Add-to-Playlist menu.
+
+    Sources from the same owned+favorited union `/api/library/playlists`
+    uses (see `_owned_and_favorited_playlists`) rather than
+    `tidal.get_user_playlists()` alone — that legacy endpoint has been
+    observed to under-report an account's own playlists, which made
+    this menu come up empty for playlists the sidebar's Playlist tab
+    (backed by the union) showed just fine. Filtering the union to
+    `owned` keeps the menu's contract intact: every entry here is one
+    `POST /api/playlists/{id}/tracks` will actually accept, since that
+    endpoint 403s on anything `owns_playlist` doesn't confirm.
+    """
     _require_auth()
-    return [playlist_to_dict(p) for p in tidal.get_user_playlists()]
+    return [
+        playlist_to_dict(p)
+        for p in _owned_and_favorited_playlists()
+        if tidal.owns_playlist(p)
+    ]
 
 
 @app.post("/api/playlists")
