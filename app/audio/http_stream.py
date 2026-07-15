@@ -348,6 +348,13 @@ class RingBuffer:
 
         Clears data_ready so the next do_GET waits for the new
         encoder to write its header before responding.
+
+        CRITICAL: bumps _gen so any stale consumer waiting in read()
+        is immediately invalidated (gen mismatch → returns b"").
+        Without this, a stale HTTP serve loop from the previous track
+        picks up data written by the new encoder and sends it to the
+        renderer's old socket — the new track's FLAC header arrives
+        mid-stream on the old connection, corrupting the decoder.
         """
         self._data_ready.clear()
         self._head.clear()
@@ -357,6 +364,7 @@ class RingBuffer:
         with self._cv:
             self._buf.clear()
             self._ring_active = False
+            self._gen += 1
             self._cv.notify_all()
 
     def fill_ratio(self) -> float:
