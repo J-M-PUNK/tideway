@@ -981,6 +981,12 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         _upnp_manager.set_local_silencer(
             _native_player().set_external_output_active
         )
+        _upnp_manager.set_source_provider(
+            _native_player().get_current_source_urls
+        )
+        _upnp_manager.set_metadata_provider(
+            _native_player().get_current_track_metadata
+        )
     except Exception as exc:
         print(f"[upnp] startup wiring failed: {exc}", flush=True)
 

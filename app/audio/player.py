@@ -333,6 +333,7 @@ class PCMPlayer:
         # the filesystem path. `None` when no track is loaded.
         self._source_urls: Optional[list[str]] = None
         self._source_path: Optional[str] = None
+        self._current_track_meta: Optional[dict] = None
 
         # Sounddevice dtype the current OutputStream opened with.
         # Stored so the gapless-swap check can verify the preloaded
@@ -344,6 +345,13 @@ class PCMPlayer:
         # the current track ends; consumed in-place by the audio
         # callback at end-of-track.
         self._preload: Optional[_Preload] = None
+
+        # Set by _try_gapless_swap() when the audio callback
+        # transitions to a new track while UPnP passthrough is active.
+        # The callback can't block on HTTP calls (SetAVTransportURI),
+        # so it defers to _load_locked() Path 0 which reads this flag
+        # and calls start_passthrough for the new track.
+        self._pending_upnp_notify: bool = False
 
         # Stream-manifest cache. Keyed by (track_id, quality_or_None).
         # Frontend hover / album-mount prefetch writes here so the
@@ -622,6 +630,26 @@ class PCMPlayer:
                 self._current_track_id == track_id
                 and self._state in ("playing", "paused")
             ):
+                # Deferred UPnP passthrough notification from
+                # _try_gapless_swap (audio callback can't do HTTP).
+                # Start passthrough for the new track so the
+                # renderer receives SetAVTransportURI before it
+                # hits EOF on the previous track's buffer.
+                if self._pending_upnp_notify:
+                    self._pending_upnp_notify = False
+                    if (
+                        _upnp_manager is not None
+                        and _upnp_manager.is_active()
+                        and isinstance(self._source_urls, list)
+                    ):
+                        try:
+                            _upnp_manager.start_passthrough(
+                                self._source_urls,
+                                prefetched=None,
+                                metadata=self._current_track_meta,
+                            )
+                        except Exception:
+                            pass
                 self._dbg(f"load Path 0: already playing track={track_id}")
                 return self.snapshot()
             # Path 0b: a preload for this track is already buffering.
@@ -669,6 +697,7 @@ class PCMPlayer:
         #      it only fires in cases where we genuinely have to close
         #      and reopen.
         self._dbg(f"load SLOW PATH: full teardown + fresh resolve for {track_id}")
+        self._pending_upnp_notify = False
         load_t0 = time.monotonic()
 
         # Snapshot the active stream's format so we can decide whether
@@ -809,6 +838,20 @@ class PCMPlayer:
             )
             t_resolved = time.monotonic()
             initial_source = _build_source(source_spec, prefetched=prefetched_bytes)
+
+            # Start DLNA passthrough if a session is active. Same
+            # condition as the _build_load_pipeline path above.
+            if _upnp_manager is not None and isinstance(source_spec, list):
+                try:
+                    if _upnp_manager.is_active():
+                        _upnp_manager.start_passthrough(
+                            source_spec,
+                            prefetched=prefetched_bytes,
+                            metadata=self._current_track_meta,
+                        )
+                except Exception:
+                    pass
+
             decoder = Decoder(initial_source)
             t_decoder = time.monotonic()
         except Exception as exc:
@@ -1270,6 +1313,25 @@ class PCMPlayer:
             track_id, quality
         )
         source = _build_source(source_spec, prefetched=prefetched_bytes)
+
+        # Start bit-perfect FLAC passthrough when a DLNA session is
+        # active. The passthrough encoder demuxes raw FLAC frames
+        # from the fMP4 source and writes them directly to the
+        # ring buffer, bypassing PCM decode + re-encode so the
+        # original STREAMINFO (with real total_samples) is preserved.
+        # Only when the source is a URL list (Tidal stream), not a
+        # local file.
+        if _upnp_manager is not None and isinstance(source_spec, list):
+            try:
+                    if _upnp_manager.is_active():
+                        _upnp_manager.start_passthrough(
+                            source_spec,
+                            prefetched=prefetched_bytes,
+                            metadata=self._current_track_meta,
+                        )
+            except Exception:
+                pass
+
         decoder = Decoder(source)
 
         # Match the active stream's rate so the adopt path can take
@@ -1370,6 +1432,20 @@ class PCMPlayer:
             self._muted = bool(muted)
             self._seq += 1
         return self.snapshot()
+
+    def get_current_source_urls(self) -> Optional[list[str]]:
+        """Return the active track's segment URLs, or None if no
+        track is loaded or the source is a local file.
+
+        Used by the DLNA manager to start FLAC passthrough when a
+        session is established after a track is already playing."""
+        with self._lock:
+            return self._source_urls
+
+    def get_current_track_metadata(self) -> Optional[dict]:
+        """Return the active track's metadata dict, or None."""
+        with self._lock:
+            return self._current_track_meta
 
     def set_external_output_active(self, active: bool) -> None:
         """Toggle local-output silencing.
@@ -1846,6 +1922,7 @@ class PCMPlayer:
         # Drop preload first so finished_callback's `pre` read sees
         # None when it fires during stream.close() below.
         self._drop_preload()
+        self._pending_upnp_notify = False
         with self._lock:
             # If we're already idle, nothing to do.
             if self._state == "idle" and self._stream is None:
@@ -1933,6 +2010,7 @@ class PCMPlayer:
             self._stream_sample_rate = None
             self._source_urls = None
             self._source_path = None
+            self._current_track_meta = None
             self._paused = False
             self._seeking = False
 
@@ -2100,6 +2178,35 @@ class PCMPlayer:
             if not urls:
                 raise RuntimeError("manifest has no segment urls")
             duration = getattr(track, "duration", None)
+            # Save track metadata for UPnP/DLNA track-change notification.
+            artist_name = (
+                getattr(track.artist, "name", None)
+                if hasattr(track, "artist")
+                else None
+            )
+            if not artist_name and hasattr(track, "artists") and track.artists:
+                artist_name = track.artists[0].name
+            album_name = (
+                track.album.name
+                if hasattr(track, "album") and track.album
+                else None
+            )
+            cover_id = (
+                track.album.cover
+                if hasattr(track, "album") and track.album
+                else None
+            )
+            self._current_track_meta = {
+                "title": getattr(track, "name", "") or "",
+                "artist": artist_name or "",
+                "album": album_name or "",
+                "duration_s": duration or 0,
+                "cover_url": (
+                    f"https://resources.tidal.com/images/{cover_id}/640x640.jpg"
+                    if cover_id
+                    else ""
+                ),
+            }
             info = StreamInfo(
                 source="stream",
                 codec=_normalize_codec(
@@ -3120,6 +3227,21 @@ class PCMPlayer:
         # unconditionally; that's a no-op in the same-rate case
         # because the values already match the active stream.
         self._swap_pipeline_to(pre)
+        # Start DLNA passthrough for the new track.  This runs on
+        # the HTTP thread, so blocking on SetAVTransportURI is fine.
+        if (
+            _upnp_manager is not None
+            and _upnp_manager.is_active()
+            and pre.source_urls is not None
+        ):
+            try:
+                _upnp_manager.start_passthrough(
+                    pre.source_urls,
+                    prefetched=None,
+                    metadata=self._current_track_meta,
+                )
+            except Exception:
+                pass
         self._preload = None
         self._state = "playing"
         self._last_error = None
@@ -3464,6 +3586,16 @@ class PCMPlayer:
         # Phase 2: actual swap. Old decoder + thread have already
         # finished (done event is set), we just replace refs.
         self._swap_pipeline_to(pre)
+        # Defer UPnP passthrough notification: the audio callback
+        # can't block on HTTP (SetAVTransportURI).  The flag is
+        # picked up by _load_locked() Path 0 when the frontend's
+        # play_track() arrives.
+        if (
+            _upnp_manager is not None
+            and _upnp_manager.is_active()
+            and pre.source_urls is not None
+        ):
+            self._pending_upnp_notify = True
         self._state = "playing"
         self._seq += 1
         self._emit()
@@ -3809,6 +3941,21 @@ class PCMPlayer:
                 # early) can't re-stomp it.
                 self._preload = None
                 self._swap_pipeline_to(pre)
+                # Start DLNA passthrough for the new track.  The
+                # bridge thread is off-realtime, so HTTP is fine.
+                if (
+                    _upnp_manager is not None
+                    and _upnp_manager.is_active()
+                    and pre.source_urls is not None
+                ):
+                    try:
+                        _upnp_manager.start_passthrough(
+                            pre.source_urls,
+                            prefetched=None,
+                            metadata=self._current_track_meta,
+                        )
+                    except Exception:
+                        pass
                 self._open_output_stream(
                     pre.sample_rate, pre.channels, pre.sd_dtype
                 )
