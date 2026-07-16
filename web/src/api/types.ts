@@ -249,12 +249,7 @@ export interface PlaylistDetail extends Playlist {
 }
 
 export type DownloadStatus =
-  | "Pending"
-  | "Fetching…"
-  | "Downloading"
-  | "Tagging…"
-  | "Complete"
-  | "Failed";
+  "Pending" | "Fetching…" | "Downloading" | "Tagging…" | "Complete" | "Failed";
 
 export interface DownloadItem {
   id: string;
@@ -543,12 +538,7 @@ export interface LastFmRecentTrack {
 }
 
 export type LastFmPeriod =
-  | "overall"
-  | "7day"
-  | "1month"
-  | "3month"
-  | "6month"
-  | "12month";
+  "overall" | "7day" | "1month" | "3month" | "6month" | "12month";
 
 export interface LastFmUserInfo {
   username: string;
@@ -707,12 +697,7 @@ export interface PageLinkItem {
 }
 
 export type PageItem =
-  | Track
-  | Album
-  | Artist
-  | Playlist
-  | MixItem
-  | PageLinkItem;
+  Track | Album | Artist | Playlist | MixItem | PageLinkItem;
 
 /** Clickable entity reference for category headers like
  *  "Because you liked X" — lets the UI show a thumbnail next to the
