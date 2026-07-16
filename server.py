@@ -54,6 +54,7 @@ from app.audio.eq import (
     parse_parametric_bands,
 )
 from app.audio.macos_now_playing import MacOSNowPlayingBridge
+from app.mpris import MprisBridge
 from app.audio.player import PCMPlayer
 from app import playlist_import
 from app import spotify_import
@@ -179,6 +180,11 @@ play_reporter = PlayReporter(tidal)
 # fills in base_url and calls .start(). No-ops on non-macOS so this
 # is safe to instantiate unconditionally.
 macos_now_playing_bridge = MacOSNowPlayingBridge()
+# Linux counterpart: exposes org.mpris.MediaPlayer2 on the session
+# bus so desktop media widgets, the lock screen, and playerctl can
+# see and drive playback. Same lifecycle contract as the macOS
+# bridge — constructed empty, no-ops off Linux.
+mpris_bridge = MprisBridge()
 settings: Settings = load_settings()
 # Guards the `settings` rebind + downloader.settings swap so workers never
 # see a torn state (new global, old downloader field or vice versa).
@@ -736,6 +742,17 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         macos_now_playing_bridge.start()
     except Exception as exc:
         print(f"[macos-np] startup failed: {exc}", flush=True)
+
+    # Linux: register on the session bus as an MPRIS player so the
+    # desktop's media layer (GNOME/KDE widgets, lock screen, media
+    # keys, playerctl) can see and drive playback. No-ops off Linux
+    # or without dbus-next. See app/mpris.py.
+    try:
+        port = int(os.environ.get("TIDAL_DL_PORT", "47823"))
+        mpris_bridge.set_base_url(f"http://127.0.0.1:{port}")
+        mpris_bridge.start()
+    except Exception as exc:
+        print(f"[mpris] startup failed: {exc}", flush=True)
 
     # Begin Cast device discovery in the background. Cheap — opens
     # one zeroconf browser thread that gets pruned on shutdown. The
@@ -5054,6 +5071,10 @@ def _native_player() -> PCMPlayer:
         # MediaPlayer framework isn't available, so unconditional
         # subscription is safe.
         _pcm_player_singleton.subscribe(macos_now_playing_bridge.update_state)
+        # Same mirror for the Linux desktop via MPRIS. update_state()
+        # caches everywhere and only emits when the D-Bus service is
+        # actually up, so unconditional subscription is safe here too.
+        _pcm_player_singleton.subscribe(mpris_bridge.update_state)
 
     # One-shot: re-apply persisted EQ + output device so users who
     # set a USB-DAC preference or an EQ preset keep it across restart.
@@ -5430,6 +5451,15 @@ def now_playing_update(payload: _NowPlayingMetadata) -> dict:
     """
     _require_local_access()
     macos_now_playing_bridge.update_metadata(
+        title=payload.title,
+        artist=payload.artist,
+        album=payload.album,
+        duration_ms=payload.duration_ms,
+        artwork_url=payload.artwork_url,
+    )
+    # Mirror the same metadata into MPRIS so Linux desktop widgets
+    # show title / artist / album / artwork. No-op off Linux.
+    mpris_bridge.update_metadata(
         title=payload.title,
         artist=payload.artist,
         album=payload.album,

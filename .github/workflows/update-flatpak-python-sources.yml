@@ -71,27 +71,45 @@ jobs:
         # The pip generator ships as a standalone script in
         # flatpak-builder-tools (not a PyPI console script like
         # flatpak-node-generator). Pull it from the upstream repo and
-        # install its one runtime dependency.
+        # install its one runtime dependency. The historical
+        # `pip/flatpak-pip-generator` path is now a git symlink to the
+        # .py file, and raw.githubusercontent serves a symlink as its
+        # one-line target text — fetch the real file.
         run: |
           curl -fsSL -o flatpak-pip-generator \
-            https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/master/pip/flatpak-pip-generator
-          python3 -m pip install --quiet requirements-parser
+            https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/master/pip/flatpak-pip-generator.py
+          head -1 flatpak-pip-generator | grep -q python || {
+            echo "downloaded file is not the generator script:"; head -3 flatpak-pip-generator; exit 1; }
+          # Matches the script's PEP 723 inline metadata block.
+          python3 -m pip install --quiet "requirements-parser<1.0.0,>=0.11.0" "packaging>=23.0"
 
       - name: Regenerate python3-requirements.json
         # --requirements-file mirrors docs/linux-flatpak.md ("generated
         # offline+hashed from requirements.txt"). Platform markers in
         # requirements.txt are resolved for the Linux/GNOME target, so
         # the darwin-only pyobjc drops out and the linux-only dbus-next
-        # is included automatically. --prefer-wheels forces prebuilt
-        # wheels over sdists (the Rust/Cython transitives — orjson,
-        # curl-cffi, av, numpy, scipy, pydantic-core, ... — have no
-        # PEP-517 build backend in the sandbox); it falls back to an
-        # sdist only where no wheel exists. Output name matches the
-        # module the manifest references (python3-requirements).
+        # is included automatically.
+        #
+        # --prefer-wheels takes a per-package list upstream now (it
+        # used to be a boolean): these are the native-extension
+        # packages that have no PEP-517 build backend inside the
+        # sandbox, so their sdists can't build and the prebuilt
+        # manylinux wheel is required. The list is every package that
+        # ships as a platform wheel in the current source set; when a
+        # new native dep joins requirements.txt, add it here (the
+        # build-check failing on a missing build backend is the
+        # symptom). Pure-Python packages build fine from sdists and
+        # don't need listing.
+        # --ignore-pkg drops build-only tools from the runtime set:
+        # pyinstaller freezes the macOS/Windows bundles and has no
+        # place inside the Flatpak (docs/linux-flatpak.md: "there is
+        # no freeze step in this path"); its module also fails to pip
+        # install in the sandbox, which is how its inclusion surfaces.
         run: |
           python3 flatpak-pip-generator \
             --runtime="org.gnome.Sdk//49" \
-            --prefer-wheels \
+            --prefer-wheels="aiohttp,av,cffi,curl-cffi,httptools,numpy,orjson,pillow,pydantic-core,pyyaml,rapidfuzz,scipy,uvloop,watchfiles,zeroconf" \
+            --ignore-pkg=pyinstaller \
             --requirements-file=requirements.txt \
             --output=flatpak/python3-requirements
 

@@ -84,6 +84,12 @@ spotapi>=1.2.7
 # environment marker so a Linux / Windows install doesn't pull
 # them.
 pyobjc-framework-MediaPlayer>=12.2.1; sys_platform == "darwin"
+# MPRIS media-player service on the D-Bus session bus (app/mpris.py):
+# the Linux counterpart of the macOS Now Playing bridge, so GNOME and
+# KDE media widgets, the lock screen, and playerctl can see and drive
+# Tideway. Pure Python and asyncio-native; no libdbus binding needed.
+# Skipped off Linux via the environment marker.
+dbus-next>=0.2.3; sys_platform == "linux"
 # UPnP / DLNA MediaRenderer output. Same library Home Assistant's
 # DLNA integration uses. Covers SSDP discovery, AVTransport control
 # (play/pause/seek), RenderingControl (volume), and OpenHome for
