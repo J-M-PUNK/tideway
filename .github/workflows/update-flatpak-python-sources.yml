@@ -100,10 +100,16 @@ jobs:
         # build-check failing on a missing build backend is the
         # symptom). Pure-Python packages build fine from sdists and
         # don't need listing.
+        # --ignore-pkg drops build-only tools from the runtime set:
+        # pyinstaller freezes the macOS/Windows bundles and has no
+        # place inside the Flatpak (docs/linux-flatpak.md: "there is
+        # no freeze step in this path"); its module also fails to pip
+        # install in the sandbox, which is how its inclusion surfaces.
         run: |
           python3 flatpak-pip-generator \
             --runtime="org.gnome.Sdk//49" \
             --prefer-wheels="aiohttp,av,cffi,curl-cffi,httptools,numpy,orjson,pillow,pydantic-core,pyyaml,rapidfuzz,scipy,uvloop,watchfiles,zeroconf" \
+            --ignore-pkg=pyinstaller \
             --requirements-file=requirements.txt \
             --output=flatpak/python3-requirements
 
