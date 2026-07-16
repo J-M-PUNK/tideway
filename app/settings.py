@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import sys
 import tempfile
 from dataclasses import asdict, dataclass, field
@@ -9,6 +10,51 @@ from typing import Optional
 from app.paths import user_data_dir
 
 SETTINGS_FILE = user_data_dir() / "settings.json"
+
+
+def _xdg_user_dir(key: str, fallback: Path) -> Path:
+    """Resolve an XDG user directory (MUSIC, VIDEOS, ...) on Linux.
+
+    Reads ${XDG_CONFIG_HOME:-~/.config}/user-dirs.dirs, the file the
+    xdg-user-dirs tooling maintains and that Flatpak exposes inside
+    the sandbox. This is what makes the defaults land in the real
+    localized folder ("~/Música", "~/Musik") instead of a literal
+    ~/Music that only exists on English-locale systems — and, under
+    Flatpak, the only paths the manifest's xdg-music / xdg-videos
+    grants actually map to the host. A hardcoded ~/Music inside the
+    sandbox is unmounted tmpfs: downloads "succeed" and vanish on
+    restart (#261).
+
+    Falls back when the file or key is missing, or when the entry is
+    disabled (the spec disables a dir by pointing it at $HOME or a
+    relative path).
+    """
+    if not sys.platform.startswith("linux"):
+        return fallback
+    config_home = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config")
+    try:
+        text = (config_home / "user-dirs.dirs").read_text(encoding="utf-8")
+    except OSError:
+        return fallback
+    match = re.search(rf'^XDG_{key}_DIR="(.*)"$', text, re.MULTILINE)
+    if not match:
+        return fallback
+    raw = match.group(1).replace("$HOME", str(Path.home()))
+    resolved = Path(raw)
+    if not resolved.is_absolute() or resolved == Path.home():
+        return fallback
+    return resolved
+
+
+def _default_output_dir() -> str:
+    """Default audio download folder: the platform music directory
+    plus a Tidal subfolder. On Linux the music directory comes from
+    the XDG user-dirs config so it matches what the desktop (and the
+    Flatpak sandbox grant) consider the Music folder."""
+    music = Path.home() / "Music"
+    if sys.platform.startswith("linux"):
+        music = _xdg_user_dir("MUSIC", music)
+    return str(music / "Tidal")
 
 
 def _default_videos_dir() -> str:
@@ -30,7 +76,13 @@ def _default_videos_dir() -> str:
         return str(movies / "Tidal")
     if sys.platform.startswith("win"):
         return str(videos / "Tidal")
-    # Linux — pick whichever exists, prefer Videos which is XDG standard.
+    # Linux — resolve through the XDG user-dirs config first (it's
+    # what the desktop and the Flatpak sandbox grant treat as the
+    # Videos folder); fall back to whichever of the conventional
+    # names exists, preferring Videos which is the XDG default.
+    xdg = _xdg_user_dir("VIDEOS", videos)
+    if xdg != videos:
+        return str(xdg / "Tidal")
     if videos.is_dir() or not movies.is_dir():
         return str(videos / "Tidal")
     return str(movies / "Tidal")
@@ -38,7 +90,7 @@ def _default_videos_dir() -> str:
 
 @dataclass
 class Settings:
-    output_dir: str = str(Path.home() / "Music" / "Tidal")
+    output_dir: str = field(default_factory=_default_output_dir)
     videos_dir: str = field(default_factory=_default_videos_dir)
     filename_template: str = "{artist} - {title}"
     create_album_folders: bool = True
@@ -310,6 +362,24 @@ def _migrate_default_paths(s: Settings) -> bool:
     }
     if s.videos_dir in legacy_videos:
         s.videos_dir = _default_videos_dir()
+        changed = True
+
+    # The Linux defaults became XDG-aware (#261): on a localized
+    # system the music dir is e.g. ~/Música, and under Flatpak that
+    # XDG dir is the only one the manifest grant maps to the host.
+    # Installs that persisted the old hardcoded default get moved to
+    # the real dir; custom paths are untouched as usual.
+    default_music = _default_output_dir()
+    if s.output_dir == new_music and default_music != new_music:
+        s.output_dir = default_music
+        changed = True
+    shipped_default_videos = {
+        str(home / "Videos" / "Tidal"),
+        str(home / "Movies" / "Tidal"),
+    }
+    default_videos = _default_videos_dir()
+    if s.videos_dir in shipped_default_videos and default_videos not in shipped_default_videos:
+        s.videos_dir = default_videos
         changed = True
 
     return changed

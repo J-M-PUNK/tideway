@@ -33,7 +33,15 @@ finish-args:
   - --socket=wayland                      # native window
   - --socket=fallback-x11                 # X11 fallback
   - --device=dri                          # WebKitGTK GPU compositing
-  - --filesystem=xdg-download             # downloads -> ~/Downloads
+  # Download folders. The app's defaults are the Music and Videos
+  # user dirs (~/Music/Tidal, ~/Videos/Tidal, localized via
+  # user-dirs.dirs); without these grants those paths are unmounted
+  # tmpfs inside the sandbox, so downloads "complete" and then
+  # vanish on restart (#261). xdg-download stays granted for users
+  # who point output_dir at ~/Downloads instead.
+  - --filesystem=xdg-music:create
+  - --filesystem=xdg-videos:create
+  - --filesystem=xdg-download
   - --talk-name=org.freedesktop.Notifications  # libnotify
 
 cleanup:
