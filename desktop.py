@@ -543,6 +543,26 @@ def main(argv: Optional[list[str]] = None) -> int:
     )
     args = parser.parse_args(argv)
 
+    # The desktop shell serves the built frontend from web/dist. In a
+    # source checkout that folder only exists after a Vite build, and
+    # without it the window opens on a JSON 404 — which renders as a
+    # blank white page with no clue what went wrong (#262). Refuse to
+    # start with instructions instead. Frozen builds and the Flatpak
+    # bundle the folder, so this only ever trips a source run.
+    from app.paths import bundled_resource_dir
+
+    if not (bundled_resource_dir() / "web" / "dist" / "index.html").is_file():
+        print(
+            "[desktop] web/dist is missing — the frontend hasn't been "
+            "built, so the window would come up blank. Build it first:\n"
+            "  cd web && npm install && npm run build\n"
+            "then re-run desktop.py. (For day-to-day frontend work use "
+            "./run.sh, which serves the UI from Vite instead.)",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 1
+
     # Single-instance guard: if /api/health responds, a sibling is
     # already up. Ask it to focus and exit quietly.
     if _probe_existing_instance():

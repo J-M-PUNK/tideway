@@ -356,7 +356,26 @@ the desktop shell. To launch it from source:
 
 `desktop.py` serves whatever is in `web/dist/`, so rebuild the
 frontend any time you change React code or the desktop window will
-show stale UI.
+show stale UI. If `web/dist/` doesn't exist yet, `desktop.py`
+refuses to start and tells you to build it, since the window would
+otherwise open blank.
+
+On Linux the native window needs a system webview backend that pip
+can't install portably. Install your distro's GTK bindings
+(preferred, it's what the Flatpak uses):
+
+```bash
+# Debian/Ubuntu
+sudo apt install python3-gi gir1.2-webkit2-4.1
+# Fedora
+sudo dnf install python3-gobject webkit2gtk4.1
+# Arch/Manjaro
+sudo pacman -S python-gobject webkit2gtk-4.1
+```
+
+or the Qt fallback via pip: `pip install qtpy PySide6`. Without
+either, `desktop.py` falls back to opening Tideway in your default
+browser and prints these same instructions.
 
 On first launch, click **Login with Tidal**. The login uses PKCE.
 Paste the redirect URL back into the app and Tideway exchanges it
@@ -432,6 +451,16 @@ running maintenance burden. And Atmos playback on a desktop needs
 either a Dolby-capable renderer on the OS side or a receiver on
 the other end of HDMI, which most setups do not have. If any of
 that changes, we can revisit.
+
+**Very old x86 CPUs can crash the audio math libraries.** The
+prebuilt numpy and scipy wheels on PyPI now target the x86-64-v2
+baseline, which needs SSE4.2. CPUs from before roughly 2009, such
+as the AMD Athlon II or first-generation Core, lack it and die
+with an illegal-instruction fault on import. That kills both the
+Flatpak and a stock source install. If you run source on hardware
+like that, install your distro's own numpy and scipy packages,
+which are compiled for the local baseline, and create the venv
+with `--system-site-packages` so they're picked up.
 
 **Network audio output is mostly there, with caveats.**
 Chromecast, Tidal Connect, and UPnP/DLNA all ship in the output
