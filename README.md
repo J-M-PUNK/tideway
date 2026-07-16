@@ -171,7 +171,10 @@ preferences. A downloaded playlist lands in a folder named after
 the playlist and is numbered in playlist order rather than by
 album track number, and the template understands `{playlist_num}`
 and `{playlist}` alongside the usual title, track, album, and
-artist tokens.
+artist tokens. A template like `{playlist_num} - {artist} - {title}`
+keeps playlist downloads in playlist order on disk; on album and
+single downloads the empty token and the separator next to it are
+dropped, so the same template renders a clean `Artist - Title`.
 
 ![Download quality picker](assets/screenshots/download-quality.png)
 

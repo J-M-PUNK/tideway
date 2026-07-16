@@ -116,7 +116,53 @@ def test_render_playlist_tokens_empty_off_playlist():
     template carrying {playlist_num} still renders cleanly."""
     item = _item(title="Hello")  # playlist_index defaults to 0
     assert _render_template("{playlist_num}{title}", item) == "Hello"
-    assert _render_template("{playlist}", item) == "_"  # empty → sanitized
+    # A standalone {playlist} disappears entirely (it used to render
+    # the "_" sanitizer fallback, nesting album downloads under a
+    # junk "_" folder when the template had a {playlist}/ prefix).
+    assert _render_template("{playlist}", item) == ""
+
+
+def test_empty_tokens_absorb_adjacent_separators():
+    """One template has to serve every download kind, so the separator
+    a template puts next to a conditionally-empty token is dropped
+    with it: "{playlist_num} - {artist} - {title}" must not leave a
+    dangling " - " on album / single downloads (#263)."""
+    off = _item(title="Sicko Mode", artist="Travis Scott")
+    on = _item(
+        title="Sicko Mode",
+        artist="Travis Scott",
+        playlist_index=5,
+        playlist_name="Chill Mix",
+    )
+    template = "{playlist_num} - {artist} - {title}"
+    assert _render_template(template, on) == "05 - Travis Scott - Sicko Mode"
+    assert _render_template(template, off) == "Travis Scott - Sicko Mode"
+
+    # Trailing position: the separator BEFORE the empty token goes.
+    assert _render_template("{title} - {playlist_num}", off) == "Sicko Mode"
+    # Mid-template position: only one separator run survives.
+    assert (
+        _render_template("{artist} - {playlist_num} - {title}", off)
+        == "Travis Scott - Sicko Mode"
+    )
+    # Token butted against text keeps the text and the separator that
+    # belongs to the next token.
+    assert (
+        _render_template("{artist}{playlist_num} - {title}", off)
+        == "Travis Scott - Sicko Mode"
+    )
+    # Absorption never crosses a `/`: the empty segment is dropped by
+    # the path splitter, not merged into its neighbour.
+    assert (
+        _render_template("{playlist}/{playlist_num} - {title}", off)
+        == "/Sicko Mode"
+    )
+    # Missing year gets the same treatment.
+    no_year = _item(title="Hello", artist="A", year=None)
+    assert _render_template("{year} - {title}", no_year) == "Hello"
+    # Parentheses are not separators — a template wrapping an empty
+    # token in brackets keeps them (the author's choice to fix).
+    assert _render_template("{album} ({year})", no_year) == "Album Name ()"
 
 
 def test_render_track_title_alias_matches_title():

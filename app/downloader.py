@@ -1942,6 +1942,41 @@ def _explicit_marker(flag: bool) -> str:
     return " [E]" if flag else ""
 
 
+# Placeholder a conditionally-empty token renders as when it has no
+# value, so _absorb_empty_tokens can also swallow the separator the
+# template put next to it. NUL can never collide with real data:
+# _sanitize_segment replaces control bytes in every token value.
+_EMPTY_TOKEN = "\x00"
+
+# Separator literals templates put between tokens. When an empty token
+# sits next to a run of these, the run is absorbed along with it.
+_SEP_CHARS = " ._-"
+
+
+def _absorb_empty_tokens(rendered: str) -> str:
+    """Drop empty-token sentinels together with the separator literals
+    adjacent to them, so one template serves every download kind:
+    "{playlist_num} - {artist} - {title}" gives "05 - A - T" on a
+    playlist and a clean "A - T" (not " - A - T") on an album.
+
+    Works per path segment so a sentinel never absorbs a `/`. Rules:
+    a sentinel ending a segment absorbs the separator run before it;
+    a sentinel at segment start or after a separator absorbs the run
+    after it; a sentinel butted against text ("{artist}{playlist_num}")
+    just disappears, leaving the text and any following separator
+    intact."""
+    parts = re.split(r"([/\\]+)", rendered)
+    out: list[str] = []
+    for part in parts:
+        if part and part[0] in "/\\":
+            out.append(part)
+            continue
+        part = re.sub(rf"(?:[{_SEP_CHARS}]*{_EMPTY_TOKEN})+[{_SEP_CHARS}]*$", "", part)
+        part = re.sub(rf"(^|(?<=[{_SEP_CHARS}])){_EMPTY_TOKEN}[{_SEP_CHARS}]*", "", part)
+        out.append(part.replace(_EMPTY_TOKEN, ""))
+    return "".join(out)
+
+
 def _render_template(template: str, item: DownloadItem) -> str:
     """Interpolate the user's filename_template with sanitized token
     values. Each token's VALUE is sanitized for path-unsafe chars
@@ -1953,9 +1988,14 @@ def _render_template(template: str, item: DownloadItem) -> str:
     Unknown tokens render as the literal `{key}` (see _SafeTokens) so
     the user sees a wonky filename and fixes their template instead of
     the download just dying with a KeyError mid-batch.
+
+    Conditionally-empty tokens (playlist_num, playlist, year, the
+    explicit markers) render the _EMPTY_TOKEN sentinel when they have
+    no value; _absorb_empty_tokens then removes the sentinel along
+    with the separator the template placed next to it.
     """
     year_str = "" if item.year is None else str(item.year)
-    return template.format_map(
+    rendered = template.format_map(
         _SafeTokens(
             title=_sanitize_segment(item.title),
             track_title=_sanitize_segment(item.title),
@@ -1965,20 +2005,26 @@ def _render_template(template: str, item: DownloadItem) -> str:
             album_artist=_sanitize_segment(item.album_artist or item.artist),
             track_num=str(item.track_num).zfill(2),
             disc_num=str(item.disc_num or 1).zfill(2) if item.disc_num else "01",
-            year=year_str,
-            explicit=_explicit_marker(item.track_explicit),
-            album_explicit=_explicit_marker(item.album_explicit_flag),
-            # Playlist-order position; empty when the item isn't from
-            # a playlist so a template carrying {playlist_num} still
-            # renders cleanly for album / single downloads.
+            year=year_str or _EMPTY_TOKEN,
+            explicit=_explicit_marker(item.track_explicit) or _EMPTY_TOKEN,
+            album_explicit=_explicit_marker(item.album_explicit_flag) or _EMPTY_TOKEN,
+            # Playlist-order position; sentinel-empty when the item
+            # isn't from a playlist so a template carrying
+            # {playlist_num} still renders cleanly for album / single
+            # downloads — the separator next to it is absorbed too.
             playlist_num=(
                 str(item.playlist_index).zfill(2)
                 if item.playlist_index > 0
-                else ""
+                else _EMPTY_TOKEN
             ),
-            playlist=_sanitize_segment(item.playlist_name),
+            playlist=(
+                _sanitize_segment(item.playlist_name)
+                if item.playlist_name
+                else _EMPTY_TOKEN
+            ),
         )
     )
+    return _absorb_empty_tokens(rendered)
 
 
 def _split_template_path(rendered: str) -> list[str]:

@@ -170,10 +170,11 @@ export const TEMPLATE_TOKENS: ReadonlyArray<{
   {
     token: "{playlist_num}",
     description:
-      "Two-digit playlist position, e.g. 05 (empty unless downloading a playlist)",
+      "Two-digit playlist position, e.g. 05. Off a playlist it disappears along with the separator next to it",
   },
   {
     token: "{playlist}",
-    description: "Playlist name (empty unless downloading a playlist)",
+    description:
+      "Playlist name. Off a playlist it disappears along with the separator next to it",
   },
 ];
