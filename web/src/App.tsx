@@ -27,7 +27,7 @@ import { ToastProvider, useToast } from "@/components/toast";
 import { DownloadedProvider } from "@/hooks/useDownloadedSet";
 import { DownloadStreamProvider } from "@/hooks/useDownloadStream";
 import { FavoritesProvider } from "@/hooks/useFavorites";
-import { MyPlaylistsProvider } from "@/hooks/useMyPlaylists";
+import { MyPlaylistsProvider, useMyPlaylists } from "@/hooks/useMyPlaylists";
 import { RecentsProvider } from "@/hooks/useRecentlyPlayed";
 import { TrackSelectionProvider } from "@/hooks/useTrackSelection";
 import { UiPreferencesProvider } from "@/hooks/useUiPreferences";
@@ -210,6 +210,7 @@ export default function App() {
 function AppInner() {
   const auth = useAuth();
   const { offline } = useOfflineMode();
+  const { refresh: refreshMyPlaylists } = useMyPlaylists();
 
   // Warm the Home page cache as soon as auth resolves. The Home
   // component is the default route and it lazy-loads its chunk
@@ -219,11 +220,19 @@ function AppInner() {
   // calls useApi, the response is usually already in the cache
   // (or in-flight, in which case useApi dedupes onto the same
   // promise) and renders without the spinner flash.
+  //
+  // The my-playlists cache is loaded here too, not in its provider:
+  // the provider mounts before auth resolves, so a mount-time fetch
+  // 401s during session restore (and always 401s on a fresh login,
+  // which happens after mount) and the add-to-playlist menu stays
+  // empty for the whole session. Keying the fetch to logged_in fires
+  // it once auth is actually confirmed, and again after each login.
   useEffect(() => {
     if (auth.logged_in && !offline) {
       prefetch.pageHome();
+      refreshMyPlaylists().catch(() => {});
     }
-  }, [auth.logged_in, offline]);
+  }, [auth.logged_in, offline, refreshMyPlaylists]);
 
   // Hold the spinner until both probes resolve — rendering Login
   // prematurely would flash the sign-in screen for users who'd land
