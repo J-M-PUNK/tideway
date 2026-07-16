@@ -91,7 +91,7 @@ async function req<T>(
     // Surface timeouts as a recognizable error string so callers /
     // toasts can format them nicely instead of showing "AbortError".
     if (err instanceof DOMException && err.name === "TimeoutError") {
-      throw new Error(`Request timed out: ${path}`);
+      throw new Error(`Request timed out: ${path}`, { cause: err });
     }
     throw err;
   }

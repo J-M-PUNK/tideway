@@ -68,8 +68,8 @@ export function installLocalStorageFallback(): boolean {
     real = window.localStorage;
   } catch {
     // The `localStorage` getter itself can throw a SecurityError in
-    // locked-down WebViews — swallow and fall through to the shim.
-    real = null;
+    // locked-down WebViews — swallow and fall through to the shim,
+    // leaving `real` as the null it was initialized to.
   }
   if (storageWorks(real)) return false;
 

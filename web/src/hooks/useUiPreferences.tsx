@@ -16,10 +16,7 @@ const STORAGE_KEY = "tideway:ui-prefs";
  *  needs a PKCE session and enough bandwidth (~140 MB for a 4-min
  *  24/192 FLAC), but works the same way as Lossless otherwise. */
 export type StreamingQuality =
-  | "low_96k"
-  | "low_320k"
-  | "high_lossless"
-  | "hi_res_lossless";
+  "low_96k" | "low_320k" | "high_lossless" | "hi_res_lossless";
 
 export type ThemeMode = "dark" | "light";
 

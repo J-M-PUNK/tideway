@@ -47,8 +47,17 @@ export default tseslint.config(
       //   * @typescript-eslint/no-explicit-any — sprinkled across
       //     menu / overlay / DnD callsites where the third-party
       //     types are loose.
+      //   * The four React Compiler rules below arrived at error
+      //     severity with eslint-plugin-react-hooks 7. All ~50 hits
+      //     are pre-existing patterns: setState inside effects, ref
+      //     reads during render, prop mutation, and manual
+      //     memoization the compiler can't preserve.
       "react-hooks/rules-of-hooks": "warn",
       "@typescript-eslint/no-explicit-any": "warn",
+      "react-hooks/set-state-in-effect": "warn",
+      "react-hooks/refs": "warn",
+      "react-hooks/immutability": "warn",
+      "react-hooks/preserve-manual-memoization": "warn",
       // Underscore-prefixed args are the standard "intentionally
       // unused" convention — used in the codebase for hook-prop
       // interfaces where the symbol is part of the API but not
