@@ -41,7 +41,7 @@ numpy>=1.26.0
 # filtering in a Python loop can't keep up with the audio callback
 # at 48k; scipy.signal.sosfilt drops into C and comfortably runs
 # all 10 bands inside each callback's deadline.
-scipy>=1.17.1
+scipy>=1.18.0
 # Fast fuzzy-matching for the AutoEQ headphone-profile picker
 # (~5,000 entries, user types a few characters, we want sub-50ms
 # matching with typo tolerance). The picker degrades gracefully
