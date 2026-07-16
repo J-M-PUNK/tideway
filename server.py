@@ -59,7 +59,7 @@ from app import playlist_import
 from app import spotify_import
 from app import tidal_realtime
 from app.downloader import DownloadItem, DownloadStatus, Downloader
-from app.http import SESSION
+from app.http import SESSION, network_error_classes
 from app.lastfm import LastFmClient
 from app.local_index import LocalIndex
 from app import now_playing_state
@@ -334,6 +334,12 @@ def _install_stream_cache(key: tuple[int, str], path: Path, mime: str) -> None:
             pass
 
 
+# Connection-level failures from either HTTP transport (requests or
+# curl-cffi). _is_logged_in must tell these apart from a real auth
+# rejection: no network ≠ signed out.
+_NETWORK_ERRORS = network_error_classes()
+
+
 def _is_logged_in() -> bool:
     import time
 
@@ -350,6 +356,20 @@ def _is_logged_in() -> bool:
             return bool(_auth_cache["ok"])
     try:
         ok = bool(tidal.session.check_login())
+    except _NETWORK_ERRORS:
+        # Network unreachable is not "logged out". check_login() only
+        # gets as far as the HTTP round-trip when the session has
+        # credentials loaded (it returns False early otherwise), so a
+        # connection-level failure means "signed in, but offline".
+        # Treating it as logged-out used to 401 the local-only
+        # endpoints (downloaded library, cached playback) the moment
+        # the wifi dropped, and flash the login screen at a user
+        # whose session is fine (#261).
+        ok = True
+    except TidalBackoffError:
+        # Same reasoning: a rate-limit backoff window refuses the
+        # check before it leaves the process. The session is intact.
+        ok = True
     except Exception:
         ok = False
     with _auth_cache_lock:

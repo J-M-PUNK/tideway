@@ -30,6 +30,27 @@ _READ_TIMEOUT_S = 30.0
 DEFAULT_TIMEOUT = (_CONNECT_TIMEOUT_S, _READ_TIMEOUT_S)
 
 
+def network_error_classes() -> tuple:
+    """Exception classes that mean "the network is unreachable, the
+    request never got an answer" — as opposed to a server that
+    answered with a rejection. Covers both transports the app can be
+    running on: plain requests (urllib3) and curl-cffi's impersonated
+    session, whose exception hierarchy mirrors requests' but shares
+    no base class with it. Callers that need to tell offline-ness
+    apart from a real auth rejection catch this tuple."""
+    import requests.exceptions as _rex
+
+    classes: list[type] = [_rex.ConnectionError, _rex.Timeout]
+    try:
+        from curl_cffi.requests import exceptions as _cex
+    except ImportError:
+        # curl-cffi is optional — build_impersonated_session already
+        # falls back to plain requests without it.
+        return tuple(classes)
+    classes += [_cex.ConnectionError, _cex.Timeout]
+    return tuple(classes)
+
+
 def build_impersonated_session():
     """Return a curl-cffi Session with the shared impersonation
     profile, or None if curl-cffi can't be loaded. Also installs the
