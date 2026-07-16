@@ -71,11 +71,17 @@ jobs:
         # The pip generator ships as a standalone script in
         # flatpak-builder-tools (not a PyPI console script like
         # flatpak-node-generator). Pull it from the upstream repo and
-        # install its one runtime dependency.
+        # install its one runtime dependency. The historical
+        # `pip/flatpak-pip-generator` path is now a git symlink to the
+        # .py file, and raw.githubusercontent serves a symlink as its
+        # one-line target text — fetch the real file.
         run: |
           curl -fsSL -o flatpak-pip-generator \
-            https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/master/pip/flatpak-pip-generator
-          python3 -m pip install --quiet requirements-parser
+            https://raw.githubusercontent.com/flatpak/flatpak-builder-tools/master/pip/flatpak-pip-generator.py
+          head -1 flatpak-pip-generator | grep -q python || {
+            echo "downloaded file is not the generator script:"; head -3 flatpak-pip-generator; exit 1; }
+          # Matches the script's PEP 723 inline metadata block.
+          python3 -m pip install --quiet "requirements-parser<1.0.0,>=0.11.0" "packaging>=23.0"
 
       - name: Regenerate python3-requirements.json
         # --requirements-file mirrors docs/linux-flatpak.md ("generated
