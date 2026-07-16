@@ -88,16 +88,22 @@ jobs:
         # offline+hashed from requirements.txt"). Platform markers in
         # requirements.txt are resolved for the Linux/GNOME target, so
         # the darwin-only pyobjc drops out and the linux-only dbus-next
-        # is included automatically. --prefer-wheels forces prebuilt
-        # wheels over sdists (the Rust/Cython transitives — orjson,
-        # curl-cffi, av, numpy, scipy, pydantic-core, ... — have no
-        # PEP-517 build backend in the sandbox); it falls back to an
-        # sdist only where no wheel exists. Output name matches the
-        # module the manifest references (python3-requirements).
+        # is included automatically.
+        #
+        # --prefer-wheels takes a per-package list upstream now (it
+        # used to be a boolean): these are the native-extension
+        # packages that have no PEP-517 build backend inside the
+        # sandbox, so their sdists can't build and the prebuilt
+        # manylinux wheel is required. The list is every package that
+        # ships as a platform wheel in the current source set; when a
+        # new native dep joins requirements.txt, add it here (the
+        # build-check failing on a missing build backend is the
+        # symptom). Pure-Python packages build fine from sdists and
+        # don't need listing.
         run: |
           python3 flatpak-pip-generator \
             --runtime="org.gnome.Sdk//49" \
-            --prefer-wheels \
+            --prefer-wheels="aiohttp,av,cffi,curl-cffi,httptools,numpy,orjson,pillow,pydantic-core,pyyaml,rapidfuzz,scipy,uvloop,watchfiles,zeroconf" \
             --requirements-file=requirements.txt \
             --output=flatpak/python3-requirements
 
