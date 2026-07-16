@@ -319,6 +319,18 @@ def _graceful_shutdown(server: "uvicorn.Server") -> None:  # type: ignore[name-d
     except Exception as exc:
         print(f"[desktop] shutdown: Now Playing stop failed: {exc!r}", file=sys.stderr, flush=True)
 
+    # Same for the Linux MPRIS service: disconnect from the session
+    # bus so desktop widgets drop the player entry immediately instead
+    # of showing a dead "Tideway" until the bus notices the connection
+    # is gone. No-op off Linux or when the service never started.
+    try:
+        import server as _server
+        mpris = getattr(_server, "mpris_bridge", None)
+        if mpris is not None:
+            mpris.stop()
+    except Exception as exc:
+        print(f"[desktop] shutdown: MPRIS stop failed: {exc!r}", file=sys.stderr, flush=True)
+
     # Close the audio OutputStream before the interpreter exits.
     # sounddevice registers an atexit Pa_Terminate(); if a stream is
     # still open when Python finalizes, PortAudio tears it down from

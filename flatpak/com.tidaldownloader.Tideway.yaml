@@ -35,6 +35,9 @@ finish-args:
   - --device=dri                          # WebKitGTK GPU compositing
   - --filesystem=xdg-download             # downloads -> ~/Downloads
   - --talk-name=org.freedesktop.Notifications  # libnotify
+  # MPRIS: the app owns this well-known name on the session bus so
+  # desktop media widgets / playerctl can find it (app/mpris.py).
+  - --own-name=org.mpris.MediaPlayer2.tideway
 
 cleanup:
   - /include

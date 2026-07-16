@@ -121,7 +121,11 @@ network AVRs, and a long tail of cheaper Hi-Fi network bridges.
 See [docs/dlna-renderer.md](docs/dlna-renderer.md) for the
 DLNA-side details. Global media keys for play, pause, next, and previous
 work even when the window is minimized. There is an opt-in desktop
-notification on every track change.
+notification on every track change. On Linux, Tideway registers as
+an MPRIS player on the session bus, so GNOME and KDE media widgets,
+the lock screen, and `playerctl` can see the current track and
+drive playback. On macOS the same job is done through the native
+Now Playing integration in Control Center.
 
 **Browsing and library.** Search, a unified Charts page (Popular,
 Top, Rising, and New Releases as tabs), and dedicated album,
