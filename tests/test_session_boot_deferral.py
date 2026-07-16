@@ -24,6 +24,13 @@ def test_boot_thread_signals_session_ready():
 
 
 def test_is_logged_in_blocks_until_session_ready():
+    # The boot thread spawned at import sets _session_ready when it
+    # finishes. If it's still running when this test clears the event,
+    # it re-sets it mid-test and the probe below doesn't block. Join
+    # it first so the clear is authoritative.
+    for t in threading.enumerate():
+        if t.name == "tidal-session-boot":
+            t.join(timeout=30.0)
     server._invalidate_auth_cache()
     server._session_ready.clear()
     try:
