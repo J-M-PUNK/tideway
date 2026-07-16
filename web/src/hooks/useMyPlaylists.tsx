@@ -2,7 +2,6 @@ import {
   createContext,
   useCallback,
   useContext,
-  useEffect,
   useMemo,
   useRef,
   useState,
@@ -33,10 +32,15 @@ const Ctx = createContext<MyPlaylistsContextValue>({
  * Caches the user's own playlists. Shared via context because multiple
  * consumers need the list (sidebar, add-to-playlist menu, playlist detail)
  * and we'd rather not fetch more than once.
+ *
+ * The provider does NOT fetch on mount: it sits above the component that
+ * owns auth state, and a mount-time fetch races the backend's session
+ * restore (and always loses on a fresh login). AppInner calls refresh()
+ * once auth resolves to logged-in.
  */
 export function MyPlaylistsProvider({ children }: { children: ReactNode }) {
   const [playlists, setPlaylists] = useState<Playlist[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(false);
 
   // Monotonic token used to discard stale refresh responses. Two nearly-
   // simultaneous refresh() calls (e.g. Create + Edit dialogs firing in
@@ -55,10 +59,6 @@ export function MyPlaylistsProvider({ children }: { children: ReactNode }) {
       if (token === refreshToken.current) setLoading(false);
     }
   }, []);
-
-  useEffect(() => {
-    refresh().catch(() => setLoading(false));
-  }, [refresh]);
 
   const optimisticAdd = useCallback((p: Playlist) => {
     setPlaylists((prev) => [p, ...prev.filter((x) => x.id !== p.id)]);
