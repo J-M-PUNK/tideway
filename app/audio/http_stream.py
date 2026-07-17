@@ -155,6 +155,13 @@ class RingBuffer:
         # can skip to the right position after serving from head cache.
         self._total_written = 0
         self._total_read = 0
+        # Track identifier set by the UPnP session on each track change.
+        # The HTTP handler validates that incoming requests carry a
+        # matching ``?ts=`` query param, rejecting stale requests from
+        # a previous track that would otherwise steal the ring lock
+        # and starve the legitimate consumer. 0 = unset (initial /
+        # transitional).
+        self._track_id = 0
 
     def attach(self, force: bool = False) -> tuple:
         """Register as a consumer. Returns (gen, head_only) tuple.
@@ -221,6 +228,20 @@ class RingBuffer:
                 self._ring_active = True
                 self._cv.notify_all()
 
+    def set_track_id(self, track_id: int) -> None:
+        """Set the current track identifier.
+
+        Called by the UPnP session after flush() and before
+        notifying the renderer of a new track, so the HTTP handler
+        can reject stale requests carrying a previous track's
+        ?ts= value."""
+        with self._cv:
+            self._track_id = track_id
+
+    @property
+    def track_id(self) -> int:
+        return self._track_id
+
     def clear_ring_active(self, gen: int) -> None:
         """Clear _ring_active when the Phase 3 consumer exits.
 
@@ -254,12 +275,13 @@ class RingBuffer:
         to block_timeout seconds for the consumer to drain enough
         space. Returns True if written, False if closed.
         """
-        # Fill head cache (non-destructive, first _head_max bytes)
-        if len(self._head) < self._head_max:
-            space = self._head_max - len(self._head)
-            self._head.extend(data[:space])
         deadline = time.monotonic() + block_timeout
         with self._cv:
+            # Fill head cache under the lock so write() and flush()
+            # don't race on _head (flush clears it under the lock).
+            if len(self._head) < self._head_max:
+                space = self._head_max - len(self._head)
+                self._head.extend(data[:space])
             while True:
                 if self._closed:
                     return False
@@ -275,6 +297,7 @@ class RingBuffer:
                         "ring buffer overflow: dropping %d bytes", overflow
                     )
                     del self._buf[:overflow]
+                    self._total_read += overflow
                     self._buf.extend(data)
                     self._total_written += len(data)
                     self._signal_data_ready(len(data))
@@ -288,6 +311,7 @@ class RingBuffer:
                         block_timeout, len(self._buf), self._max, overflow,
                     )
                     del self._buf[:overflow]
+                    self._total_read += overflow
                     self._buf.extend(data)
                     self._total_written += len(data)
                     self._signal_data_ready(len(data))
@@ -356,15 +380,16 @@ class RingBuffer:
         renderer's old socket — the new track's FLAC header arrives
         mid-stream on the old connection, corrupting the decoder.
         """
-        self._data_ready.clear()
-        self._head.clear()
-        self._total_written = 0
-        self._total_read = 0
-        self._source_done = False
         with self._cv:
+            self._head.clear()
+            self._total_written = 0
+            self._total_read = 0
+            self._source_done = False
             self._buf.clear()
             self._ring_active = False
+            self._track_id = 0
             self._gen += 1
+            self._data_ready.clear()
             self._cv.notify_all()
 
     def fill_ratio(self) -> float:
@@ -766,10 +791,9 @@ class FlacPassthroughEncoder:
             extradata = getattr(
                 stream_in.codec_context, "extradata", None
             ) or b""
-            print(
-                f"[upnp] passthrough: extradata ({len(extradata)}B) "
-                f"hex={extradata[:48].hex()}",
-                flush=True,
+            log.debug(
+                "[upnp] passthrough: extradata (%dB) hex=%s",
+                len(extradata), extradata[:48].hex(),
             )
             # PyAV/libav wraps the raw STREAMINFO in an extra 4-byte
             # "dfla" version header on some builds. Strip it: STREAMINFO
@@ -792,10 +816,9 @@ class FlacPassthroughEncoder:
                 )
                 raw_streaminfo = b""
 
-            print(
-                f"[upnp] passthrough: raw_streaminfo ({len(raw_streaminfo)}B) "
-                f"hex={raw_streaminfo[:48].hex()}",
-                flush=True,
+            log.debug(
+                "[upnp] passthrough: raw_streaminfo (%dB) hex=%s",
+                len(raw_streaminfo), raw_streaminfo[:48].hex(),
             )
 
             si_len = len(raw_streaminfo) if raw_streaminfo else 34
@@ -840,12 +863,10 @@ class FlacPassthroughEncoder:
             # needs valid FLAC bytes on its first read to init its
             # decoder.
             self._buffer.data_ready.set()
-            print(
-                f"[upnp] passthrough: wrote FLAC header "
-                f"({len(header)} bytes, STREAMINFO={si_len}B "
-                f"bps={extradata_bps}) "
-                f"hex={header.hex()[:64]}",
-                flush=True,
+            log.debug(
+                "[upnp] passthrough: wrote FLAC header "
+                "(%d bytes, STREAMINFO=%dB bps=%d) hex=%s",
+                len(header), si_len, extradata_bps, header.hex()[:64],
             )
 
             # Use the frame-detected bps for pacing.
@@ -858,11 +879,9 @@ class FlacPassthroughEncoder:
                 nonlocal packets_sent
                 if packets_sent < 3:
                     sync_ok = raw[:2] == b"\xff\xf8" or raw[:2] == b"\xff\xf9"
-                    print(
-                        f"[upnp] passthrough: pkt#{packets_sent} "
-                        f"len={len(raw)} sync={sync_ok} "
-                        f"hex={raw[:32].hex()}",
-                        flush=True,
+                    log.debug(
+                        "[upnp] passthrough: pkt#%d len=%d sync=%s hex=%s",
+                        packets_sent, len(raw), sync_ok, raw[:32].hex(),
                     )
                 if not self._buffer.write(raw, block=True, block_timeout=600.0):
                     print(
@@ -1120,6 +1139,21 @@ class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
             self.send_error(404, "not found")
             return
         buf = server.buffer
+        # Parse ?ts= from the request to detect stale requests from
+        # a previous track. UAPP sometimes sends a Range request to
+        # an old URL after a track change — if we let it reach
+        # Phase 2/3, skip_to() succeeds (buffer has fresh data) and
+        # set_ring_active() steals the ring lock, leaving the
+        # legitimate new-track connection stuck in head-only mode.
+        # Instead of rejecting with 410 (which breaks UAPP's
+        # recovery path), serve from head cache only and return
+        # without ever attaching as a consumer. UAPP gets the data
+        # it needs (or a partial response) while the ring lock
+        # stays free for the real connection.
+        _parsed = urllib.parse.urlsplit(self.path)
+        _req_ts = int(urllib.parse.parse_qs(_parsed.query).get("ts", [0])[0])
+        _cur_id = buf.track_id
+        _stale = bool(_req_ts and _cur_id and _req_ts != _cur_id)
         # Wait for the encoder to have written at least the FLAC
         # header before sending any response. If we send the 206
         # with Content-Length before data is available, the
@@ -1129,6 +1163,34 @@ class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
             self.send_error(503, "stream data not ready")
             return
         self._send_stream_headers(server)
+        # Set a socket write timeout so that _write_chunk doesn't
+        # block for minutes when the receiver stops reading the
+        # socket (UAPP pauses reading for ~3.5 min after each seek).
+        # Without this, the TCP send buffer fills, write() blocks,
+        # and the stream hangs until UAPP's OkHttp times out and
+        # issues a new Range request — by which time the RingBuffer
+        # has moved past the seek target and the connection dies
+        # with an avcodec error.
+        self.request.settimeout(30.0)
+        # Stale request from a previous track's URL. Serve from head
+        # cache only (non-destructive) and return without calling
+        # attach(). UAPP gets whatever data is available at the
+        # requested offset without ever calling set_ring_active(),
+        # so the legitimate new-track connection keeps the ring.
+        if _stale:
+            _stale_sent = self._range_start
+            while _stale_sent < buf.head_size:
+                _chunk = buf.read_head(_stale_sent, 16384)
+                if not _chunk:
+                    break
+                self._write_chunk(_chunk)
+                _stale_sent += len(_chunk)
+            print(
+                f"[http_stream] STALE start={self._range_start} "
+                f"sent={_stale_sent} from {self.client_address[0]}",
+                flush=True,
+            )
+            return
         # Become a consumer. If a main streaming connection is
         # already in Phase 3 (RingBuffer), we become "head-only":
         # same gen, but we read only from head cache and never
@@ -1139,15 +1201,12 @@ class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
         # consumer and can read from the RingBuffer. Without this,
         # head_only connections return 0 bytes when UAPP seeks beyond
         # head cache size → "unexpected end of stream" → crash.
-        _force = self._range_start >= buf.head_size
+        # For DLNA connections, force-supersede when the Range start
+        # is beyond the head cache (a genuine seek, not a probe).
+        # For Cast connections, always force-supersede so reconnects
+        # pick up the live edge instead of becoming head-only.
+        _force = not server.dlna or self._range_start >= buf.head_size
         my_gen, head_only = buf.attach(force=_force)
-        # The (gen, head_only) tuple return is safe for both DLNA
-        # and Cast paths. Cast sessions never call attach()
-        # directly — cast.py only writes to the buffer and lets
-        # this handler serve it. The Cast path (server.dlna=False)
-        # still gets 200 + chunked unchanged; head_only is False on
-        # first attach since _ring_active starts False, so Cast's
-        # single-connection streaming is unaffected.
         # Start serving at the Range offset parsed in
         # _send_stream_headers (0 if no Range header was sent).
         bytes_sent = self._range_start
@@ -1156,61 +1215,76 @@ class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
         _log_start = bytes_sent
         end_reason = "closed"
         try:
-            # Phase 1 — serve from head cache (non-destructive),
-            # starting at the Range offset. Multiple connections
-            # can read the same head cache without conflict; this
-            # gives every renderer's probe and decoder-init access
-            # to bytes 0..head_size without going through the
-            # destructive RingBuffer.
-            while bytes_sent < buf.head_size:
-                if buf.is_superseded(my_gen):
-                    end_reason = "superseded"
-                    if self._chunked:
-                        self._write_chunk(b"")
-                    return
-                chunk = buf.read_head(bytes_sent, 16384)
-                if not chunk:
-                    break
-                self._write_chunk(chunk)
-                bytes_sent += len(chunk)
-                bytes_from_head += len(chunk)
-            # Phase 2/3 — only if we're the main consumer (not
-            # head-only). Head-only connections stop here: they've
-            # served what they need from the head cache and exit
-            # cleanly, leaving the RingBuffer for the main stream.
-            if head_only:
-                if self._chunked:
-                    self._write_chunk(b"")
-                end_reason = "head_only_done"
-            else:
-                # Phase 2 — align the RingBuffer to bytes_sent.
-                # Always call (not only when > 0):
-                #   start=0, head served 2MB → skip to 2MB
-                #   start=192KB, head served 1.8MB → skip to 2MB
-                #   start=3MB, head served 0 bytes → skip to 3MB
-                buf.skip_to(bytes_sent, gen=my_gen, timeout=5.0)
-                # Mark ourselves as the active RingBuffer consumer.
-                # From now on, attach() won't supersede us — new
-                # callers become head-only instead.
-                buf.set_ring_active(my_gen)
-                # Phase 3 — stream from RingBuffer (destructive).
-                while True:
+            if server.dlna:
+                # Phase 1 (DLNA only) — serve from head cache
+                # (non-destructive), starting at the Range offset.
+                # Multiple connections can read the same head cache
+                # without conflict; this gives UAPP's probe and
+                # decoder-init connections access to bytes
+                # 0..head_size without going through the destructive
+                # RingBuffer. Cast reconnects skip this: they should
+                # start at the live edge, not replay the intro.
+                while bytes_sent < buf.head_size:
                     if buf.is_superseded(my_gen):
                         end_reason = "superseded"
                         if self._chunked:
                             self._write_chunk(b"")
                         return
-                    chunk = buf.read(16384, timeout=2.0, gen=my_gen)
+                    chunk = buf.read_head(bytes_sent, 16384)
                     if not chunk:
-                        if buf.is_source_done or buf.is_closed or buf.is_superseded(my_gen):
-                            end_reason = "source_done" if buf.is_source_done else ("closed" if buf.is_closed else "superseded")
-                            if self._chunked:
-                                self._write_chunk(b"")
-                            return
-                        continue
+                        break
                     self._write_chunk(chunk)
-                    bytes_from_ring += len(chunk)
-        except (BrokenPipeError, ConnectionResetError):
+                    bytes_sent += len(chunk)
+                    bytes_from_head += len(chunk)
+                # Phase 2/3 (DLNA only) — head-only connections
+                # (UAPP probe/init) stop here: they've served what
+                # they need from head cache and exit cleanly.
+                if head_only:
+                    if self._chunked:
+                        self._write_chunk(b"")
+                    end_reason = "head_only_done"
+                    return
+                # Phase 2 — align the RingBuffer to bytes_sent.
+                # Always call (not only when > 0):
+                #   start=0, head served 2MB → skip to 2MB
+                #   start=192KB, head served 1.8MB → skip to 2MB
+                #   start=3MB, head served 0 bytes → skip to 3MB
+                if not buf.skip_to(bytes_sent, gen=my_gen, timeout=5.0):
+                    # Seek position unreachable — the RingBuffer has
+                    # already discarded that data or the encoder can't
+                    # keep up. Close the connection so UAPP doesn't
+                    # receive data from the wrong stream offset.
+                    end_reason = "skip_failed"
+                    if self._chunked:
+                        self._write_chunk(b"")
+                    return
+                # Mark ourselves as the active RingBuffer consumer.
+                # From now on, attach() won't supersede us — new
+                # callers become head-only instead. Cast reconnects
+                # skip this so they always supersede the old consumer.
+                buf.set_ring_active(my_gen)
+            # Phase 3 — stream from RingBuffer (destructive).
+            # For DLNA, this runs after Phase 2 and set_ring_active.
+            # For Cast, it runs directly — no head cache, no skip_to,
+            # no ring lock — preserving the old supersede-and-serve-
+            # live semantics that Cast reconnects depend on.
+            while True:
+                if buf.is_superseded(my_gen):
+                    end_reason = "superseded"
+                    if self._chunked:
+                        self._write_chunk(b"")
+                    return
+                chunk = buf.read(16384, timeout=2.0, gen=my_gen)
+                if not chunk:
+                    if buf.is_source_done or buf.is_closed or buf.is_superseded(my_gen):
+                        end_reason = "source_done" if buf.is_source_done else ("closed" if buf.is_closed else "superseded")
+                        if self._chunked:
+                            self._write_chunk(b"")
+                        return
+                    continue
+                self._write_chunk(chunk)
+                bytes_from_ring += len(chunk)
+        except (BrokenPipeError, ConnectionResetError, socket.timeout):
             end_reason = "broken_pipe"
             return
         finally:

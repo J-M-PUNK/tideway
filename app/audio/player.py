@@ -1323,14 +1323,17 @@ class PCMPlayer:
         # local file.
         if _upnp_manager is not None and isinstance(source_spec, list):
             try:
-                    if _upnp_manager.is_active():
-                        _upnp_manager.start_passthrough(
-                            source_spec,
-                            prefetched=prefetched_bytes,
-                            metadata=self._current_track_meta,
-                        )
-            except Exception:
-                pass
+                if _upnp_manager.is_active():
+                    _upnp_manager.start_passthrough(
+                        source_spec,
+                        prefetched=prefetched_bytes,
+                        metadata=self._current_track_meta,
+                    )
+            except Exception as exc:
+                print(
+                    f"[player] upnp start_passthrough failed: {exc!r}",
+                    flush=True,
+                )
 
         decoder = Decoder(source)
 
