@@ -151,6 +151,25 @@ listening activity chart that responds to period filters.
 
 ![Artist page](assets/screenshots/artist-page.png)
 
+**AI-generated music.** Tidal tags tracks it identifies as 100%
+AI-generated, part of the AI policy it started rolling out in July
+2026. Tideway reads that tag and, with the filter on, hides those
+tracks everywhere you browse: search, artist and album pages, mixes,
+radio, and the Home recommendations. The downloader skips them too,
+so expanding an album or playlist never quietly pulls in AI tracks.
+Your own library is the one exception. Anything you've already
+favorited still shows, which mirrors how Tidal's own client treats
+the setting. The filter is on by default and lives in Settings under
+Playback. It's a local preference on this install, not something
+stored on your Tidal account, so it doesn't sync across machines or
+with the official app. Existing installs get a one-time notice on the
+Home screen the first time they open after updating, with the option
+to allow AI content right there if you'd rather keep it.
+
+![The one-time AI-content notice on first launch after updating](assets/screenshots/ai-content-notice.png)
+
+![The Hide AI-generated content setting under Playback](assets/screenshots/ai-content-setting.png)
+
 **Data enrichment.** Last.fm powers scrobbling and per-user or
 global playcounts on every track, album, and artist page. Spotify
 contributes a separate layer of public data through its anonymous
