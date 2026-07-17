@@ -648,8 +648,12 @@ class PCMPlayer:
                                 prefetched=None,
                                 metadata=self._current_track_meta,
                             )
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            print(
+                                f"[player] upnp start_passthrough failed "
+                                f"(Path 0): {exc!r}",
+                                flush=True,
+                            )
                 self._dbg(f"load Path 0: already playing track={track_id}")
                 return self.snapshot()
             # Path 0b: a preload for this track is already buffering.
@@ -849,8 +853,12 @@ class PCMPlayer:
                             prefetched=prefetched_bytes,
                             metadata=self._current_track_meta,
                         )
-                except Exception:
-                    pass
+                except Exception as exc:
+                    print(
+                        f"[player] upnp start_passthrough failed "
+                        f"(Path B): {exc!r}",
+                        flush=True,
+                    )
 
             decoder = Decoder(initial_source)
             t_decoder = time.monotonic()
@@ -3243,8 +3251,12 @@ class PCMPlayer:
                     prefetched=None,
                     metadata=self._current_track_meta,
                 )
-            except Exception:
-                pass
+            except Exception as exc:
+                print(
+                    f"[player] upnp start_passthrough failed "
+                    f"(adopt_preload): {exc!r}",
+                    flush=True,
+                )
         self._preload = None
         self._state = "playing"
         self._last_error = None
@@ -3718,6 +3730,20 @@ class PCMPlayer:
                 old_stream.close()
             except Exception:
                 pass
+        # Signal source_done to the DLNA passthrough encoder so the
+        # renderer sees a clean end-of-stream instead of hanging on
+        # the HTTP connection until the 30s write timeout kicks in.
+        # Only when no preload exists — if one is pending, the gapless
+        # transition will start passthrough for the next track.
+        if _upnp_manager is not None:
+            try:
+                if _upnp_manager.is_active():
+                    _upnp_manager.signal_source_done()
+            except Exception as exc:
+                print(
+                    f"[player] upnp signal_source_done failed: {exc!r}",
+                    flush=True,
+                )
         self._emit()
 
     def _recover_from_device_loss(self) -> None:
@@ -3957,8 +3983,12 @@ class PCMPlayer:
                             prefetched=None,
                             metadata=self._current_track_meta,
                         )
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        print(
+                            f"[player] upnp start_passthrough failed "
+                            f"(bridge): {exc!r}",
+                            flush=True,
+                        )
                 self._open_output_stream(
                     pre.sample_rate, pre.channels, pre.sd_dtype
                 )
