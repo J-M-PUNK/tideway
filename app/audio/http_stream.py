@@ -939,6 +939,15 @@ class FlacPassthroughEncoder:
                 self._done_event.set()
             print("[upnp] passthrough thread ended", flush=True)
 
+    def signal_source_done(self) -> None:
+        """Signal that the source has ended (natural EOF).
+
+        Called by the player when the last track finishes with no
+        preloaded next track, so the renderer sees a clean end-of-
+        stream instead of timing out after 30s.
+        """
+        self._buffer.source_done()
+
     def close(self) -> None:
         """Stop the encoder thread and clean up.
 

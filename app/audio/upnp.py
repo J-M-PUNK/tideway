@@ -679,6 +679,21 @@ class UpnpManager:
                 flush=True,
             )
 
+    def signal_source_done(self) -> None:
+        """Signal that the current track's source has reached EOF.
+
+        Called by the player when the last track ends with no preload,
+        so the passthrough encoder tells the ring buffer the source is
+        done. The HTTP serve loop then closes the connection once any
+        remaining buffered data is drained.
+        """
+        with self._session_lock:
+            session = self._session
+        if session is None:
+            return
+        if session.passthrough_encoder is not None:
+            session.passthrough_encoder.signal_source_done()
+
     def stop_passthrough(self) -> None:
         """Stop passthrough and revert to PCM re-encode mode."""
         with self._session_lock:
