@@ -334,6 +334,17 @@ export interface Settings {
    *  as Tidal returned. Mirrors the toggle Tidal's own client has
    *  under its "Explicit content" setting. */
   explicit_content_preference: "explicit" | "clean" | "both";
+  /** Hide tracks Tidal has tagged as 100% AI-generated (the `ai` flag
+   *  on the track payload). When true, such tracks are dropped from
+   *  browse lists and refused by the downloader. Mirrors the
+   *  "AI content" toggle in Tidal's own client, but defaults on —
+   *  Tideway hides AI content out of the box. */
+  hide_ai_content: boolean;
+  /** Whether the user has dismissed the one-time Home-screen notice
+   *  about AI content now being hidden by default. False shows the
+   *  notice once (existing installs upgrading into the change); fresh
+   *  installs start true so new users don't see it. */
+  ai_filter_notice_ack: boolean;
   /** Bit-perfect audio output — CoreAudio change_device_parameters
    *  + fail_if_conversion_required on macOS; WASAPI exclusive on
    *  Windows. No effect on Linux. */
