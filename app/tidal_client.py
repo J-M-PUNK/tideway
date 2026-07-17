@@ -211,6 +211,51 @@ def _swap_to_impersonated_transport(session: tidalapi.Session) -> None:
     session.request_session = impersonated
 
 
+_track_ai_patched = False
+
+
+def _patch_track_ai_field() -> None:
+    """Teach tidalapi's Track parser to keep the `ai` flag.
+
+    Tidal tags every 100% AI-generated track with a top-level `ai`
+    boolean on the track payload (its July 2026 AI-content policy).
+    tidalapi 0.8.11 parses ~30 track fields but drops this one and
+    retains no raw JSON, so without this patch the flag never reaches
+    Python and the AI-content filter has nothing to act on. Wrap
+    parse_track so the returned Track carries `ai`; a class-level
+    default of None keeps `getattr(track, "ai", None)` safe on any
+    Track built before the wrapper ran.
+
+    Class-level and idempotent: Track objects are created deep inside
+    tidalapi, so an instance patch can't reach them, and the login
+    flow rebuilds the Session more than once.
+    """
+    global _track_ai_patched
+    if _track_ai_patched:
+        return
+    from tidalapi.media import Track
+
+    original = Track.parse_track
+    Track.ai = None
+
+    def parse_track_with_ai(self, json_obj, album=None):
+        track = original(self, json_obj, album)
+        ai = bool(json_obj.get("ai")) if "ai" in json_obj else None
+        # parse_track returns copy.copy(self), and the two callers keep
+        # different objects: list parsing (map_json) uses the returned
+        # copy, but Track.__init__ discards _get's return and keeps
+        # `self`. Set the flag on both so either path carries it.
+        track.ai = ai
+        self.ai = ai
+        return track
+
+    Track.parse_track = parse_track_with_ai
+    _track_ai_patched = True
+
+
+_patch_track_ai_field()
+
+
 def _friendly_pkce_error(exc: BaseException) -> Optional[str]:
     """Translate the cryptic exceptions tidalapi can raise during the
     PKCE token exchange into something a non-developer can act on.

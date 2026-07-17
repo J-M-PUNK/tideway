@@ -329,6 +329,24 @@ class Settings:
     #  - "clean":    keep the clean edit when both exist.
     #  - "both":     show both, as the raw API returned them.
     explicit_content_preference: str = "explicit"
+    # Mirror Tidal's July 2026 AI-content filter. Tidal tags every
+    # 100% AI-generated track with an `ai` boolean on the track
+    # payload; its own clients keep a local (not account-synced)
+    # preference to hide that content. When this is on, tracks whose
+    # `ai` flag is true are dropped from browse lists and refused by
+    # the downloader. Defaults on: Tideway hides AI-generated tracks
+    # out of the box (a stricter stance than Tidal, whose own default
+    # is `aiContentEnabled = true`). Users who want AI content can
+    # turn it off in Playback settings.
+    hide_ai_content: bool = True
+    # Whether the user has seen the one-time notice explaining that
+    # Tideway now hides AI-generated tracks by default. False means the
+    # Home screen shows the notice once; dismissing it PUTs this True.
+    # Suppressed for fresh installs in load_settings() (a new user
+    # doesn't need to be told about a default they never had a
+    # different value for) — the notice is only for existing installs
+    # upgrading into the change.
+    ai_filter_notice_ack: bool = False
     # Desktop window geometry, persisted on close and restored on the
     # next launch. -1 means "not set yet" so the first run uses the
     # platform default size + centred position instead of forcing a
@@ -464,7 +482,14 @@ def load_settings() -> Settings:
                 # the updated values.
                 pass
         return settings
-    return Settings()
+    # Fresh install: no settings file yet. Mark the AI-filter notice
+    # already acknowledged so a brand-new user isn't shown a "this
+    # changed" popup for a default they're seeing for the first time.
+    # Existing installs fall through the branch above where the field
+    # defaults to False, so they get the notice once after upgrading.
+    fresh = Settings()
+    fresh.ai_filter_notice_ack = True
+    return fresh
 
 
 def save_settings(settings: Settings):

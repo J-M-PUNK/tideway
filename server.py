@@ -1376,6 +1376,11 @@ def track_to_dict(t) -> dict:
         # Spotify-enrichment path to resolve a Tidal track to its
         # Spotify counterpart (and thus to global play counts).
         "isrc": _first(lambda: t.isrc),
+        # Tidal's 100%-AI-generated flag (its July 2026 AI policy).
+        # None when the payload didn't carry it (older cached objects
+        # or endpoints that omit it); True/False otherwise. The
+        # frontend can badge it; hide_ai_content filtering keys off it.
+        "ai": _first(lambda: t.ai),
     }
 
 
@@ -1516,6 +1521,24 @@ def filter_explicit_dupes(items: list, preference: str, *, kind: str) -> list:
         )
         out.append(preferred)
     return out
+
+
+def filter_ai_tracks(items: list) -> list:
+    """Drop tracks Tidal tagged as 100% AI-generated, honouring the
+    hide_ai_content setting.
+
+    `items` is a list of tidalapi Track objects (the `ai` attribute is
+    populated by the parse patch in app/tidal_client.py). No-op when the
+    setting is off, so browse lists are untouched for users who leave
+    AI content enabled. A missing/None `ai` (older cached objects, or an
+    endpoint that omitted the flag) is treated as not-AI: we only drop
+    on an explicit True so a sparse payload never blanks a shelf. This
+    mirrors Tidal's own client, which keeps the toggle local rather than
+    on the account and removes flagged tracks from listings when it's
+    on."""
+    if not getattr(settings, "hide_ai_content", False):
+        return list(items)
+    return [it for it in items if getattr(it, "ai", None) is not True]
 
 
 def artist_to_dict(a) -> dict:
@@ -4159,8 +4182,10 @@ def lastfm_chart_top_tracks_resolved(limit: int = 50) -> list[dict]:
                     flush=True,
                 )
                 return None
-            tracks = filter_explicit_dupes(
-                results.get("tracks", []), pref, kind="track"
+            tracks = filter_ai_tracks(
+                filter_explicit_dupes(
+                    results.get("tracks", []), pref, kind="track"
+                )
             )
             if not tracks:
                 print(
@@ -7425,6 +7450,7 @@ def search(q: str, limit: int = 25) -> dict:
     # tracks participate in the explicit/clean collapse.
     tracks = _rerank_tracks(q, tidal_top, artists, raw_tracks, taste)
     tracks = filter_explicit_dupes(tracks, pref, kind="track")
+    tracks = filter_ai_tracks(tracks)
     albums = filter_explicit_dupes(
         _rerank_albums(q, raw_albums, taste), pref, kind="album"
     )
@@ -7451,6 +7477,16 @@ def search(q: str, limit: int = 25) -> dict:
             best = (cand, entity)
     if best is not None:
         top_hit = best[1]
+
+    # The hero can still be Tidal's nominated top_hit when we didn't
+    # override it — drop it if that's an AI track and the filter is on,
+    # so a hidden track can't sneak back in as the hero card.
+    if (
+        getattr(settings, "hide_ai_content", False)
+        and type(top_hit).__name__ == "Track"
+        and getattr(top_hit, "ai", None) is True
+    ):
+        top_hit = None
 
     # Pool was widened for ranking; trim back to the requested size.
     return {
@@ -8189,7 +8225,10 @@ def album_detail(album_id: int) -> dict:
     with ThreadPoolExecutor(max_workers=2) as pool:
         f_tracks = pool.submit(
             _safe,
-            lambda: [track_to_dict(t) for t in tidal.get_album_tracks(album)],
+            lambda: [
+                track_to_dict(t)
+                for t in filter_ai_tracks(tidal.get_album_tracks(album))
+            ],
             [],
         )
         f_similar = pool.submit(
@@ -8289,7 +8328,8 @@ def artist_detail(artist_id: int) -> dict:
             _safe_t,
             "top_tracks",
             lambda: [
-                track_to_dict(t) for t in tidal.get_artist_top_tracks(artist)
+                track_to_dict(t)
+                for t in filter_ai_tracks(tidal.get_artist_top_tracks(artist))
             ],
             [],
         )
@@ -8523,7 +8563,7 @@ def artist_radio(artist_id: int) -> list[dict]:
         tracks = artist.get_radio(limit=100)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc))
-    return [track_to_dict(t) for t in tracks]
+    return [track_to_dict(t) for t in filter_ai_tracks(tracks)]
 
 
 _artist_extras_cache: dict[str, tuple[float, dict]] = {}
@@ -9146,6 +9186,8 @@ def _artist_credits_list(artist_id: int, limit: int) -> list[dict]:
             track = tidal.session.track(track_id)
         except Exception:
             continue
+        if not filter_ai_tracks([track]):
+            continue
         out.append({**track_to_dict(track), "role": role})
     return out
 
@@ -9227,7 +9269,7 @@ def track_radio(track_id: int) -> list[dict]:
         radio = track.get_track_radio()
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc))
-    return [track_to_dict(t) for t in radio]
+    return [track_to_dict(t) for t in filter_ai_tracks(radio)]
 
 
 @app.get("/api/mixes")
@@ -9275,7 +9317,12 @@ def mix_detail(mix_id: str) -> dict:
         items = list(mix.items())
     except Exception:
         items = []
-    tracks = [track_to_dict(t) for t in items if type(t).__name__ == "Track"]
+    tracks = [
+        track_to_dict(t)
+        for t in filter_ai_tracks(
+            [it for it in items if type(it).__name__ == "Track"]
+        )
+    ]
     result = {
         "kind": "mix",
         "id": mix_id,
@@ -9333,7 +9380,8 @@ def _fetch_playlist_items_with_added_at(
             except Exception:
                 tracks = []
             return [
-                {**track_to_dict(t), "added_at": None} for t in tracks
+                {**track_to_dict(t), "added_at": None}
+                for t in filter_ai_tracks(tracks)
             ]
 
         items = payload.get("items") or []
@@ -9349,6 +9397,8 @@ def _fetch_playlist_items_with_added_at(
                 # single source of truth for the response shape.
                 track_obj = tidal.session.parse_track(raw)
             except Exception:
+                continue
+            if not filter_ai_tracks([track_obj]):
                 continue
             track_dict = track_to_dict(track_obj)
             created = (entry or {}).get("created")
@@ -10359,6 +10409,8 @@ class SettingsPayload(BaseModel):
     continue_playing_after_queue_ends: Optional[bool] = None
     pause_on_other_device: Optional[bool] = None
     explicit_content_preference: Optional[str] = None
+    hide_ai_content: Optional[bool] = None
+    ai_filter_notice_ack: Optional[bool] = None
     download_rate_limit_mbps: Optional[int] = None
     eq_mode: Optional[str] = None
     eq_active_profile_id: Optional[str] = None
@@ -10579,6 +10631,11 @@ def _serialize_page_item(item) -> Optional[dict]:
     import tidalapi
 
     if isinstance(item, tidalapi.Track):
+        # Editorial rows are recommendations; drop AI-flagged tracks
+        # when the filter is on, the way Tidal strips them from its own
+        # home/explore surfaces. Returning None lets the caller omit it.
+        if not filter_ai_tracks([item]):
+            return None
         return track_to_dict(item)
     if isinstance(item, tidalapi.Album):
         # Drop albums Tidal lists but won't stream (region lock,
