@@ -837,16 +837,16 @@
                 },
                 {
                     "type": "file",
-                    "url": "https://files.pythonhosted.org/packages/9d/6e/dbf1d0625dc711fb2851f4f3c3055c39ed58bae92082d8c627dbe6013736/aiohttp-3.14.1-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
-                    "sha256": "faccab372e66bc76d5731525e7f1143c922271725b9d38c9f97edcc66266b451",
+                    "url": "https://files.pythonhosted.org/packages/0c/31/2e9ca3b21c07ea8a001e2b142cb01401fd34fd07b248a0b95a04c3ebc4ec/aiohttp-3.14.2-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+                    "sha256": "46b8887aa303075c1e5b24123f314a1a7bbfa03d0213dff8bb70503b2148c853",
                     "only-arches": [
                         "x86_64"
                     ]
                 },
                 {
                     "type": "file",
-                    "url": "https://files.pythonhosted.org/packages/e8/ed/3c0fb5c500fdd8e7ebc10d1889c04384fffa1a9163eac1356088ca9da1b1/aiohttp-3.14.1-cp313-cp313-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl",
-                    "sha256": "bd869c427324e5cb15195793de951295710db28be7d818247f3097b4ab5d4b96",
+                    "url": "https://files.pythonhosted.org/packages/87/f7/6d081c2ee838458492c7ae1062399bdd68f149811d257d4502e79a25b306/aiohttp-3.14.2-cp313-cp313-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl",
+                    "sha256": "09d1b0deec698d1198eb0b8f910dd9432d856985abbfea3f06be8b296a6619b4",
                     "only-arches": [
                         "aarch64"
                     ]
