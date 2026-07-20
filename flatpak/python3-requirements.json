@@ -250,7 +250,7 @@
             "name": "python3-fastapi",
             "buildsystem": "simple",
             "build-commands": [
-                "pip3 install --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"fastapi>=0.139.0\" --no-build-isolation"
+                "pip3 install --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"fastapi>=0.139.2\" --no-build-isolation"
             ],
             "sources": [
                 {
