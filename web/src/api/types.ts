@@ -118,6 +118,25 @@ export interface PlaylistFolder {
   num_items: number;
 }
 
+/** Local-only user album collection (#243). Summary shape used by the
+ *  library grid: name, album count, and up to four covers for a
+ *  stacked thumbnail. Not synced to Tidal. */
+export interface AlbumCollectionSummary {
+  id: string;
+  name: string;
+  count: number;
+  covers: string[];
+  created_at: number;
+}
+
+/** Full album collection with its album list, for the detail page. */
+export interface AlbumCollectionDetail {
+  id: string;
+  name: string;
+  created_at: number;
+  albums: Album[];
+}
+
 export type LibraryItem = Track | Album | Artist | Playlist;
 
 /**

@@ -41,6 +41,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
+from app import album_collections
 from app import aoty as aoty_module
 from app import aoty_resolver
 from app import deezer_import
@@ -7922,6 +7923,95 @@ def _first_folder_or_throwaway():
     # endpoints and only use `self.trn` for a couple of operations, not
     # move_items_to_folder.
     return tidalapi.Folder(session=tidal.session, folder_id="root")
+
+
+# ---------------------------------------------------------------------------
+# Local album collections (#243). User-defined groups of favorite albums,
+# stored on disk with no Tidal round-trip — Tidal has no album-folder API.
+# See app/album_collections.py.
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/collections")
+def list_album_collections() -> list[dict]:
+    _require_local_access()
+    return album_collections.list_collections()
+
+
+class CreateCollectionRequest(BaseModel):
+    name: str
+
+
+@app.post("/api/collections")
+def create_album_collection(req: CreateCollectionRequest) -> dict:
+    _require_local_access()
+    if not req.name.strip():
+        raise HTTPException(status_code=400, detail="Collection name is required")
+    return album_collections.create_collection(req.name)
+
+
+@app.get("/api/collections/{collection_id}")
+def get_album_collection(collection_id: str) -> dict:
+    _require_local_access()
+    c = album_collections.get_collection(collection_id)
+    if c is None:
+        raise HTTPException(status_code=404, detail="Collection not found")
+    return c
+
+
+class RenameCollectionRequest(BaseModel):
+    name: str
+
+
+@app.patch("/api/collections/{collection_id}")
+def rename_album_collection(
+    collection_id: str, req: RenameCollectionRequest
+) -> dict:
+    _require_local_access()
+    if not req.name.strip():
+        raise HTTPException(status_code=400, detail="Collection name is required")
+    if not album_collections.rename_collection(collection_id, req.name):
+        raise HTTPException(status_code=404, detail="Collection not found")
+    return {"ok": True}
+
+
+@app.delete("/api/collections/{collection_id}")
+def delete_album_collection(collection_id: str) -> dict:
+    _require_local_access()
+    if not album_collections.delete_collection(collection_id):
+        raise HTTPException(status_code=404, detail="Collection not found")
+    return {"ok": True}
+
+
+class AddAlbumToCollectionRequest(BaseModel):
+    album: dict
+
+
+@app.post("/api/collections/{collection_id}/albums")
+def add_album_to_collection(
+    collection_id: str, req: AddAlbumToCollectionRequest
+) -> dict:
+    _require_local_access()
+    result = album_collections.add_album(collection_id, req.album)
+    if result is None:
+        # Either the collection is missing or the album payload had no
+        # usable id. Distinguish so the UI can show the right message.
+        if album_collections.get_collection(collection_id) is None:
+            raise HTTPException(status_code=404, detail="Collection not found")
+        raise HTTPException(status_code=400, detail="Album id is required")
+    # result is True on add, False when it was already there — both are
+    # a success from the caller's point of view (idempotent add).
+    return {"ok": True, "added": result}
+
+
+@app.delete("/api/collections/{collection_id}/albums/{album_id}")
+def remove_album_from_collection(collection_id: str, album_id: str) -> dict:
+    _require_local_access()
+    if not album_collections.remove_album(collection_id, album_id):
+        raise HTTPException(
+            status_code=404, detail="Album not in collection"
+        )
+    return {"ok": True}
 
 
 # Cache of (path, mtime_ns, size) -> tags dict, shared across /api/library/local
