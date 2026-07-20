@@ -858,8 +858,8 @@
                 },
                 {
                     "type": "file",
-                    "url": "https://files.pythonhosted.org/packages/88/27/37f09d39fb4a7617a5ded95d1013b3a498c25857ca9445f3d8661f6e0ac6/async_upnp_client-0.47.0-py3-none-any.whl",
-                    "sha256": "a879b1041b03b347dcf009c243e084b9ecb19e9c521c39bd435438229dd99602"
+                    "url": "https://files.pythonhosted.org/packages/92/f4/80d89479e4d07d3226b18ad0ec38b159021b9ce421d2d26ff6533b99a887/async_upnp_client-0.47.1-py3-none-any.whl",
+                    "sha256": "b6f1613caabffca6563691f86ed81db145d69dbb2fda8428f4e05ccfe813aa32"
                 },
                 {
                     "type": "file",
