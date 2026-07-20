@@ -1,4 +1,6 @@
 import type {
+  AlbumCollectionDetail,
+  AlbumCollectionSummary,
   AlbumDetail,
   ArtistDetail,
   ArtistExtras,
@@ -853,6 +855,37 @@ export const api = {
           },
         ),
     },
+  },
+  // Local-only album collections (#243). Purely on-device grouping of
+  // favorite albums; no Tidal round-trip.
+  collections: {
+    list: () => req<AlbumCollectionSummary[]>("/api/collections"),
+    get: (id: string) =>
+      req<AlbumCollectionDetail>(`/api/collections/${encodeURIComponent(id)}`),
+    create: (name: string) =>
+      req<AlbumCollectionSummary>("/api/collections", {
+        method: "POST",
+        body: JSON.stringify({ name }),
+      }),
+    rename: (id: string, name: string) =>
+      req<{ ok: boolean }>(`/api/collections/${encodeURIComponent(id)}`, {
+        method: "PATCH",
+        body: JSON.stringify({ name }),
+      }),
+    delete: (id: string) =>
+      req<{ ok: boolean }>(`/api/collections/${encodeURIComponent(id)}`, {
+        method: "DELETE",
+      }),
+    addAlbum: (id: string, album: Album) =>
+      req<{ ok: boolean; added: boolean }>(
+        `/api/collections/${encodeURIComponent(id)}/albums`,
+        { method: "POST", body: JSON.stringify({ album }) },
+      ),
+    removeAlbum: (id: string, albumId: string) =>
+      req<{ ok: boolean }>(
+        `/api/collections/${encodeURIComponent(id)}/albums/${encodeURIComponent(albumId)}`,
+        { method: "DELETE" },
+      ),
   },
   album: (id: string) => req<AlbumDetail>(`/api/album/${id}`),
   albumCredits: (id: string) =>

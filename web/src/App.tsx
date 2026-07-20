@@ -89,6 +89,14 @@ const LocalLibrary = lazy(() =>
 const FolderDetail = lazy(() =>
   import("@/pages/FolderDetail").then((m) => ({ default: m.FolderDetail })),
 );
+const Collections = lazy(() =>
+  import("@/pages/Collections").then((m) => ({ default: m.Collections })),
+);
+const CollectionDetail = lazy(() =>
+  import("@/pages/CollectionDetail").then((m) => ({
+    default: m.CollectionDetail,
+  })),
+);
 const FollowListPage = lazy(() =>
   import("@/pages/FollowListPage").then((m) => ({ default: m.FollowListPage })),
 );
@@ -628,6 +636,14 @@ function Shell({
                       <Route
                         path="/library/folder/:id"
                         element={<FolderDetail onDownload={enqueue} />}
+                      />
+                      <Route
+                        path="/library/collections"
+                        element={<Collections />}
+                      />
+                      <Route
+                        path="/library/collection/:id"
+                        element={<CollectionDetail />}
                       />
                       <Route
                         path="/library/:section"
