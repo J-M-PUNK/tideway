@@ -73,7 +73,7 @@ pynput>=1.8.2
 # which uses curl-cffi (already in this requirements file for
 # tidalapi). pip will still pull tls_client in transitively because
 # it's a hard dep of spotapi, but the runtime never loads its DLL.
-spotapi>=1.2.7
+spotapi>=1.2.8
 # macOS Now Playing integration. Without claiming the system's
 # "active media player" role via MPNowPlayingInfoCenter and
 # MPRemoteCommandCenter, media keys (Cmd-F8, hardware play/pause

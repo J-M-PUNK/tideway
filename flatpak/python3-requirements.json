@@ -666,7 +666,7 @@
             "name": "python3-spotapi",
             "buildsystem": "simple",
             "build-commands": [
-                "pip3 install --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"spotapi>=1.2.7\" --no-build-isolation"
+                "pip3 install --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"spotapi>=1.2.8\" --no-build-isolation"
             ],
             "sources": [
                 {
