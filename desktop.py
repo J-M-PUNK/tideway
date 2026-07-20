@@ -1622,8 +1622,22 @@ def main(argv: Optional[list[str]] = None) -> int:
         # gui=None lets pywebview pick the native backend
         # (edgechromium/WebView2 on Windows, WebKit on macOS,
         # WebKitGTK / QtWebEngine on Linux).
+        #
+        # private_mode defaults to True, which gives the webview an
+        # ephemeral profile that's wiped on exit. That reset the
+        # "dismissed" flags the UI stores in localStorage every restart:
+        # the Last.fm connect nudge and the per-version update banner
+        # both came back on every launch (#276). Point storage at a
+        # stable dir under the app data folder so those flags — and any
+        # future localStorage/cookie state — survive restarts.
+        from app.paths import user_data_dir
+
+        webview_storage = user_data_dir() / "webview"
+        webview_storage.mkdir(parents=True, exist_ok=True)
         try:
-            webview.start()
+            webview.start(
+                private_mode=False, storage_path=str(webview_storage)
+            )
         except webview.errors.WebViewException as exc:
             # Linux only: pywebview needs GTK (with python-gobject +
             # gir1.2-webkit2) or QT (with PyQt5 + QtWebEngine) installed
