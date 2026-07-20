@@ -22,6 +22,14 @@
    *  for light mode; Tailwind classes that reference `bg-background`,
    *  `text-foreground`, etc. pick up whichever set is active. */
   :root {
+    /* Tell the engine the app is dark so UA-rendered controls (the
+     *  native <select> option popup, scrollbars, form widgets) paint
+     *  in a dark scheme. Without this, WebKitGTK falls back to the OS
+     *  default (usually light) and the dropdown popup renders white,
+     *  often white-on-white and unreadable (#274). `.light` flips it
+     *  back below. */
+    color-scheme: dark;
+
     --background: 0 0% 2%;
     --foreground: 0 0% 98%;
     --card: 0 0% 4%;
@@ -52,6 +60,8 @@
   }
 
   .light {
+    color-scheme: light;
+
     /* Off-white base with a cool tint so `bg-card` (pure white) reads
      *  as elevated against it — the old palette had background at 100%
      *  and card at 98%, which left surfaces indistinguishable. The
