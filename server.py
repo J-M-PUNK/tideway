@@ -658,12 +658,22 @@ def _restore_pending_downloads() -> None:
         )
 
 
-# A session that couldn't be validated at boot (no network, or a Tidal
-# backoff window) leaves this undone — `logged_in` is False, so the boot
-# thread skips it. Without this hook the user's pending downloads stay
-# lost for the rest of the process even after the watchdog gets the
-# session back.
-tidal.on_session_restored = _restore_pending_downloads
+def _on_session_restored() -> None:
+    """A session deferred at boot (no network, or a Tidal backoff
+    window) has finally validated.
+
+    Two things were left undone while it looked signed out. The auth
+    cache holds the stand-in answer the deferral produced, whose
+    username reads "Tidal User" because session.user was unset; drop it
+    so the next /auth/status reports the real account. And the boot
+    thread skipped re-enqueueing pending downloads, which nothing else
+    re-runs — without this they stay lost for the rest of the process.
+    """
+    _invalidate_auth_cache()
+    _restore_pending_downloads()
+
+
+tidal.on_session_restored = _on_session_restored
 
 
 def _boot_tidal_session() -> None:
@@ -3087,6 +3097,27 @@ def video_downloads_list() -> list[dict]:
 
 
 # /api/notify route moved to `app/routers/notify.py`.
+
+@app.post("/api/auth/session/retry")
+def auth_session_retry() -> dict:
+    """Retry a session load that a dead network or a backoff window
+    aborted at boot.
+
+    The frontend pokes this when the browser reports connectivity back,
+    so recovery follows the actual event instead of waiting out the
+    watchdog's poll interval (up to a minute). The watchdog stays as the
+    fallback for what `navigator.onLine` can't see — a captive portal
+    clearing, or a Tidal-side outage ending while the LAN was fine
+    throughout.
+
+    Deliberately not behind `_require_auth`: the whole point is that it
+    runs while the app is reporting itself signed-in-but-offline, and
+    gating it on the auth check it exists to repair would deadlock the
+    recovery. It starts a retry of a session already on disk and takes
+    no input.
+    """
+    return {"started": tidal.retry_deferred_load_async()}
+
 
 @app.get("/api/auth/status")
 def auth_status() -> dict:

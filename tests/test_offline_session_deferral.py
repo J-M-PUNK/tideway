@@ -17,6 +17,8 @@ of the process.
 from __future__ import annotations
 
 import json
+import threading
+import time
 
 import curl_cffi.requests.exceptions as curl_exc
 import pytest
@@ -182,6 +184,67 @@ def test_failed_retry_does_not_fire_the_restored_hook(
 
     assert calls["restored"] == 0
     assert client.session_load_deferred() is True
+
+
+def test_connectivity_retry_recovers_without_waiting_for_the_poll(
+    client, session_file, monkeypatch
+):
+    """The watchdog only ticks once a minute. When the browser tells us
+    the network is back we retry immediately instead."""
+    calls = {"n": 0}
+
+    def flaky(*a, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise req_exc.ConnectionError("dns down")
+        return True
+
+    monkeypatch.setattr(client.session, "load_oauth_session", flaky)
+    monkeypatch.setattr(client.session, "check_login", lambda: calls["n"] > 1)
+
+    assert client.load_session() is False
+    assert client.retry_deferred_load_async() is True
+
+    deadline = time.monotonic() + 5.0
+    while client.session_load_deferred() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert client.session_load_deferred() is False
+
+
+def test_connectivity_retry_noops_when_nothing_is_deferred(client):
+    """`online` fires on every reconnect, including ones where the
+    session was fine all along. Those must not hit Tidal."""
+    assert client.session_load_deferred() is False
+    assert client.retry_deferred_load_async() is False
+
+
+def test_concurrent_retries_do_not_stack(client, session_file, monkeypatch):
+    """The browser fires `online` in bursts. Each one must not start
+    another round-trip against the same session object."""
+    started = threading.Event()
+    release = threading.Event()
+    calls = {"n": 0}
+
+    def blocking(*a, **kw):
+        calls["n"] += 1
+        started.set()
+        release.wait(5.0)
+        raise req_exc.ConnectionError("still down")
+
+    monkeypatch.setattr(client.session, "load_oauth_session", blocking)
+    client._session_load_deferred = True
+
+    assert client.retry_deferred_load_async() is True
+    assert started.wait(5.0)
+    # Second and third pokes land while the first is still in flight.
+    assert client.retry_deferred_load_async() is False
+    assert client.retry_deferred_load_async() is False
+    release.set()
+
+    deadline = time.monotonic() + 5.0
+    while client._deferred_retry_lock.locked() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert calls["n"] == 1
 
 
 def test_logout_clears_the_flag(client, session_file, monkeypatch):

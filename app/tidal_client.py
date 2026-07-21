@@ -505,6 +505,9 @@ class TidalClient:
         # yet. Read by the server's auth check (offline ≠ signed out)
         # and cleared by the watchdog's retry once the network is back.
         self._session_load_deferred = False
+        # Serializes the deferred-load retry across the watchdog tick
+        # and connectivity-triggered retries, which can land together.
+        self._deferred_retry_lock = threading.Lock()
         # Cached subscription-tier result. Populated on first call and
         # refreshed every _SUB_TTL_SEC. Subscription almost never changes
         # within a session, so a long TTL is fine.
@@ -851,17 +854,53 @@ class TidalClient:
         signed in?" should treat this as yes-but-offline."""
         return self._session_load_deferred
 
+    def retry_deferred_load_async(self) -> bool:
+        """Retry a deferred session load on a background thread.
+
+        Called when something observed connectivity returning, so
+        recovery tracks the actual event instead of waiting out the
+        watchdog's poll interval. Runs off-thread because the retry
+        makes a Tidal round-trip and the caller is an HTTP handler.
+
+        Returns True when a retry was started. No-ops when there's
+        nothing deferred, or when a retry is already in flight — the
+        browser fires `online` in bursts and each one must not stack
+        another round-trip.
+        """
+        if not self._session_load_deferred:
+            return False
+        if self._deferred_retry_lock.locked():
+            return False
+        threading.Thread(
+            target=self._retry_deferred_load,
+            daemon=True,
+            name="tidal-session-retry",
+        ).start()
+        return True
+
     def _retry_deferred_load(self) -> None:
         """Re-run the session load that a dead network aborted at boot.
 
         Until this succeeds, session.user and session.session_id are
         unset and every check_login() returns False, so the app would
         stay in its offline degraded state for the rest of the process
-        even after the network came back."""
-        _tlog("session load was deferred (offline at boot) — retrying")
-        if self.load_session():
-            _tlog("deferred session load succeeded")
-            self._notify_session_restored()
+        even after the network came back.
+
+        Serialized: the watchdog tick and a connectivity-triggered
+        retry can land together, and two concurrent load_session calls
+        would race on the same session object.
+        """
+        if not self._deferred_retry_lock.acquire(blocking=False):
+            return  # another retry is already in flight
+        try:
+            if not self._session_load_deferred:
+                return  # a racing retry already recovered it
+            _tlog("session load was deferred (offline at boot) — retrying")
+            if self.load_session():
+                _tlog("deferred session load succeeded")
+                self._notify_session_restored()
+        finally:
+            self._deferred_retry_lock.release()
 
     def _refresh_watchdog(self) -> None:
         """Background loop that refreshes the token before it expires.
