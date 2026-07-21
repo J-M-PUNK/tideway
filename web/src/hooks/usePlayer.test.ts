@@ -258,6 +258,15 @@ describe("shuffle order under queue edits", () => {
   it("closes the gap when a track is removed", () => {
     expect(shuffleOrderAfterRemove([1, 3, 0, 2], 2)).toEqual([1, 2, 0]);
   });
+
+  it("shifts the current track too when the insert lands before it", () => {
+    // Queue [A,B,C,D] playing C (index 2), order C,A,D,B. Inserting at
+    // index 1 pushes C to 3, so the new track must land after 3 — not
+    // after whatever happens to sit at the stale index 2.
+    expect(shuffleOrderAfterInsert([2, 0, 3, 1], 1, 2)).toEqual([
+      3, 1, 0, 4, 2,
+    ]);
+  });
 });
 
 describe("shuffleTracks", () => {

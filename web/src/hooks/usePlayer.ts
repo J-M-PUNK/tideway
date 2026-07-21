@@ -156,7 +156,13 @@ export function shuffleOrderAfterInsert(
   currentIndex: number,
 ): number[] {
   const shifted = order.map((i) => (i >= insertAt ? i + 1 : i));
-  const pos = shifted.indexOf(currentIndex);
+  // The current track moves too when the insert lands at or before it.
+  // Today's only caller inserts at queueIndex + 1 so this is a no-op,
+  // but looking up the pre-shift index in a post-shift array would
+  // silently splice after the wrong track for any caller that doesn't.
+  const shiftedCurrent =
+    currentIndex >= insertAt ? currentIndex + 1 : currentIndex;
+  const pos = shifted.indexOf(shiftedCurrent);
   // "Play next" means next in the order the user is actually hearing.
   const at = pos < 0 ? shifted.length : pos + 1;
   return [...shifted.slice(0, at), insertAt, ...shifted.slice(at)];
@@ -170,6 +176,24 @@ export function shuffleOrderAfterRemove(
   return order
     .filter((i) => i !== removedAt)
     .map((i) => (i > removedAt ? i - 1 : i));
+}
+
+/**
+ * The shuffle order for a load that may be replacing the queue.
+ *
+ * A replacement invalidates the old order outright — its indices point
+ * into a list that no longer exists — so deal a fresh one anchored on
+ * the track being loaded. Advancing within the existing queue keeps the
+ * order it's already walking.
+ */
+function shuffleOrderForLoad(
+  s: PlayerState,
+  queue: Track[],
+  index: number,
+  queueReplaced: boolean,
+): number[] {
+  if (!queueReplaced || !s.shuffle) return s.shuffleOrder;
+  return buildShuffleOrder(queue.length, index);
 }
 
 /**
@@ -927,13 +951,7 @@ export function usePlayer() {
           error: null,
           currentTime: 0,
           duration: track.duration ?? 0,
-          // A new queue invalidates the old order — its indices point
-          // into a list that no longer exists. Deal a fresh one from
-          // the track the user picked.
-          shuffleOrder:
-            queueOverride && s.shuffle
-              ? buildShuffleOrder(queue.length, index)
-              : s.shuffleOrder,
+          shuffleOrder: shuffleOrderForLoad(s, queue, index, !!queueOverride),
           source:
             sourceOverride !== undefined
               ? sourceOverride
@@ -991,10 +1009,7 @@ export function usePlayer() {
           error: null,
           currentTime: 0,
           duration: track.duration ?? 0,
-          shuffleOrder:
-            queueOverride && s.shuffle
-              ? buildShuffleOrder(queue.length, index)
-              : s.shuffleOrder,
+          shuffleOrder: shuffleOrderForLoad(s, queue, index, !!queueOverride),
           source:
             sourceOverride !== undefined
               ? sourceOverride
