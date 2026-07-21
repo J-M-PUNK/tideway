@@ -496,11 +496,18 @@ export function usePlayer() {
   // call pickNextIndex against the freshest state without reinstalling
   // the subscription every queue change.
   const advanceRef = useRef<() => void>(() => {});
-  // Tracks which track_id we've already preloaded-next-for so we
-  // don't fire /api/player/preload once per position tick after
-  // crossing the 15s-remaining threshold. Resets when track_id
-  // changes.
-  const preloadedForTrackIdRef = useRef<string | null>(null);
+  // The track id we last asked the backend to preload, so we don't
+  // fire /api/player/preload once per position tick.
+  //
+  // This keys on what we preloaded rather than what we preloaded FOR,
+  // which is what makes the preload self-correcting: anything that
+  // changes the answer to "what plays next" mid-track — toggling
+  // shuffle, Play next, removing a queue item, changing repeat —
+  // makes the recomputed next differ from this, and we re-preload.
+  // Keying on the current track instead meant the first answer stood
+  // for the rest of the track, so the crossfade faded into a track
+  // the queue was no longer going to play (#291).
+  const preloadedNextIdRef = useRef<string | null>(null);
   // Track ids we've already kicked off a rehydrate fetch for. Keeps
   // us from firing the same GET /api/track/{id} on every position
   // tick when the frontend has no cached Track for the current id.
@@ -686,12 +693,7 @@ export function usePlayer() {
     // buffer is freed as soon as the swap completes or the queue
     // changes.
     const triggerPreloadIfNeeded = (snap: PlayerSnapshot) => {
-      if (
-        snap.state !== "playing" ||
-        snap.track_id === null ||
-        preloadedForTrackIdRef.current === snap.track_id
-      )
-        return;
+      if (snap.state !== "playing" || snap.track_id === null) return;
       const currentTime = snap.position_ms / 1000;
       if (currentTime < 10) return;
       const s = stateRef.current;
@@ -699,26 +701,15 @@ export function usePlayer() {
       if (nextIdx === null || nextIdx === s.queueIndex) return;
       const nextTrack = s.queue[nextIdx];
       if (!nextTrack || nextTrack.id === snap.track_id) return;
-      preloadedForTrackIdRef.current = snap.track_id;
+      // Already primed with this exact track — nothing to do. Cheap
+      // enough to re-check every tick (SSE runs at ~4Hz) and that is
+      // the point: it's what notices the answer changing mid-track.
+      if (preloadedNextIdRef.current === nextTrack.id) return;
+      preloadedNextIdRef.current = nextTrack.id;
       api.player.preload(nextTrack.id, qualityRef.current).catch(() => {
         /* fire-and-forget; failure falls back to the slow-path
            load on track-end. */
       });
-    };
-
-    // Reset the preload guard when track_id changes so the next
-    // track's own preload fires at its own 10-second trigger
-    // point. Only resets when we've moved PAST the track we
-    // preloaded FOR — re-firing mid-track would re-preload the
-    // same next track repeatedly.
-    const resetPreloadGuardOnTrackChange = (snap: PlayerSnapshot) => {
-      if (
-        snap.track_id !== null &&
-        preloadedForTrackIdRef.current !== null &&
-        preloadedForTrackIdRef.current !== snap.track_id
-      ) {
-        preloadedForTrackIdRef.current = null;
-      }
     };
 
     const applySnapshot = (snap: PlayerSnapshot) => {
@@ -738,7 +729,6 @@ export function usePlayer() {
         advanceRef.current();
       }
       triggerPreloadIfNeeded(snap);
-      resetPreloadGuardOnTrackChange(snap);
     };
 
     const connect = () => {
@@ -1423,7 +1413,15 @@ export function usePlayer() {
 
   return {
     ...state,
-    hasNext: state.queueIndex >= 0 && state.queueIndex < state.queue.length - 1,
+    // Ask the same function playback asks. A queue-position test
+    // (`queueIndex < queue.length - 1`) describes sequential play
+    // only: under shuffle, sitting on the last queue position with
+    // most of the order still unplayed would disable the button.
+    hasNext: (() => {
+      if (state.queueIndex < 0) return false;
+      const n = pickNextIndex(state);
+      return n !== null && n !== state.queueIndex;
+    })(),
     // True whenever ANY track is loaded — pressing prev on the first
     // track restarts it (see the `prev` callback above), so the button
     // shouldn't be disabled in that state. Matches Spotify, Apple Music,

@@ -204,6 +204,49 @@ describe("pickNextIndex with shuffle", () => {
   });
 });
 
+describe("hasNext under shuffle", () => {
+  // hasNext has to agree with pickNextIndex or the Next button lies.
+  // The old queue-position test disabled the button whenever the
+  // current track sat at the last *queue* index, regardless of how
+  // much of the shuffle order was left.
+  const queueOf = (n: number) =>
+    Array.from(
+      { length: n },
+      (_, i) => ({ id: String(i) }) as unknown as PlayerState["queue"][number],
+    );
+  const hasNext = (s: PlayerState) => {
+    if (s.queueIndex < 0) return false;
+    const n = pickNextIndex(s);
+    return n !== null && n !== s.queueIndex;
+  };
+
+  it("is true on the last queue position when the order has more", () => {
+    const s = _state({
+      queue: queueOf(4),
+      queueIndex: 3,
+      shuffle: true,
+      shuffleOrder: [3, 1, 0, 2],
+    });
+    expect(hasNext(s)).toBe(true);
+  });
+
+  it("is false at the end of the order with repeat off", () => {
+    const s = _state({
+      queue: queueOf(4),
+      queueIndex: 2,
+      shuffle: true,
+      shuffleOrder: [3, 1, 0, 2],
+    });
+    expect(hasNext(s)).toBe(false);
+    expect(hasNext({ ...s, repeat: "all" })).toBe(true);
+  });
+
+  it("is false on a single-track queue", () => {
+    const s = _state({ queue: queueOf(1), queueIndex: 0, shuffle: true });
+    expect(hasNext(s)).toBe(false);
+  });
+});
+
 describe("shuffle order under queue edits", () => {
   it("moves a play-next insert to right after the current track", () => {
     // Queue [A,B,C,D] playing B (index 1), order B,D,A,C. Inserting at
