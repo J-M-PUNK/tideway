@@ -73,6 +73,16 @@ export interface PlayerState {
   queue: Track[];
   queueIndex: number;
   shuffle: boolean;
+  /** Playback order while `shuffle` is on: a permutation of queue
+   *  indices. Empty when shuffle is off.
+   *
+   *  This has to be state rather than a fresh random pick per call,
+   *  because "what plays next" is asked twice per track and the two
+   *  answers must agree: once ~10s in to preload/crossfade into the
+   *  next track, and again when the current one ends. Two independent
+   *  random draws meant the track that faded in was almost never the
+   *  track that then loaded (#291). */
+  shuffleOrder: number[];
   repeat: RepeatMode;
   /** What's actually audible — codec + sample rate. Null while
    *  loading, idle, or when the backend couldn't determine it. */
@@ -104,12 +114,115 @@ const INITIAL: PlayerState = {
   queue: [],
   queueIndex: -1,
   shuffle: false,
+  shuffleOrder: [],
   repeat: "off",
   streamInfo: null,
   source: null,
   forceVolume: false,
   pausedByDevice: null,
 };
+
+/**
+ * Build a shuffle order for `length` tracks, with `currentIndex` placed
+ * first so the track already playing stays put and the shuffle applies
+ * to what comes after it.
+ */
+export function buildShuffleOrder(
+  length: number,
+  currentIndex: number,
+): number[] {
+  const rest: number[] = [];
+  for (let i = 0; i < length; i++) if (i !== currentIndex) rest.push(i);
+  for (let i = rest.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [rest[i], rest[j]] = [rest[j], rest[i]];
+  }
+  return currentIndex >= 0 && currentIndex < length
+    ? [currentIndex, ...rest]
+    : rest;
+}
+
+/**
+ * Remap a shuffle order across an insertion at `insertAt`, placing the
+ * inserted track directly after `currentIndex` in the play order.
+ *
+ * The order holds queue *positions*, so an insert shifts every entry at
+ * or past it. Track ids would sidestep the remapping, but the queue
+ * deliberately allows the same track twice, which makes ids ambiguous.
+ */
+export function shuffleOrderAfterInsert(
+  order: number[],
+  insertAt: number,
+  currentIndex: number,
+): number[] {
+  const shifted = order.map((i) => (i >= insertAt ? i + 1 : i));
+  const pos = shifted.indexOf(currentIndex);
+  // "Play next" means next in the order the user is actually hearing.
+  const at = pos < 0 ? shifted.length : pos + 1;
+  return [...shifted.slice(0, at), insertAt, ...shifted.slice(at)];
+}
+
+/** Remap a shuffle order across a removal at `removedAt`. */
+export function shuffleOrderAfterRemove(
+  order: number[],
+  removedAt: number,
+): number[] {
+  return order
+    .filter((i) => i !== removedAt)
+    .map((i) => (i > removedAt ? i - 1 : i));
+}
+
+/**
+ * Recover the shuffle order from a persisted snapshot.
+ *
+ * Snapshots written by older versions have no `shuffleOrder` at all,
+ * and localStorage is user-writable, so nothing about the stored value
+ * can be assumed. A snapshot with shuffle on but no usable order gets a
+ * freshly dealt one rather than silently falling back to sequential
+ * play — the user left shuffle on and expects it honored.
+ */
+function restoreShuffleOrder(
+  persisted: Partial<PersistedState>,
+  queue: Track[],
+  currentIndex: number,
+): number[] {
+  if (!persisted.shuffle) return [];
+  const stored = persisted.shuffleOrder;
+  if (
+    Array.isArray(stored) &&
+    stored.length > 0 &&
+    stored.every((i) => Number.isInteger(i) && i >= 0 && i < queue.length)
+  ) {
+    return stored;
+  }
+  return buildShuffleOrder(queue.length, currentIndex);
+}
+
+/**
+ * The shuffle order to actually walk, reconciled against the current
+ * queue. Total and deterministic — no RNG — so the two callers that ask
+ * "what's next?" for the same track always get the same answer.
+ *
+ * Reconciliation matters because the queue can grow underneath a live
+ * order: end-of-queue autoplay appends a radio tail to the queue the
+ * user is already shuffling through. Known positions keep the order
+ * they were dealt; anything the order doesn't cover yet (an appended
+ * tail, or a queue that changed without a reshuffle) goes on the end in
+ * queue order. Stale entries past the end of a shrunken queue drop out.
+ */
+function resolveShuffleOrder(state: PlayerState): number[] {
+  const len = state.queue.length;
+  const seen = new Set<number>();
+  const order: number[] = [];
+  for (const i of state.shuffleOrder) {
+    if (i >= 0 && i < len && !seen.has(i)) {
+      seen.add(i);
+      order.push(i);
+    }
+  }
+  for (let i = 0; i < len; i++) if (!seen.has(i)) order.push(i);
+  return order;
+}
 
 /**
  * Pick the next queue index given the current state.
@@ -131,11 +244,16 @@ export function pickNextIndex(
     return 0;
   }
   if (state.shuffle) {
-    let next = state.queueIndex;
-    while (next === state.queueIndex) {
-      next = Math.floor(Math.random() * state.queue.length);
-    }
-    return next;
+    const order = resolveShuffleOrder(state);
+    const pos = order.indexOf(state.queueIndex);
+    // Not in the order yet (queue just replaced): start at its head.
+    if (pos < 0) return order[0] ?? null;
+    if (pos + 1 < order.length) return order[pos + 1];
+    // Walked the whole shuffled queue. Same end-of-queue rule as
+    // sequential play: wrap only if the user asked for repeat, else
+    // hand off to the autoplay/stop branch.
+    if (state.repeat === "all") return order[0];
+    return null;
   }
   const next = state.queueIndex + 1;
   if (next < state.queue.length) return next;
@@ -226,11 +344,12 @@ export function pickPrevIndex(state: PlayerState): number | null {
   if (state.queue.length === 0) return null;
   if (state.shuffle) {
     if (state.queue.length === 1) return 0;
-    let prev = state.queueIndex;
-    while (prev === state.queueIndex) {
-      prev = Math.floor(Math.random() * state.queue.length);
-    }
-    return prev;
+    // Walk the same order backwards, so Previous returns to the track
+    // that actually just played rather than a fresh random one.
+    const order = resolveShuffleOrder(state);
+    const pos = order.indexOf(state.queueIndex);
+    if (pos < 0) return null;
+    return pos > 0 ? order[pos - 1] : null;
   }
   const prev = state.queueIndex - 1;
   return prev >= 0 ? prev : null;
@@ -291,6 +410,7 @@ export function usePlayer() {
       duration: restoreTrack?.duration ?? 0,
       volume: typeof persisted.volume === "number" ? persisted.volume : 1,
       shuffle: !!persisted.shuffle,
+      shuffleOrder: restoreShuffleOrder(persisted, queue, restoreIndex),
       repeat,
     };
   });
@@ -343,6 +463,7 @@ export function usePlayer() {
         volume:
           typeof persisted.volume === "number" ? persisted.volume : s.volume,
         shuffle: !!persisted.shuffle,
+        shuffleOrder: restoreShuffleOrder(persisted, queue, restoreIndex),
         repeat,
       }));
     })();
@@ -816,6 +937,13 @@ export function usePlayer() {
           error: null,
           currentTime: 0,
           duration: track.duration ?? 0,
+          // A new queue invalidates the old order — its indices point
+          // into a list that no longer exists. Deal a fresh one from
+          // the track the user picked.
+          shuffleOrder:
+            queueOverride && s.shuffle
+              ? buildShuffleOrder(queue.length, index)
+              : s.shuffleOrder,
           source:
             sourceOverride !== undefined
               ? sourceOverride
@@ -873,6 +1001,10 @@ export function usePlayer() {
           error: null,
           currentTime: 0,
           duration: track.duration ?? 0,
+          shuffleOrder:
+            queueOverride && s.shuffle
+              ? buildShuffleOrder(queue.length, index)
+              : s.shuffleOrder,
           source:
             sourceOverride !== undefined
               ? sourceOverride
@@ -1120,7 +1252,19 @@ export function usePlayer() {
   }, []);
 
   const toggleShuffle = useCallback(() => {
-    setState((s) => ({ ...s, shuffle: !s.shuffle }));
+    setState((s) => {
+      const shuffle = !s.shuffle;
+      return {
+        ...s,
+        shuffle,
+        // Deal a fresh order on every enable, so turning shuffle off
+        // and on again re-randomizes instead of replaying the order
+        // from last time.
+        shuffleOrder: shuffle
+          ? buildShuffleOrder(s.queue.length, s.queueIndex)
+          : [],
+      };
+    });
   }, []);
 
   const cycleRepeat = useCallback(() => {
@@ -1230,7 +1374,13 @@ export function usePlayer() {
         track,
         ...s.queue.slice(insertAt),
       ];
-      return { ...s, queue: nextQueue };
+      return {
+        ...s,
+        queue: nextQueue,
+        shuffleOrder: s.shuffle
+          ? shuffleOrderAfterInsert(s.shuffleOrder, insertAt, s.queueIndex)
+          : s.shuffleOrder,
+      };
     });
   }, []);
 
@@ -1248,14 +1398,26 @@ export function usePlayer() {
       const nextQueue = [...s.queue];
       nextQueue.splice(index, 1);
       const nextIdx = index < s.queueIndex ? s.queueIndex - 1 : s.queueIndex;
-      return { ...s, queue: nextQueue, queueIndex: nextIdx };
+      return {
+        ...s,
+        queue: nextQueue,
+        queueIndex: nextIdx,
+        shuffleOrder: s.shuffle
+          ? shuffleOrderAfterRemove(s.shuffleOrder, index)
+          : s.shuffleOrder,
+      };
     });
   }, []);
 
   const clearQueue = useCallback(() => {
     setState((s) => {
-      if (s.queueIndex < 0) return { ...s, queue: [] };
-      return { ...s, queue: [s.queue[s.queueIndex]], queueIndex: 0 };
+      if (s.queueIndex < 0) return { ...s, queue: [], shuffleOrder: [] };
+      return {
+        ...s,
+        queue: [s.queue[s.queueIndex]],
+        queueIndex: 0,
+        shuffleOrder: s.shuffle ? [0] : [],
+      };
     });
   }, []);
 

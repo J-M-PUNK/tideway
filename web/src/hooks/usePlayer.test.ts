@@ -7,7 +7,15 @@
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { api } from "@/api/client";
-import { fetchRadioTakeover, pickPrevIndex, shuffleTracks } from "./usePlayer";
+import {
+  buildShuffleOrder,
+  fetchRadioTakeover,
+  pickNextIndex,
+  pickPrevIndex,
+  shuffleOrderAfterInsert,
+  shuffleOrderAfterRemove,
+  shuffleTracks,
+} from "./usePlayer";
 import type { PlayerState } from "./usePlayer";
 import type { Track } from "@/api/types";
 
@@ -37,6 +45,7 @@ function _state(overrides: Partial<PlayerState>): PlayerState {
     queue: [],
     queueIndex: -1,
     shuffle: false,
+    shuffleOrder: [],
     repeat: "off",
     streamInfo: null,
     source: null,
@@ -103,6 +112,108 @@ describe("pickPrevIndex", () => {
       shuffle: true,
     });
     expect(pickPrevIndex(s)).toBe(0);
+  });
+});
+
+describe("pickNextIndex with shuffle", () => {
+  const queueOf = (n: number) =>
+    Array.from(
+      { length: n },
+      (_, i) => ({ id: String(i) }) as unknown as PlayerState["queue"][number],
+    );
+
+  it("gives the same answer every time it is asked", () => {
+    // The bug behind #291. "What plays next?" is asked twice per
+    // track — once ~10s in to prime the preload the crossfade will
+    // fade into, once when the track actually ends — and shuffle used
+    // to answer with a fresh Math.random() each time. The crossfade
+    // then faded into one track while the queue advanced to another,
+    // which the user hears as an interruption at every song change.
+    const s = _state({
+      queue: queueOf(8),
+      queueIndex: 3,
+      shuffle: true,
+      shuffleOrder: buildShuffleOrder(8, 3),
+    });
+    const answers = new Set(
+      Array.from({ length: 20 }, () => pickNextIndex(s, true)),
+    );
+    expect(answers.size).toBe(1);
+  });
+
+  it("plays every track once before any repeats", () => {
+    const order = buildShuffleOrder(6, 0);
+    let s = _state({
+      queue: queueOf(6),
+      queueIndex: 0,
+      shuffle: true,
+      shuffleOrder: order,
+    });
+    const visited = [0];
+    for (let i = 0; i < 5; i++) {
+      const next = pickNextIndex(s, true);
+      expect(next).not.toBeNull();
+      visited.push(next as number);
+      s = { ...s, queueIndex: next as number };
+    }
+    expect([...visited].sort((a, b) => a - b)).toEqual([0, 1, 2, 3, 4, 5]);
+  });
+
+  it("ends the queue at the end of the order unless repeat is on", () => {
+    const order = buildShuffleOrder(4, 0);
+    const last = order[order.length - 1];
+    const s = _state({
+      queue: queueOf(4),
+      queueIndex: last,
+      shuffle: true,
+      shuffleOrder: order,
+    });
+    expect(pickNextIndex(s, true)).toBeNull();
+    expect(pickNextIndex({ ...s, repeat: "all" }, true)).toBe(order[0]);
+  });
+
+  it("keeps the current track first so enabling shuffle doesn't skip", () => {
+    const order = buildShuffleOrder(10, 7);
+    expect(order[0]).toBe(7);
+    expect([...order].sort((a, b) => a - b)).toEqual([
+      0, 1, 2, 3, 4, 5, 6, 7, 8, 9,
+    ]);
+  });
+
+  it("plays an appended radio tail after the shuffled queue", () => {
+    // End-of-queue autoplay appends to the queue the user is already
+    // shuffling through; the new positions aren't in the order yet.
+    const s = _state({
+      queue: queueOf(5),
+      queueIndex: 2,
+      shuffle: true,
+      shuffleOrder: [2, 0, 1],
+    });
+    expect(pickNextIndex(s, true)).toBe(0);
+    expect(pickNextIndex({ ...s, queueIndex: 1 }, true)).toBe(3);
+  });
+
+  it("ignores order entries left over from a shorter queue", () => {
+    const s = _state({
+      queue: queueOf(2),
+      queueIndex: 0,
+      shuffle: true,
+      shuffleOrder: [0, 9, 1],
+    });
+    expect(pickNextIndex(s, true)).toBe(1);
+  });
+});
+
+describe("shuffle order under queue edits", () => {
+  it("moves a play-next insert to right after the current track", () => {
+    // Queue [A,B,C,D] playing B (index 1), order B,D,A,C. Inserting at
+    // index 2 shifts C and D up one.
+    const next = shuffleOrderAfterInsert([1, 3, 0, 2], 2, 1);
+    expect(next).toEqual([1, 2, 4, 0, 3]);
+  });
+
+  it("closes the gap when a track is removed", () => {
+    expect(shuffleOrderAfterRemove([1, 3, 0, 2], 2)).toEqual([1, 2, 0]);
   });
 });
 
