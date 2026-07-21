@@ -73,7 +73,16 @@ export function OfflineProvider({ children }: { children: React.ReactNode }) {
   // will surface its own errors if it's the Tidal side that's
   // unreachable while the LAN is fine.
   useEffect(() => {
-    const onOnline = () => setAutoOffline(false);
+    const onOnline = () => {
+      setAutoOffline(false);
+      // Launching with no network leaves the backend holding a Tidal
+      // session it never got to validate, which it treats as
+      // signed-in-but-offline. It polls to recover, but this is the
+      // moment we actually know the network is back, so tell it rather
+      // than letting the user wait out the poll. Fire-and-forget: the
+      // poll is still there if this request doesn't land.
+      api.auth.retrySession().catch(() => {});
+    };
     const onOffline = () => setAutoOffline(true);
     window.addEventListener("online", onOnline);
     window.addEventListener("offline", onOffline);
