@@ -589,6 +589,16 @@ class TidalClient:
             # and the session stays dead until the app restarts (#292).
             self._session_load_deferred = bool(refresh_token)
             return False
+        except TidalBackoffError:
+            # We refused to make the call ourselves — a rate-limit or
+            # abuse-detection window is still open. Same situation as
+            # no network: the credentials are untouched and the session
+            # simply never got validated, so defer and retry rather
+            # than reporting the user signed out for the rest of the
+            # process. Backoff windows outlast a launch (30 minutes for
+            # the abuse case), so this is reachable on a normal start.
+            self._session_load_deferred = bool(refresh_token)
+            return False
         except Exception:
             return False
 

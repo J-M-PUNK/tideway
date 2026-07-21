@@ -23,7 +23,7 @@ import pytest
 import requests.exceptions as req_exc
 
 from app import tidal_client
-from app.tidal_client import TidalClient
+from app.tidal_client import TidalBackoffError, TidalClient
 
 
 @pytest.fixture
@@ -66,6 +66,23 @@ def test_network_failure_defers_the_load(client, session_file, monkeypatch, exc)
         raise exc
 
     monkeypatch.setattr(client.session, "load_oauth_session", unreachable)
+
+    assert client.load_session() is False
+    assert client.session_load_deferred() is True
+
+
+def test_backoff_window_defers_the_load(client, session_file, monkeypatch):
+    """A rate-limit / abuse backoff refuses the call inside our own
+    request gate, before any HTTP leaves the process. The session is
+    every bit as intact as it is when the network is down, and the
+    abuse window runs 30 minutes — long enough to still be open at the
+    next launch — so this must defer and retry too, not report the user
+    signed out until they restart."""
+
+    def gated(*a, **kw):
+        raise TidalBackoffError(1800.0, "abuse-detected (HTTP 403)")
+
+    monkeypatch.setattr(client.session, "load_oauth_session", gated)
 
     assert client.load_session() is False
     assert client.session_load_deferred() is True
