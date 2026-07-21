@@ -1040,6 +1040,18 @@ class PCMPlayer:
             # in-progress transition. `_seeking` now silences the callback,
             # so cancel the fade and dispose the claimed incoming preload.
             self._abort_crossfade()
+            # Stop DLNA passthrough on seek so the encoder doesn't
+            # keep streaming from the pre-seek position. The PCM
+            # re-encode path (FlacStreamEncoder via push_pcm) takes
+            # over for the remainder of this track; passthrough
+            # resumes automatically when the next track loads.
+            # See issue #273 for context.
+            if _upnp_manager is not None:
+                try:
+                    if _upnp_manager.is_active():
+                        _upnp_manager.stop_passthrough()
+                except Exception as exc:
+                    print(f"[player] upnp stop_passthrough on seek failed: {exc!r}", flush=True)
             effective_s = target_s
             try:
                 effective_s = self._restart_decoder_at(target_s)
