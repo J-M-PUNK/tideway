@@ -7357,6 +7357,65 @@ def upnp_devices() -> dict:
 # startup so the pynput listener thread can fan events out.
 
 
+def _snapshot_needs_client_action(state: Optional[str]) -> bool:
+    """Player states the client must *respond* to, not merely display.
+
+    `ended` -> the client advances the queue to the next track;
+    `error` -> the client skips the dead track (when continue-playing
+    is on). The player parks in these states and emits the transition
+    exactly once. Auto-advance therefore hinges on the client catching
+    that single edge — and if it's missed (a frame coalesced away under
+    backpressure, a dropped SSE message, a reconnect gap) the player
+    strands at end-of-track with no recovery, which is the "song ended
+    and didn't advance" hang.
+
+    So these states are re-advertised on every poll instead of deduped.
+    The client's monotonic `seq` guard makes the repeat a no-op for a
+    client that already acted, while a client that missed the edge
+    finally sees it and advances.
+    """
+    return state in ("ended", "error")
+
+
+def _should_forward_snapshot(seq, last_seq, state: Optional[str]) -> bool:
+    """Whether a polled snapshot should be sent, given the last seq we
+    already put on the wire.
+
+    A new seq always goes out. A *repeat* seq is normally deduped to
+    keep idle keepalive ticks off the wire — except for states the
+    client must respond to (`ended`/`error`), which keep flowing so a
+    client that missed the one transition edge still receives it and
+    advances. The client's own monotonic seq guard makes the repeats a
+    no-op once it has acted.
+    """
+    if seq != last_seq:
+        return True
+    return _snapshot_needs_client_action(state)
+
+
+def _put_latest(queue: "asyncio.Queue", payload) -> None:
+    """Enqueue `payload`, dropping the OLDEST buffered snapshot when the
+    queue is full.
+
+    Snapshots are a last-writer-wins stream: losing an intermediate
+    position tick under backpressure is harmless, but the *newest*
+    snapshot must never be dropped — it is sometimes the one `ended`
+    edge that drives auto-advance. The previous code did the opposite:
+    `put_nowait` raised `QueueFull` on the newest and the surrounding
+    `except: pass` swallowed it, so a busy event loop at a track
+    boundary could silently strand playback.
+    """
+    while True:
+        try:
+            queue.put_nowait(payload)
+            return
+        except asyncio.QueueFull:
+            try:
+                queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+
+
 @app.get("/api/player/events")
 async def player_events(request: Request):
     """SSE stream of player snapshots.
@@ -7375,8 +7434,12 @@ async def player_events(request: Request):
     def _on_snapshot(snap) -> None:
         payload = _snapshot_dict(snap)
         try:
-            loop.call_soon_threadsafe(queue.put_nowait, payload)
-        except Exception:
+            loop.call_soon_threadsafe(_put_latest, queue, payload)
+        except RuntimeError:
+            # Event loop already closed: the SSE connection is tearing
+            # down and unsubscribe() is about to detach us. Nothing to
+            # deliver. (Narrow catch — we do NOT want to swallow a
+            # QueueFull here; _put_latest handles backpressure itself.)
             pass
 
     unsubscribe = player.subscribe(_on_snapshot)
@@ -7399,8 +7462,11 @@ async def player_events(request: Request):
                 if payload is None:
                     break
                 seq = payload.get("seq", 0)
-                if seq == last_seq and payload.get("state") != "playing":
-                    # Dedupe keepalive ticks while nothing is happening.
+                if not _should_forward_snapshot(seq, last_seq, payload.get("state")):
+                    # Dedupe keepalive ticks while nothing actionable is
+                    # pending. States the client must respond to
+                    # (`ended`/`error`) keep flowing so a client that
+                    # missed the transition can still act.
                     continue
                 last_seq = seq
                 yield f"data: {json.dumps(payload)}\n\n"
