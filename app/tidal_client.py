@@ -15,6 +15,7 @@ from typing import Callable, Optional, Tuple
 
 import tidalapi
 
+from app.http import network_error_classes
 from app.paths import user_data_dir
 
 # audio.log is bound to the "tideway.audio" logger in
@@ -39,6 +40,11 @@ def _tlog(msg: str) -> None:
         pass
 
 SESSION_FILE = user_data_dir() / "tidal_session.json"
+
+# Connection-level failures from either HTTP transport. Loading a
+# persisted session over a dead network has to be told apart from
+# Tidal rejecting the credentials — see load_session.
+_NETWORK_ERRORS = network_error_classes()
 
 
 # --- Tidal request gate + abuse/rate-limit backoff ---------------------
@@ -487,6 +493,14 @@ class TidalClient:
         # bounces to Login immediately instead of after the cache TTL.
         self.on_auth_lost: Optional[Callable[[], None]] = None
         self._login_future: Optional[Future] = None
+        # True when a persisted session exists on disk but the network
+        # was unreachable when we tried to validate it, so
+        # `session.user` / `session.session_id` were never populated.
+        # Distinct from "no session" and from "Tidal rejected us": the
+        # credentials are fine, we just haven't been able to use them
+        # yet. Read by the server's auth check (offline ≠ signed out)
+        # and cleared by the watchdog's retry once the network is back.
+        self._session_load_deferred = False
         # Cached subscription-tier result. Populated on first call and
         # refreshed every _SUB_TTL_SEC. Subscription almost never changes
         # within a session, so a long TTL is fine.
@@ -558,7 +572,23 @@ class TidalClient:
                 self.session.expiry_time or expiry,
                 is_pkce=is_pkce,
             )
+            # Reaching here means load_oauth_session got an answer from
+            # Tidal, so whatever check_login() says is the real verdict
+            # — including a False, which is a genuine rejection and not
+            # something a retry would fix.
+            self._session_load_deferred = False
             return self.session.check_login()
+        except _NETWORK_ERRORS:
+            # No route to Tidal. load_oauth_session never populated
+            # session.user / session_id, which makes check_login()
+            # return False from then on — with no exception for callers
+            # to distinguish from a real rejection. Flag it so the auth
+            # check reads this as "signed in, offline" and the watchdog
+            # retries the load once the network is back. Without the
+            # flag, launching offline 401s the local-library endpoints
+            # and the session stays dead until the app restarts (#292).
+            self._session_load_deferred = bool(refresh_token)
+            return False
         except Exception:
             return False
 
@@ -788,13 +818,32 @@ class TidalClient:
         _tlog("force_refresh: success")
         return True
 
+    def session_load_deferred(self) -> bool:
+        """True when a persisted session couldn't be validated because
+        the network was down. The credentials are intact; we just
+        haven't reached Tidal yet. Callers gating on "is this user
+        signed in?" should treat this as yes-but-offline."""
+        return self._session_load_deferred
+
+    def _retry_deferred_load(self) -> None:
+        """Re-run the session load that a dead network aborted at boot.
+
+        Until this succeeds, session.user and session.session_id are
+        unset and every check_login() returns False, so the app would
+        stay in its offline degraded state for the rest of the process
+        even after the network came back."""
+        _tlog("session load was deferred (offline at boot) — retrying")
+        if self.load_session():
+            _tlog("deferred session load succeeded")
+
     def _refresh_watchdog(self) -> None:
         """Background loop that refreshes the token before it expires.
 
         Sleeps for _REFRESH_CHECK_INTERVAL_SEC between checks. Each tick:
-        if we're logged in and the stored expiry is within the window,
-        fire force_refresh. Errors inside force_refresh are already
-        logged there; the watchdog swallows its own errors so a transient
+        retry a session load the network aborted at boot, then, if we're
+        logged in and the stored expiry is within the window, fire
+        force_refresh. Errors inside force_refresh are already logged
+        there; the watchdog swallows its own errors so a transient
         network blip doesn't kill the thread.
         """
         while not self._refresh_stop.is_set():
@@ -802,6 +851,8 @@ class TidalClient:
             if self._refresh_stop.wait(self._REFRESH_CHECK_INTERVAL_SEC):
                 return
             try:
+                if self._session_load_deferred:
+                    self._retry_deferred_load()
                 expiry = getattr(self.session, "expiry_time", None)
                 refresh_token = getattr(self.session, "refresh_token", None)
                 if not expiry or not refresh_token:
@@ -982,6 +1033,10 @@ class TidalClient:
     def logout(self):
         if SESSION_FILE.exists():
             SESSION_FILE.unlink()
+        # There is no longer a session to defer-load; leaving this set
+        # would have the watchdog retry a file we just deleted and the
+        # auth check report a signed-out user as offline-signed-in.
+        self._session_load_deferred = False
         config = tidalapi.Config(quality=tidalapi.Quality.high_lossless)
         config.client_id = _DEVICE_CODE_CLIENT_ID
         config.client_secret = _DEVICE_CODE_CLIENT_SECRET

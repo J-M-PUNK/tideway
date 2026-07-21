@@ -23,7 +23,10 @@ from app.tidal_client import TidalBackoffError
 def _fresh_auth_cache():
     server._session_ready.set()
     server._invalidate_auth_cache()
+    was_deferred = server.tidal._session_load_deferred
+    server.tidal._session_load_deferred = False
     yield
+    server.tidal._session_load_deferred = was_deferred
     server._invalidate_auth_cache()
 
 
@@ -53,6 +56,15 @@ def test_network_failure_keeps_session_signed_in(monkeypatch, exc):
 
 def test_auth_rejection_still_signs_out(monkeypatch):
     assert _check(monkeypatch, False) is False
+
+
+def test_deferred_session_load_keeps_session_signed_in(monkeypatch):
+    """Booting offline leaves session.user unset, which makes
+    check_login() return False with no exception to catch — the same
+    "offline, not signed out" case arriving as a return value instead of
+    a raise (#292)."""
+    server.tidal._session_load_deferred = True
+    assert _check(monkeypatch, False) is True
 
 
 def test_unexpected_error_still_signs_out(monkeypatch):

@@ -363,6 +363,16 @@ def _is_logged_in() -> bool:
             return bool(_auth_cache["ok"])
     try:
         ok = bool(tidal.session.check_login())
+        if not ok and tidal.session_load_deferred():
+            # check_login() short-circuits to False — no exception, no
+            # round-trip — when session.user / session_id are unset,
+            # which is exactly the state a boot with no network leaves
+            # behind. The credentials on disk are fine, so this is the
+            # same "signed in, but offline" case the except-branch below
+            # handles; it just arrives as a return value instead of a
+            # raise. Reporting it as logged-out 401'd the local library
+            # for anyone who launched offline (#292).
+            ok = True
     except _NETWORK_ERRORS:
         # Network unreachable is not "logged out". check_login() only
         # gets as far as the HTTP round-trip when the session has
