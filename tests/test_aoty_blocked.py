@@ -87,6 +87,47 @@ def test_successful_fetch_keeps_flag_clear():
     assert aoty.is_scraper_blocked() is False
 
 
+def test_fallback_profile_recovers_from_challenge():
+    # Chrome draws a challenge but a fallback fingerprint gets through.
+    # The fetch should succeed and the blocked flag must stay clear —
+    # that's the whole point of the fallback (#275).
+    challenge = _FakeResponse(403, {"cf-mitigated": "challenge"})
+    ok = _FakeResponse(200)
+    ok.text = "<html>recovered</html>"
+    with patch("app.aoty.cffi_requests.get") as get:
+        get.side_effect = [challenge, ok]
+        result = aoty._fetch(
+            "https://www.albumoftheyear.org/releases/this-week/"
+        )
+    assert result == "<html>recovered</html>"
+    assert aoty.is_scraper_blocked() is False
+
+
+def test_all_profiles_challenged_sets_blocked_flag():
+    # When every fingerprint is challenged the block is real; only then
+    # does the flag flip. One challenge per configured profile.
+    n_profiles = 1 + len(aoty._FALLBACK_IMPERSONATE)
+    with patch("app.aoty.cffi_requests.get") as get:
+        get.side_effect = [
+            _FakeResponse(403, {"cf-mitigated": "challenge"})
+            for _ in range(n_profiles)
+        ]
+        result = aoty._fetch(
+            "https://www.albumoftheyear.org/releases/this-week/"
+        )
+    assert result is None
+    assert aoty.is_scraper_blocked() is True
+    assert get.call_count == n_profiles
+
+
+def test_fallback_profiles_are_known_to_curl_cffi():
+    # A typo in a fallback profile would silently 403 every retry.
+    from curl_cffi.requests.impersonate import normalize_browser_type
+
+    for profile in aoty._FALLBACK_IMPERSONATE:
+        assert normalize_browser_type(profile)
+
+
 def test_impersonate_profile_is_current_and_known_to_curl_cffi():
     """Guard against shipping a Cloudflare-blocked impersonate
     profile. `chrome120` is confirmed-403'd by AOTY's Cloudflare;

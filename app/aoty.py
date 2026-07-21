@@ -97,6 +97,18 @@ _BASE_URL = "https://www.albumoftheyear.org"
 # challenged, signalling it's time to upgrade curl_cffi itself.
 _CFFI_IMPERSONATE = "chrome"
 
+# Fallback fingerprints, tried in order only after the primary profile
+# is challenged. Cloudflare's anti-bot layer decides per fingerprint
+# AND per client (IP, ASN, prior reputation), so a profile that draws a
+# challenge for one user routinely passes for another (#275: the rows
+# went dark for a Flatpak user while the Chrome profile kept working
+# everywhere else). These are distinct TLS/HTTP-2 stacks from Chrome,
+# so when Chrome specifically is being singled out one of them tends to
+# get through. The happy path still sends exactly one request; these
+# only fire on a challenge, and if every profile is challenged the
+# block is treated as real (IP-level, or curl_cffi needs upgrading).
+_FALLBACK_IMPERSONATE: tuple[str, ...] = ("safari", "firefox")
+
 _HTTP_TIMEOUT_SEC = 15.0
 
 # In-memory cache. Per-key TTL so the two surfaces can refresh on
@@ -421,50 +433,61 @@ def _looks_like_cf_challenge(status_code: int, headers) -> bool:
 
 
 def _fetch(url: str) -> Optional[str]:
-    try:
-        # No `headers=` kwarg. curl_cffi's impersonate profile sets
-        # the entire Chrome-120 header set (UA, every sec-ch-ua-*,
-        # Accept, Accept-Language, header order) consistent with the
-        # TLS hello it sends. Overriding any of those — even a
-        # nominally identical User-Agent — breaks Cloudflare's
-        # cross-check and earns a 403.
-        r = cffi_requests.get(
-            url,
-            impersonate=_CFFI_IMPERSONATE,
-            timeout=_HTTP_TIMEOUT_SEC,
-        )
-    except Exception as exc:
-        log.warning("aoty fetch %s failed: %s", url, exc)
-        return None
-    if r.status_code != 200:
-        if _looks_like_cf_challenge(r.status_code, r.headers):
-            _mark_blocked()
-            # High-signal: this is the "the scraper needs updating"
-            # message future-you wants to see in the dev console
-            # without grepping a logfile. Uses the print pattern
-            # the rest of the app uses for user/dev-visible state
-            # changes (see CLAUDE.md Logging section).
-            print(
-                f"[aoty] Cloudflare challenge on {url} "
-                f"(status {r.status_code}) — the "
-                f"{_CFFI_IMPERSONATE!r} impersonation profile is "
-                f"being blocked. Upgrade curl_cffi (the 'chrome' "
-                f"alias tracks its newest profile) or file: "
-                f"{ISSUE_TRACKER_URL}",
-                flush=True,
+    # Primary Chrome profile first, then the fallback fingerprints —
+    # but only if Chrome draws a Cloudflare challenge. A clean 200 on
+    # the first try sends exactly one request.
+    profiles = (_CFFI_IMPERSONATE, *_FALLBACK_IMPERSONATE)
+    for profile in profiles:
+        try:
+            # No `headers=` kwarg. curl_cffi's impersonate profile sets
+            # the entire header set (UA, every sec-ch-ua-*, Accept,
+            # Accept-Language, header order) consistent with the TLS
+            # hello it sends. Overriding any of those — even a nominally
+            # identical User-Agent — breaks Cloudflare's cross-check and
+            # earns a 403.
+            r = cffi_requests.get(
+                url,
+                impersonate=profile,
+                timeout=_HTTP_TIMEOUT_SEC,
             )
-        else:
-            log.warning("aoty fetch %s returned %d", url, r.status_code)
+        except Exception as exc:
+            log.warning("aoty fetch %s (%s) failed: %s", url, profile, exc)
+            return None
+        if r.status_code == 200:
+            # AOTY serves UTF-8 but doesn't always declare a charset in
+            # Content-Type, which makes requests fall back to
+            # ISO-8859-1 for the .text attribute and mangle multi-byte
+            # characters (the middle-dot in "Apr 30 · LP" comes back as
+            # the U+FFFD replacement character). Force UTF-8 — the
+            # apparent_encoding check would also catch this, but it's an
+            # O(n) scan and we already know the right answer.
+            r.encoding = "utf-8"
+            return r.text
+        if _looks_like_cf_challenge(r.status_code, r.headers):
+            # This fingerprint got challenged. Try the next one before
+            # concluding the block is real.
+            continue
+        # A non-challenge error (404, 500, AOTY's own auth wall): a
+        # fingerprint swap won't change the answer, so don't burn the
+        # extra requests on it.
+        log.warning("aoty fetch %s returned %d", url, r.status_code)
         return None
-    # AOTY serves UTF-8 but doesn't always declare a charset in
-    # Content-Type, which makes requests fall back to ISO-8859-1
-    # for the .text attribute and mangle multi-byte characters
-    # (the middle-dot in "Apr 30 · LP" comes back as the U+FFFD
-    # replacement character). Force UTF-8 — the apparent_encoding
-    # check would also catch this, but it's an O(n) scan and we
-    # already know the right answer.
-    r.encoding = "utf-8"
-    return r.text
+    # Every fingerprint drew a challenge — the block isn't
+    # profile-specific (IP-level, or the whole curl_cffi build has aged
+    # out). Flag it so the Home page can explain the empty rows.
+    _mark_blocked()
+    # High-signal: the "scraper needs updating / user is IP-blocked"
+    # message future-you wants in the dev console without grepping a
+    # logfile. Uses the print pattern the rest of the app uses for
+    # user/dev-visible state changes (see CLAUDE.md Logging section).
+    print(
+        f"[aoty] Cloudflare challenged every impersonation profile "
+        f"({', '.join(profiles)}) on {url} — likely an IP-level block "
+        f"or a curl_cffi build that needs upgrading. File: "
+        f"{ISSUE_TRACKER_URL}",
+        flush=True,
+    )
+    return None
 
 
 def _parse_album_list_rows(html: str) -> list[AotyAlbum]:

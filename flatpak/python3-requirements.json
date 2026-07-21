@@ -225,7 +225,7 @@
             "name": "python3-pillow",
             "buildsystem": "simple",
             "build-commands": [
-                "pip3 install --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"pillow>=12.2.0\" --no-build-isolation"
+                "pip3 install --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"pillow>=12.3.0\" --no-build-isolation"
             ],
             "sources": [
                 {
@@ -250,7 +250,7 @@
             "name": "python3-fastapi",
             "buildsystem": "simple",
             "build-commands": [
-                "pip3 install --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"fastapi>=0.139.0\" --no-build-isolation"
+                "pip3 install --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"fastapi>=0.139.2\" --no-build-isolation"
             ],
             "sources": [
                 {
@@ -320,7 +320,7 @@
             "name": "python3-uvicorn",
             "buildsystem": "simple",
             "build-commands": [
-                "pip3 install --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"uvicorn[standard]>=0.49.0\" --no-build-isolation"
+                "pip3 install --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"uvicorn[standard]>=0.51.0\" --no-build-isolation"
             ],
             "sources": [
                 {
@@ -419,8 +419,8 @@
                 },
                 {
                     "type": "file",
-                    "url": "https://files.pythonhosted.org/packages/66/58/bd83247f39ddc26ffc2c24eb05087a3b749e00cb4509fc6d19daa23c8495/websockets-16.1-py3-none-any.whl",
-                    "sha256": "c5149dfe490ec7e5ee5dbf624c642fb725f93a5575c7f00ab594ca9eddb8dd81"
+                    "url": "https://files.pythonhosted.org/packages/be/4d/2d0d67834092e354d2b0498f014a41249a89556bc406cf86f3e1557bb463/websockets-16.1.1-py3-none-any.whl",
+                    "sha256": "6abbd3e82c731c8e531714466acd5d87b5e88ac3243465337ba71d68e23ae7e3"
                 }
             ]
         },
@@ -443,8 +443,8 @@
                 },
                 {
                     "type": "file",
-                    "url": "https://files.pythonhosted.org/packages/78/75/c88d3f5dafd59c791da1ce27650d30bf5b70cbf1cbf01cd00e5f9e360915/sse_starlette-3.4.5-py3-none-any.whl",
-                    "sha256": "e71bad53323f65573c3864a6c3bd0c1eb6e5f092b2e48082b0c35927d19ca296"
+                    "url": "https://files.pythonhosted.org/packages/49/36/e10c1d1b7ca881d2625db2ec28508578499187bb1c389952c398474e1834/sse_starlette-3.4.6-py3-none-any.whl",
+                    "sha256": "56217ab4c9a9f9c5db7b21e08732d3e7c2b807f45231ad23de0551a24c4a41f6"
                 },
                 {
                     "type": "file",
@@ -666,7 +666,7 @@
             "name": "python3-spotapi",
             "buildsystem": "simple",
             "build-commands": [
-                "pip3 install --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"spotapi>=1.2.7\" --no-build-isolation"
+                "pip3 install --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"spotapi>=1.2.8\" --no-build-isolation"
             ],
             "sources": [
                 {
@@ -784,8 +784,8 @@
                 },
                 {
                     "type": "file",
-                    "url": "https://files.pythonhosted.org/packages/5e/f5/0c41cb68dcae6b7de4fac4188a3a9589e21fb31df21ea3a2e888db95e6c9/soupsieve-2.8.4-py3-none-any.whl",
-                    "sha256": "e7e6b0769c8f51ed59acab6e994b00621096cfb1c640a7509295987388fbaf65"
+                    "url": "https://files.pythonhosted.org/packages/7b/d6/3185ab5ad1280319b31986898f3206dd7227cd75e293d4dba2a5e6bf27a0/soupsieve-2.9-py3-none-any.whl",
+                    "sha256": "a2b2c76d67df2382d245409fd71e321a571717e58463efa32ace87dcadac2c12"
                 },
                 {
                     "type": "file",
@@ -837,16 +837,16 @@
                 },
                 {
                     "type": "file",
-                    "url": "https://files.pythonhosted.org/packages/9d/6e/dbf1d0625dc711fb2851f4f3c3055c39ed58bae92082d8c627dbe6013736/aiohttp-3.14.1-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
-                    "sha256": "faccab372e66bc76d5731525e7f1143c922271725b9d38c9f97edcc66266b451",
+                    "url": "https://files.pythonhosted.org/packages/0c/31/2e9ca3b21c07ea8a001e2b142cb01401fd34fd07b248a0b95a04c3ebc4ec/aiohttp-3.14.2-cp313-cp313-manylinux2014_x86_64.manylinux_2_17_x86_64.manylinux_2_28_x86_64.whl",
+                    "sha256": "46b8887aa303075c1e5b24123f314a1a7bbfa03d0213dff8bb70503b2148c853",
                     "only-arches": [
                         "x86_64"
                     ]
                 },
                 {
                     "type": "file",
-                    "url": "https://files.pythonhosted.org/packages/e8/ed/3c0fb5c500fdd8e7ebc10d1889c04384fffa1a9163eac1356088ca9da1b1/aiohttp-3.14.1-cp313-cp313-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl",
-                    "sha256": "bd869c427324e5cb15195793de951295710db28be7d818247f3097b4ab5d4b96",
+                    "url": "https://files.pythonhosted.org/packages/87/f7/6d081c2ee838458492c7ae1062399bdd68f149811d257d4502e79a25b306/aiohttp-3.14.2-cp313-cp313-manylinux2014_aarch64.manylinux_2_17_aarch64.manylinux_2_28_aarch64.whl",
+                    "sha256": "09d1b0deec698d1198eb0b8f910dd9432d856985abbfea3f06be8b296a6619b4",
                     "only-arches": [
                         "aarch64"
                     ]
@@ -858,8 +858,8 @@
                 },
                 {
                     "type": "file",
-                    "url": "https://files.pythonhosted.org/packages/88/27/37f09d39fb4a7617a5ded95d1013b3a498c25857ca9445f3d8661f6e0ac6/async_upnp_client-0.47.0-py3-none-any.whl",
-                    "sha256": "a879b1041b03b347dcf009c243e084b9ecb19e9c521c39bd435438229dd99602"
+                    "url": "https://files.pythonhosted.org/packages/92/f4/80d89479e4d07d3226b18ad0ec38b159021b9ce421d2d26ff6533b99a887/async_upnp_client-0.47.1-py3-none-any.whl",
+                    "sha256": "b6f1613caabffca6563691f86ed81db145d69dbb2fda8428f4e05ccfe813aa32"
                 },
                 {
                     "type": "file",
@@ -903,8 +903,8 @@
                 },
                 {
                     "type": "file",
-                    "url": "https://files.pythonhosted.org/packages/fd/4d/4b880086bd0d3e034d25647be1d830afc3e3f610e98c4ab3490af6b1b6d5/yarl-1.24.2-py3-none-any.whl",
-                    "sha256": "2783d9226db8797636cd6896e4de81feed252d1db72265686c9558d97a4d94b9"
+                    "url": "https://files.pythonhosted.org/packages/61/02/962c1cbfc401a30c1d034dc67ff395f64b52302c6d62de556c1fca99acc0/yarl-1.24.5-py3-none-any.whl",
+                    "sha256": "a33700d13d9b7d84fd10947b09ff69fb9a792e519c8cb9764a3ca70baa6c23a7"
                 }
             ]
         },

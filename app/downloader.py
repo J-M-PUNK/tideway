@@ -466,6 +466,21 @@ class Downloader:
             self._surface_enqueue_failure(content_type, exc)
             return
 
+        # Hard-block AI-generated tracks when the filter is on. A single
+        # AI track surfaces a clear refusal row; album/playlist batches
+        # just drop the flagged tracks and download the rest.
+        pairs, ai_dropped = self._filter_ai_pairs(pairs)
+        if ai_dropped:
+            print(
+                f"[downloader] hid {ai_dropped} AI-generated track(s) "
+                f"from {content_type} download",
+                file=_sys.stderr,
+                flush=True,
+            )
+        if not pairs:
+            self._surface_ai_blocked()
+            return
+
         # Preflight: bail early if the drive clearly can't hold this.
         # Runs after the expand since we need the track count; the
         # failure row replaces the silence the user would otherwise get
@@ -569,6 +584,40 @@ class Downloader:
         placeholder.error = str(exc)
         self.on_add(placeholder)
 
+    _AI_BLOCKED_MESSAGE = (
+        "AI-generated content is hidden by your settings. "
+        "Turn off \"Hide AI-generated content\" to download it."
+    )
+
+    def _filter_ai_pairs(self, pairs: list) -> tuple[list, int]:
+        """Drop AI-generated tracks from a download batch when the
+        hide_ai_content setting is on.
+
+        Returns (kept_pairs, dropped_count). Mirrors the browse-list
+        filter so a hidden track can't slip back in by downloading its
+        album/playlist, or via a direct track submit. Each pair is
+        (track, album, playlist_index); the `ai` flag is populated by
+        the parse patch in app/tidal_client.py. A missing/None flag is
+        treated as not-AI so a sparse payload never blocks a normal
+        download."""
+        if not getattr(self.settings, "hide_ai_content", False):
+            return pairs, 0
+        kept = [p for p in pairs if getattr(p[0], "ai", None) is not True]
+        return kept, len(pairs) - len(kept)
+
+    def _surface_ai_blocked(self, item: Optional["DownloadItem"] = None) -> None:
+        """Show the user why nothing got queued when the whole request
+        was AI-generated. Reuses an existing placeholder row if the
+        caller has one (the URL path), otherwise adds a fresh one."""
+        placeholder = item or DownloadItem(item_id=str(uuid.uuid4()), url="")
+        placeholder.title = "AI-generated content hidden"
+        placeholder.status = DownloadStatus.FAILED
+        placeholder.error = self._AI_BLOCKED_MESSAGE
+        if item is None:
+            self.on_add(placeholder)
+        else:
+            self.on_update(placeholder)
+
     def _preflight_disk_space(
         self, track_count: int, quality: Optional[str]
     ) -> Optional[str]:
@@ -649,6 +698,23 @@ class Downloader:
             placeholder.status = DownloadStatus.FAILED
             placeholder.error = f"Unsupported type: {content_type}"
             self.on_update(placeholder)
+            return
+
+        # Hard-block AI-generated tracks when the filter is on. Same rule
+        # as the object-submit path: single AI track becomes a refusal
+        # row, batches drop the flagged tracks and keep the rest.
+        pairs, ai_dropped = self._filter_ai_pairs(pairs)
+        if ai_dropped:
+            import sys as _sys
+
+            print(
+                f"[downloader] hid {ai_dropped} AI-generated track(s) "
+                f"from {content_type} download",
+                file=_sys.stderr,
+                flush=True,
+            )
+        if not pairs:
+            self._surface_ai_blocked(placeholder)
             return
 
         # Preflight disk space before committing any track to the queue.

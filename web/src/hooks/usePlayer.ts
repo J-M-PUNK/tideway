@@ -683,6 +683,14 @@ export function usePlayer() {
         artist: artistName,
         album: track.album?.name ?? "",
         duration_ms: Math.round((track.duration ?? 0) * 1000),
+        // `album.cover` is already a full resources.tidal.com URL
+        // (the backend expands the UUID when it serializes the
+        // track). MPRIS puts it in `mpris:artUrl` and macOS Now
+        // Playing fetches it, so desktop media widgets and Control
+        // Center show the album art. Omitted when the track has no
+        // cover — build_metadata drops an empty artUrl rather than
+        // sending "".
+        artwork_url: track.album?.cover ?? undefined,
       })
       .catch(() => {
         /* fire-and-forget */

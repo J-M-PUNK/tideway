@@ -41,6 +41,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from sse_starlette.sse import EventSourceResponse
 
+from app import album_collections
 from app import aoty as aoty_module
 from app import aoty_resolver
 from app import deezer_import
@@ -1382,6 +1383,11 @@ def track_to_dict(t) -> dict:
         # Spotify-enrichment path to resolve a Tidal track to its
         # Spotify counterpart (and thus to global play counts).
         "isrc": _first(lambda: t.isrc),
+        # Tidal's 100%-AI-generated flag (its July 2026 AI policy).
+        # None when the payload didn't carry it (older cached objects
+        # or endpoints that omit it); True/False otherwise. The
+        # frontend can badge it; hide_ai_content filtering keys off it.
+        "ai": _first(lambda: t.ai),
     }
 
 
@@ -1522,6 +1528,24 @@ def filter_explicit_dupes(items: list, preference: str, *, kind: str) -> list:
         )
         out.append(preferred)
     return out
+
+
+def filter_ai_tracks(items: list) -> list:
+    """Drop tracks Tidal tagged as 100% AI-generated, honouring the
+    hide_ai_content setting.
+
+    `items` is a list of tidalapi Track objects (the `ai` attribute is
+    populated by the parse patch in app/tidal_client.py). No-op when the
+    setting is off, so browse lists are untouched for users who leave
+    AI content enabled. A missing/None `ai` (older cached objects, or an
+    endpoint that omitted the flag) is treated as not-AI: we only drop
+    on an explicit True so a sparse payload never blanks a shelf. This
+    mirrors Tidal's own client, which keeps the toggle local rather than
+    on the account and removes flagged tracks from listings when it's
+    on."""
+    if not getattr(settings, "hide_ai_content", False):
+        return list(items)
+    return [it for it in items if getattr(it, "ai", None) is not True]
 
 
 def artist_to_dict(a) -> dict:
@@ -4165,8 +4189,10 @@ def lastfm_chart_top_tracks_resolved(limit: int = 50) -> list[dict]:
                     flush=True,
                 )
                 return None
-            tracks = filter_explicit_dupes(
-                results.get("tracks", []), pref, kind="track"
+            tracks = filter_ai_tracks(
+                filter_explicit_dupes(
+                    results.get("tracks", []), pref, kind="track"
+                )
             )
             if not tracks:
                 print(
@@ -7337,6 +7363,65 @@ def upnp_devices() -> dict:
 # startup so the pynput listener thread can fan events out.
 
 
+def _snapshot_needs_client_action(state: Optional[str]) -> bool:
+    """Player states the client must *respond* to, not merely display.
+
+    `ended` -> the client advances the queue to the next track;
+    `error` -> the client skips the dead track (when continue-playing
+    is on). The player parks in these states and emits the transition
+    exactly once. Auto-advance therefore hinges on the client catching
+    that single edge — and if it's missed (a frame coalesced away under
+    backpressure, a dropped SSE message, a reconnect gap) the player
+    strands at end-of-track with no recovery, which is the "song ended
+    and didn't advance" hang.
+
+    So these states are re-advertised on every poll instead of deduped.
+    The client's monotonic `seq` guard makes the repeat a no-op for a
+    client that already acted, while a client that missed the edge
+    finally sees it and advances.
+    """
+    return state in ("ended", "error")
+
+
+def _should_forward_snapshot(seq, last_seq, state: Optional[str]) -> bool:
+    """Whether a polled snapshot should be sent, given the last seq we
+    already put on the wire.
+
+    A new seq always goes out. A *repeat* seq is normally deduped to
+    keep idle keepalive ticks off the wire — except for states the
+    client must respond to (`ended`/`error`), which keep flowing so a
+    client that missed the one transition edge still receives it and
+    advances. The client's own monotonic seq guard makes the repeats a
+    no-op once it has acted.
+    """
+    if seq != last_seq:
+        return True
+    return _snapshot_needs_client_action(state)
+
+
+def _put_latest(queue: "asyncio.Queue", payload) -> None:
+    """Enqueue `payload`, dropping the OLDEST buffered snapshot when the
+    queue is full.
+
+    Snapshots are a last-writer-wins stream: losing an intermediate
+    position tick under backpressure is harmless, but the *newest*
+    snapshot must never be dropped — it is sometimes the one `ended`
+    edge that drives auto-advance. The previous code did the opposite:
+    `put_nowait` raised `QueueFull` on the newest and the surrounding
+    `except: pass` swallowed it, so a busy event loop at a track
+    boundary could silently strand playback.
+    """
+    while True:
+        try:
+            queue.put_nowait(payload)
+            return
+        except asyncio.QueueFull:
+            try:
+                queue.get_nowait()
+            except asyncio.QueueEmpty:
+                return
+
+
 @app.get("/api/player/events")
 async def player_events(request: Request):
     """SSE stream of player snapshots.
@@ -7355,8 +7440,12 @@ async def player_events(request: Request):
     def _on_snapshot(snap) -> None:
         payload = _snapshot_dict(snap)
         try:
-            loop.call_soon_threadsafe(queue.put_nowait, payload)
-        except Exception:
+            loop.call_soon_threadsafe(_put_latest, queue, payload)
+        except RuntimeError:
+            # Event loop already closed: the SSE connection is tearing
+            # down and unsubscribe() is about to detach us. Nothing to
+            # deliver. (Narrow catch — we do NOT want to swallow a
+            # QueueFull here; _put_latest handles backpressure itself.)
             pass
 
     unsubscribe = player.subscribe(_on_snapshot)
@@ -7379,8 +7468,11 @@ async def player_events(request: Request):
                 if payload is None:
                     break
                 seq = payload.get("seq", 0)
-                if seq == last_seq and payload.get("state") != "playing":
-                    # Dedupe keepalive ticks while nothing is happening.
+                if not _should_forward_snapshot(seq, last_seq, payload.get("state")):
+                    # Dedupe keepalive ticks while nothing actionable is
+                    # pending. States the client must respond to
+                    # (`ended`/`error`) keep flowing so a client that
+                    # missed the transition can still act.
                     continue
                 last_seq = seq
                 yield f"data: {json.dumps(payload)}\n\n"
@@ -7431,6 +7523,7 @@ def search(q: str, limit: int = 25) -> dict:
     # tracks participate in the explicit/clean collapse.
     tracks = _rerank_tracks(q, tidal_top, artists, raw_tracks, taste)
     tracks = filter_explicit_dupes(tracks, pref, kind="track")
+    tracks = filter_ai_tracks(tracks)
     albums = filter_explicit_dupes(
         _rerank_albums(q, raw_albums, taste), pref, kind="album"
     )
@@ -7457,6 +7550,16 @@ def search(q: str, limit: int = 25) -> dict:
             best = (cand, entity)
     if best is not None:
         top_hit = best[1]
+
+    # The hero can still be Tidal's nominated top_hit when we didn't
+    # override it — drop it if that's an AI track and the filter is on,
+    # so a hidden track can't sneak back in as the hero card.
+    if (
+        getattr(settings, "hide_ai_content", False)
+        and type(top_hit).__name__ == "Track"
+        and getattr(top_hit, "ai", None) is True
+    ):
+        top_hit = None
 
     # Pool was widened for ranking; trim back to the requested size.
     return {
@@ -7894,6 +7997,95 @@ def _first_folder_or_throwaway():
     return tidalapi.Folder(session=tidal.session, folder_id="root")
 
 
+# ---------------------------------------------------------------------------
+# Local album collections (#243). User-defined groups of favorite albums,
+# stored on disk with no Tidal round-trip — Tidal has no album-folder API.
+# See app/album_collections.py.
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/collections")
+def list_album_collections() -> list[dict]:
+    _require_local_access()
+    return album_collections.list_collections()
+
+
+class CreateCollectionRequest(BaseModel):
+    name: str
+
+
+@app.post("/api/collections")
+def create_album_collection(req: CreateCollectionRequest) -> dict:
+    _require_local_access()
+    if not req.name.strip():
+        raise HTTPException(status_code=400, detail="Collection name is required")
+    return album_collections.create_collection(req.name)
+
+
+@app.get("/api/collections/{collection_id}")
+def get_album_collection(collection_id: str) -> dict:
+    _require_local_access()
+    c = album_collections.get_collection(collection_id)
+    if c is None:
+        raise HTTPException(status_code=404, detail="Collection not found")
+    return c
+
+
+class RenameCollectionRequest(BaseModel):
+    name: str
+
+
+@app.patch("/api/collections/{collection_id}")
+def rename_album_collection(
+    collection_id: str, req: RenameCollectionRequest
+) -> dict:
+    _require_local_access()
+    if not req.name.strip():
+        raise HTTPException(status_code=400, detail="Collection name is required")
+    if not album_collections.rename_collection(collection_id, req.name):
+        raise HTTPException(status_code=404, detail="Collection not found")
+    return {"ok": True}
+
+
+@app.delete("/api/collections/{collection_id}")
+def delete_album_collection(collection_id: str) -> dict:
+    _require_local_access()
+    if not album_collections.delete_collection(collection_id):
+        raise HTTPException(status_code=404, detail="Collection not found")
+    return {"ok": True}
+
+
+class AddAlbumToCollectionRequest(BaseModel):
+    album: dict
+
+
+@app.post("/api/collections/{collection_id}/albums")
+def add_album_to_collection(
+    collection_id: str, req: AddAlbumToCollectionRequest
+) -> dict:
+    _require_local_access()
+    result = album_collections.add_album(collection_id, req.album)
+    if result is None:
+        # Either the collection is missing or the album payload had no
+        # usable id. Distinguish so the UI can show the right message.
+        if album_collections.get_collection(collection_id) is None:
+            raise HTTPException(status_code=404, detail="Collection not found")
+        raise HTTPException(status_code=400, detail="Album id is required")
+    # result is True on add, False when it was already there — both are
+    # a success from the caller's point of view (idempotent add).
+    return {"ok": True, "added": result}
+
+
+@app.delete("/api/collections/{collection_id}/albums/{album_id}")
+def remove_album_from_collection(collection_id: str, album_id: str) -> dict:
+    _require_local_access()
+    if not album_collections.remove_album(collection_id, album_id):
+        raise HTTPException(
+            status_code=404, detail="Album not in collection"
+        )
+    return {"ok": True}
+
+
 # Cache of (path, mtime_ns, size) -> tags dict, shared across /api/library/local
 # calls so repeat loads don't re-open every file. Keyed by absolute path; an
 # mtime mismatch invalidates the entry (covers re-tags, file replacements).
@@ -8195,7 +8387,10 @@ def album_detail(album_id: int) -> dict:
     with ThreadPoolExecutor(max_workers=2) as pool:
         f_tracks = pool.submit(
             _safe,
-            lambda: [track_to_dict(t) for t in tidal.get_album_tracks(album)],
+            lambda: [
+                track_to_dict(t)
+                for t in filter_ai_tracks(tidal.get_album_tracks(album))
+            ],
             [],
         )
         f_similar = pool.submit(
@@ -8295,7 +8490,8 @@ def artist_detail(artist_id: int) -> dict:
             _safe_t,
             "top_tracks",
             lambda: [
-                track_to_dict(t) for t in tidal.get_artist_top_tracks(artist)
+                track_to_dict(t)
+                for t in filter_ai_tracks(tidal.get_artist_top_tracks(artist))
             ],
             [],
         )
@@ -8529,7 +8725,7 @@ def artist_radio(artist_id: int) -> list[dict]:
         tracks = artist.get_radio(limit=100)
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc))
-    return [track_to_dict(t) for t in tracks]
+    return [track_to_dict(t) for t in filter_ai_tracks(tracks)]
 
 
 _artist_extras_cache: dict[str, tuple[float, dict]] = {}
@@ -9152,6 +9348,8 @@ def _artist_credits_list(artist_id: int, limit: int) -> list[dict]:
             track = tidal.session.track(track_id)
         except Exception:
             continue
+        if not filter_ai_tracks([track]):
+            continue
         out.append({**track_to_dict(track), "role": role})
     return out
 
@@ -9233,7 +9431,7 @@ def track_radio(track_id: int) -> list[dict]:
         radio = track.get_track_radio()
     except Exception as exc:
         raise HTTPException(status_code=502, detail=str(exc))
-    return [track_to_dict(t) for t in radio]
+    return [track_to_dict(t) for t in filter_ai_tracks(radio)]
 
 
 @app.get("/api/mixes")
@@ -9281,7 +9479,12 @@ def mix_detail(mix_id: str) -> dict:
         items = list(mix.items())
     except Exception:
         items = []
-    tracks = [track_to_dict(t) for t in items if type(t).__name__ == "Track"]
+    tracks = [
+        track_to_dict(t)
+        for t in filter_ai_tracks(
+            [it for it in items if type(it).__name__ == "Track"]
+        )
+    ]
     result = {
         "kind": "mix",
         "id": mix_id,
@@ -9339,7 +9542,8 @@ def _fetch_playlist_items_with_added_at(
             except Exception:
                 tracks = []
             return [
-                {**track_to_dict(t), "added_at": None} for t in tracks
+                {**track_to_dict(t), "added_at": None}
+                for t in filter_ai_tracks(tracks)
             ]
 
         items = payload.get("items") or []
@@ -9355,6 +9559,8 @@ def _fetch_playlist_items_with_added_at(
                 # single source of truth for the response shape.
                 track_obj = tidal.session.parse_track(raw)
             except Exception:
+                continue
+            if not filter_ai_tracks([track_obj]):
                 continue
             track_dict = track_to_dict(track_obj)
             created = (entry or {}).get("created")
@@ -10365,6 +10571,8 @@ class SettingsPayload(BaseModel):
     continue_playing_after_queue_ends: Optional[bool] = None
     pause_on_other_device: Optional[bool] = None
     explicit_content_preference: Optional[str] = None
+    hide_ai_content: Optional[bool] = None
+    ai_filter_notice_ack: Optional[bool] = None
     download_rate_limit_mbps: Optional[int] = None
     eq_mode: Optional[str] = None
     eq_active_profile_id: Optional[str] = None
@@ -10585,6 +10793,11 @@ def _serialize_page_item(item) -> Optional[dict]:
     import tidalapi
 
     if isinstance(item, tidalapi.Track):
+        # Editorial rows are recommendations; drop AI-flagged tracks
+        # when the filter is on, the way Tidal strips them from its own
+        # home/explore surfaces. Returning None lets the caller omit it.
+        if not filter_ai_tracks([item]):
+            return None
         return track_to_dict(item)
     if isinstance(item, tidalapi.Album):
         # Drop albums Tidal lists but won't stream (region lock,

@@ -13,6 +13,7 @@ import { GridSkeleton } from "@/components/Skeletons";
 import { AotyHomeSection } from "@/components/AotyHomeSection";
 import { LastfmConnectNudge } from "@/components/LastfmConnectNudge";
 import { CreditsDialog } from "@/components/CreditsDialog";
+import { AiFilterNotice } from "@/components/AiFilterNotice";
 import { DROPDOWN_MENU_PARTS, TrackMenuItems } from "@/components/TrackMenu";
 import {
   DropdownMenu,
@@ -645,6 +646,7 @@ export function Home({ onDownload }: { onDownload: OnDownload }) {
 
   return (
     <div>
+      <AiFilterNotice />
       <LastfmConnectNudge />
       {firstCompact && (
         <CompactRow

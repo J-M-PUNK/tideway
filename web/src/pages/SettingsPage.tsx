@@ -310,6 +310,12 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
                 </select>
               </Field>
               <Toggle
+                checked={settings.hide_ai_content}
+                onChange={(v) => patch({ hide_ai_content: v })}
+                label="Hide AI-generated content"
+                hint="Tidal tags tracks it identifies as 100% AI-generated. When on, those tracks are hidden from search, artist and album pages, mixes, and recommendations, and are skipped when downloading. Your own library stays untouched, so anything you've already favorited still shows there. Mirrors the AI-content toggle in Tidal's own client."
+              />
+              <Toggle
                 checked={settings.continue_playing_after_queue_ends}
                 onChange={(v) =>
                   patch({ continue_playing_after_queue_ends: v })
