@@ -819,7 +819,7 @@ class UpnpManager:
                 if urls and isinstance(urls, list):
                     self.start_passthrough(urls)
                     _notified = True
-            except Exception as exc:
+            except (ValueError, RuntimeError, OSError) as exc:
                 log.debug("upnp: source provider raised: %r", exc)
 
         try:
