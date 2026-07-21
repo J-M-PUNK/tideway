@@ -639,6 +639,33 @@ downloader = Downloader(
     on_file_ready=_on_file_ready,
 )
 
+def _restore_pending_downloads() -> None:
+    """Re-enqueue downloads left pending from a previous run.
+
+    Gated on a valid session by every caller: submits without one each
+    fail in their expand thread and surface as loud FAILED rows the user
+    can't act on until they sign in.
+    """
+    import sys as _sys
+
+    try:
+        downloader.restore()
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"[server] downloader.restore() failed: {exc!r}",
+            file=_sys.stderr,
+            flush=True,
+        )
+
+
+# A session that couldn't be validated at boot (no network, or a Tidal
+# backoff window) leaves this undone — `logged_in` is False, so the boot
+# thread skips it. Without this hook the user's pending downloads stay
+# lost for the rest of the process even after the watchdog gets the
+# session back.
+tidal.on_session_restored = _restore_pending_downloads
+
+
 def _boot_tidal_session() -> None:
     """Load the persisted Tidal session, then re-enqueue pending
     downloads — both off the import critical path so the app window can
@@ -666,14 +693,7 @@ def _boot_tidal_session() -> None:
     finally:
         _session_ready.set()
     if logged_in:
-        try:
-            downloader.restore()
-        except Exception as exc:  # noqa: BLE001
-            print(
-                f"[server] downloader.restore() failed: {exc!r}",
-                file=_sys.stderr,
-                flush=True,
-            )
+        _restore_pending_downloads()
 
 
 threading.Thread(

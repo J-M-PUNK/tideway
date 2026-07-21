@@ -135,6 +135,55 @@ def test_watchdog_retry_recovers_the_session(client, session_file, monkeypatch):
     assert client.session_load_deferred() is False
 
 
+def test_recovery_fires_the_session_restored_hook(
+    client, session_file, monkeypatch
+):
+    """The boot thread skips re-enqueueing pending downloads when the
+    session looks signed out, and nothing else re-runs it. Without this
+    hook a user who launched offline loses their pending downloads for
+    the rest of the process even after the session comes back."""
+    calls = {"n": 0, "restored": 0}
+    client.on_session_restored = lambda: calls.__setitem__(
+        "restored", calls["restored"] + 1
+    )
+
+    def flaky(*a, **kw):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise req_exc.ConnectionError("dns down")
+        return True
+
+    monkeypatch.setattr(client.session, "load_oauth_session", flaky)
+    monkeypatch.setattr(client.session, "check_login", lambda: calls["n"] > 1)
+
+    assert client.load_session() is False
+    assert calls["restored"] == 0
+
+    client._retry_deferred_load()
+
+    assert calls["restored"] == 1
+
+
+def test_failed_retry_does_not_fire_the_restored_hook(
+    client, session_file, monkeypatch
+):
+    calls = {"restored": 0}
+    client.on_session_restored = lambda: calls.__setitem__(
+        "restored", calls["restored"] + 1
+    )
+
+    def unreachable(*a, **kw):
+        raise req_exc.ConnectionError("dns down")
+
+    monkeypatch.setattr(client.session, "load_oauth_session", unreachable)
+
+    assert client.load_session() is False
+    client._retry_deferred_load()
+
+    assert calls["restored"] == 0
+    assert client.session_load_deferred() is True
+
+
 def test_logout_clears_the_flag(client, session_file, monkeypatch):
     def unreachable(*a, **kw):
         raise req_exc.ConnectionError("dns down")

@@ -492,6 +492,10 @@ class TidalClient:
         # when a hard refresh failure logs the user out, so the UI
         # bounces to Login immediately instead of after the cache TTL.
         self.on_auth_lost: Optional[Callable[[], None]] = None
+        # Set by the server. Invoked when a deferred session load
+        # finally succeeds, so the boot-time work that was skipped
+        # because we looked signed out still happens.
+        self.on_session_restored: Optional[Callable[[], None]] = None
         self._login_future: Optional[Future] = None
         # True when a persisted session exists on disk but the network
         # was unreachable when we tried to validate it, so
@@ -770,6 +774,18 @@ class TidalClient:
         transport on this object."""
         self.session.token_refresh = self._token_refresh_and_persist
 
+    def _notify_session_restored(self) -> None:
+        """Tell the server a session that couldn't be validated at boot
+        is now live, so the boot work that was skipped for a
+        signed-out-looking session can run. Counterpart to
+        _notify_auth_lost."""
+        cb = getattr(self, "on_session_restored", None)
+        if cb is not None:
+            try:
+                cb()
+            except Exception:
+                pass
+
     def _notify_auth_lost(self) -> None:
         """Tell the server its cached auth state is stale (refresh
         token dead, user logged out) so the next /auth/status flips
@@ -845,6 +861,7 @@ class TidalClient:
         _tlog("session load was deferred (offline at boot) — retrying")
         if self.load_session():
             _tlog("deferred session load succeeded")
+            self._notify_session_restored()
 
     def _refresh_watchdog(self) -> None:
         """Background loop that refreshes the token before it expires.
