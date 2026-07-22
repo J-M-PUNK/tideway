@@ -126,6 +126,12 @@ export const api = {
         "/api/auth/login/poll",
       ),
     logout: () => req<{ ok: true }>("/api/auth/logout", { method: "POST" }),
+    /** Tell the backend connectivity is back so it can retry a session
+     *  load that a dead network aborted at launch. No-ops server-side
+     *  when nothing is deferred. `started` reports whether a retry
+     *  actually kicked off. */
+    retrySession: () =>
+      req<{ started: boolean }>("/api/auth/session/retry", { method: "POST" }),
     pkceUrl: () => req<{ url: string }>("/api/auth/pkce/url"),
     pkceComplete: (redirect_url: string) =>
       req<{ status: "ok"; username: string | null }>(

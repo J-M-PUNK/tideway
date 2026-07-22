@@ -94,14 +94,19 @@ export function AddToCollectionButton({ album }: { album: Album }) {
     <>
       <DropdownMenu onOpenChange={loadOnOpen}>
         <DropdownMenuTrigger asChild>
-          <Button
-            variant="ghost"
-            size="icon"
+          {/* Same bare icon-over-caption pattern as the sibling row
+              controls (AddToLibraryButton / ShareButton), not the
+              shadcn <Button> — that rendered a smaller icon (the button
+              base class forces svg to size-4 over our h-5), no caption,
+              a stray hover pill, and the wrong height. */}
+          <button
+            className="flex flex-col items-center gap-1 text-muted-foreground transition-colors hover:text-foreground data-[state=open]:text-primary"
             aria-label="Add to collection"
-            title="Add to collection"
+            title="Save this album to one of your own on-device collections — personal groups of albums that Tidal can't do (like folders or tags), and that work offline"
           >
             <Layers className="h-5 w-5" />
-          </Button>
+            <div className="text-xs font-semibold">Collection</div>
+          </button>
         </DropdownMenuTrigger>
         <DropdownMenuContent align="end" className="max-h-80 overflow-y-auto">
           <DropdownMenuLabel>Add to collection</DropdownMenuLabel>

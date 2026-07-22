@@ -363,6 +363,16 @@ def _is_logged_in() -> bool:
             return bool(_auth_cache["ok"])
     try:
         ok = bool(tidal.session.check_login())
+        if not ok and tidal.session_load_deferred():
+            # check_login() short-circuits to False — no exception, no
+            # round-trip — when session.user / session_id are unset,
+            # which is exactly the state a boot with no network leaves
+            # behind. The credentials on disk are fine, so this is the
+            # same "signed in, but offline" case the except-branch below
+            # handles; it just arrives as a return value instead of a
+            # raise. Reporting it as logged-out 401'd the local library
+            # for anyone who launched offline (#292).
+            ok = True
     except _NETWORK_ERRORS:
         # Network unreachable is not "logged out". check_login() only
         # gets as far as the HTTP round-trip when the session has
@@ -629,6 +639,43 @@ downloader = Downloader(
     on_file_ready=_on_file_ready,
 )
 
+def _restore_pending_downloads() -> None:
+    """Re-enqueue downloads left pending from a previous run.
+
+    Gated on a valid session by every caller: submits without one each
+    fail in their expand thread and surface as loud FAILED rows the user
+    can't act on until they sign in.
+    """
+    import sys as _sys
+
+    try:
+        downloader.restore()
+    except Exception as exc:  # noqa: BLE001
+        print(
+            f"[server] downloader.restore() failed: {exc!r}",
+            file=_sys.stderr,
+            flush=True,
+        )
+
+
+def _on_session_restored() -> None:
+    """A session deferred at boot (no network, or a Tidal backoff
+    window) has finally validated.
+
+    Two things were left undone while it looked signed out. The auth
+    cache holds the stand-in answer the deferral produced, whose
+    username reads "Tidal User" because session.user was unset; drop it
+    so the next /auth/status reports the real account. And the boot
+    thread skipped re-enqueueing pending downloads, which nothing else
+    re-runs — without this they stay lost for the rest of the process.
+    """
+    _invalidate_auth_cache()
+    _restore_pending_downloads()
+
+
+tidal.on_session_restored = _on_session_restored
+
+
 def _boot_tidal_session() -> None:
     """Load the persisted Tidal session, then re-enqueue pending
     downloads — both off the import critical path so the app window can
@@ -656,14 +703,7 @@ def _boot_tidal_session() -> None:
     finally:
         _session_ready.set()
     if logged_in:
-        try:
-            downloader.restore()
-        except Exception as exc:  # noqa: BLE001
-            print(
-                f"[server] downloader.restore() failed: {exc!r}",
-                file=_sys.stderr,
-                flush=True,
-            )
+        _restore_pending_downloads()
 
 
 threading.Thread(
@@ -3063,6 +3103,27 @@ def video_downloads_list() -> list[dict]:
 
 
 # /api/notify route moved to `app/routers/notify.py`.
+
+@app.post("/api/auth/session/retry")
+def auth_session_retry() -> dict:
+    """Retry a session load that a dead network or a backoff window
+    aborted at boot.
+
+    The frontend pokes this when the browser reports connectivity back,
+    so recovery follows the actual event instead of waiting out the
+    watchdog's poll interval (up to a minute). The watchdog stays as the
+    fallback for what `navigator.onLine` can't see — a captive portal
+    clearing, or a Tidal-side outage ending while the LAN was fine
+    throughout.
+
+    Deliberately not behind `_require_auth`: the whole point is that it
+    runs while the app is reporting itself signed-in-but-offline, and
+    gating it on the auth check it exists to repair would deadlock the
+    recovery. It starts a retry of a session already on disk and takes
+    no input.
+    """
+    return {"started": tidal.retry_deferred_load_async()}
+
 
 @app.get("/api/auth/status")
 def auth_status() -> dict:

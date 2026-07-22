@@ -17,6 +17,10 @@ export interface PersistedState {
   currentTime: number;
   volume: number;
   shuffle: boolean;
+  /** The shuffle order in play when the app closed. Persisted with
+   *  the queue it indexes into, so relaunching mid-queue resumes the
+   *  same order instead of re-dealing one. */
+  shuffleOrder: number[];
   repeat: RepeatMode;
   /** Id of the track that was loaded when the user closed the app.
    *  Used as a sanity-check against the persisted queue so that on
@@ -142,6 +146,7 @@ export function usePlayerPersistence(
         currentTime: s.currentTime,
         volume: s.volume,
         shuffle: s.shuffle,
+        shuffleOrder: s.shuffleOrder,
         repeat: s.repeat,
         trackId: s.track?.id ?? null,
         track: s.track,
