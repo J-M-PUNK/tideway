@@ -99,26 +99,93 @@ Paste this, updating the version:
 > We are not currently Authenticode-signed, which we understand
 > contributes to the low reputation score.
 
+## You cannot reproduce this locally
+
+The maintainer's Windows machine runs a third-party antivirus
+(Surfshark), and Windows stands Defender's real-time protection down
+whenever another AV registers itself — `Get-Service WinDefend` reports
+`Stopped`. The engine that emits these detections is therefore not
+running here at all. Every release installer back to 1.14.0, including
+the exact 1.21.2 file reported in #293, sits intact in the maintainer's
+Downloads folder.
+
+So a clean download on the maintainer's machine is not evidence of
+anything, and neither is a clean install. To actually check a build:
+
+- Upload the installer to VirusTotal and read which engines flag it.
+  Typically only the ML-heuristic ones do. This is also the artifact
+  worth linking when replying to a user, because it's independent
+  evidence rather than our own reassurance.
+- Or run it on a Windows VM with Defender enabled and cloud-delivered
+  protection on.
+
+Bear in mind detection is not even consistent across Defender users:
+`!ml` verdicts shift with definition versions and cloud-protection
+settings, so the same file can pass one day and be quarantined the
+next.
+
 ## The permanent fix: Authenticode
 
-An Authenticode certificate is the only thing that ends the recurrence.
+Getting the installer Authenticode-signed is the only thing that ends
+the recurrence. The ground rules changed recently and older advice
+(including an earlier draft of this document) is misleading:
 
-- **OV (organisation validation)**, roughly $100–300/year. Stops most ML
-  heuristics immediately and accumulates SmartScreen reputation over a
-  few weeks of download volume. Requires business-identity validation.
-- **EV (extended validation)**, roughly $300–600/year, issued on a
-  hardware token or via a cloud HSM. Clears SmartScreen from the first
-  signed build with no reputation-building period. The token makes CI
-  signing harder — either sign locally alongside
-  `scripts/sign-release.sh`, or use a cloud signing service that exposes
-  an API.
+- Since **June 2023**, code-signing private keys must live on a
+  hardware token or an HSM. You can no longer drop a `.pfx` into a CI
+  secret and call `signtool`.
+- Since **23 February 2026**, maximum certificate lifetime is 459 days
+  (~15 months), and multi-year purchases ship a new hardware device
+  each year.
 
-Wiring it into CI means adding an `signtool sign /fd SHA256 /tr <rfc3161
-timestamp url> /td SHA256` step to the `build-windows` and
-`build-windows-arm64` jobs in `.github/workflows/release.yml`, after
-Inno Setup produces the installer and before the artifact upload. Gate
-it on the certificate secret being present so forks and unsigned local
-builds keep working.
+That makes a CA-shipped USB token awkward for a GitHub Actions build,
+and pushes the practical options toward managed signing services:
+
+- **SignPath Foundation** (<https://signpath.org/>) — free for open
+  source, with CI-native GitHub connectors. Their model is verifying
+  that the binary was built from the public repository, which Tideway
+  already satisfies: `release.yml` builds entirely on GitHub-hosted
+  runners with no local build step and no manual artifact handling.
+  Requires an application and approval. Worth stating plainly in the
+  application that Tideway downloads audio from TIDAL, rather than
+  having it discovered later.
+- **Azure Trusted Signing** — cloud-based, roughly $10/month, designed
+  for CI so there is no token to manage. Public trust is limited to
+  organisations in the US/Canada/EU/UK and to individual developers in
+  the US and Canada only, so eligibility depends on where the
+  maintainer is.
+- **A traditional OV/IV certificate** — a distant third now. Individual
+  Validation certificates exist for solo developers without a
+  registered company, but you are managing shipped hardware plus annual
+  device replacement.
+
+Verify current pricing and eligibility directly with the provider; this
+area has been changing yearly.
+
+### Where signing has to happen in the release flow
+
+**Authenticode signing must happen inside the build job, before the
+artifact is uploaded to the draft release.**
+
+`scripts/sign-release.sh` downloads whatever is attached to the release
+and minisigns those exact bytes. Authenticode signing rewrites the PE —
+it appends to the certificate table — which changes the file hash. Sign
+in the wrong order and every `.minisig` is silently invalid, which
+breaks "Install now" for every existing install: precisely the failure
+the minisign scheme exists to prevent.
+
+The correct order is:
+
+```
+build-windows / build-windows-arm64
+  → Inno Setup produces the installer
+  → Authenticode signing (SignPath / Azure / signtool)
+  → upload artifact to the draft release
+  → maintainer runs scripts/sign-release.sh (minisign over signed bytes)
+  → publish
+```
+
+Gate the signing step on its credential being present, so forks and
+unsigned local builds keep working.
 
 ## What to tell affected users
 
