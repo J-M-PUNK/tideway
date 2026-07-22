@@ -561,7 +561,7 @@ class CastManager:
                     try:
                         tail = session.encoder.close()
                         if tail:
-                            session.buffer.write(tail)
+                            session.buffer.write(tail, block=False)
                     except Exception as exc:
                         log.debug("encoder close failed: %r", exc)
                     session.encoder = None
@@ -760,7 +760,7 @@ class CastManager:
                     try:
                         tail = session.encoder.close()
                         if tail:
-                            session.buffer.write(tail)
+                            session.buffer.write(tail, block=False)
                     except Exception as exc:
                         log.debug("encoder close on rebuild: %r", exc)
                 try:
@@ -790,7 +790,7 @@ class CastManager:
                 log.debug("flac encode failed: %r", exc)
                 return
         if encoded:
-            session.buffer.write(encoded)
+            session.buffer.write(encoded, block=False)
             # Atomic int update; no lock needed for a counter.
             session.bytes_encoded += len(encoded)
 

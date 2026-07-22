@@ -64,6 +64,7 @@ from app.audio.avtransport import (
     RenderingControlController,
 )
 from app.audio.http_stream import (
+    FlacPassthroughEncoder,
     FlacStreamEncoder,
     RingBuffer,
     StreamHTTPServer,
@@ -311,6 +312,11 @@ class _SessionState:
     media_loaded: bool = False
     stream_url: str = ""
     encode_failed: bool = False
+    # Passthrough fields — populated by start_passthrough()
+    passthrough_encoder: Optional[FlacPassthroughEncoder] = None
+    passthrough_active: bool = False
+    _passthrough_source_urls: Optional[tuple[str, ...]] = None
+    _passthrough_done_event: Optional[threading.Event] = None
 
 
 def _filter_dlna_renderer(service_types: tuple[str, ...]) -> bool:
@@ -362,6 +368,17 @@ class UpnpManager:
         # both local and remote audio, which is inconvenient but not
         # catastrophic.
         self._local_silencer: Optional[Callable[[bool], None]] = None
+
+        # Source provider: returns the current track's segment URLs
+        # (list[str]) or None. The player registers this so connect()
+        # can start passthrough even when a track is already loaded
+        # before the DLNA session.
+        self._source_provider: Optional[Callable[[], Optional[list[str]]]] = None
+
+        # Metadata provider: returns the current track's metadata dict
+        # (title, artist, album, duration_s, cover_url) or None. Used
+        # to notify the renderer on track changes via SetAVTransportURI.
+        self._metadata_provider: Optional[Callable[[], Optional[dict]]] = None
 
         if _UPNP_AVAILABLE:
             self._start_loop_thread()
@@ -426,6 +443,24 @@ class UpnpManager:
         Cast uses; server.py wires both at startup."""
         self._local_silencer = callback
 
+    def set_source_provider(
+        self, callback: Optional[Callable[[], Optional[list[str]]]]
+    ) -> None:
+        """Register a callback that returns the current track's segment
+        URLs (list[str]) or None. The player sets this so connect()
+        can start passthrough for tracks loaded before the DLNA session
+        was established."""
+        self._source_provider = callback
+
+    def set_metadata_provider(
+        self, callback: Optional[Callable[[], Optional[dict]]]
+    ) -> None:
+        """Register a callback that returns the current track's metadata
+        dict (title, artist, album, duration_s, cover_url) or None.
+        Called on track changes to notify the renderer via
+        SetAVTransportURI + Play."""
+        self._metadata_provider = callback
+
     def add_listener(
         self, callback: Callable[[Optional[UpnpDevice]], None]
     ) -> Callable[[], None]:
@@ -473,6 +508,210 @@ class UpnpManager:
             self._devices = {d.id: d for d in devices}
             self._last_scan_at = time.monotonic()
         return devices
+
+    # ---- passthrough -----------------------------------------------
+
+    def start_passthrough(
+        self, source, prefetched=None, metadata=None
+    ) -> None:
+        """Start bit-perfect FLAC passthrough for the current track.
+
+        Opens the same fMP4 source that the Decoder uses, but instead
+        of decoding to PCM, demuxes raw FLAC packets and remuxes them
+        into a continuous FLAC stream written directly to the RingBuffer.
+
+        Sends SetAVTransportURI + Play to the renderer so it updates
+        its now-playing display and initiates a fresh HTTP GET for the
+        new track's FLAC stream (needed for gapless passthrough).
+
+        This preserves the original STREAMINFO and seektable from the
+        Tidal encoder, which strict DLNA renderers like UAPP require.
+
+        Args:
+            source: URL list (SegmentReader-compatible) or file-like
+            prefetched: dict of {segment_idx: bytes} for pre-fetched segments
+            metadata: dict with title, artist, album, duration_s, cover_url
+                      for the new track; falls back to _metadata_provider
+                      if not given and the provider is registered.
+        """
+        with self._session_lock:
+            session = self._session
+        if session is None:
+            print("[upnp] passthrough: no active session", flush=True)
+            return
+
+        # ---- GUARD: skip if already running for the same source ----
+        # player.py calls start_passthrough() in 2 places (lines 819
+        # and 1299 in the original; now also in _build_load_pipeline).
+        # On gapless transitions both fire for the same track. Without
+        # this guard, the 2nd call closes the encoder, clears the
+        # buffer, and re-notifies UAPP — causing duplicated audio.
+        # Key on the URL tuple rather than id() so the guard survives
+        # object reuse across garbage-collection cycles.
+        _source_urls = tuple(source) if isinstance(source, (list, tuple)) else None
+        if session.passthrough_active and session._passthrough_source_urls == _source_urls:
+            print(
+                "[upnp] passthrough: already running for this source, skipping",
+                flush=True,
+            )
+            return
+        session._passthrough_source_urls = _source_urls
+
+        # Stop existing passthrough if any
+        if session.passthrough_encoder is not None:
+            try:
+                session.passthrough_encoder.close()
+            except Exception:
+                pass
+            session.passthrough_encoder = None
+
+        # Build SegmentReader from URLs
+        try:
+            from app.audio.segment_reader import SegmentReader
+            if isinstance(source, (list, tuple)):
+                reader = SegmentReader(source, prefetched=prefetched)
+            else:
+                reader = source  # already a file-like
+        except Exception as exc:
+            print(f"[upnp] passthrough: failed to build source: {exc!r}", flush=True)
+            return
+
+        stop_flag = threading.Event()
+        done_event = threading.Event()
+        session._passthrough_done_event = done_event
+
+        # Set passthrough_active BEFORE flush so the audio callback
+        # (which checks this flag in push_pcm) doesn't land PCM bytes
+        # in the freshly cleared buffer behind the passthrough header.
+        session.passthrough_active = True
+
+        # Generate a unique track identifier before flush, so it can
+        # be set on the buffer AND embedded in the URL the renderer
+        # receives. The HTTP handler validates incoming ?ts= against
+        # this value, rejecting stale requests from a previous track.
+        import time as _time
+        _track_ts = int(_time.monotonic() * 1_000_000)
+
+        # Flush old buffer content so receiver starts at live edge.
+        # After this point, push_pcm early-returns because the flag is
+        # already set; only the passthrough encoder feeds the buffer.
+        session.buffer.flush()
+        session.buffer.set_track_id(_track_ts)
+
+        session.passthrough_encoder = FlacPassthroughEncoder(
+            source=reader,
+            buffer=session.buffer,
+            stop_flag=stop_flag,
+            done_event=done_event,
+        )
+        session.passthrough_encoder.start()
+
+        # Notify the renderer of the new track. Falls back to the
+        # metadata provider callback if no metadata dict was passed.
+        if metadata is None and self._metadata_provider is not None:
+            try:
+                metadata = self._metadata_provider()
+            except Exception as exc:
+                print(f"[upnp] metadata provider raised: {exc!r}", flush=True)
+        if metadata:
+            self._notify_track_change(metadata, session, track_ts=_track_ts)
+
+        print(
+            "[upnp] passthrough ON -- bitperfect FLAC passthrough enabled",
+            flush=True,
+        )
+
+    # ---- track-change notification ----------------------------------
+
+    def _notify_track_change(
+        self, metadata: dict, session: _SessionState, track_ts: Optional[int] = None,
+    ) -> None:
+        """Send SetAVTransportURI + Play to the renderer so it updates
+        its now-playing display and initiates a fresh HTTP GET for the
+        new track's FLAC stream.
+
+        Without this, the renderer keeps showing the previous track's
+        name and its decoder may not re-parse the new STREAMINFO header
+        that the passthrough encoder writes into the ring buffer.
+
+        URL UNIQUENESS: appends ``?ts=<timestamp>`` to the stream URL
+        so UAPP sees a different URI per track. UAPP ignores
+        SetAVTransportURI when the URI is unchanged — it processes
+        only Play and continues reading stale buffer data (which was
+        flushed with new track content), causing a crash. A fresh URI
+        forces UAPP to re-initialize its decoder for the new track.
+
+        ``track_ts`` is the track identifier generated by
+        ``start_passthrough`` and set on the RingBuffer. When
+        provided, it must match the buffer's current ``track_id``
+        so the HTTP handler can validate incoming requests against it.
+        """
+        if session.av is None or session.stream_url is None:
+            return
+        try:
+            # Unique URL per track: append ?ts= so UAPP re-initializes
+            # instead of ignoring the notification (same URI = ignored).
+            if track_ts is None:
+                import time as _time
+                _ts = int(_time.monotonic() * 1_000_000)
+            else:
+                _ts = track_ts
+            _sep = "&" if "?" in session.stream_url else "?"
+            _uri = f"{session.stream_url}{_sep}ts={_ts}"
+            track_meta = TrackMetadata(
+                title=metadata.get("title", ""),
+                artist=metadata.get("artist", ""),
+                album=metadata.get("album", ""),
+                duration_s=metadata.get("duration_s", 0),
+                cover_url=metadata.get("cover_url", ""),
+                track_uri=_uri,
+                mime_type="audio/flac",
+            )
+            didl = build_didl_lite(track_meta)
+            session.av.set_av_transport_uri(_uri, didl)
+            session.av.play()
+            print(
+                f"[upnp] track change notified: {metadata.get('title', '?')} "
+                f"url={_uri}",
+                flush=True,
+            )
+        except Exception as exc:
+            print(
+                f"[upnp] track change notification failed: {exc!r}",
+                flush=True,
+            )
+
+    def signal_source_done(self) -> None:
+        """Signal that the current track's source has reached EOF.
+
+        Called by the player when the last track ends with no preload,
+        so the passthrough encoder tells the ring buffer the source is
+        done. The HTTP serve loop then closes the connection once any
+        remaining buffered data is drained.
+        """
+        with self._session_lock:
+            session = self._session
+        if session is None:
+            return
+        if session.passthrough_encoder is not None:
+            session.passthrough_encoder.signal_source_done()
+
+    def stop_passthrough(self) -> None:
+        """Stop passthrough and revert to PCM re-encode mode."""
+        with self._session_lock:
+            session = self._session
+        if session is None:
+            return
+        if session.passthrough_encoder is not None:
+            try:
+                session.passthrough_encoder.close()
+            except Exception:
+                pass
+            session.passthrough_encoder = None
+        session.passthrough_active = False
+        session._passthrough_source_urls = None
+        session._passthrough_done_event = None
+        print("[upnp] passthrough OFF", flush=True)
 
     # ---- session lifecycle -----------------------------------------
 
@@ -566,15 +805,35 @@ class UpnpManager:
         )
         didl = build_didl_lite(metadata)
 
-        # Hand the URL to the device. Order is SetAVTransportURI
-        # then Play. The spec allows either order, but Set first +
-        # Play second is what every reference implementation does
-        # and what real renderers most reliably accept.
+        # Register the session before calling start_passthrough (so it
+        # can find the active session) and before play() (so the FLAC
+        # header lands in the ring buffer before the renderer's first
+        # GET). Duplicate assignment below is idempotent.
+        with self._session_lock:
+            self._session = session
+
+        # If a track is already loaded, start passthrough before play()
+        # so the FLAC header is in the ring buffer when the renderer's
+        # first GET arrives. Reduces the race to zero in the common case.
+        _notified = False
+        if self._source_provider is not None:
+            try:
+                urls = self._source_provider()
+                if urls and isinstance(urls, list):
+                    self.start_passthrough(urls)
+                    _notified = True
+            except (ValueError, RuntimeError, OSError) as exc:
+                log.debug("upnp: source provider raised: %r", exc)
+
         try:
-            av.set_av_transport_uri(session.stream_url, didl)
-            av.play()
-            session.media_loaded = True
+            if not _notified:
+                av.set_av_transport_uri(session.stream_url, didl)
+                av.play()
+                session.media_loaded = True
         except Exception as exc:
+            # Undo the early session registration
+            with self._session_lock:
+                self._session = None
             # Tear down the HTTP server we just stood up; otherwise
             # we leak a port until the manager's process exits.
             try:
@@ -590,9 +849,6 @@ class UpnpManager:
             raise RuntimeError(
                 f"AVTransport handshake to {device.name} failed: {exc}"
             ) from exc
-
-        with self._session_lock:
-            self._session = session
 
         # Mute local audio output. The PCM tap above feeds the DLNA
         # encoder via push_pcm; the silencer just prevents the
@@ -624,13 +880,26 @@ class UpnpManager:
         if session is None:
             return
 
+        # Stop passthrough encoder first
+        if session.passthrough_encoder is not None:
+            try:
+                session.passthrough_encoder.close()
+            except Exception as exc:
+                print(
+                    f"[upnp] passthrough: encoder close error: {exc!r}",
+                    flush=True,
+                )
+            session.passthrough_encoder = None
+            session.passthrough_active = False
+            session._passthrough_source_urls = None
+            session._passthrough_done_event = None
         try:
             with session.encoder_lock:
                 if session.encoder is not None:
                     try:
                         tail = session.encoder.close()
                         if tail:
-                            session.buffer.write(tail)
+                            session.buffer.write(tail, block=False)
                     except Exception as exc:
                         log.debug("encoder close failed: %r", exc)
                     session.encoder = None
@@ -739,6 +1008,23 @@ class UpnpManager:
             session = self._session
         if session is None:
             return
+        if session.passthrough_active:
+            # If the passthrough encoder has already finished, clean up
+            # and let PCM data flow through (re-encode to FLAC for the
+            # renderer). If it's still running, skip — the encoder
+            # feeds the buffer directly.
+            if (
+                session._passthrough_done_event is not None
+                and session._passthrough_done_event.is_set()
+            ):
+                session.passthrough_active = False
+                session._passthrough_done_event = None
+                session._passthrough_source_urls = None
+                if session.passthrough_encoder is not None:
+                    session.passthrough_encoder = None
+                session.buffer.source_done()
+            else:
+                return
         if dtype == "float32":
             scaled = pcm.astype(np.float64) * 2147483647.0
             np.clip(scaled, -2147483648.0, 2147483647.0, out=scaled)
@@ -757,7 +1043,7 @@ class UpnpManager:
                     try:
                         tail = session.encoder.close()
                         if tail:
-                            session.buffer.write(tail)
+                            session.buffer.write(tail, block=False)
                     except Exception as exc:
                         log.debug("encoder close on rebuild: %r", exc)
                 try:
@@ -806,7 +1092,7 @@ class UpnpManager:
             # A successful encode clears the failure latch so a later
             # failure episode reports again instead of staying silent.
             session.encode_failed = False
-            session.buffer.write(encoded)
+            session.buffer.write(encoded, block=False)
             session.bytes_encoded += len(encoded)
 
     # ---- internals -------------------------------------------------
