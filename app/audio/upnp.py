@@ -316,6 +316,7 @@ class _SessionState:
     passthrough_encoder: Optional[FlacPassthroughEncoder] = None
     passthrough_active: bool = False
     _passthrough_source_urls: Optional[tuple[str, ...]] = None
+    _passthrough_done_event: Optional[threading.Event] = None
 
 
 def _filter_dlna_renderer(service_types: tuple[str, ...]) -> bool:
@@ -577,6 +578,7 @@ class UpnpManager:
 
         stop_flag = threading.Event()
         done_event = threading.Event()
+        session._passthrough_done_event = done_event
 
         # Set passthrough_active BEFORE flush so the audio callback
         # (which checks this flag in push_pcm) doesn't land PCM bytes
@@ -708,6 +710,7 @@ class UpnpManager:
             session.passthrough_encoder = None
         session.passthrough_active = False
         session._passthrough_source_urls = None
+        session._passthrough_done_event = None
         print("[upnp] passthrough OFF", flush=True)
 
     # ---- session lifecycle -----------------------------------------
@@ -889,6 +892,7 @@ class UpnpManager:
             session.passthrough_encoder = None
             session.passthrough_active = False
             session._passthrough_source_urls = None
+            session._passthrough_done_event = None
         try:
             with session.encoder_lock:
                 if session.encoder is not None:
@@ -1005,7 +1009,22 @@ class UpnpManager:
         if session is None:
             return
         if session.passthrough_active:
-            return  # passthrough encoder feeds the buffer directly
+            # If the passthrough encoder has already finished, clean up
+            # and let PCM data flow through (re-encode to FLAC for the
+            # renderer). If it's still running, skip — the encoder
+            # feeds the buffer directly.
+            if (
+                session._passthrough_done_event is not None
+                and session._passthrough_done_event.is_set()
+            ):
+                session.passthrough_active = False
+                session._passthrough_done_event = None
+                session._passthrough_source_urls = None
+                if session.passthrough_encoder is not None:
+                    session.passthrough_encoder = None
+                session.buffer.source_done()
+            else:
+                return
         if dtype == "float32":
             scaled = pcm.astype(np.float64) * 2147483647.0
             np.clip(scaled, -2147483648.0, 2147483647.0, out=scaled)
