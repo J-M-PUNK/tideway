@@ -317,6 +317,12 @@ class _SessionState:
     passthrough_active: bool = False
     _passthrough_source_urls: Optional[tuple[str, ...]] = None
     _passthrough_done_event: Optional[threading.Event] = None
+    # Serializes every read-modify-write of the passthrough fields above.
+    # Touched from three threads — player pipeline (start/stop), realtime
+    # audio callback (push_pcm), and last-track EOF (signal_source_done).
+    # Never held across encoder close() or reader build I/O so the audio
+    # callback can't stall.
+    passthrough_lock: threading.Lock = field(default_factory=threading.Lock)
 
 
 def _filter_dlna_renderer(service_types: tuple[str, ...]) -> bool:
@@ -540,71 +546,70 @@ class UpnpManager:
             print("[upnp] passthrough: no active session", flush=True)
             return
 
-        # ---- GUARD: skip if already running for the same source ----
-        # player.py calls start_passthrough() in 2 places (lines 819
-        # and 1299 in the original; now also in _build_load_pipeline).
-        # On gapless transitions both fire for the same track. Without
-        # this guard, the 2nd call closes the encoder, clears the
-        # buffer, and re-notifies UAPP — causing duplicated audio.
-        # Key on the URL tuple rather than id() so the guard survives
-        # object reuse across garbage-collection cycles.
+        # ---- GUARD + stop old encoder + setup new source ------------
+        # The passthrough-state transition is split into two short
+        # locked sections with the slow work (encoder close + reader
+        # build) BETWEEN them, outside the lock. close() can block up to
+        # the ring-buffer write timeout when the old encoder is stuck in
+        # a full-buffer write, and push_pcm takes this same lock on the
+        # realtime audio thread — holding it across close() would stall
+        # audio. Between the two sections passthrough_active stays True
+        # with passthrough_encoder cleared: push_pcm reads (active, its
+        # done_event) atomically and either skips (event unset) or does
+        # a cleanup that the second section's flush() resets.
         _source_urls = tuple(source) if isinstance(source, (list, tuple)) else None
-        if session.passthrough_active and session._passthrough_source_urls == _source_urls:
-            print(
-                "[upnp] passthrough: already running for this source, skipping",
-                flush=True,
-            )
-            return
-        session._passthrough_source_urls = _source_urls
-
-        # Stop existing passthrough if any
-        if session.passthrough_encoder is not None:
-            try:
-                session.passthrough_encoder.close()
-            except Exception:
-                pass
+        with session.passthrough_lock:
+            if (
+                session.passthrough_active
+                and session._passthrough_source_urls == _source_urls
+            ):
+                print(
+                    "[upnp] passthrough: already running for this source, "
+                    "skipping",
+                    flush=True,
+                )
+                return
+            old_encoder = session.passthrough_encoder
             session.passthrough_encoder = None
 
-        # Build SegmentReader from URLs
+        # Stop old encoder OUTSIDE the lock — close() may block on a
+        # full-buffer write until the timeout, and the audio callback
+        # must not wait that out on passthrough_lock.
+        if old_encoder is not None:
+            try:
+                old_encoder.close()
+            except Exception:
+                pass
+
+        # Build SegmentReader from URLs (network/parse work — off-lock).
         try:
             from app.audio.segment_reader import SegmentReader
             if isinstance(source, (list, tuple)):
                 reader = SegmentReader(source, prefetched=prefetched)
             else:
-                reader = source  # already a file-like
+                reader = source
         except Exception as exc:
             print(f"[upnp] passthrough: failed to build source: {exc!r}", flush=True)
             return
 
         stop_flag = threading.Event()
         done_event = threading.Event()
-        session._passthrough_done_event = done_event
-
-        # Set passthrough_active BEFORE flush so the audio callback
-        # (which checks this flag in push_pcm) doesn't land PCM bytes
-        # in the freshly cleared buffer behind the passthrough header.
-        session.passthrough_active = True
-
-        # Generate a unique track identifier before flush, so it can
-        # be set on the buffer AND embedded in the URL the renderer
-        # receives. The HTTP handler validates incoming ?ts= against
-        # this value, rejecting stale requests from a previous track.
         import time as _time
         _track_ts = int(_time.monotonic() * 1_000_000)
 
-        # Flush old buffer content so receiver starts at live edge.
-        # After this point, push_pcm early-returns because the flag is
-        # already set; only the passthrough encoder feeds the buffer.
-        session.buffer.flush()
-        session.buffer.set_track_id(_track_ts)
-
-        session.passthrough_encoder = FlacPassthroughEncoder(
-            source=reader,
-            buffer=session.buffer,
-            stop_flag=stop_flag,
-            done_event=done_event,
-        )
-        session.passthrough_encoder.start()
+        with session.passthrough_lock:
+            session._passthrough_source_urls = _source_urls
+            session._passthrough_done_event = done_event
+            session.passthrough_active = True
+            session.buffer.flush()
+            session.buffer.set_track_id(_track_ts)
+            session.passthrough_encoder = FlacPassthroughEncoder(
+                source=reader,
+                buffer=session.buffer,
+                stop_flag=stop_flag,
+                done_event=done_event,
+            )
+            session.passthrough_encoder.start()
 
         # Notify the renderer of the new track. Falls back to the
         # metadata provider callback if no metadata dict was passed.
@@ -693,8 +698,10 @@ class UpnpManager:
             session = self._session
         if session is None:
             return
-        if session.passthrough_encoder is not None:
-            session.passthrough_encoder.signal_source_done()
+        with session.passthrough_lock:
+            encoder = session.passthrough_encoder
+        if encoder is not None:
+            encoder.signal_source_done()
 
     def stop_passthrough(self) -> None:
         """Stop passthrough and revert to PCM re-encode mode."""
@@ -702,15 +709,17 @@ class UpnpManager:
             session = self._session
         if session is None:
             return
-        if session.passthrough_encoder is not None:
+        with session.passthrough_lock:
+            encoder = session.passthrough_encoder
+            session.passthrough_encoder = None
+            session.passthrough_active = False
+            session._passthrough_source_urls = None
+            session._passthrough_done_event = None
+        if encoder is not None:
             try:
-                session.passthrough_encoder.close()
+                encoder.close()
             except Exception:
                 pass
-            session.passthrough_encoder = None
-        session.passthrough_active = False
-        session._passthrough_source_urls = None
-        session._passthrough_done_event = None
         print("[upnp] passthrough OFF", flush=True)
 
     # ---- session lifecycle -----------------------------------------
@@ -880,19 +889,25 @@ class UpnpManager:
         if session is None:
             return
 
-        # Stop passthrough encoder first
-        if session.passthrough_encoder is not None:
+        # Stop passthrough encoder first. The session is already
+        # detached (self._session = None above), so no new push_pcm /
+        # start_passthrough can reach it; still take passthrough_lock to
+        # settle with any call already in flight, and close() the
+        # detached encoder outside the lock.
+        with session.passthrough_lock:
+            pt_encoder = session.passthrough_encoder
+            session.passthrough_encoder = None
+            session.passthrough_active = False
+            session._passthrough_source_urls = None
+            session._passthrough_done_event = None
+        if pt_encoder is not None:
             try:
-                session.passthrough_encoder.close()
+                pt_encoder.close()
             except Exception as exc:
                 print(
                     f"[upnp] passthrough: encoder close error: {exc!r}",
                     flush=True,
                 )
-            session.passthrough_encoder = None
-            session.passthrough_active = False
-            session._passthrough_source_urls = None
-            session._passthrough_done_event = None
         try:
             with session.encoder_lock:
                 if session.encoder is not None:
@@ -1008,22 +1023,19 @@ class UpnpManager:
             session = self._session
         if session is None:
             return
-        if session.passthrough_active:
-            # If the passthrough encoder has already finished, clean up
-            # and let PCM data flow through (re-encode to FLAC for the
-            # renderer). If it's still running, skip — the encoder
-            # feeds the buffer directly.
-            if (
-                session._passthrough_done_event is not None
-                and session._passthrough_done_event.is_set()
-            ):
-                session.passthrough_active = False
-                session._passthrough_done_event = None
-                session._passthrough_source_urls = None
-                if session.passthrough_encoder is not None:
+        # Decide whether passthrough owns the buffer right now, atomically
+        # against start_passthrough. Without the lock this cleanup could
+        # clobber a just-started next track's stream.
+        with session.passthrough_lock:
+            if session.passthrough_active:
+                done = session._passthrough_done_event
+                if done is not None and done.is_set():
+                    session.passthrough_active = False
+                    session._passthrough_done_event = None
+                    session._passthrough_source_urls = None
                     session.passthrough_encoder = None
-                session.buffer.source_done()
-            else:
+                    session.buffer.source_done()
+                    return
                 return
         if dtype == "float32":
             scaled = pcm.astype(np.float64) * 2147483647.0
