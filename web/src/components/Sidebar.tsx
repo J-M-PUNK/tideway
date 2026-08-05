@@ -12,6 +12,8 @@ import {
   Library,
   Link2,
   ListMusic,
+  PanelLeftClose,
+  PanelLeftOpen,
   Plus,
   Rss,
   TrendingUp,
@@ -109,9 +111,13 @@ const offlineLibrary: typeof library = [
 // 200 ms transition so clicking between tabs reads as the bar
 // growing into the new row rather than snapping. Same idea every
 // modern sidebar uses (Spotify, Linear, Notion).
-const navItemClass = (isActive: boolean) =>
+// `collapsed` swaps the row from icon+label (gap-4, left-aligned) to a
+// centered icon-only tile so the same NavLink works in both sidebar
+// widths without duplicating markup.
+const navItemClass = (isActive: boolean, collapsed = false) =>
   cn(
-    "relative flex items-center gap-4 rounded-md px-3 py-2 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground",
+    "relative flex items-center rounded-md py-2 text-sm font-medium text-muted-foreground transition-colors hover:text-foreground",
+    collapsed ? "justify-center px-2" : "gap-4 px-3",
     "before:absolute before:left-0 before:top-1/2 before:w-0.5 before:-translate-y-1/2 before:rounded-r before:bg-primary before:transition-all before:duration-200",
     isActive
       ? "text-foreground before:h-5 before:opacity-100"
@@ -134,9 +140,18 @@ export function Sidebar({
 }) {
   const libraryLinks = offline ? offlineLibrary : library;
   const feedUnread = useFeedUnreadCount();
-  const { importLinkDismissed, set: setPrefs } = useUiPreferences();
+  const {
+    importLinkDismissed,
+    sidebarCollapsed: collapsed,
+    set: setPrefs,
+  } = useUiPreferences();
   return (
-    <aside className="flex h-full w-64 flex-col gap-2 bg-background p-2 text-sm">
+    <aside
+      className={cn(
+        "flex h-full flex-col gap-2 bg-background p-2 text-sm transition-[width] duration-200 ease-out",
+        collapsed ? "w-16" : "w-64",
+      )}
+    >
       {/* Brand mark at the top left of the app. It also works as a
           Home link, which matters in offline mode where the normal
           Home nav row further down is hidden.
@@ -154,16 +169,45 @@ export function Sidebar({
           transparent and sits directly on the sidebar's dark
           background. A subtle scale bump on hover still makes it
           feel interactive without painting a box behind the glyph. */}
-      <NavLink
-        to="/"
-        end
-        aria-label="Home"
-        title="Home"
-        onMouseEnter={prefetch.pageHome}
-        className="ml-[10px] inline-flex h-10 w-10 items-center justify-center transition-transform duration-150 hover:scale-105"
+      <div
+        className={cn(
+          "flex",
+          collapsed
+            ? "flex-col items-center gap-1"
+            : "items-center justify-between pr-1",
+        )}
       >
-        <img src="/app-icon.svg" alt="" className="h-10 w-10 shrink-0" />
-      </NavLink>
+        <NavLink
+          to="/"
+          end
+          aria-label="Home"
+          title="Home"
+          onMouseEnter={prefetch.pageHome}
+          className={cn(
+            "inline-flex h-10 w-10 items-center justify-center transition-transform duration-150 hover:scale-105",
+            // The 10px nudge lines the 40px brand glyph up with the 20px
+            // nav icons below in the expanded rail; collapsed, everything
+            // is centered so the offset would push it off-center instead.
+            !collapsed && "ml-[10px]",
+          )}
+        >
+          <img src="/app-icon.svg" alt="" className="h-10 w-10 shrink-0" />
+        </NavLink>
+        <button
+          type="button"
+          onClick={() => setPrefs({ sidebarCollapsed: !collapsed })}
+          title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          aria-label={collapsed ? "Expand sidebar" : "Collapse sidebar"}
+          aria-pressed={collapsed}
+          className="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+        >
+          {collapsed ? (
+            <PanelLeftOpen className="h-5 w-5" />
+          ) : (
+            <PanelLeftClose className="h-5 w-5" />
+          )}
+        </button>
+      </div>
 
       {!offline && (
         <nav className="rounded-lg bg-card p-2">
@@ -175,11 +219,20 @@ export function Sidebar({
                 to={to}
                 end={end}
                 onMouseEnter={warm}
-                className={({ isActive }) => navItemClass(isActive)}
+                title={collapsed ? label : undefined}
+                className={({ isActive }) => navItemClass(isActive, collapsed)}
               >
-                <Icon className="h-5 w-5" />
-                <span className="flex-1">{label}</span>
-                {badge > 0 && (
+                <span className="relative flex shrink-0">
+                  <Icon className="h-5 w-5" />
+                  {/* Collapsed rows have no room for the count pill, so a
+                      dot on the icon still signals "there's something new"
+                      without the number. */}
+                  {collapsed && badge > 0 && (
+                    <span className="absolute -right-1 -top-1 h-2 w-2 rounded-full bg-primary" />
+                  )}
+                </span>
+                {!collapsed && <span className="flex-1">{label}</span>}
+                {!collapsed && badge > 0 && (
                   <span
                     className="rounded-full bg-primary/20 px-2 py-0.5 text-[10px] font-bold text-primary"
                     title={`${badge} new release${badge === 1 ? "" : "s"}`}
@@ -194,11 +247,22 @@ export function Sidebar({
       )}
 
       <div className="flex min-h-0 flex-1 flex-col rounded-lg bg-card p-2">
-        <div className="flex items-center justify-between px-3 py-2 text-muted-foreground">
-          <span className="flex items-center gap-3 text-sm font-semibold">
-            <Library className="h-5 w-5" /> Your Library
+        <div
+          className={cn(
+            "flex items-center py-2 text-muted-foreground",
+            collapsed ? "justify-center px-0" : "justify-between px-3",
+          )}
+        >
+          <span
+            className={cn(
+              "flex items-center text-sm font-semibold",
+              !collapsed && "gap-3",
+            )}
+            title={collapsed ? "Your Library" : undefined}
+          >
+            <Library className="h-5 w-5" /> {!collapsed && "Your Library"}
           </span>
-          {!offline && (
+          {!offline && !collapsed && (
             <CreatePlaylistDialog
               trigger={
                 <button
@@ -222,9 +286,10 @@ export function Sidebar({
               key={to}
               to={to}
               onMouseEnter={warm}
+              title={collapsed ? label : undefined}
               className={({ isActive }) =>
                 cn(
-                  navItemClass(isActive),
+                  navItemClass(isActive, collapsed),
                   // Library rows additionally fade the background on
                   // hover so this section reads as a more
                   // interaction-heavy surface than the primary /
@@ -234,11 +299,22 @@ export function Sidebar({
                 )
               }
             >
-              <Icon className="h-5 w-5" />
-              {label}
+              <Icon className="h-5 w-5 shrink-0" />
+              {!collapsed && label}
             </NavLink>
           ))}
-          {!offline && !importLinkDismissed && (
+          {!offline && !importLinkDismissed && collapsed && (
+            <NavLink
+              to="/import"
+              title="Import"
+              className={({ isActive }) =>
+                cn(navItemClass(isActive, true), "hover:bg-accent")
+              }
+            >
+              <ImportIcon className="h-5 w-5 shrink-0" />
+            </NavLink>
+          )}
+          {!offline && !importLinkDismissed && !collapsed && (
             <div className="group relative">
               <NavLink
                 to="/import"
@@ -270,12 +346,16 @@ export function Sidebar({
         </div>
       </div>
 
-      <div className="flex items-center gap-2">
+      <div className={cn("flex gap-2", collapsed ? "flex-col" : "items-center")}>
         <NavLink
           to="/downloads"
+          title={collapsed ? "Downloads" : undefined}
           className={({ isActive }) =>
             cn(
-              "flex flex-1 items-center gap-3 rounded-lg bg-card px-3 py-2 text-sm font-semibold text-muted-foreground hover:text-foreground",
+              "flex items-center rounded-lg bg-card text-sm font-semibold text-muted-foreground hover:text-foreground",
+              collapsed
+                ? "w-full justify-center px-2 py-2"
+                : "flex-1 gap-3 px-3 py-2",
               isActive && "text-foreground",
             )
           }
@@ -291,27 +371,30 @@ export function Sidebar({
               </span>
             )}
           </div>
-          Downloads
-          {activeDownloads > 0 ? (
-            <span className="ml-auto rounded-full bg-primary/20 px-2 py-0.5 text-[10px] font-bold text-primary">
-              {activeDownloads}
-            </span>
-          ) : newDownloads > 0 ? (
-            <span className="ml-auto rounded-full bg-primary/20 px-2 py-0.5 text-[10px] font-bold text-primary">
-              {newDownloads}
-            </span>
-          ) : null}
+          {!collapsed && "Downloads"}
+          {!collapsed &&
+            (activeDownloads > 0 ? (
+              <span className="ml-auto rounded-full bg-primary/20 px-2 py-0.5 text-[10px] font-bold text-primary">
+                {activeDownloads}
+              </span>
+            ) : newDownloads > 0 ? (
+              <span className="ml-auto rounded-full bg-primary/20 px-2 py-0.5 text-[10px] font-bold text-primary">
+                {newDownloads}
+              </span>
+            ) : null)}
         </NavLink>
-        <AddUrlDialog
-          trigger={
-            <button
-              className="flex h-9 w-9 items-center justify-center rounded-lg bg-card text-muted-foreground hover:text-foreground"
-              title="Download from Tidal URL"
-            >
-              <Link2 className="h-4 w-4" />
-            </button>
-          }
-        />
+        {!collapsed && (
+          <AddUrlDialog
+            trigger={
+              <button
+                className="flex h-9 w-9 items-center justify-center rounded-lg bg-card text-muted-foreground hover:text-foreground"
+                title="Download from Tidal URL"
+              >
+                <Link2 className="h-4 w-4" />
+              </button>
+            }
+          />
+        )}
       </div>
     </aside>
   );
