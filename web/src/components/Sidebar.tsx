@@ -346,7 +346,9 @@ export function Sidebar({
         </div>
       </div>
 
-      <div className={cn("flex gap-2", collapsed ? "flex-col" : "items-center")}>
+      <div
+        className={cn("flex gap-2", collapsed ? "flex-col" : "items-center")}
+      >
         <NavLink
           to="/downloads"
           title={collapsed ? "Downloads" : undefined}
