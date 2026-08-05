@@ -10,16 +10,20 @@ primary_lan_ip's UDP-socket trick is testable with patching.
 """
 from __future__ import annotations
 
+import sys
 import threading
 import time
+from types import SimpleNamespace
 
 import numpy as np
 import pytest
 
 from app.audio.http_stream import (
+    FlacPassthroughEncoder,
     FlacStreamEncoder,
     RingBuffer,
     _StreamRequestHandler,
+    _build_flac_stream_header,
     primary_lan_ip,
     start_stream_http_server,
 )
@@ -128,10 +132,10 @@ class TestRingBuffer:
         guard that stops two serve loops draining one buffer."""
         buf = RingBuffer(max_bytes=1024)
         buf.write(b"data")
-        gen1 = buf.attach()
+        gen1, _ = buf.attach()
         # First consumer serves a chunk, so the next attach won't wait.
         buf.read(2, timeout=0.1, gen=gen1)
-        gen2 = buf.attach()
+        gen2, _ = buf.attach()
         assert gen2 != gen1
         assert buf.is_superseded(gen1) is True
         assert buf.is_superseded(gen2) is False
@@ -142,7 +146,7 @@ class TestRingBuffer:
         hold the supersede until the probe serves one chunk, so the
         probe connection isn't killed with zero data."""
         buf = RingBuffer(max_bytes=1024)
-        gen1 = buf.attach()  # probe; buffer empty, nothing served yet
+        gen1, _ = buf.attach()  # probe; buffer empty, nothing served yet
 
         served = threading.Event()
 
@@ -196,7 +200,7 @@ class TestRingBuffer:
         hs._SUPERSEDE_GRACE_S = 0.1
         try:
             start = time.monotonic()
-            gen2 = buf.attach()
+            gen2, _ = buf.attach()
             elapsed = time.monotonic() - start
         finally:
             hs._SUPERSEDE_GRACE_S = original
@@ -210,7 +214,7 @@ class TestRingBuffer:
         with no grace delay."""
         buf = RingBuffer(max_bytes=1024)
         buf.write(b"streaming")
-        gen1 = buf.attach()
+        gen1, _ = buf.attach()
         buf.read(4, timeout=0.1, gen=gen1)  # served
         start = time.monotonic()
         buf.attach()
@@ -224,6 +228,70 @@ class TestRingBuffer:
 
 
 class TestFlacStreamEncoder:
+    def test_build_flac_stream_header_is_valid_for_passthrough(self):
+        """The initial FLAC header emitted for DLNA passthrough must
+        start with the FLAC marker and a STREAMINFO metadata block of
+        the expected size so strict renderers can initialize."""
+        header = _build_flac_stream_header(
+            sample_rate=44100,
+            channels=2,
+            bits_per_sample=16,
+        )
+        assert header.startswith(b"fLaC")
+        assert header[4:8] == b"\x80\x00\x00\x22"
+        assert len(header) == 4 + 4 + 34
+
+    def test_passthrough_encoder_writes_fallback_header_without_extradata(
+        self, monkeypatch
+    ):
+        """If the source exposes no usable STREAMINFO extradata, the
+        passthrough encoder should still emit a valid FLAC header and
+        keep streaming instead of crashing."""
+
+        class FakePacket:
+            def __init__(self, data: bytes):
+                self._data = data
+                self.duration = 0
+
+            def __bytes__(self):
+                return self._data
+
+        class FakeContainer:
+            def __init__(self):
+                self.streams = [
+                    SimpleNamespace(
+                        type="audio",
+                        time_base=1 / 44100,
+                        codec_context=SimpleNamespace(
+                            sample_rate=44100,
+                            layout=SimpleNamespace(nb_channels=2),
+                            extradata=b"",
+                        ),
+                    )
+                ]
+
+            def demux(self, _stream):
+                yield FakePacket(b"abc")
+
+            def close(self):
+                return None
+
+        class FakeAVModule:
+            @staticmethod
+            def open(_source, format, options):
+                return FakeContainer()
+
+        monkeypatch.setitem(sys.modules, "av", FakeAVModule)
+
+        buf = RingBuffer(max_bytes=1024)
+        encoder = FlacPassthroughEncoder(source=object(), buffer=buf)
+        encoder._run()
+
+        assert not encoder._failed
+        data = buf.read(256, timeout=0.1)
+        assert data.startswith(b"fLaC")
+        assert b"abc" in data
+
     def test_int16_stereo_encodes(self):
         """A simple int16 stereo chunk encodes to non-empty FLAC
         bytes. We don't validate the FLAC binary structure
@@ -363,6 +431,7 @@ class TestStreamHTTPServerProtocol:
         # arrives. Seed enough bytes that the first read returns
         # immediately; otherwise the test races the 2s read timeout.
         buffer.write(b"\x00" * 256)
+        buffer.data_ready.set()
         server = start_stream_http_server(
             buffer, stream_path="/test", content_type="audio/flac"
         )
@@ -410,6 +479,7 @@ class TestDlnaHttpCompliance:
         # Seed bytes so do_GET's first buffer.read() returns at once
         # instead of racing the 2s read timeout.
         buffer.write(b"\x00" * 256)
+        buffer.data_ready.set()
         server = start_stream_http_server(
             buffer,
             stream_path="/dlna/stream",
@@ -449,8 +519,8 @@ class TestDlnaHttpCompliance:
                 b"GET /dlna/stream?mediaPlayerId=1&playMode=2 HTTP/1.1\r\n"
                 b"Host: localhost\r\n\r\n",
             )
-            assert data.startswith(b"HTTP/1.1 200"), (
-                f"query-param URL should serve 200, got: {data!r}"
+            assert data.startswith(b"HTTP/1.1 206"), (
+                f"query-param URL should serve 206, got: {data!r}"
             )
         finally:
             server.shutdown()
@@ -586,19 +656,20 @@ class TestDlnaHttpCompliance:
             server.server_close()
             buffer.close()
 
-    def test_no_range_header_stays_200(self):
-        """A DLNA GET without a Range header keeps the plain 200
-        chunked stream — 206 is only for explicit Range probes."""
+    def test_no_range_header_gets_206(self):
+        """A DLNA GET without a Range header still gets 206 + Content-Length
+        + Content-Range. Strict renderers (UAPP) need Content-Length on their
+        initial plain GET for SEEK_END during decoder-init."""
         server, buffer = self._seeded_server()
         try:
             data = self._request(
                 server,
                 b"GET /dlna/stream HTTP/1.1\r\nHost: localhost\r\n\r\n",
             )
-            assert data.startswith(b"HTTP/1.1 200"), (
-                f"non-Range GET should stay 200, got: {data!r}"
+            assert data.startswith(b"HTTP/1.1 206"), (
+                f"non-Range DLNA GET should get 206, got: {data!r}"
             )
-            assert b"Content-Range" not in data
+            assert b"Content-Range" in data
         finally:
             server.shutdown()
             server.server_close()

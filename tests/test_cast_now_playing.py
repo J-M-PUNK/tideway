@@ -30,11 +30,11 @@ def test_ring_buffer_single_consumer_supersede():
     # Cast per-track reload's new GET racing the old one) must not
     # both drain the buffer. A newer attach() supersedes the old.
     rb = RingBuffer(max_bytes=1024)
-    g1 = rb.attach()
+    g1, _ = rb.attach()
     rb.write(b"AAAA")
     assert rb.read(64, timeout=0.1, gen=g1) == b"AAAA"
 
-    g2 = rb.attach()  # new connection takes over
+    g2, _ = rb.attach()  # new connection takes over
     assert rb.is_superseded(g1)
     assert not rb.is_superseded(g2)
 
