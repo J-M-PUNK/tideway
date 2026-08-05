@@ -35,6 +35,9 @@ interface UiPreferences {
    *  stays reachable from Settings; this is just the user saying
    *  "I've seen it, stop suggesting it." */
   importLinkDismissed: boolean;
+  /** When true, the left sidebar renders in its narrow icon-only form.
+   *  Persisted so the choice survives reloads. */
+  sidebarCollapsed: boolean;
 }
 
 interface UiPreferencesContextValue extends UiPreferences {
@@ -50,6 +53,7 @@ const DEFAULTS: UiPreferences = {
   streamingQuality: "hi_res_lossless",
   theme: "dark",
   importLinkDismissed: false,
+  sidebarCollapsed: false,
 };
 
 const Ctx = createContext<UiPreferencesContextValue>({
