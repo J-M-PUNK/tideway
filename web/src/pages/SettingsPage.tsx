@@ -316,6 +316,12 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
                 hint="Tidal tags tracks it identifies as 100% AI-generated. When on, those tracks are hidden from search, artist and album pages, mixes, and recommendations, and are skipped when downloading. Your own library stays untouched, so anything you've already favorited still shows there. Mirrors the AI-content toggle in Tidal's own client."
               />
               <Toggle
+                checked={settings.album_recommendations_enabled}
+                onChange={(v) => patch({ album_recommendations_enabled: v })}
+                label="Show album recommendations (For You)"
+                hint="Adds a 'For You' page with album picks based on your Tidal favorites, blended with Last.fm similar artists when you've connected Last.fm. It's a transparent heuristic — every pick shows why it was chosen — not a black-box model. When off, the sidebar entry is hidden and no recommendations are generated."
+              />
+              <Toggle
                 checked={settings.continue_playing_after_queue_ends}
                 onChange={(v) =>
                   patch({ continue_playing_after_queue_ends: v })

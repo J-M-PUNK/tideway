@@ -347,6 +347,13 @@ class Settings:
     # different value for) — the notice is only for existing installs
     # upgrading into the change.
     ai_filter_notice_ack: bool = False
+    # Whether the "For You" album-recommendations surface is active
+    # (#307). Recommendations are a transparent heuristic over the
+    # user's Tidal favorites and — when connected — Last.fm similar
+    # artists, not a black-box model; on by default, but users who
+    # only want editorial/library surfaces can turn it off, which
+    # hides the sidebar entry and makes the endpoint return nothing.
+    album_recommendations_enabled: bool = True
     # Desktop window geometry, persisted on close and restored on the
     # next launch. -1 means "not set yet" so the first run uses the
     # platform default size + centred position instead of forcing a

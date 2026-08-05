@@ -126,6 +126,9 @@ const AotyDrilldownPage = lazy(() =>
 const FeedPage = lazy(() =>
   import("@/pages/FeedPage").then((m) => ({ default: m.FeedPage })),
 );
+const ForYouPage = lazy(() =>
+  import("@/pages/ForYouPage").then((m) => ({ default: m.ForYouPage })),
+);
 const HistoryPage = lazy(() =>
   import("@/pages/HistoryPage").then((m) => ({ default: m.HistoryPage })),
 );
@@ -345,6 +348,9 @@ function Shell({
   // whole settings object into context just for one boolean.
   const [notifyEnabled, setNotifyEnabled] = useState(false);
   const [notifyTrackEnabled, setNotifyTrackEnabled] = useState(false);
+  // Recommendations default on (#307). Sidebar hides the "For You" entry
+  // when this is off. Same lazy-from-settings pattern as the notify prefs.
+  const [recommendationsEnabled, setRecommendationsEnabled] = useState(true);
   useEffect(() => {
     let cancelled = false;
     api.settings
@@ -353,6 +359,7 @@ function Shell({
         if (cancelled) return;
         setNotifyEnabled(!!s.notify_on_complete);
         setNotifyTrackEnabled(!!s.notify_on_track_change);
+        setRecommendationsEnabled(s.album_recommendations_enabled !== false);
       })
       .catch(() => {
         /* ignore — default stays false */
@@ -364,6 +371,7 @@ function Shell({
         e as CustomEvent<{
           notify_on_complete?: boolean;
           notify_on_track_change?: boolean;
+          album_recommendations_enabled?: boolean;
         }>
       ).detail;
       if (!detail) return;
@@ -372,6 +380,9 @@ function Shell({
       }
       if (typeof detail.notify_on_track_change === "boolean") {
         setNotifyTrackEnabled(detail.notify_on_track_change);
+      }
+      if (typeof detail.album_recommendations_enabled === "boolean") {
+        setRecommendationsEnabled(detail.album_recommendations_enabled);
       }
     };
     window.addEventListener("tidal-settings-updated", onUpdate);
@@ -531,6 +542,7 @@ function Shell({
           }
           newDownloads={newCompletedCount}
           offline={offline}
+          recommendationsEnabled={recommendationsEnabled}
         />
         <main
           ref={scrollRef}
@@ -684,6 +696,10 @@ function Shell({
                       <Route
                         path="/feed"
                         element={<FeedPage onDownload={enqueue} />}
+                      />
+                      <Route
+                        path="/for-you"
+                        element={<ForYouPage onDownload={enqueue} />}
                       />
                       <Route
                         path="/history"

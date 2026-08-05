@@ -10635,6 +10635,7 @@ class SettingsPayload(BaseModel):
     explicit_content_preference: Optional[str] = None
     hide_ai_content: Optional[bool] = None
     ai_filter_notice_ack: Optional[bool] = None
+    album_recommendations_enabled: Optional[bool] = None
     download_rate_limit_mbps: Optional[int] = None
     eq_mode: Optional[str] = None
     eq_active_profile_id: Optional[str] = None
@@ -11821,6 +11822,172 @@ def feed() -> dict:
     with _feed_lock:
         _feed_cache["at"] = time.monotonic()
         _feed_cache["value"] = payload
+    return payload
+
+
+# ---------------------------------------------------------------------------
+# Album recommendations (#307) — the "For You" surface.
+#
+# A transparent, taste-based album feed built by composing similarity
+# primitives already in the app: Tidal's own `album.similar()` and
+# `artist.get_similar()`, blended (when Last.fm is connected) with
+# Last.fm's `artist.getSimilar` collaborative-filtering graph. Every
+# candidate carries a human "Because you like X" reason, albums the user
+# already favorites are filtered out, and no single artist dominates.
+# Bounded and parallelized so the (cached) build stays a few seconds.
+# ---------------------------------------------------------------------------
+
+_RECS_CACHE_TTL_SEC = 15 * 60.0
+_recs_cache: dict[str, tuple[float, dict]] = {}
+_recs_cache_lock = threading.Lock()
+
+# Bounds tuned to keep the parallel build to a few seconds and the list
+# varied; raising them fans out more Tidal/Last.fm calls for diminishing
+# return once the per-artist cap and final limit apply.
+_RECS_SEED_ALBUMS = 8
+_RECS_SEED_ARTISTS = 8
+_RECS_LASTFM_SEEDS = 6
+_RECS_PER_ARTIST_CAP = 2
+_RECS_MAX = 40
+
+
+def _album_primary_artist_key(album) -> str:
+    """Lower-cased primary-artist name, used only to cap how many albums
+    from one artist can appear. Empty string when it can't be read (then
+    that album just isn't diversity-capped)."""
+    try:
+        artists = getattr(album, "artists", None) or []
+        if artists:
+            return (getattr(artists[0], "name", "") or "").strip().lower()
+        art = getattr(album, "artist", None)
+        return (getattr(art, "name", "") or "").strip().lower()
+    except Exception:
+        return ""
+
+
+def _album_recommendations() -> list[dict]:
+    def _safe(fn, default):
+        try:
+            return fn()
+        except Exception:
+            return default
+
+    fav_artists = _safe(lambda: list(tidal.get_favorite_artists() or []), [])
+    fav_albums = _safe(lambda: list(tidal.get_favorite_albums() or []), [])
+    owned_ids = {str(getattr(a, "id", "") or "") for a in fav_albums}
+    lfm_connected = bool(_safe(lambda: lastfm.status().get("connected"), False))
+
+    # Each task returns a list of (album_obj, score, reason). Running them
+    # in a pool means one slow or failing seed can't stall the build.
+    def _from_similar_albums(seed):
+        sims = _safe(lambda: list(seed.similar())[:8], [])
+        name = getattr(seed, "name", "") or "this album"
+        return [
+            (alb, 120.0 - rank, f"Because you saved {name}")
+            for rank, alb in enumerate(sims)
+        ]
+
+    def _from_similar_artists(seed):
+        out = []
+        sim_artists = _safe(lambda: list(seed.get_similar())[:5], [])
+        name = getattr(seed, "name", "") or "this artist"
+        for a_rank, sart in enumerate(sim_artists):
+            albs = _safe(lambda a=sart: list(a.get_albums(limit=3) or []), [])
+            for rank, alb in enumerate(albs):
+                out.append(
+                    (alb, 100.0 - a_rank * 4 - rank, f"Because you follow {name}")
+                )
+        return out
+
+    def _from_lastfm(seed_name):
+        out = []
+        sims = _safe(lambda: lastfm.get_similar_artists(seed_name, limit=6), [])
+        for s_rank, s in enumerate(sims[:4]):
+            cand = s.get("name") or ""
+            if not cand:
+                continue
+            res = _safe(lambda n=cand: tidal.search(n, limit=5), {}) or {}
+            arts = res.get("artists") or []
+            if not arts:
+                continue
+            albs = _safe(lambda a=arts[0]: list(a.get_albums(limit=2) or []), [])
+            match = float(s.get("match") or 0.0)
+            for rank, alb in enumerate(albs):
+                out.append(
+                    (alb, 70.0 + match * 20 - s_rank - rank,
+                     f"Because you listen to {seed_name}")
+                )
+        return out
+
+    tasks: list = []
+    for seed in fav_albums[:_RECS_SEED_ALBUMS]:
+        tasks.append(lambda s=seed: _from_similar_albums(s))
+    for seed in fav_artists[:_RECS_SEED_ARTISTS]:
+        tasks.append(lambda s=seed: _from_similar_artists(s))
+    if lfm_connected:
+        top = _safe(
+            lambda: lastfm.get_top_artists("6month", limit=_RECS_LASTFM_SEEDS), []
+        )
+        for t in top[:_RECS_LASTFM_SEEDS]:
+            nm = t.get("name") or ""
+            if nm:
+                tasks.append(lambda n=nm: _from_lastfm(n))
+
+    # Fan out. tidalapi's session is safe for concurrent GETs — the app
+    # already parallelizes detail pages the same way.
+    results: list = []
+    if tasks:
+        with ThreadPoolExecutor(max_workers=6, thread_name_prefix="recs") as pool:
+            for fut in [pool.submit(t) for t in tasks]:
+                results.extend(_safe(lambda f=fut: f.result(), []))
+
+    # Dedupe by album id, keeping the best score/reason; drop owned albums.
+    best: dict[str, tuple[float, str, object]] = {}
+    for alb, score, reason in results:
+        aid = str(getattr(alb, "id", "") or "")
+        if not aid or aid in owned_ids:
+            continue
+        prev = best.get(aid)
+        if prev is None or score > prev[0]:
+            best[aid] = (score, reason, alb)
+
+    ranked = sorted(best.values(), key=lambda x: x[0], reverse=True)
+    out: list[dict] = []
+    per_artist: dict[str, int] = {}
+    for score, reason, alb in ranked:
+        key = _album_primary_artist_key(alb)
+        if key and per_artist.get(key, 0) >= _RECS_PER_ARTIST_CAP:
+            continue
+        d = _safe(lambda a=alb: album_to_dict(a), None)
+        if not d or not d.get("available"):
+            continue
+        d["reason"] = reason
+        out.append(d)
+        if key:
+            per_artist[key] = per_artist.get(key, 0) + 1
+        if len(out) >= _RECS_MAX:
+            break
+    return out
+
+
+@app.get("/api/recommendations/albums")
+def recommendations_albums() -> dict:
+    """Taste-based album recommendations for the "For You" page (#307).
+
+    Returns ``{"enabled": bool, "albums": [...]}``. When the setting is
+    off, ``enabled`` is False and the list is empty. Cached for 15 min
+    because the build fans out many Tidal/Last.fm calls."""
+    _require_auth()
+    if not getattr(settings, "album_recommendations_enabled", True):
+        return {"enabled": False, "albums": []}
+    now = time.monotonic()
+    with _recs_cache_lock:
+        c = _recs_cache.get("albums")
+        if c and (now - c[0]) < _RECS_CACHE_TTL_SEC:
+            return c[1]
+    payload = {"enabled": True, "albums": _album_recommendations()}
+    with _recs_cache_lock:
+        _recs_cache["albums"] = (time.monotonic(), payload)
     return payload
 
 

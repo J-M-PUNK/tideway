@@ -16,6 +16,7 @@ export const queryKeys = {
   pageGenres: "page:genres",
   pageMoods: "page:moods",
   feed: "page:feed",
+  recommendations: "page:recommendations",
   mixes: "page:mixes",
   charts: (path: string) => `page:charts:${path}`,
   pagePath: (path: string) => `page:path:${path}`,
@@ -54,6 +55,8 @@ const LIBRARY_PREFETCH_TTL_MS = 30 * 1000;
 export const prefetch = {
   pageHome: () => prefetchApi(queryKeys.pageHome, () => api.page("home")),
   feed: () => prefetchApi(queryKeys.feed, () => api.feed()),
+  recommendations: () =>
+    prefetchApi(queryKeys.recommendations, () => api.recommendations()),
   popularArtists: () =>
     prefetchApi(queryKeys.popularArtists, () => api.lastfm.chartTopArtists(50)),
   popularTracks: () =>

@@ -965,6 +965,11 @@ export const api = {
       items: (Album & { released_at: string })[];
       editorial: TidalPage | null;
     }>("/api/feed"),
+  recommendations: () =>
+    req<{
+      enabled: boolean;
+      albums: (Album & { reason: string })[];
+    }>("/api/recommendations/albums"),
   player: {
     available: () => req<{ available: boolean }>("/api/player/available"),
     state: () => req<PlayerSnapshot>("/api/player/state"),

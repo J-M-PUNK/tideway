@@ -364,6 +364,10 @@ export interface Settings {
    *  notice once (existing installs upgrading into the change); fresh
    *  installs start true so new users don't see it. */
   ai_filter_notice_ack: boolean;
+  /** Whether the "For You" album-recommendations surface is active
+   *  (#307). On by default; when off, the sidebar entry is hidden and
+   *  the recommendations endpoint returns nothing. */
+  album_recommendations_enabled: boolean;
   /** Bit-perfect audio output — CoreAudio change_device_parameters
    *  + fail_if_conversion_required on macOS; WASAPI exclusive on
    *  Windows. No effect on Linux. */

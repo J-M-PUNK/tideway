@@ -16,6 +16,7 @@ import {
   PanelLeftOpen,
   Plus,
   Rss,
+  Sparkles,
   TrendingUp,
   User,
   X,
@@ -56,6 +57,16 @@ const primary: Array<{
     prefetch: prefetch.popularArtists,
   },
 ];
+
+// "For You" (#307) is spliced into the primary block only when album
+// recommendations are enabled, so it's a separate entry rather than a
+// static member of `primary`.
+const forYouItem: (typeof primary)[number] = {
+  to: "/for-you",
+  label: "For You",
+  icon: Sparkles,
+  prefetch: prefetch.recommendations,
+};
 
 // Library order: the things the user curates (Liked Songs → Albums →
 // Artists → Playlists) come first, then derived/supporting surfaces
@@ -128,6 +139,7 @@ export function Sidebar({
   activeDownloads,
   newDownloads,
   offline = false,
+  recommendationsEnabled = true,
 }: {
   activeDownloads: number;
   /** Count of completed downloads the user hasn't looked at yet. Shown
@@ -137,8 +149,15 @@ export function Sidebar({
   /** When true, hide everything that needs a live Tidal session — the
    *  user is signed out but has offline mode enabled. */
   offline?: boolean;
+  /** When false, the "For You" recommendations entry is hidden (#307). */
+  recommendationsEnabled?: boolean;
 }) {
   const libraryLinks = offline ? offlineLibrary : library;
+  // "For You" sits in the primary block, after the discovery links, only
+  // when recommendations are enabled.
+  const primaryLinks = recommendationsEnabled
+    ? [...primary, forYouItem]
+    : primary;
   const feedUnread = useFeedUnreadCount();
   const {
     importLinkDismissed,
@@ -211,38 +230,42 @@ export function Sidebar({
 
       {!offline && (
         <nav className="rounded-lg bg-card p-2">
-          {primary.map(({ to, label, icon: Icon, end, prefetch: warm }) => {
-            const badge = to === "/feed" && feedUnread > 0 ? feedUnread : 0;
-            return (
-              <NavLink
-                key={to}
-                to={to}
-                end={end}
-                onMouseEnter={warm}
-                title={collapsed ? label : undefined}
-                className={({ isActive }) => navItemClass(isActive, collapsed)}
-              >
-                <span className="relative flex shrink-0">
-                  <Icon className="h-5 w-5" />
-                  {/* Collapsed rows have no room for the count pill, so a
+          {primaryLinks.map(
+            ({ to, label, icon: Icon, end, prefetch: warm }) => {
+              const badge = to === "/feed" && feedUnread > 0 ? feedUnread : 0;
+              return (
+                <NavLink
+                  key={to}
+                  to={to}
+                  end={end}
+                  onMouseEnter={warm}
+                  title={collapsed ? label : undefined}
+                  className={({ isActive }) =>
+                    navItemClass(isActive, collapsed)
+                  }
+                >
+                  <span className="relative flex shrink-0">
+                    <Icon className="h-5 w-5" />
+                    {/* Collapsed rows have no room for the count pill, so a
                       dot on the icon still signals "there's something new"
                       without the number. */}
-                  {collapsed && badge > 0 && (
-                    <span className="absolute -right-1 -top-1 h-2 w-2 rounded-full bg-primary" />
-                  )}
-                </span>
-                {!collapsed && <span className="flex-1">{label}</span>}
-                {!collapsed && badge > 0 && (
-                  <span
-                    className="rounded-full bg-primary/20 px-2 py-0.5 text-[10px] font-bold text-primary"
-                    title={`${badge} new release${badge === 1 ? "" : "s"}`}
-                  >
-                    {badge > 99 ? "99+" : badge}
+                    {collapsed && badge > 0 && (
+                      <span className="absolute -right-1 -top-1 h-2 w-2 rounded-full bg-primary" />
+                    )}
                   </span>
-                )}
-              </NavLink>
-            );
-          })}
+                  {!collapsed && <span className="flex-1">{label}</span>}
+                  {!collapsed && badge > 0 && (
+                    <span
+                      className="rounded-full bg-primary/20 px-2 py-0.5 text-[10px] font-bold text-primary"
+                      title={`${badge} new release${badge === 1 ? "" : "s"}`}
+                    >
+                      {badge > 99 ? "99+" : badge}
+                    </span>
+                  )}
+                </NavLink>
+              );
+            },
+          )}
         </nav>
       )}
 
