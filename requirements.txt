@@ -19,7 +19,15 @@ orjson>=3.11.9
 # THAT fallback is the bug we're fixing here: shipping it as the
 # production transport meant every Tideway install looked like a
 # scraper to Tidal's anti-abuse layer.
-curl-cffi>=0.15.0
+# Upper-bounded: 0.16 dropped `normalize_browser_type` from
+# `curl_cffi.requests.impersonate`, which our impersonate-profile guard
+# tests import. More to the point, the PyInstaller build bundles whatever
+# is installed here, so an unbounded `>=` lets CI test against a curl-cffi
+# newer than the one we actually ship. Pin to the 0.15.x line so the
+# tested and shipped transport are the same version family. Revisit when
+# adopting 0.16+ deliberately (the profile API and the guard tests move
+# together).
+curl-cffi>=0.15.0,<0.16
 pillow>=12.3.0
 fastapi>=0.139.2
 uvicorn[standard]>=0.51.0
