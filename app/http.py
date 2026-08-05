@@ -143,3 +143,18 @@ SESSION = build_impersonated_session() or _build_requests_session()
 # When False, login and other Tidal calls are more likely to be
 # blocked by anti-abuse heuristics or local AV that targets Python.
 IMPERSONATED = type(SESSION).__module__.startswith("curl_cffi")
+
+# Dedicated transport for cover-art proxying (`/api/image`). A grid of
+# album/artist cards fires dozens of image fetches at once, and routing
+# those through the single shared SESSION makes them contend with the
+# latency-sensitive audio path — DASH segment reads, manifest resolves,
+# and tidalapi calls all draw from the same connection pool. Under that
+# contention covers queue behind streaming traffic (slow to appear) or
+# trip their timeout and 502 (the card renders a broken image). Giving
+# images their own session with an independent, generously-sized pool
+# means cover traffic and audio traffic never starve each other. Tidal's
+# resources.tidal.com CDN is public and doesn't fingerprint-block, so the
+# plain pooled requests session is sufficient; keeping images off the
+# impersonated transport also leaves more curl-cffi capacity for the
+# calls that actually need it.
+IMAGE_SESSION = _build_requests_session()
