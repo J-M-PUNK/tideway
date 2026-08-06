@@ -567,11 +567,36 @@ class TidalClient:
             # token and refresh up front.
             now = datetime.now(expiry.tzinfo) if expiry and expiry.tzinfo else datetime.now()
             if expiry and refresh_token and expiry <= now:
+                # The stored access token is already expired, so this refresh
+                # is what keeps a relaunch (app was closed past the token
+                # lifetime) from bouncing the user to the login screen. It
+                # must NOT swallow its failure: a transient error (network
+                # not up yet at boot, 429, 5xx) has to defer-and-retry like
+                # the offline path, or the fall-through to a stale-token
+                # check_login() logs the user out for a blip. A genuine
+                # rejection is a real re-login, but we log it so it stops
+                # being invisible (#309).
+                _transient = (TransientRefreshError,) + _NETWORK_ERRORS
                 try:
                     if self._token_refresh_capturing(refresh_token):
                         self.save_session()
-                except Exception:
-                    pass
+                        _tlog("load_session: expired token refreshed on launch")
+                except tidalapi.exceptions.AuthenticationError as exc:
+                    _tlog(
+                        "load_session: stored refresh token rejected on "
+                        f"launch — re-login required ({exc})"
+                    )
+                    # fall through: check_login() below returns False.
+                except _transient as exc:
+                    _tlog(
+                        "load_session: launch refresh hit a transient error, "
+                        f"keeping session to retry: {exc!r}"
+                    )
+                    self._session_load_deferred = True
+                    return False
+                except Exception as exc:
+                    _tlog(f"load_session: unexpected launch-refresh error: {exc!r}")
+                    # fall through rather than hide it.
             self.session.load_oauth_session(
                 data["token_type"],
                 self.session.access_token or data["access_token"],
