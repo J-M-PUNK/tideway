@@ -317,18 +317,18 @@ export const api = {
       req<LastFmChartTrack[]>(`/api/lastfm/chart/top-tracks?limit=${limit}`),
     /** Last.fm top tracks pre-resolved to Tidal Track objects. One
      *  round-trip instead of the N+1 resolve-on-client pattern. */
-    chartTopTracksResolved: (limit = 50) =>
-      // Cold-load takes ~18s server-side (Last.fm chart fetch + N
-      // parallel Tidal search resolves for each entry). The default
-      // 15s timeout aborts before the server finishes, so the
-      // Popular Tracks tab always errored on first load. The
-      // resolved list is cached for an hour after that first
-      // resolve, so the 60s budget is paid at most once per hour.
-      req<Track[]>(
-        `/api/lastfm/chart/top-tracks-resolved?limit=${limit}`,
-        undefined,
-        { timeoutMs: 60_000 },
-      ),
+    /** One page of Last.fm's top tracks resolved to Tidal Tracks. Now
+     *  paginated, so a page of ~18 resolves well under the default
+     *  timeout (the whole 50 used to take ~18s and error out). */
+    chartTopTracksResolved: (opts?: { offset?: number; limit?: number }) => {
+      const params = new URLSearchParams();
+      if (opts?.offset !== undefined) params.set("offset", String(opts.offset));
+      if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
+      const qs = params.toString();
+      return req<{ items: Track[]; has_more: boolean }>(
+        `/api/lastfm/chart/top-tracks-resolved${qs ? `?${qs}` : ""}`,
+      );
+    },
     chartTopTags: (limit = 50) =>
       req<LastFmChartTag[]>(`/api/lastfm/chart/top-tags?limit=${limit}`),
     nowPlaying: (track: {

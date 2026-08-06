@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import {
   Music,
@@ -8,9 +8,10 @@ import {
 } from "lucide-react";
 import { api } from "@/api/client";
 import { queryKeys } from "@/api/queryKeys";
-import type { LastFmChartArtist } from "@/api/types";
+import type { LastFmChartArtist, Track } from "@/api/types";
 import type { OnDownload } from "@/api/download";
 import { useApi } from "@/hooks/useApi";
+import { useInfinitePages } from "@/hooks/useInfinitePages";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/EmptyState";
 import { Skeleton, TrackListSkeleton } from "@/components/Skeletons";
@@ -244,24 +245,27 @@ function ArtistChartCard({
 // ---------------------------------------------------------------------------
 
 function ChartTracks({ onDownload }: { onDownload: OnDownload }) {
-  const { data, loading, error } = useApi(
-    () => api.lastfm.chartTopTracksResolved(50),
+  const { items, hasMore, loading, error, sentinelRef } = useInfinitePages<
+    Track,
+    { items: Track[]; has_more: boolean }
+  >(
+    (offset) => api.lastfm.chartTopTracksResolved({ offset, limit: 18 }),
+    18,
     [],
-    { cacheKey: queryKeys.popularTracks },
   );
 
-  // Preseed Spotify playcounts in one bounded-pool server call so the
-  // 50 per-row hooks don't each fire a browser request and hit
-  // Spotify's throttle. We send title + primary artist alongside the
-  // ISRC so the server can fall back to a fuzzy search when Spotify
-  // doesn't have the exact ISRC (covers feature-version ISRCs and
-  // fresh releases). Re-runs whenever data identity changes so an
-  // SWR revalidate that brings new chart tracks gets fresh
-  // playcounts too.
+  // Preseed Spotify playcounts for each newly-loaded page in one
+  // bounded-pool server call, so per-row hooks don't each fire a browser
+  // request and hit Spotify's throttle. Only the fresh slice is looked up
+  // (the count reset handles the list clearing on reload). `refresh: true`
+  // retries entries that missed their playcount before.
+  const preseeded = useRef(0);
   useEffect(() => {
-    if (!data || data.length === 0) return;
-    let cancelled = false;
-    const lookup = data
+    if (items.length < preseeded.current) preseeded.current = 0;
+    if (items.length <= preseeded.current) return;
+    const fresh = items.slice(preseeded.current);
+    preseeded.current = items.length;
+    const lookup = fresh
       .filter((t) => !!t.isrc)
       .map((t) => ({
         isrc: t.isrc as string,
@@ -269,9 +273,7 @@ function ChartTracks({ onDownload }: { onDownload: OnDownload }) {
         artist: t.artists[0]?.name ?? "",
       }));
     if (lookup.length === 0) return;
-    // `refresh: true` drops stale null/zero cache entries so chart
-    // tracks that missed their playcount on an earlier visit (Spotify
-    // throttle, release-week zero) get a retry instead of sitting dark.
+    let cancelled = false;
     api.spotify
       .trackPlaycounts(lookup, { refresh: true })
       .then(({ playcounts }) => {
@@ -283,21 +285,15 @@ function ChartTracks({ onDownload }: { onDownload: OnDownload }) {
     return () => {
       cancelled = true;
     };
-  }, [data]);
+  }, [items]);
 
-  if (loading && !data) return <TrackListSkeleton />;
-  if (!data || data.length === 0) {
-    // Distinguish "the backend failed" from "the backend returned
-    // genuinely no results". The previous copy ("Last.fm didn't
-    // return any results") was misleading: most of the time the
-    // empty list came from Tidal failing to resolve any of the
-    // chart entries, not from Last.fm having no data. When useApi
-    // surfaces an error (network drop, 500 from /api/lastfm/...),
-    // show it. Otherwise blame Tidal — Last.fm's chart endpoint is
-    // pure JSON, basically never empty in practice; an empty
-    // resolved list means Tidal couldn't find a single match.
+  if (loading && items.length === 0) return <TrackListSkeleton />;
+  if (items.length === 0) {
+    // An empty resolved list almost always means Tidal couldn't resolve
+    // the chart entries (Last.fm's chart JSON is basically never empty),
+    // so blame Tidal unless the request itself errored.
     const description = error
-      ? `Couldn't load chart tracks: ${error.message}`
+      ? `Couldn't load chart tracks: ${error}`
       : "Last.fm had chart entries but none of them resolved to Tidal — likely a temporary Tidal hiccup. Try again in a few seconds.";
     return (
       <EmptyState
@@ -308,7 +304,19 @@ function ChartTracks({ onDownload }: { onDownload: OnDownload }) {
     );
   }
   return (
-    <TrackList tracks={data} onDownload={onDownload} numbered showPlaycount />
+    <>
+      <TrackList
+        tracks={items}
+        onDownload={onDownload}
+        numbered
+        showPlaycount
+      />
+      {hasMore && (
+        <div ref={sentinelRef} className="mt-2" aria-hidden>
+          <TrackListSkeleton />
+        </div>
+      )}
+    </>
   );
 }
 

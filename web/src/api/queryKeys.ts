@@ -56,10 +56,6 @@ export const prefetch = {
   feed: () => prefetchApi(queryKeys.feed, () => api.feed()),
   popularArtists: () =>
     prefetchApi(queryKeys.popularArtists, () => api.lastfm.chartTopArtists(50)),
-  popularTracks: () =>
-    prefetchApi(queryKeys.popularTracks, () =>
-      api.lastfm.chartTopTracksResolved(50),
-    ),
   libraryAlbums: () =>
     prefetchApi(
       queryKeys.libraryAlbums,

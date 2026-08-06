@@ -4170,22 +4170,23 @@ def lastfm_chart_top_tracks(limit: int = 50) -> list[dict]:
 
 
 @app.get("/api/lastfm/chart/top-tracks-resolved")
-def lastfm_chart_top_tracks_resolved(limit: int = 50) -> list[dict]:
-    """Last.fm top tracks already resolved to Tidal Track objects.
+def lastfm_chart_top_tracks_resolved(offset: int = 0, limit: int = 18) -> dict:
+    """One page of Last.fm's top tracks resolved to Tidal Tracks (#perf).
 
-    The Popular page's Tracks tab used to fire N separate search
-    requests from the browser to resolve each Last.fm entry —
-    cold-load was 5-10 s for 50 rows. We now do the whole fan-out
-    server-side with a bounded thread pool and cache the result, so
-    the client is back to one round-trip.
+    The Popular > Tracks tab used to resolve all 50 chart entries up front
+    — ~18s cold, past the request timeout, which is why it was the slowest
+    page in the app. It now resolves only the requested ~18-track page (the
+    chart scrape and the per-track resolutions are both cached) and the UI
+    streams more on scroll. Returns {items, has_more}.
     """
     _require_auth()
-    limit = max(1, min(limit, 100))
+    offset = max(0, int(offset))
+    limit = max(1, min(int(limit), 40))
 
-    def _resolve_all() -> list[dict]:
+    def _resolve_page() -> list[dict]:
         from app import lastfm_disk_cache
 
-        entries = lastfm.get_chart_top_tracks(limit=limit)
+        entries = lastfm.get_chart_top_tracks(limit=100)
 
         pref = (settings.explicit_content_preference or "explicit").lower()
         username = lastfm.status().get("username") or ""
@@ -4296,8 +4297,9 @@ def lastfm_chart_top_tracks_resolved(limit: int = 50) -> list[dict]:
         # chart-cache miss usually only fires a handful of fresh
         # searches (the entries that changed), so the wall-clock
         # bursts are typically much smaller in practice.
+        page = entries[offset:offset + limit]
         with ThreadPoolExecutor(max_workers=3) as pool:
-            results = list(pool.map(_one, entries))
+            results = list(pool.map(_one, page))
 
         resolved = [r for r in results if r is not None]
         # When Last.fm returned chart entries but we couldn't
@@ -4305,9 +4307,9 @@ def lastfm_chart_top_tracks_resolved(limit: int = 50) -> list[dict]:
         # (rate limit, expired session, etc.). Log the chart-level
         # outcome; the cache_empty=False below ensures we don't
         # pin this empty result for an hour like we used to.
-        if entries and not resolved:
+        if page and not resolved:
             print(
-                f"[lastfm] chart resolve fully failed: {len(entries)} "
+                f"[lastfm] chart resolve fully failed: {len(page)} "
                 f"Last.fm entries, zero Tidal matches. Empty result "
                 f"will NOT be cached; next visit retries.",
                 file=sys.stderr,
@@ -4329,13 +4331,17 @@ def lastfm_chart_top_tracks_resolved(limit: int = 50) -> list[dict]:
     # any results" message that stuck until the cache expired even
     # after Tidal had recovered. Now an empty result re-fetches on
     # the next visit, costing ~18 s of resolve once Tidal is back.
-    return _lastfm_cached(
-        f"chart-top-tracks-resolved:{limit}",
-        _resolve_all,
+    items = _lastfm_cached(
+        f"chart-top-tracks-resolved:{offset}:{limit}",
+        _resolve_page,
         ttl_sec=3600.0,
         persistent=True,
         cache_empty=False,
     )
+    # `has_more` from the cheap, cached chart length — not the resolved
+    # count (some entries never resolve to Tidal).
+    total = len(lastfm.get_chart_top_tracks(limit=100))
+    return {"items": items, "has_more": offset + limit < total}
 
 
 @app.get("/api/lastfm/chart/top-tags")
