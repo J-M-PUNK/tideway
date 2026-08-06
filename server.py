@@ -4361,33 +4361,70 @@ def lastfm_chart_top_tags(limit: int = 50) -> list[dict]:
 # year).
 
 
+# Fetch a generous slab of the (cheap, cached) AOTY listing so paging is
+# just a cache hit; only the page's albums pay the Tidal-resolution cost.
+_AOTY_LISTING_MAX = 100
+
+
+def _aoty_listing_genres(listing: list[dict]) -> list[dict]:
+    """Genre picker options from the full unresolved listing (no Tidal
+    calls) — so the drill-down keeps its sub-genre options even though the
+    grid itself is paginated."""
+    seen: dict = {}
+    for e in listing:
+        for slug, name in zip(e.get("genre_slugs") or [], e.get("genres") or []):
+            if slug and name and slug not in seen:
+                seen[slug] = name
+    return sorted(
+        ({"slug": s, "name": n} for s, n in seen.items()),
+        key=lambda g: g["name"].lower(),
+    )
+
+
+def _aoty_page(listing: list[dict], offset: int, limit: int) -> tuple[list[dict], bool]:
+    """Resolve ONE page of an AOTY listing to Tidal. The full listing is
+    cheap and cached; resolving is the slow part, so we only resolve the
+    slice actually being shown — the fix for pages that used to resolve all
+    100 albums up front and take 25s+ (#315-adjacent perf report)."""
+    offset = max(0, int(offset))
+    limit = max(1, min(int(limit), 40))
+    page = listing[offset:offset + limit]
+    resolved = aoty_resolver.resolve_listing(page)
+    return resolved, offset + limit < len(listing)
+
+
 @app.get("/api/aoty/top-of-year")
 def aoty_top_of_year(
-    year: int | None = None, limit: int = 50, genre: str | None = None
-) -> list[dict]:
-    """AOTY's highest-rated albums for the given year, decorated with
-    Tidal album dicts under `tidal_album` (or None when Tidal has no
-    match). With `genre` (an AOTY "{id}-{slug}" segment) it returns
-    that genre's real year chart instead of the global one."""
+    year: int | None = None,
+    offset: int = 0,
+    limit: int = 18,
+    genre: str | None = None,
+) -> dict:
+    """One page of AOTY's highest-rated albums for the year, each decorated
+    with a Tidal album dict under `tidal_album`. `{items, has_more}` plus,
+    on the first page, `genres` for the picker. With `genre` it pages that
+    genre's chart instead of the global one."""
     _require_auth()
     y = year if year is not None else datetime.now().year
     if genre:
-        listing = aoty_module.top_albums_of_year_by_genre(
-            genre, y, limit=limit
-        )
+        listing = aoty_module.top_albums_of_year_by_genre(genre, y, limit=_AOTY_LISTING_MAX)
     else:
-        listing = aoty_module.top_albums_of_year(y, limit=limit)
-    return aoty_resolver.resolve_listing(listing)
+        listing = aoty_module.top_albums_of_year(y, limit=_AOTY_LISTING_MAX)
+    items, has_more = _aoty_page(listing, offset, limit)
+    out: dict = {"items": items, "has_more": has_more}
+    if offset == 0 and not genre:
+        out["genres"] = _aoty_listing_genres(listing)
+    return out
 
 
 @app.get("/api/aoty/recent-releases")
-def aoty_recent_releases(limit: int = 30) -> list[dict]:
-    """Recently-released albums from AOTY's /releases/ grid, decorated
-    with Tidal album dicts under `tidal_album` (or None when Tidal
-    doesn't have a match)."""
+def aoty_recent_releases(offset: int = 0, limit: int = 18) -> dict:
+    """One page of AOTY's recent releases, each decorated with a Tidal
+    album dict under `tidal_album`. Returns `{items, has_more}`."""
     _require_auth()
-    listing = aoty_module.recent_releases(limit=limit)
-    return aoty_resolver.resolve_listing(listing)
+    listing = aoty_module.recent_releases(limit=_AOTY_LISTING_MAX)
+    items, has_more = _aoty_page(listing, offset, limit)
+    return {"items": items, "has_more": has_more}
 
 
 @app.get("/api/aoty/genres")
@@ -4400,13 +4437,14 @@ def aoty_genres() -> list[dict]:
 
 
 @app.get("/api/aoty/genre-releases")
-def aoty_genre_releases(genre: str, limit: int = 60) -> list[dict]:
-    """Recent albums for one AOTY genre (the "Recent {Genre} Albums"
-    section of /genre/{slug}/), decorated with Tidal album dicts
-    under `tidal_album` (or None when Tidal has no match)."""
+def aoty_genre_releases(genre: str, offset: int = 0, limit: int = 18) -> dict:
+    """One page of recent albums for one AOTY genre (the "Recent {Genre}
+    Albums" section of /genre/{slug}/), each decorated with a Tidal album
+    dict under `tidal_album`. Returns `{items, has_more}`."""
     _require_auth()
-    listing = aoty_module.recent_releases_by_genre(genre, limit=limit)
-    return aoty_resolver.resolve_listing(listing)
+    listing = aoty_module.recent_releases_by_genre(genre, limit=_AOTY_LISTING_MAX)
+    items, has_more = _aoty_page(listing, offset, limit)
+    return {"items": items, "has_more": has_more}
 
 
 @app.get("/api/aoty/status")

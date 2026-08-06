@@ -25,8 +25,8 @@ import type {
   LastFmTopTrack,
   LastFmUserInfo,
   LastFmWeeklyScrobble,
-  AotyAlbum,
   AotyGenre,
+  AotyPage,
   LocalFile,
   LocalVideo,
   Lyrics,
@@ -368,28 +368,43 @@ export const api = {
     /** Top-rated albums of the given year per AlbumOfTheYear, with
      *  each entry decorated with a Tidal album dict when one exists.
      *  Year defaults server-side to the current year. */
-    topOfYear: (opts?: { year?: number; limit?: number; genre?: string }) => {
+    topOfYear: (opts?: {
+      year?: number;
+      offset?: number;
+      limit?: number;
+      genre?: string;
+    }) => {
       const params = new URLSearchParams();
       if (opts?.year !== undefined) params.set("year", String(opts.year));
+      if (opts?.offset !== undefined) params.set("offset", String(opts.offset));
       if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
       if (opts?.genre) params.set("genre", opts.genre);
       const qs = params.toString();
-      return req<AotyAlbum[]>(`/api/aoty/top-of-year${qs ? `?${qs}` : ""}`);
+      return req<AotyPage>(`/api/aoty/top-of-year${qs ? `?${qs}` : ""}`);
     },
-    /** Recently-released albums per AOTY's /releases/ grid, with each
-     *  entry decorated with a Tidal album dict when one exists. */
-    recentReleases: (limit = 30) =>
-      req<AotyAlbum[]>(`/api/aoty/recent-releases?limit=${limit}`),
+    /** One page of AOTY's recent releases, each decorated with a Tidal
+     *  album dict when one exists. */
+    recentReleases: (opts?: { offset?: number; limit?: number }) => {
+      const params = new URLSearchParams();
+      if (opts?.offset !== undefined) params.set("offset", String(opts.offset));
+      if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
+      const qs = params.toString();
+      return req<AotyPage>(`/api/aoty/recent-releases${qs ? `?${qs}` : ""}`);
+    },
     /** AOTY's genre list ({slug, name}) for the New-releases genre
      *  picker. */
     genres: () => req<AotyGenre[]>(`/api/aoty/genres`),
-    /** Recent albums for one AOTY genre (the "Recent {Genre}
-     *  Albums" section of /genre/{slug}/), each decorated with a
-     *  Tidal album dict when one exists. */
-    genreReleases: (slug: string, limit = 60) =>
-      req<AotyAlbum[]>(
-        `/api/aoty/genre-releases?genre=${encodeURIComponent(slug)}&limit=${limit}`,
-      ),
+    /** One page of recent albums for one AOTY genre, each decorated with
+     *  a Tidal album dict when one exists. */
+    genreReleases: (
+      slug: string,
+      opts?: { offset?: number; limit?: number },
+    ) => {
+      const params = new URLSearchParams({ genre: slug });
+      if (opts?.offset !== undefined) params.set("offset", String(opts.offset));
+      if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
+      return req<AotyPage>(`/api/aoty/genre-releases?${params.toString()}`);
+    },
     /** Scraper health. `blocked` is true when AOTY has recently
      *  served us a Cloudflare challenge instead of HTML — the
      *  Home page reads this to render a "report on GitHub" notice

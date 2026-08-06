@@ -640,6 +640,15 @@ export interface AotyGenre {
   name: string;
 }
 
+/** One page of an AOTY listing. `genres` is only present on the first
+ *  page of a paginated top-of-year request (the drill-down's picker
+ *  options). `has_more` drives infinite scroll. */
+export interface AotyPage {
+  items: AotyAlbum[];
+  has_more: boolean;
+  genres?: AotyGenre[];
+}
+
 export interface LastFmLovedTrack {
   name: string;
   artist: string;

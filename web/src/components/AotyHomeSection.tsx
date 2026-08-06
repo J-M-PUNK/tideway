@@ -40,12 +40,14 @@ export function AotyHomeSection() {
       {status?.blocked && <AotyBlockedNotice issuesUrl={status.issues_url} />}
       <AotyRow
         title="New album releases"
-        fetch={() => api.aoty.recentReleases(60)}
+        fetch={() =>
+          api.aoty.recentReleases({ limit: 30 }).then((p) => p.items)
+        }
         viewMoreTo="/aoty/new-releases"
       />
       <AotyRow
         title={`Top albums of ${year}`}
-        fetch={() => api.aoty.topOfYear({ limit: 30 })}
+        fetch={() => api.aoty.topOfYear({ limit: 30 }).then((p) => p.items)}
         viewMoreTo="/aoty/top-of-year"
       />
     </div>
