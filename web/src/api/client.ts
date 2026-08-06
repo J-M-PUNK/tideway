@@ -975,6 +975,11 @@ export const api = {
         albums: (Album & { reason?: string })[];
       }[];
     }>("/api/recommendations/albums"),
+  dismissRecommendation: (albumId: string, artist?: string) =>
+    req<{ ok: boolean }>("/api/recommendations/dismiss", {
+      method: "POST",
+      body: JSON.stringify({ album_id: albumId, artist: artist ?? null }),
+    }),
   player: {
     available: () => req<{ available: boolean }>("/api/player/available"),
     state: () => req<PlayerSnapshot>("/api/player/state"),

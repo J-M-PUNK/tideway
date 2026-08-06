@@ -1,5 +1,6 @@
+import { useCallback, useState } from "react";
 import { Link } from "react-router-dom";
-import { Compass, Music, Sparkles } from "lucide-react";
+import { Compass, Music, Sparkles, X } from "lucide-react";
 import { api } from "@/api/client";
 import type { Album } from "@/api/types";
 import type { OnDownload } from "@/api/download";
@@ -31,6 +32,17 @@ export function ForYouPage({ onDownload }: { onDownload: OnDownload }) {
   const { data, loading, error } = useApi(() => api.recommendations(), [], {
     cacheKey: queryKeys.recommendations,
   });
+  // Dismissed albums vanish immediately; the backend persists the choice
+  // and down-weights the artist on the next (re)load.
+  const [dismissed, setDismissed] = useState<Set<string>>(() => new Set());
+  const onDismiss = useCallback((item: RecAlbum) => {
+    setDismissed((prev) => new Set(prev).add(item.id));
+    void api
+      .dismissRecommendation(item.id, item.artists?.[0]?.name)
+      .catch(() => {
+        /* best-effort — it's gone from the view either way */
+      });
+  }, []);
 
   if (loading) {
     return (
@@ -61,7 +73,12 @@ export function ForYouPage({ onDownload }: { onDownload: OnDownload }) {
     );
   }
 
-  const sections = data.sections.filter((s) => s.albums.length > 0);
+  const sections = data.sections
+    .map((s) => ({
+      ...s,
+      albums: s.albums.filter((a) => !dismissed.has(a.id)),
+    }))
+    .filter((s) => s.albums.length > 0);
   if (sections.length === 0) {
     return (
       <div>
@@ -85,7 +102,12 @@ export function ForYouPage({ onDownload }: { onDownload: OnDownload }) {
       <PageHeading />
       <div className="flex flex-col gap-10">
         {sections.map((section) => (
-          <Shelf key={section.key} section={section} onDownload={onDownload} />
+          <Shelf
+            key={section.key}
+            section={section}
+            onDownload={onDownload}
+            onDismiss={onDismiss}
+          />
         ))}
       </div>
     </div>
@@ -109,9 +131,11 @@ function PageHeading() {
 function Shelf({
   section,
   onDownload,
+  onDismiss,
 }: {
   section: Section;
   onDownload: OnDownload;
+  onDismiss: (item: RecAlbum) => void;
 }) {
   return (
     <section>
@@ -122,7 +146,12 @@ function Shelf({
       {!section.subtitle && <div className="mb-3" />}
       <div className="flex gap-4 overflow-x-auto pb-2 scrollbar-thin">
         {section.albums.map((item) => (
-          <RecCard key={item.id} item={item} onDownload={onDownload} />
+          <RecCard
+            key={item.id}
+            item={item}
+            onDownload={onDownload}
+            onDismiss={onDismiss}
+          />
         ))}
       </div>
     </section>
@@ -132,14 +161,29 @@ function Shelf({
 function RecCard({
   item,
   onDownload,
+  onDismiss,
 }: {
   item: RecAlbum;
   onDownload: OnDownload;
+  onDismiss: (item: RecAlbum) => void;
 }) {
   const cover = imageProxy(item.cover);
   const artist = item.artists?.map((a) => a.name).join(", ") ?? "";
   return (
     <div className="group relative flex w-44 shrink-0 flex-col gap-3 rounded-lg bg-card p-4 transition-colors hover:bg-accent">
+      <button
+        type="button"
+        onClick={(e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          onDismiss(item);
+        }}
+        title="Not interested — hide this and show less like it"
+        aria-label={`Not interested in ${item.name}`}
+        className="absolute left-3 top-3 z-10 flex h-7 w-7 items-center justify-center rounded-full bg-black/70 text-white opacity-0 transition-opacity hover:bg-black/90 focus-visible:opacity-100 group-hover:opacity-100"
+      >
+        <X className="h-4 w-4" />
+      </button>
       <Link to={`/album/${item.id}`} className="flex flex-col gap-3">
         <div className="aspect-square overflow-hidden rounded-md bg-secondary">
           {cover ? (
