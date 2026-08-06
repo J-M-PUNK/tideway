@@ -15,11 +15,16 @@ import pytest
 def _clean_recs_cache():
     import server
 
-    with server._recs_cache_lock:
-        server._recs_cache.clear()
+    def _reset():
+        with server._recs_cache_lock:
+            server._recs_cache.clear()
+        with server._genre_map_lock:
+            server._genre_map_cache["at"] = 0.0
+            server._genre_map_cache["map"] = None
+
+    _reset()
     yield
-    with server._recs_cache_lock:
-        server._recs_cache.clear()
+    _reset()
 
 
 @pytest.fixture
@@ -377,15 +382,36 @@ def test_taste_profile_infers_genres_from_tags(stub_auth, monkeypatch):
         ],
     )
     monkeypatch.setattr(
-        server.aoty_module, "genre_index",
-        lambda: [{"slug": "7-electronic", "name": "Electronic"},
-                 {"slug": "9-rock", "name": "Rock"}],
+        server, "_aoty_genre_slug_map",
+        lambda: {"electronic": ("7-electronic", "Electronic"),
+                 "rock": ("9-rock", "Rock")},
     )
     prof = server._taste_profile()
     assert prof["connected"] is True
     assert "boards of canada" in prof["artist_names"]
     slugs = [g[0] for g in prof["genres"]]
-    assert slugs == ["7-electronic"]
+    assert slugs == ["7-electronic"]  # IDM has no AOTY genre -> dropped
+
+
+def test_genre_slug_map_harvests_subgenres(monkeypatch):
+    """The slug map must include sub-genres from album tags, not just the
+    ~48 on genre.php — otherwise 'Best of Shoegaze' can never render."""
+    import server
+
+    monkeypatch.setattr(
+        server.aoty_module, "genre_index",
+        lambda: [{"slug": "6-electronic", "name": "Electronic"}],
+    )
+    monkeypatch.setattr(
+        server.aoty_module, "top_albums_of_year",
+        lambda year, limit=100: [
+            {"genres": ["Shoegaze", "Slowcore"], "genre_slugs": ["26-shoegaze", "119-slowcore"]},
+        ],
+    )
+    m = server._aoty_genre_slug_map()
+    assert m["electronic"] == ("6-electronic", "Electronic")
+    assert m["shoegaze"] == ("26-shoegaze", "Shoegaze")
+    assert m["slowcore"] == ("119-slowcore", "Slowcore")
 
 
 def _resolver_passthrough(monkeypatch):

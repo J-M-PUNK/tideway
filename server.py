@@ -12128,12 +12128,56 @@ def _dedupe_cap_albums(albums: list, limit: int) -> list[dict]:
     return out
 
 
+_GENRE_MAP_TTL_SEC = 24 * 3600.0
+_genre_map_cache: dict = {"at": 0.0, "map": None}
+_genre_map_lock = threading.Lock()
+
+
+def _aoty_genre_slug_map() -> dict:
+    """name (lower) -> (slug, display_name) covering AOTY's *full* genre
+    taxonomy, not just the ~48 on /genre.php.
+
+    AOTY's genre index page lists only top-level and a few sub-genres, so
+    matching a listener's tags against it drops the specific ones
+    (shoegaze, slowcore, art pop, IDM …) and the "by genre" rows fall
+    through to broad parents. AOTY tags every *album* with the full
+    ~360-genre set, though, and those tags carry the real slugs
+    ("26-shoegaze"). Harvesting name->slug from a couple of years of
+    top-rated albums builds the complete map, so "Best of Shoegaze"
+    becomes a real row. Cached ~a day — the taxonomy barely moves."""
+    now = time.monotonic()
+    with _genre_map_lock:
+        c = _genre_map_cache
+        if c["map"] is not None and now - c["at"] < _GENRE_MAP_TTL_SEC:
+            return c["map"]
+    mapping: dict = {}
+    # Curated index first so its canonical display names win.
+    for g in _rec_safe(lambda: aoty_module.genre_index(), []) or []:
+        n = (g.get("name") or "").strip()
+        s = g.get("slug")
+        if n and s:
+            mapping.setdefault(n.lower(), (s, n))
+    # Harvest the long tail from album genre tags across recent years.
+    yr = datetime.now().year
+    for y in (yr, yr - 1):
+        for it in _rec_safe(lambda yy=y: aoty_module.top_albums_of_year(yy, 100), []) or []:
+            for n, s in zip(it.get("genres") or [], it.get("genre_slugs") or []):
+                n = (n or "").strip()
+                if n and s:
+                    mapping.setdefault(n.lower(), (s, n))
+    with _genre_map_lock:
+        _genre_map_cache["at"] = time.monotonic()
+        _genre_map_cache["map"] = mapping
+    return mapping
+
+
 def _taste_profile() -> dict:
     """Infer taste from Last.fm: play-weighted top artists, and their most
-    common community tags aggregated into top genres mapped to AOTY slugs.
-    A disconnected or empty profile is fine — sections that depend on it
-    just don't render. This is the "listening history" half of the
-    popularity-x-history ranking (#307)."""
+    common community tags aggregated into top genres mapped to AOTY slugs
+    (the full taxonomy, so sub-genres survive). A disconnected or empty
+    profile is fine — sections that depend on it just don't render. This
+    is the "listening history" half of the popularity-x-history ranking
+    (#307)."""
     connected = bool(_rec_safe(lambda: lastfm.status().get("connected"), False))
     if not connected:
         return {"connected": False, "artist_names": set(), "genres": []}
@@ -12164,14 +12208,9 @@ def _taste_profile() -> dict:
                     if name:
                         weights[name] = weights.get(name, 0.0) + w
 
-    # Map inferred genre names to AOTY's genre slugs (exact, normalized).
-    aoty_genres = _rec_safe(lambda: aoty_module.genre_index(), []) or []
-    name_to_slug = {}
-    for g in aoty_genres:
-        gname = (g.get("name") or "").strip().lower()
-        if gname:
-            name_to_slug[gname] = (g.get("slug"), g.get("name"))
-
+    # Map inferred genre names to AOTY's full-taxonomy slugs so specific
+    # sub-genres (shoegaze, slowcore, art pop) survive instead of dropping.
+    name_to_slug = _aoty_genre_slug_map()
     genres: list = []
     seen_slugs: set = set()
     for gname, _w in sorted(weights.items(), key=lambda kv: kv[1], reverse=True):
