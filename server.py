@@ -12025,13 +12025,19 @@ def _album_recommendations(include_for_you: bool = True) -> list[dict]:
     # Merge: dedupe by album id keeping the best score; drop owned albums;
     # add a small novelty boost when the artist isn't already heavy
     # rotation, so the list leans toward discovery over the familiar.
+    feedback = _load_rec_feedback()
+    dismissed_albums, dismissed_artists = feedback["albums"], feedback["artists"]
     best: dict[str, tuple[float, str, object]] = {}
     for alb, score, reason in results:
         aid = str(getattr(alb, "id", "") or "")
-        if not aid or aid in owned_ids:
+        if not aid or aid in owned_ids or aid in dismissed_albums:
             continue
         key = _album_primary_artist_key(alb)
         adjusted = score + (8.0 if key and key not in heavy_rotation else 0.0)
+        # "Not interested" on an album pushes that artist's other picks
+        # down so the page visibly reacts to the feedback.
+        if key and key in dismissed_artists:
+            adjusted -= 50.0
         prev = best.get(aid)
         if prev is None or adjusted > prev[0]:
             best[aid] = (adjusted, reason, alb)
@@ -12126,6 +12132,65 @@ def _dedupe_cap_albums(albums: list, limit: int) -> list[dict]:
         if len(out) >= limit:
             break
     return out
+
+
+# --- "Not interested" feedback (#307) -------------------------------------
+# Dismissing a rec removes that album everywhere and down-weights its
+# artist in the taste-driven sections, so the page visibly learns. Stored
+# per-device (it's local taste, not account state), atomically.
+def _rec_feedback_file():
+    from app.paths import user_data_dir
+    return user_data_dir() / "rec_feedback.json"
+
+
+_rec_feedback_lock = threading.Lock()
+
+
+def _load_rec_feedback() -> dict:
+    """{'albums': set[str], 'artists': set[str]} — dismissed album ids and
+    the lower-cased artist names to down-weight."""
+    try:
+        with open(_rec_feedback_file()) as f:
+            data = json.load(f)
+        return {
+            "albums": {str(x) for x in (data.get("albums") or [])},
+            "artists": {str(x).strip().lower() for x in (data.get("artists") or [])},
+        }
+    except Exception:
+        return {"albums": set(), "artists": set()}
+
+
+def _dismiss_recommendation(album_id: str, artist: Optional[str]) -> None:
+    album_id = str(album_id or "").strip()
+    if not album_id:
+        return
+    with _rec_feedback_lock:
+        fb = _load_rec_feedback()
+        fb["albums"].add(album_id)
+        if artist and artist.strip():
+            fb["artists"].add(artist.strip().lower())
+        target = _rec_feedback_file()
+        tmp_fd, tmp_path = tempfile.mkstemp(
+            prefix=".rec_feedback.", suffix=".tmp", dir=str(target.parent)
+        )
+        try:
+            with os.fdopen(tmp_fd, "w") as f:
+                json.dump(
+                    {"albums": sorted(fb["albums"]), "artists": sorted(fb["artists"])}, f
+                )
+            os.replace(tmp_path, target)
+        except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+    # Drop the cached page so the dismissed album disappears on next load.
+    with _recs_cache_lock:
+        _recs_cache.pop("sections", None)
+
+
+def _filter_dismissed(albums: list, dismissed_ids: set) -> list:
+    return [a for a in albums if a and str(a.get("id") or "") not in dismissed_ids]
 
 
 _GENRE_MAP_TTL_SEC = 24 * 3600.0
@@ -12337,7 +12402,18 @@ def _build_recommendation_sections() -> list[dict]:
         ordered.append(results.get(f"genre:{slug}"))
     ordered.append(results.get("popular"))
     ordered.extend(because)
-    return [s for s in ordered if s and s.get("albums")]
+
+    # Drop anything the user said "not interested" in, across every
+    # section, then drop sections left empty.
+    dismissed = _load_rec_feedback()["albums"]
+    out: list[dict] = []
+    for s in ordered:
+        if not s:
+            continue
+        s["albums"] = _filter_dismissed(s.get("albums", []), dismissed)
+        if s["albums"]:
+            out.append(s)
+    return out
 
 
 @app.get("/api/recommendations/albums")
@@ -12361,6 +12437,22 @@ def recommendations_albums() -> dict:
     with _recs_cache_lock:
         _recs_cache["sections"] = (time.monotonic(), payload)
     return payload
+
+
+class DismissRecommendationRequest(BaseModel):
+    album_id: str
+    # Optional so the artist can be down-weighted, not just the one album.
+    artist: Optional[str] = None
+
+
+@app.post("/api/recommendations/dismiss")
+def recommendations_dismiss(req: DismissRecommendationRequest) -> dict:
+    """Mark an album "not interested" (#307): it's removed from every
+    section and its artist is down-weighted in the taste-driven rows, so
+    the page learns. Persisted per-device."""
+    _require_auth()
+    _dismiss_recommendation(req.album_id, req.artist)
+    return {"ok": True}
 
 
 # ---------------------------------------------------------------------------
