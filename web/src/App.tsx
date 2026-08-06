@@ -39,6 +39,7 @@ import {
 } from "@/hooks/useVideoDownloads";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { VideoPlayerProvider } from "@/hooks/useVideoPlayer";
+import { useMouseNavButtons } from "@/hooks/useMouseNavButtons";
 import { VideoPlayerModal } from "@/components/VideoPlayerModal";
 import { SelectionBar } from "@/components/SelectionBar";
 import { useAuth } from "@/hooks/useAuth";
@@ -338,6 +339,7 @@ function Shell({
   const videoDownloads = useVideoDownloads();
   const toast = useToast();
   const location = useLocation();
+  useMouseNavButtons();
   const playerMeta = usePlayerMeta();
   // Opt-in desktop notifications when a burst finishes. We pull the
   // pref lazily from settings — Settings is the source of truth and
