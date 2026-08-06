@@ -11847,6 +11847,11 @@ _recs_cache_lock = threading.Lock()
 _RECS_SEED_ALBUMS = 8
 _RECS_SEED_ARTISTS = 8
 _RECS_PER_ARTIST_CAP = 2
+# Cap albums sharing one reason (one seed / one Tidal module) so a single
+# heavily-played seed can't fill the whole page — a real failure seen
+# against live libraries, where one big "Because you listened to X" module
+# swamped everything with 40 near-identical picks.
+_RECS_PER_REASON_CAP = 5
 _RECS_MAX = 40
 
 
@@ -12026,21 +12031,50 @@ def _album_recommendations() -> list[dict]:
             best[aid] = (adjusted, reason, alb)
 
     ranked = sorted(best.values(), key=lambda x: x[0], reverse=True)
+
+    # Group by reason, then round-robin across reasons so the page spans
+    # many facets of taste instead of one over-represented seed. Group
+    # insertion order follows score, so each round takes the strongest
+    # still-available pick from each reason — a varied top, not 40 in a row
+    # from the same module.
+    groups: "OrderedDict[str, list]" = OrderedDict()
+    for entry in ranked:
+        groups.setdefault(entry[1], []).append(entry)
+
     out: list[dict] = []
     per_artist: dict[str, int] = {}
-    for score, reason, alb in ranked:
-        key = _album_primary_artist_key(alb)
-        if key and per_artist.get(key, 0) >= _RECS_PER_ARTIST_CAP:
-            continue
-        d = _safe(lambda a=alb: album_to_dict(a), None)
-        if not d or not d.get("available"):
-            continue
-        d["reason"] = reason
-        out.append(d)
-        if key:
-            per_artist[key] = per_artist.get(key, 0) + 1
-        if len(out) >= _RECS_MAX:
-            break
+    per_reason: dict[str, int] = {}
+    # Same album reissued under different Tidal ids (deluxe / explicit /
+    # regional variants) shares a title + artist; the id-keyed dedupe above
+    # can't catch those, so collapse them by (title, artist) here too.
+    seen_sigs: set = set()
+    made_progress = True
+    while len(out) < _RECS_MAX and made_progress:
+        made_progress = False
+        for reason, entries in groups.items():
+            if per_reason.get(reason, 0) >= _RECS_PER_REASON_CAP:
+                continue
+            while entries:
+                _score, _reason, alb = entries.pop(0)
+                key = _album_primary_artist_key(alb)
+                if key and per_artist.get(key, 0) >= _RECS_PER_ARTIST_CAP:
+                    continue
+                sig = ((getattr(alb, "name", "") or "").strip().lower(), key)
+                if sig in seen_sigs:
+                    continue
+                d = _safe(lambda a=alb: album_to_dict(a), None)
+                if not d or not d.get("available"):
+                    continue
+                d["reason"] = reason
+                out.append(d)
+                seen_sigs.add(sig)
+                if key:
+                    per_artist[key] = per_artist.get(key, 0) + 1
+                per_reason[reason] = per_reason.get(reason, 0) + 1
+                made_progress = True
+                break
+            if len(out) >= _RECS_MAX:
+                break
     return out
 
 

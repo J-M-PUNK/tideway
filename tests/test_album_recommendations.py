@@ -263,6 +263,43 @@ def test_for_you_outranks_similar_graph(stub_auth, monkeypatch):
     assert ids.index("3") < ids.index("2")
 
 
+def test_reissues_collapsed_by_title_and_artist(stub_auth, monkeypatch):
+    """Same album under two Tidal ids (deluxe/explicit/regional) should
+    appear once — the id-dedupe can't catch it, the title+artist one does."""
+    import server
+
+    _no_lastfm(monkeypatch)
+    seed = StubAlbum("1", "Seed", "A", similar=[
+        StubAlbum("100", "Power Ballad", "Same Artist"),
+        StubAlbum("200", "power ballad", "Same Artist"),  # reissue, other id
+    ])
+    _set_library(monkeypatch, fav_albums=[seed])
+    out = server._album_recommendations()
+    assert len(out) == 1
+    assert out[0]["name"] == "Power Ballad"
+
+
+def test_per_reason_cap_diversifies(stub_auth, monkeypatch):
+    """A single big seed/module can't fill the page — no reason exceeds
+    the cap, and a smaller seed still gets represented (the live-library
+    "40 game OSTs from one seed" failure)."""
+    import server
+    from collections import Counter
+
+    _no_lastfm(monkeypatch)
+    # One seed with a big pile of similars, each a distinct artist so the
+    # per-artist cap doesn't mask the per-reason behavior.
+    big = [StubAlbum(str(i), f"Album {i}", f"Artist {i}") for i in range(20)]
+    seed_a = StubAlbum("100", "Seed A", "SA", similar=big)
+    seed_b = StubAlbum("101", "Seed B", "SB", similar=[StubAlbum("999", "Other", "ZZ")])
+    _set_library(monkeypatch, fav_albums=[seed_a, seed_b])
+
+    out = server._album_recommendations()
+    counts = Counter(a["reason"] for a in out)
+    assert max(counts.values()) <= server._RECS_PER_REASON_CAP
+    assert "Because you saved Seed B" in counts  # smaller seed survives
+
+
 def test_for_you_failure_is_non_fatal(stub_auth, monkeypatch):
     """A broken For You fetch must not sink the whole endpoint — the
     similar-graph candidates should still come through."""
