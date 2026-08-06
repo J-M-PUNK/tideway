@@ -555,6 +555,37 @@ class LastFmClient:
             })
         return out
 
+    def get_artist_top_tags(self, artist: str, limit: int = 5) -> list[dict]:
+        """Last.fm's `artist.getTopTags` — the community's most-applied
+        tags for an artist, which in practice are genres ("rock",
+        "electronic", "hip hop", …) plus noise. Each has a 0..100 `count`.
+        Aggregated across a user's top artists, this is how we infer their
+        genres for the taste profile (#307) without any manual tagging."""
+        artist = (artist or "").strip()
+        if not artist:
+            return []
+        data = self._public_get_no_user({
+            "method": "artist.getTopTags",
+            "artist": artist,
+            "autocorrect": "1",
+        })
+        if not data:
+            return []
+        raw = (data.get("toptags") or {}).get("tag") or []
+        if isinstance(raw, dict):
+            raw = [raw]
+        out: list[dict] = []
+        for t in raw:
+            if not isinstance(t, dict):
+                continue
+            name = (t.get("name") or "").strip()
+            if not name:
+                continue
+            out.append({"name": name, "count": _safe_int(t.get("count"))})
+            if len(out) >= max(1, int(limit)):
+                break
+        return out
+
     def get_loved_tracks(self, limit: int = 50) -> list[dict]:
         """Tracks the user has "loved" (heart-clicked) on Last.fm."""
         data = self._public_get({

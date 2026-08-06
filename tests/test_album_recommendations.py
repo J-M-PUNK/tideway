@@ -95,6 +95,19 @@ def _no_lastfm(monkeypatch):
     monkeypatch.setattr(server.lastfm, "status", lambda: {"connected": False})
 
 
+def _no_aoty(monkeypatch):
+    """Neutralize the AOTY-backed sections so endpoint/assembly tests don't
+    hit the network."""
+    import server
+
+    monkeypatch.setattr(server.aoty_module, "recent_releases", lambda limit=30: [])
+    monkeypatch.setattr(server.aoty_module, "top_albums_of_year", lambda year, limit=50: [])
+    monkeypatch.setattr(
+        server.aoty_module, "top_albums_of_year_by_genre", lambda slug, year, limit=60: []
+    )
+    monkeypatch.setattr(server.aoty_module, "genre_index", lambda: [])
+
+
 # ---------------------------------------------------------------------------
 # Endpoint gating
 # ---------------------------------------------------------------------------
@@ -107,24 +120,27 @@ def test_disabled_setting_returns_empty(stub_auth, monkeypatch):
         server.settings, "album_recommendations_enabled", False, raising=False
     )
     out = server.recommendations_albums()
-    assert out == {"enabled": False, "albums": []}
+    assert out == {"enabled": False, "sections": []}
 
 
-def test_enabled_wraps_albums(stub_auth, monkeypatch):
+def test_enabled_returns_made_for_you_section(stub_auth, monkeypatch):
     import server
 
     monkeypatch.setattr(
         server.settings, "album_recommendations_enabled", True, raising=False
     )
     _no_lastfm(monkeypatch)
+    _no_aoty(monkeypatch)
     seed = StubAlbum("1", "Seed", "Artist A", similar=[
         StubAlbum("2", "Rec One", "Artist B"),
     ])
     _set_library(monkeypatch, fav_albums=[seed])
     out = server.recommendations_albums()
     assert out["enabled"] is True
-    assert [a["id"] for a in out["albums"]] == ["2"]
-    assert out["albums"][0]["reason"] == "Because you saved Seed"
+    made = [s for s in out["sections"] if s["key"] == "made_for_you"]
+    assert made, "Made For You section should be present"
+    assert [a["id"] for a in made[0]["albums"]] == ["2"]
+    assert made[0]["albums"][0]["reason"] == "Because you saved Seed"
 
 
 # ---------------------------------------------------------------------------
@@ -314,3 +330,124 @@ def test_for_you_failure_is_non_fatal(stub_auth, monkeypatch):
     seed = StubAlbum("1", "Seed", "A", similar=[StubAlbum("9", "Still Here", "B")])
     _set_library(monkeypatch, fav_albums=[seed])
     assert [a["id"] for a in server._album_recommendations()] == ["9"]
+
+
+# ---------------------------------------------------------------------------
+# Sectioned page: taste profile, AOTY ranking, assembly
+# ---------------------------------------------------------------------------
+
+
+def test_dedupe_cap_albums_collapses_and_caps():
+    import server
+
+    albums = [
+        {"name": "X", "artists": [{"name": "A"}]},
+        {"name": "x", "artists": [{"name": "A"}]},  # reissue of X -> dropped
+        {"name": "Y", "artists": [{"name": "A"}]},
+        {"name": "Z", "artists": [{"name": "A"}]},  # 3rd by A -> capped at 2
+        {"name": "W", "artists": [{"name": "B"}]},
+    ]
+    assert [a["name"] for a in server._dedupe_cap_albums(albums, 10)] == ["X", "Y", "W"]
+
+
+def test_taste_profile_empty_when_disconnected(stub_auth, monkeypatch):
+    import server
+
+    _no_lastfm(monkeypatch)
+    assert server._taste_profile() == {
+        "connected": False,
+        "artist_names": set(),
+        "genres": [],
+    }
+
+
+def test_taste_profile_infers_genres_from_tags(stub_auth, monkeypatch):
+    import server
+
+    monkeypatch.setattr(server.lastfm, "status", lambda: {"connected": True})
+    monkeypatch.setattr(
+        server.lastfm, "get_top_artists",
+        lambda period, limit: [{"name": "Boards of Canada", "playcount": 500}],
+    )
+    monkeypatch.setattr(
+        server.lastfm, "get_artist_top_tags",
+        lambda name, limit=4: [
+            {"name": "Electronic", "count": 100},
+            {"name": "IDM", "count": 80},  # no AOTY genre -> dropped
+        ],
+    )
+    monkeypatch.setattr(
+        server.aoty_module, "genre_index",
+        lambda: [{"slug": "7-electronic", "name": "Electronic"},
+                 {"slug": "9-rock", "name": "Rock"}],
+    )
+    prof = server._taste_profile()
+    assert prof["connected"] is True
+    assert "boards of canada" in prof["artist_names"]
+    slugs = [g[0] for g in prof["genres"]]
+    assert slugs == ["7-electronic"]
+
+
+def _resolver_passthrough(monkeypatch):
+    import server
+
+    def _resolve(items):
+        return [
+            {**it, "tidal_album": {
+                "id": it["id"], "name": it["title"],
+                "artists": [{"name": it["artist"]}], "available": True}}
+            for it in items
+        ]
+
+    monkeypatch.setattr(server.aoty_resolver, "resolve_listing", _resolve)
+
+
+def test_aoty_section_ranks_by_score_and_genre(stub_auth, monkeypatch):
+    import server
+
+    _resolver_passthrough(monkeypatch)
+    profile = {"connected": True, "artist_names": set(),
+               "genres": [("7-electronic", "Electronic", 1.0)]}
+    listing = [
+        {"id": "a", "title": "High No Genre", "artist": "A", "score": 90, "genre_slugs": ["9-rock"]},
+        {"id": "b", "title": "Lower In Genre", "artist": "B", "score": 70, "genre_slugs": ["7-electronic"]},
+    ]
+    sec = server._aoty_section("k", "T", "s", listing, profile, taste_rank=True)
+    # b: 70*0.7 + 25 = 74 ; a: 90*0.7 = 63  -> b first
+    assert [x["id"] for x in sec["albums"]] == ["b", "a"]
+
+
+def test_aoty_section_without_taste_rank_keeps_order(stub_auth, monkeypatch):
+    import server
+
+    _resolver_passthrough(monkeypatch)
+    listing = [
+        {"id": "a", "title": "First", "artist": "A", "score": 10, "genre_slugs": []},
+        {"id": "b", "title": "Second", "artist": "B", "score": 99, "genre_slugs": []},
+    ]
+    sec = server._aoty_section("k", "T", "s", listing, {"genres": []}, taste_rank=False)
+    assert [x["id"] for x in sec["albums"]] == ["a", "b"]
+
+
+def test_section_assembly_orders_and_drops_empty(stub_auth, monkeypatch):
+    import server
+
+    _no_lastfm(monkeypatch)  # no genres, no behavioral seeds
+    _resolver_passthrough(monkeypatch)
+    monkeypatch.setattr(
+        server.aoty_module, "recent_releases",
+        lambda limit=30: [{"id": "n1", "title": "New", "artist": "NA", "score": 80, "genre_slugs": []}],
+    )
+    monkeypatch.setattr(
+        server.aoty_module, "top_albums_of_year",
+        lambda year, limit=50: [{"id": "p1", "title": "Pop", "artist": "PA", "score": 95, "genre_slugs": []}],
+    )
+    monkeypatch.setattr(server.aoty_module, "genre_index", lambda: [])
+    seed = StubAlbum("1", "Seed", "SA", similar=[StubAlbum("m1", "Made Pick", "MB")])
+    _set_library(monkeypatch, fav_albums=[seed])
+
+    sections = server._build_recommendation_sections()
+    # Genre rows absent (no inferred genres); order is made -> new -> popular.
+    assert [s["key"] for s in sections] == ["made_for_you", "new_releases", "popular"]
+    made = next(s for s in sections if s["key"] == "made_for_you")
+    assert [a["id"] for a in made["albums"]] == ["m1"]

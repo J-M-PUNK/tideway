@@ -11878,8 +11878,14 @@ def _is_tidal_album(item) -> bool:
     return isinstance(item, tidalapi.Album)
 
 
-def _album_recommendations() -> list[dict]:
+def _album_recommendations(include_for_you: bool = True) -> list[dict]:
     """Behavior-seeded hybrid album recommendations (#307).
+
+    `include_for_you` folds Tidal's For You album modules into the blend.
+    The sectioned page sets it False for its "Made For You" row so those
+    modules don't duplicate the dedicated "Because You Listened To X"
+    sections.
+
 
     Composes three candidate sources, best-first:
       A. Tidal's own "For You" page (`session.for_you()`) — its native
@@ -11987,7 +11993,7 @@ def _album_recommendations() -> list[dict]:
             arts[0], f"Because you listen to {name}", 110.0
         )
 
-    tasks: list = [_from_for_you]
+    tasks: list = [_from_for_you] if include_for_you else []
     for t in top_artists[:8]:
         nm = (t.get("name") or "").strip()
         if nm:
@@ -12078,24 +12084,243 @@ def _album_recommendations() -> list[dict]:
     return out
 
 
+# How many albums each section shows.
+_SECTION_SIZE = 18
+# How many AOTY rows to resolve to Tidal per section. Resolving hits a
+# Tidal search per album, so we rank the (cheap) AOTY listing first and
+# only resolve the top slice — not the whole 60-row scrape.
+_SECTION_RESOLVE_POOL = 24
+
+
+def _rec_safe(fn, default):
+    try:
+        return fn()
+    except Exception:
+        return default
+
+
+def _album_dict_artist_key(d) -> str:
+    arts = d.get("artists") or []
+    return (arts[0].get("name", "") if arts else "").strip().lower()
+
+
+def _dedupe_cap_albums(albums: list, limit: int) -> list[dict]:
+    """Collapse reissues (title, artist), cap per artist, and truncate —
+    the shared tail every section runs its candidates through."""
+    out: list[dict] = []
+    seen: set = set()
+    per_artist: dict[str, int] = {}
+    for d in albums:
+        if not d:
+            continue
+        key = _album_dict_artist_key(d)
+        sig = ((d.get("name") or "").strip().lower(), key)
+        if sig in seen:
+            continue
+        if key and per_artist.get(key, 0) >= _RECS_PER_ARTIST_CAP:
+            continue
+        out.append(d)
+        seen.add(sig)
+        if key:
+            per_artist[key] = per_artist.get(key, 0) + 1
+        if len(out) >= limit:
+            break
+    return out
+
+
+def _taste_profile() -> dict:
+    """Infer taste from Last.fm: play-weighted top artists, and their most
+    common community tags aggregated into top genres mapped to AOTY slugs.
+    A disconnected or empty profile is fine — sections that depend on it
+    just don't render. This is the "listening history" half of the
+    popularity-x-history ranking (#307)."""
+    connected = bool(_rec_safe(lambda: lastfm.status().get("connected"), False))
+    if not connected:
+        return {"connected": False, "artist_names": set(), "genres": []}
+    top = _rec_safe(lambda: lastfm.get_top_artists("6month", limit=15), [])
+    artist_names = {
+        (t.get("name") or "").strip().lower() for t in top if t.get("name")
+    }
+
+    # Aggregate genre tags across top artists, weighting each tag by the
+    # artist's playcount and the tag's 0..100 strength.
+    def _tags_for(t):
+        nm = (t.get("name") or "").strip()
+        if not nm:
+            return []
+        pc = float(t.get("playcount") or 0) or 1.0
+        tags = _rec_safe(lambda: lastfm.get_artist_top_tags(nm, limit=4), [])
+        return [
+            ((tag.get("name") or "").strip().lower(),
+             pc * (float(tag.get("count") or 0) / 100.0))
+            for tag in tags
+        ]
+
+    weights: dict[str, float] = {}
+    if top:
+        with ThreadPoolExecutor(max_workers=6, thread_name_prefix="taste") as pool:
+            for pairs in pool.map(_tags_for, top[:12]):
+                for name, w in pairs:
+                    if name:
+                        weights[name] = weights.get(name, 0.0) + w
+
+    # Map inferred genre names to AOTY's genre slugs (exact, normalized).
+    aoty_genres = _rec_safe(lambda: aoty_module.genre_index(), []) or []
+    name_to_slug = {}
+    for g in aoty_genres:
+        gname = (g.get("name") or "").strip().lower()
+        if gname:
+            name_to_slug[gname] = (g.get("slug"), g.get("name"))
+
+    genres: list = []
+    seen_slugs: set = set()
+    for gname, _w in sorted(weights.items(), key=lambda kv: kv[1], reverse=True):
+        hit = name_to_slug.get(gname)
+        if hit and hit[0] and hit[0] not in seen_slugs:
+            seen_slugs.add(hit[0])
+            genres.append((hit[0], hit[1], _w))
+        if len(genres) >= 4:
+            break
+    return {"connected": True, "artist_names": artist_names, "genres": genres}
+
+
+def _aoty_section(key, title, subtitle, listing, profile, taste_rank) -> dict:
+    """Build one AOTY-backed section. When `taste_rank`, re-order the
+    (cheap) AOTY listing by popularity (AOTY score) x genre affinity before
+    resolving only the top slice to Tidal."""
+    items = list(listing or [])
+    if taste_rank:
+        top_slugs = {s for s, _, _ in profile.get("genres", [])}
+
+        def _score(it):
+            pop = float(it.get("score") or 0)  # AOTY 0..100
+            aff = 25.0 if (set(it.get("genre_slugs") or []) & top_slugs) else 0.0
+            return pop * 0.7 + aff
+
+        items.sort(key=_score, reverse=True)
+    items = items[:_SECTION_RESOLVE_POOL]
+    resolved = _rec_safe(lambda: aoty_resolver.resolve_listing(items), []) or []
+    albums = [
+        it["tidal_album"]
+        for it in resolved
+        if it.get("tidal_album") and it["tidal_album"].get("available")
+    ]
+    return {
+        "key": key,
+        "title": title,
+        "subtitle": subtitle,
+        "albums": _dedupe_cap_albums(albums, _SECTION_SIZE),
+    }
+
+
+def _for_you_album_sections() -> list[dict]:
+    """Tidal's own For You *album* modules, each as its own section, using
+    Tidal's built-in "Because you listened to X" module labels."""
+    page = _rec_safe(lambda: tidal.session.for_you(), None)
+    if page is None:
+        return []
+    sections: list[dict] = []
+    for cat in _rec_safe(lambda: list(getattr(page, "categories", []) or []), []):
+        title = (getattr(cat, "title", None) or "").strip()
+        sub = (
+            getattr(cat, "subtitle", None) or getattr(cat, "description", None) or ""
+        ).strip()
+        if sub and sub == title:
+            sub = ""
+        label = f"{title} {sub}".strip()
+        if not label:
+            continue
+        items = _rec_safe(lambda c=cat: list(getattr(c, "items", []) or []), [])
+        albums = []
+        for item in items:
+            if _is_tidal_album(item):
+                d = _rec_safe(lambda a=item: album_to_dict(a), None)
+                if d and d.get("available"):
+                    albums.append(d)
+        albums = _dedupe_cap_albums(albums, _SECTION_SIZE)
+        if len(albums) >= 4:  # skip thin rows
+            sections.append(
+                {"key": f"for_you:{label}", "title": label, "subtitle": "", "albums": albums}
+            )
+    return sections
+
+
+def _build_recommendation_sections() -> list[dict]:
+    """Assemble the sectioned "For You" page. Section builders run in
+    parallel (each fans out its own Tidal/AOTY calls); empty sections are
+    dropped so the page never shows a bare heading."""
+    profile = _taste_profile()
+    year = datetime.now().year
+
+    builders: list[tuple[str, Any]] = [
+        ("made", lambda: {
+            "key": "made_for_you",
+            "title": "Made For You",
+            "subtitle": "Blended from your favorites and listening",
+            "albums": _dedupe_cap_albums(
+                _album_recommendations(include_for_you=False), _SECTION_SIZE
+            ),
+        }),
+        ("new", lambda: _aoty_section(
+            "new_releases", "New Releases For You",
+            "Fresh this week, ranked for your taste",
+            _rec_safe(lambda: aoty_module.recent_releases(60), []), profile, True,
+        )),
+    ]
+    genre_seeds = profile.get("genres", [])[:2]
+    for slug, name, _w in genre_seeds:
+        builders.append((
+            f"genre:{slug}",
+            lambda s=slug, n=name: _aoty_section(
+                f"genre:{s}", f"Best of {n}", f"Top-rated {n} of {year}",
+                _rec_safe(lambda: aoty_module.top_albums_of_year_by_genre(s, year, 60), []),
+                profile, False,
+            ),
+        ))
+    builders.append(("popular", lambda: _aoty_section(
+        "popular", "Popular in Your Orbit",
+        "Highly rated this year, tuned to your genres",
+        _rec_safe(lambda: aoty_module.top_albums_of_year(year, 60), []), profile, True,
+    )))
+
+    results: dict[str, dict] = {}
+    with ThreadPoolExecutor(max_workers=6, thread_name_prefix="recsec") as pool:
+        futs = {pool.submit(fn): key for key, fn in builders}
+        for fut in futs:
+            r = _rec_safe(lambda f=fut: f.result(), None)
+            if r:
+                results[futs[fut]] = r
+
+    because = _rec_safe(lambda: _for_you_album_sections(), [])[:2]
+
+    ordered = [results.get("made"), results.get("new")]
+    for slug, _n, _w in genre_seeds:
+        ordered.append(results.get(f"genre:{slug}"))
+    ordered.append(results.get("popular"))
+    ordered.extend(because)
+    return [s for s in ordered if s and s.get("albums")]
+
+
 @app.get("/api/recommendations/albums")
 def recommendations_albums() -> dict:
-    """Taste-based album recommendations for the "For You" page (#307).
+    """Sectioned taste-based album recommendations for the "For You" page
+    (#307): "Made For You", "New Releases For You", per-genre rows, "Popular
+    in Your Orbit", and Tidal's "Because you listened to X" modules.
 
-    Returns ``{"enabled": bool, "albums": [...]}``. When the setting is
-    off, ``enabled`` is False and the list is empty. Cached for 15 min
-    because the build fans out many Tidal/Last.fm calls."""
+    Returns ``{"enabled": bool, "sections": [{key, title, subtitle,
+    albums:[...]}]}``. Off => enabled False, no sections. Cached for 15 min
+    because the build fans out many Tidal / Last.fm / AOTY calls."""
     _require_auth()
     if not getattr(settings, "album_recommendations_enabled", True):
-        return {"enabled": False, "albums": []}
+        return {"enabled": False, "sections": []}
     now = time.monotonic()
     with _recs_cache_lock:
-        c = _recs_cache.get("albums")
+        c = _recs_cache.get("sections")
         if c and (now - c[0]) < _RECS_CACHE_TTL_SEC:
             return c[1]
-    payload = {"enabled": True, "albums": _album_recommendations()}
+    payload = {"enabled": True, "sections": _build_recommendation_sections()}
     with _recs_cache_lock:
-        _recs_cache["albums"] = (time.monotonic(), payload)
+        _recs_cache["sections"] = (time.monotonic(), payload)
     return payload
 
 

@@ -968,7 +968,12 @@ export const api = {
   recommendations: () =>
     req<{
       enabled: boolean;
-      albums: (Album & { reason: string })[];
+      sections: {
+        key: string;
+        title: string;
+        subtitle: string;
+        albums: (Album & { reason?: string })[];
+      }[];
     }>("/api/recommendations/albums"),
   player: {
     available: () => req<{ available: boolean }>("/api/player/available"),
