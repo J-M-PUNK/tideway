@@ -46,6 +46,7 @@ from app import album_collections
 from app import aoty as aoty_module
 from app import aoty_resolver
 from app import deezer_import
+from app import musicbrainz as musicbrainz_module
 from app import global_keys as global_keys_mod
 from app.audio.eq import (
     default_parametric_bands,
@@ -12382,6 +12383,62 @@ def _for_you_album_sections() -> list[dict]:
     return sections
 
 
+def _section_more_from_these_people() -> dict:
+    """MusicBrainz relationship discovery (#307): band members, aliases,
+    and collaborators of your top artists resolved to their Tidal albums.
+    Opportunistic — MB coverage is patchy for very new artists, so this
+    returns empty (and the row drops) whenever there's too little to show,
+    rather than half a shelf."""
+    top = _rec_safe(lambda: lastfm.get_top_artists("6month", limit=8), [])
+
+    # Gather related (name, reason) pairs from MB, seeded by top artists.
+    # MB calls are serialized ~1/sec by the client, so keep the seed set
+    # small; a missing MBID falls back to a name search.
+    related: list[dict] = []
+    seen: set = set()
+    for t in top[:5]:
+        nm = (t.get("name") or "").strip()
+        if not nm:
+            continue
+        mbid = t.get("mbid") or _rec_safe(lambda: musicbrainz_module.resolve_mbid(nm), None)
+        if not mbid:
+            continue
+        for r in _rec_safe(lambda: musicbrainz_module.related_artists(mbid, nm), []):
+            key = (r.get("name") or "").strip().lower()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            related.append(r)
+
+    def _albums_for(r):
+        res = _rec_safe(lambda: tidal.search(r["name"], limit=3), {}) or {}
+        arts = res.get("artists") or []
+        if not arts:
+            return []
+        albs = _rec_safe(lambda a=arts[0]: list(a.get_albums(limit=2) or []), [])
+        out = []
+        for alb in albs:
+            d = _rec_safe(lambda a=alb: album_to_dict(a), None)
+            if d and d.get("available"):
+                d["reason"] = r["reason"]
+                out.append(d)
+        return out
+
+    albums: list = []
+    if related:
+        with ThreadPoolExecutor(max_workers=6, thread_name_prefix="mbrels") as pool:
+            for a in pool.map(_albums_for, related[:12]):
+                albums.extend(a)
+    albums = _dedupe_cap_albums(albums, _SECTION_SIZE)
+    return {
+        "key": "more_from_people",
+        "title": "More From These People",
+        "subtitle": "Bandmates, aliases, and collaborators of your favorites",
+        # Drop the row unless it earns its place — opportunistic by design.
+        "albums": albums if len(albums) >= 3 else [],
+    }
+
+
 def _build_recommendation_sections() -> list[dict]:
     """Assemble the sectioned "For You" page. Section builders run in
     parallel (each fans out its own Tidal/AOTY calls); empty sections are
@@ -12431,6 +12488,10 @@ def _build_recommendation_sections() -> list[dict]:
                 profile, taste_rank=False, deep=True,
             ),
         ))
+    # MusicBrainz relationship discovery — only when Last.fm is connected
+    # (that's where the seed artists + MBIDs come from).
+    if profile.get("connected"):
+        builders.append(("mbrels", _section_more_from_these_people))
 
     results: dict[str, dict] = {}
     with ThreadPoolExecutor(max_workers=6, thread_name_prefix="recsec") as pool:
@@ -12447,6 +12508,7 @@ def _build_recommendation_sections() -> list[dict]:
         ordered.append(results.get(f"genre:{slug}"))
     ordered.append(results.get("popular"))
     ordered.append(results.get("deep"))
+    ordered.append(results.get("mbrels"))
     ordered.extend(because)
 
     # Drop anything the user said "not interested" in, across every

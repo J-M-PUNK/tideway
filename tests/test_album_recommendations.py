@@ -594,3 +594,69 @@ def test_dismiss_persists_and_reloads(stub_auth, monkeypatch, tmp_path):
     fb = server._load_rec_feedback()
     assert "100" in fb["albums"]
     assert "cool band" in fb["artists"]
+
+
+# ---------------------------------------------------------------------------
+# MusicBrainz relationship discovery ("More From These People")
+# ---------------------------------------------------------------------------
+
+
+def test_more_from_people_builds_from_mb_relations(stub_auth, monkeypatch):
+    import server
+
+    monkeypatch.setattr(
+        server.lastfm, "get_top_artists",
+        lambda period, limit: [{"name": "venturing", "mbid": "mbid-venturing"}],
+    )
+    monkeypatch.setattr(
+        server.musicbrainz_module, "related_artists",
+        lambda mbid, seed: [{"name": "Jane Remover", "reason": "The artist behind venturing"}],
+    )
+    resolved = StubArtist("Jane Remover", albums=[StubAlbum("77", "Frailty", "Jane Remover")])
+    monkeypatch.setattr(server.tidal, "search", lambda q, limit=25: {"artists": [resolved]})
+
+    sec = server._section_more_from_these_people()
+    # Fewer than 3 albums here, so the opportunistic row drops out...
+    assert sec["albums"] == []
+
+
+def test_more_from_people_shows_when_rich(stub_auth, monkeypatch):
+    import server
+
+    monkeypatch.setattr(
+        server.lastfm, "get_top_artists",
+        lambda period, limit: [{"name": "Boards of Canada", "mbid": "mbid-boc"}],
+    )
+    monkeypatch.setattr(
+        server.musicbrainz_module, "related_artists",
+        lambda mbid, seed: [
+            {"name": "Marcus Eoin", "reason": "Bandmate of Boards of Canada"},
+            {"name": "Michael Sandison", "reason": "Bandmate of Boards of Canada"},
+        ],
+    )
+
+    def _search(q, limit=25):
+        return {"artists": [StubArtist(q, albums=[
+            StubAlbum(f"{q}-1", f"{q} LP", q),
+            StubAlbum(f"{q}-2", f"{q} EP", q),
+        ])]}
+
+    monkeypatch.setattr(server.tidal, "search", _search)
+    sec = server._section_more_from_these_people()
+    assert sec["title"] == "More From These People"
+    assert len(sec["albums"]) >= 3
+    assert sec["albums"][0]["reason"].startswith("Bandmate of")
+
+
+def test_more_from_people_empty_when_mb_has_nothing(stub_auth, monkeypatch):
+    import server
+
+    monkeypatch.setattr(
+        server.lastfm, "get_top_artists",
+        lambda period, limit: [{"name": "Brand New Artist", "mbid": "mbid-x"}],
+    )
+    monkeypatch.setattr(
+        server.musicbrainz_module, "related_artists", lambda mbid, seed: []
+    )
+    sec = server._section_more_from_these_people()
+    assert sec["albums"] == []
