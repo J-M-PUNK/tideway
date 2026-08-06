@@ -386,11 +386,59 @@ def test_taste_profile_infers_genres_from_tags(stub_auth, monkeypatch):
         lambda: {"electronic": ("7-electronic", "Electronic"),
                  "rock": ("9-rock", "Rock")},
     )
+    monkeypatch.setattr(server.lastfm, "get_chart_top_artists", lambda limit=500: [])
     prof = server._taste_profile()
     assert prof["connected"] is True
     assert "boards of canada" in prof["artist_names"]
     slugs = [g[0] for g in prof["genres"]]
     assert slugs == ["7-electronic"]  # IDM has no AOTY genre -> dropped
+
+
+def test_mainstream_ratio_from_chart_overlap(stub_auth, monkeypatch):
+    import server
+
+    monkeypatch.setattr(server.lastfm, "status", lambda: {"connected": True})
+    monkeypatch.setattr(
+        server.lastfm, "get_top_artists",
+        lambda period, limit: [{"name": "Taylor Swift"}, {"name": "Some Nobody"}],
+    )
+    monkeypatch.setattr(server.lastfm, "get_artist_top_tags", lambda name, limit=4: [])
+    monkeypatch.setattr(server, "_aoty_genre_slug_map", lambda: {})
+    monkeypatch.setattr(
+        server.lastfm, "get_chart_top_artists",
+        lambda limit=500: [{"name": "Taylor Swift"}],  # 1 of 2 is mainstream
+    )
+    prof = server._taste_profile()
+    assert prof["mainstream_ratio"] == 0.5
+
+
+def test_obscure_listener_weights_genre_over_popularity(stub_auth, monkeypatch):
+    import server
+
+    _resolver_passthrough(monkeypatch)
+    listing = [
+        {"id": "hit", "title": "Chart Hit", "artist": "A", "score": 95, "genre_slugs": ["9-pop"]},
+        {"id": "niche", "title": "Genre Fit", "artist": "B", "score": 60, "genre_slugs": ["26-shoegaze"]},
+    ]
+    niche = {"genres": [("26-shoegaze", "Shoegaze", 1.0)], "mainstream_ratio": 0.0}
+    mainstream = {"genres": [("26-shoegaze", "Shoegaze", 1.0)], "mainstream_ratio": 1.0}
+    niche_ids = [a["id"] for a in server._aoty_section("k", "T", "s", listing, niche, True)["albums"]]
+    main_ids = [a["id"] for a in server._aoty_section("k", "T", "s", listing, mainstream, True)["albums"]]
+    assert niche_ids[0] == "niche"  # obscure taste -> genre fit wins
+    assert main_ids[0] == "hit"     # mainstream taste -> popularity wins
+
+
+def test_deep_mode_favors_lesser_known(stub_auth, monkeypatch):
+    import server
+
+    _resolver_passthrough(monkeypatch)
+    profile = {"genres": [("26-shoegaze", "Shoegaze", 1.0)], "mainstream_ratio": 0.0}
+    listing = [
+        {"id": "canon", "title": "Canon", "artist": "A", "score": 98, "genre_slugs": ["26-shoegaze"]},
+        {"id": "gem", "title": "Hidden Gem", "artist": "B", "score": 72, "genre_slugs": ["26-shoegaze"]},
+    ]
+    ids = [a["id"] for a in server._aoty_section("k", "T", "s", listing, profile, False, deep=True)["albums"]]
+    assert ids[0] == "gem"  # both in-genre; deep mode prefers the lower-popularity one
 
 
 def test_genre_slug_map_harvests_subgenres(monkeypatch):

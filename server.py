@@ -12285,21 +12285,54 @@ def _taste_profile() -> dict:
             genres.append((hit[0], hit[1], _w))
         if len(genres) >= 4:
             break
-    return {"connected": True, "artist_names": artist_names, "genres": genres}
+
+    # Obscurity: how much of your top rotation overlaps Last.fm's global
+    # charts. A niche listener (little overlap) should have raw popularity
+    # count for less and genre fit for more, or "Popular in Your Orbit"
+    # just becomes the global chart. 0 = fully niche, 1 = fully mainstream.
+    chart = _rec_safe(lambda: lastfm.get_chart_top_artists(limit=500), [])
+    chart_names = {
+        (a.get("name") or "").strip().lower() for a in chart if a.get("name")
+    }
+    mainstream_ratio = (
+        len(artist_names & chart_names) / len(artist_names) if artist_names else 0.5
+    )
+    return {
+        "connected": True,
+        "artist_names": artist_names,
+        "genres": genres,
+        "mainstream_ratio": mainstream_ratio,
+    }
 
 
-def _aoty_section(key, title, subtitle, listing, profile, taste_rank) -> dict:
+def _aoty_section(key, title, subtitle, listing, profile, taste_rank, deep=False) -> dict:
     """Build one AOTY-backed section. When `taste_rank`, re-order the
-    (cheap) AOTY listing by popularity (AOTY score) x genre affinity before
-    resolving only the top slice to Tidal."""
-    items = list(listing or [])
-    if taste_rank:
-        top_slugs = {s for s, _, _ in profile.get("genres", [])}
+    (cheap) AOTY listing by a blend of popularity (AOTY score) and genre
+    affinity before resolving only the top slice to Tidal.
 
-        def _score(it):
-            pop = float(it.get("score") or 0)  # AOTY 0..100
-            aff = 25.0 if (set(it.get("genre_slugs") or []) & top_slugs) else 0.0
-            return pop * 0.7 + aff
+    The blend is obscurity-aware: for a niche listener popularity counts
+    for less and genre fit for more, so their rows don't collapse into the
+    global chart. `deep` inverts it — genre fit with a popularity *penalty*
+    — to surface the hidden-gem end of a genre ("Deep Cuts")."""
+    items = list(listing or [])
+    if taste_rank or deep:
+        top_slugs = {s for s, _, _ in profile.get("genres", [])}
+        mainstream = profile.get("mainstream_ratio", 0.5)
+        if deep:
+            # Favor genre fit, penalize chart popularity -> lesser-known.
+            def _score(it):
+                pop = float(it.get("score") or 0)
+                aff = 40.0 if (set(it.get("genre_slugs") or []) & top_slugs) else 0.0
+                return aff - pop * 0.3
+        else:
+            # pop weight 0.3 (niche) .. 0.8 (mainstream); affinity the inverse.
+            pop_w = 0.3 + 0.5 * mainstream
+            aff_w = 40.0 - 20.0 * mainstream
+
+            def _score(it):
+                pop = float(it.get("score") or 0)  # AOTY 0..100
+                aff = aff_w if (set(it.get("genre_slugs") or []) & top_slugs) else 0.0
+                return pop * pop_w + aff
 
         items.sort(key=_score, reverse=True)
     items = items[:_SECTION_RESOLVE_POOL]
@@ -12386,6 +12419,18 @@ def _build_recommendation_sections() -> list[dict]:
         "Highly rated this year, tuned to your genres",
         _rec_safe(lambda: aoty_module.top_albums_of_year(year, 60), []), profile, True,
     )))
+    # Deep Cuts: the hidden-gem end of your top genre — genre fit with a
+    # popularity penalty so it surfaces what the canon rows won't.
+    if genre_seeds:
+        d_slug, d_name, _dw = genre_seeds[0]
+        builders.append((
+            "deep",
+            lambda s=d_slug, n=d_name: _aoty_section(
+                "deep_cuts", f"Deep Cuts: {n}", f"Lesser-known {n}, off the canon",
+                _rec_safe(lambda: aoty_module.top_albums_of_year_by_genre(s, year, 60), []),
+                profile, taste_rank=False, deep=True,
+            ),
+        ))
 
     results: dict[str, dict] = {}
     with ThreadPoolExecutor(max_workers=6, thread_name_prefix="recsec") as pool:
@@ -12401,6 +12446,7 @@ def _build_recommendation_sections() -> list[dict]:
     for slug, _n, _w in genre_seeds:
         ordered.append(results.get(f"genre:{slug}"))
     ordered.append(results.get("popular"))
+    ordered.append(results.get("deep"))
     ordered.extend(because)
 
     # Drop anything the user said "not interested" in, across every
