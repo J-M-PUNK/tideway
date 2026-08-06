@@ -11846,15 +11846,14 @@ _recs_cache_lock = threading.Lock()
 # return once the per-artist cap and final limit apply.
 _RECS_SEED_ALBUMS = 8
 _RECS_SEED_ARTISTS = 8
-_RECS_LASTFM_SEEDS = 6
 _RECS_PER_ARTIST_CAP = 2
 _RECS_MAX = 40
 
 
 def _album_primary_artist_key(album) -> str:
-    """Lower-cased primary-artist name, used only to cap how many albums
-    from one artist can appear. Empty string when it can't be read (then
-    that album just isn't diversity-capped)."""
+    """Lower-cased primary-artist name, used both for the per-artist cap
+    and to tell "already play heavily" artists apart from new ones for the
+    novelty boost. Empty string when it can't be read."""
     try:
         artists = getattr(album, "artists", None) or []
         if artists:
@@ -11865,38 +11864,92 @@ def _album_primary_artist_key(album) -> str:
         return ""
 
 
+def _is_tidal_album(item) -> bool:
+    """Whether a page item is an Album (vs a mix/playlist/track/link).
+    Factored out so tests can inject stub albums without constructing real
+    tidalapi objects, which need a live session."""
+    import tidalapi
+
+    return isinstance(item, tidalapi.Album)
+
+
 def _album_recommendations() -> list[dict]:
+    """Behavior-seeded hybrid album recommendations (#307).
+
+    Composes three candidate sources, best-first:
+      A. Tidal's own "For You" page (`session.for_you()`) — its native
+         collaborative-filtering over the whole catalog plus your play
+         history. We harvest just the *album* modules (the page itself is
+         mix-heavy, which is the gap this feature fills) and reuse Tidal's
+         module label ("Because you listened to X") as the reason.
+      B. Behavioral seeds: your most-*played* artists (Last.fm top artists
+         over 6 months, ranked by real playcount — a stronger signal than
+         the sparse favorites list), expanded through Tidal's similar-
+         artist graph and Last.fm's `artist.getSimilar` neighborhood.
+      C. Favorite seeds (albums/artists you've saved) as a fallback, at a
+         lower base score, so it still works with Last.fm disconnected.
+
+    Candidates are deduped, filtered against what you already own, given a
+    small novelty boost when the artist isn't already in heavy rotation,
+    capped per-artist, and ranked. Bounded + parallelized behind the
+    endpoint's cache.
+    """
     def _safe(fn, default):
         try:
             return fn()
         except Exception:
             return default
 
+    lfm_connected = bool(_safe(lambda: lastfm.status().get("connected"), False))
+    top_artists = (
+        _safe(lambda: lastfm.get_top_artists("6month", limit=12), [])
+        if lfm_connected
+        else []
+    )
+    # Names of artists you already play a lot — used to bias the ranking
+    # toward discovery rather than "more of the same".
+    heavy_rotation = {
+        (t.get("name") or "").strip().lower() for t in top_artists if t.get("name")
+    }
+
     fav_artists = _safe(lambda: list(tidal.get_favorite_artists() or []), [])
     fav_albums = _safe(lambda: list(tidal.get_favorite_albums() or []), [])
     owned_ids = {str(getattr(a, "id", "") or "") for a in fav_albums}
-    lfm_connected = bool(_safe(lambda: lastfm.status().get("connected"), False))
 
-    # Each task returns a list of (album_obj, score, reason). Running them
-    # in a pool means one slow or failing seed can't stall the build.
-    def _from_similar_albums(seed):
-        sims = _safe(lambda: list(seed.similar())[:8], [])
-        name = getattr(seed, "name", "") or "this album"
-        return [
-            (alb, 120.0 - rank, f"Because you saved {name}")
-            for rank, alb in enumerate(sims)
-        ]
+    # -- Candidate generators. Each returns list[(album, score, reason)]. --
 
-    def _from_similar_artists(seed):
+    def _from_for_you():
         out = []
-        sim_artists = _safe(lambda: list(seed.get_similar())[:5], [])
-        name = getattr(seed, "name", "") or "this artist"
-        for a_rank, sart in enumerate(sim_artists):
+        page = _safe(lambda: tidal.session.for_you(), None)
+        if page is None:
+            return out
+        for cat in _safe(lambda: list(getattr(page, "categories", []) or []), []):
+            title = (getattr(cat, "title", None) or "").strip()
+            sub = (
+                getattr(cat, "subtitle", None)
+                or getattr(cat, "description", None)
+                or ""
+            ).strip()
+            if sub and sub == title:
+                sub = ""
+            reason = f"{title} {sub}".strip() or "Recommended for you"
+            items = _safe(lambda c=cat: list(getattr(c, "items", []) or []), [])
+            for rank, item in enumerate(items):
+                if _is_tidal_album(item):
+                    out.append((item, 150.0 - rank, reason))
+        return out
+
+    def _from_similar_albums(seed, reason, base):
+        sims = _safe(lambda: list(seed.similar())[:8], [])
+        return [(alb, base - rank, reason) for rank, alb in enumerate(sims)]
+
+    def _from_similar_artists(artist_obj, reason, base):
+        out = []
+        sim = _safe(lambda: list(artist_obj.get_similar())[:5], [])
+        for a_rank, sart in enumerate(sim):
             albs = _safe(lambda a=sart: list(a.get_albums(limit=3) or []), [])
             for rank, alb in enumerate(albs):
-                out.append(
-                    (alb, 100.0 - a_rank * 4 - rank, f"Because you follow {name}")
-                )
+                out.append((alb, base - a_rank * 4 - rank, reason))
         return out
 
     def _from_lastfm(seed_name):
@@ -11914,24 +11967,41 @@ def _album_recommendations() -> list[dict]:
             match = float(s.get("match") or 0.0)
             for rank, alb in enumerate(albs):
                 out.append(
-                    (alb, 70.0 + match * 20 - s_rank - rank,
+                    (alb, 80.0 + match * 15 - s_rank - rank,
                      f"Because you listen to {seed_name}")
                 )
         return out
 
-    tasks: list = []
-    for seed in fav_albums[:_RECS_SEED_ALBUMS]:
-        tasks.append(lambda s=seed: _from_similar_albums(s))
-    for seed in fav_artists[:_RECS_SEED_ARTISTS]:
-        tasks.append(lambda s=seed: _from_similar_artists(s))
-    if lfm_connected:
-        top = _safe(
-            lambda: lastfm.get_top_artists("6month", limit=_RECS_LASTFM_SEEDS), []
+    def _behavioral_artist_task(name):
+        # Resolve a played artist name to Tidal, then walk its similars.
+        res = _safe(lambda: tidal.search(name, limit=3), {}) or {}
+        arts = res.get("artists") or []
+        if not arts:
+            return []
+        return _from_similar_artists(
+            arts[0], f"Because you listen to {name}", 110.0
         )
-        for t in top[:_RECS_LASTFM_SEEDS]:
-            nm = t.get("name") or ""
-            if nm:
-                tasks.append(lambda n=nm: _from_lastfm(n))
+
+    tasks: list = [_from_for_you]
+    for t in top_artists[:8]:
+        nm = (t.get("name") or "").strip()
+        if nm:
+            tasks.append(lambda n=nm: _behavioral_artist_task(n))
+            tasks.append(lambda n=nm: _from_lastfm(n))
+    for seed in fav_albums[:_RECS_SEED_ALBUMS]:
+        nm = getattr(seed, "name", "") or "an album you saved"
+        tasks.append(
+            lambda s=seed, r=f"Because you saved {nm}": _from_similar_albums(
+                s, r, 100.0
+            )
+        )
+    for seed in fav_artists[:_RECS_SEED_ARTISTS]:
+        nm = getattr(seed, "name", "") or "an artist you follow"
+        tasks.append(
+            lambda s=seed, r=f"Because you follow {nm}": _from_similar_artists(
+                s, r, 95.0
+            )
+        )
 
     # Fan out. tidalapi's session is safe for concurrent GETs — the app
     # already parallelizes detail pages the same way.
@@ -11941,15 +12011,19 @@ def _album_recommendations() -> list[dict]:
             for fut in [pool.submit(t) for t in tasks]:
                 results.extend(_safe(lambda f=fut: f.result(), []))
 
-    # Dedupe by album id, keeping the best score/reason; drop owned albums.
+    # Merge: dedupe by album id keeping the best score; drop owned albums;
+    # add a small novelty boost when the artist isn't already heavy
+    # rotation, so the list leans toward discovery over the familiar.
     best: dict[str, tuple[float, str, object]] = {}
     for alb, score, reason in results:
         aid = str(getattr(alb, "id", "") or "")
         if not aid or aid in owned_ids:
             continue
+        key = _album_primary_artist_key(alb)
+        adjusted = score + (8.0 if key and key not in heavy_rotation else 0.0)
         prev = best.get(aid)
-        if prev is None or score > prev[0]:
-            best[aid] = (score, reason, alb)
+        if prev is None or adjusted > prev[0]:
+            best[aid] = (adjusted, reason, alb)
 
     ranked = sorted(best.values(), key=lambda x: x[0], reverse=True)
     out: list[dict] = []

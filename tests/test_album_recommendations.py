@@ -38,6 +38,23 @@ def stub_auth(monkeypatch):
             "available": a.available,
         },
     )
+    # Default: Tidal's For You page contributes nothing unless a test opts
+    # in. Also teach the album predicate to recognize our stubs (real
+    # tidalapi.Album instances need a live session to construct).
+    monkeypatch.setattr(server.tidal.session, "for_you", lambda: StubPage([]))
+    monkeypatch.setattr(server, "_is_tidal_album", lambda i: isinstance(i, StubAlbum))
+
+
+class StubPage:
+    def __init__(self, categories):
+        self.categories = categories
+
+
+class StubCategory:
+    def __init__(self, title, items, subtitle=""):
+        self.title = title
+        self.subtitle = subtitle
+        self.items = items
 
 
 class StubAlbum:
@@ -205,3 +222,58 @@ def test_lastfm_blend_when_connected(stub_auth, monkeypatch):
     out = server._album_recommendations()
     assert [a["id"] for a in out] == ["55"]
     assert out[0]["reason"] == "Because you listen to TopA"
+
+
+def test_for_you_album_modules_harvested(stub_auth, monkeypatch):
+    import server
+
+    _no_lastfm(monkeypatch)
+    _set_library(monkeypatch)  # no favorites — only the For You source
+    # Tidal's For You page: an album module (harvested, labelled by the
+    # module title + subtitle) and a non-album item (ignored).
+    page = StubPage([
+        StubCategory(
+            "Because you listened to",
+            [StubAlbum("88", "Native Pick", "Artist Q"), object()],
+            subtitle="Radiohead",
+        ),
+    ])
+    monkeypatch.setattr(server.tidal.session, "for_you", lambda: page)
+    out = server._album_recommendations()
+    assert [a["id"] for a in out] == ["88"]
+    assert out[0]["reason"] == "Because you listened to Radiohead"
+
+
+def test_for_you_outranks_similar_graph(stub_auth, monkeypatch):
+    """Tidal's native picks (base 150) should rank above the favorites
+    similar-graph fallback (base 100)."""
+    import server
+
+    _no_lastfm(monkeypatch)
+    seed = StubAlbum("1", "Seed", "Fav Artist", similar=[
+        StubAlbum("2", "Graph Pick", "Artist B"),
+    ])
+    _set_library(monkeypatch, fav_albums=[seed])
+    page = StubPage([
+        StubCategory("Suggested new albums", [StubAlbum("3", "Native Pick", "Artist C")]),
+    ])
+    monkeypatch.setattr(server.tidal.session, "for_you", lambda: page)
+    out = server._album_recommendations()
+    ids = [a["id"] for a in out]
+    assert ids.index("3") < ids.index("2")
+
+
+def test_for_you_failure_is_non_fatal(stub_auth, monkeypatch):
+    """A broken For You fetch must not sink the whole endpoint — the
+    similar-graph candidates should still come through."""
+    import server
+
+    _no_lastfm(monkeypatch)
+
+    def _boom():
+        raise RuntimeError("tidal for_you 500")
+
+    monkeypatch.setattr(server.tidal.session, "for_you", _boom)
+    seed = StubAlbum("1", "Seed", "A", similar=[StubAlbum("9", "Still Here", "B")])
+    _set_library(monkeypatch, fav_albums=[seed])
+    assert [a["id"] for a in server._album_recommendations()] == ["9"]
