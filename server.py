@@ -46,6 +46,7 @@ from app import album_collections
 from app import aoty as aoty_module
 from app import aoty_resolver
 from app import deezer_import
+from app import rec_analytics
 from app import global_keys as global_keys_mod
 from app.audio.eq import (
     default_parametric_bands,
@@ -12576,14 +12577,23 @@ def _build_recommendation_sections() -> list[dict]:
     ordered.append(results.get("fans"))
     ordered.extend(because)
 
-    # Drop anything the user said "not interested" in, across every
-    # section, then drop sections left empty.
+    # Drop anything the user said "not interested" in, and anything already
+    # in their favorites, across every section — then drop sections left
+    # empty. Both filters belong here rather than in the individual
+    # builders: recommending an album back to someone who already saved it
+    # is wrong in every row, and only _album_recommendations was excluding
+    # favorites, so the AOTY-backed rows were handing back the library.
     dismissed = _load_rec_feedback()["albums"]
+    owned = {
+        str(getattr(a, "id", "") or "")
+        for a in _rec_safe(lambda: list(tidal.get_favorite_albums() or []), [])
+    }
     out: list[dict] = []
     for s in ordered:
         if not s:
             continue
-        s["albums"] = _filter_dismissed(s.get("albums", []), dismissed)
+        albums = _filter_dismissed(s.get("albums", []), dismissed)
+        s["albums"] = [a for a in albums if str(a.get("id") or "") not in owned]
         if s["albums"]:
             out.append(s)
     return out
@@ -12607,9 +12617,36 @@ def recommendations_albums() -> dict:
         if c and (now - c[0]) < _RECS_CACHE_TTL_SEC:
             return c[1]
     payload = {"enabled": True, "sections": _build_recommendation_sections()}
+    # Record what this build served so row quality can be compared against
+    # what actually got played later. Never let analytics break the page.
+    _rec_safe(lambda: rec_analytics.record_impressions(payload["sections"]), None)
     with _recs_cache_lock:
         _recs_cache["sections"] = (time.monotonic(), payload)
     return payload
+
+
+@app.get("/api/recommendations/stats")
+def recommendations_stats() -> dict:
+    """Per-row engagement for the For You page (#307).
+
+    Answers "which rows are actually working" with numbers rather than
+    opinion. Compare `play_rate` *between* rows: the play signal is joined
+    from scrobble text so it under-counts, but it under-counts every row
+    the same way. `dismiss_rate` and `liked` are exact.
+    """
+    _require_auth()
+    scrobbles = _rec_safe(lambda: lastfm.get_recent_tracks(limit=200), [])
+    played = rec_analytics.played_keys_from_scrobbles(scrobbles)
+    feedback = _load_rec_feedback()
+    liked = {
+        str(getattr(a, "id", "") or "")
+        for a in _rec_safe(lambda: list(tidal.get_favorite_albums() or []), [])
+    }
+    return rec_analytics.stats(
+        played_keys=played,
+        dismissed_ids=feedback["albums"],
+        liked_ids=liked,
+    )
 
 
 class DismissRecommendationRequest(BaseModel):

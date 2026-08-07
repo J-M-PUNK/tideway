@@ -128,6 +128,41 @@ def test_disabled_setting_returns_empty(stub_auth, monkeypatch):
     assert out == {"enabled": False, "sections": []}
 
 
+def test_favorited_albums_are_filtered_from_every_section(stub_auth, monkeypatch):
+    """Only _album_recommendations used to exclude saved albums, so the
+    AOTY-backed rows recommended the listener their own library back —
+    11 of 18 in "Popular in Your Orbit" on a real profile. The filter
+    belongs to section assembly so it covers every row."""
+    import server
+
+    monkeypatch.setattr(
+        server.settings, "album_recommendations_enabled", True, raising=False
+    )
+    _no_lastfm(monkeypatch)
+    _no_aoty(monkeypatch)
+
+    owned = StubAlbum("99", "Already Saved", "Artist Z")
+    _set_library(monkeypatch, fav_albums=[owned])
+
+    # An AOTY-backed row that offers the saved album plus a fresh one.
+    def _fake_section(key, title, subtitle, listing, profile, taste_rank, deep=False):
+        return {
+            "key": key, "title": title, "subtitle": subtitle,
+            "albums": [
+                {"id": "99", "name": "Already Saved",
+                 "artists": [{"name": "Artist Z"}], "available": True},
+                {"id": "100", "name": "Brand New",
+                 "artists": [{"name": "Artist Y"}], "available": True},
+            ],
+        }
+
+    monkeypatch.setattr(server, "_aoty_section", _fake_section)
+    out = server.recommendations_albums()
+    served = [a["id"] for s in out["sections"] for a in s["albums"]]
+    assert "99" not in served, "a saved album was recommended back to the user"
+    assert "100" in served, "the unsaved album should still be offered"
+
+
 def test_enabled_returns_made_for_you_section(stub_auth, monkeypatch):
     import server
 
