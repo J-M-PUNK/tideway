@@ -640,6 +640,15 @@ export interface AotyGenre {
   name: string;
 }
 
+/** One page of an AOTY listing. `genres` is only present on the first
+ *  page of a paginated top-of-year request (the drill-down's picker
+ *  options). `has_more` drives infinite scroll. */
+export interface AotyPage {
+  items: AotyAlbum[];
+  has_more: boolean;
+  genres?: AotyGenre[];
+}
+
 export interface LastFmLovedTrack {
   name: string;
   artist: string;
@@ -674,6 +683,12 @@ export interface LastFmChartArtist {
   url: string;
   image: string;
   mbid: string;
+  /** Present on the resolved endpoint (`chart/top-artists-resolved`):
+   *  the Tidal artist id + cover, resolved server-side so the cards
+   *  don't each fire their own Tidal search. Null when the artist
+   *  doesn't resolve to Tidal; absent on the unresolved endpoint. */
+  tidal_id?: string | null;
+  tidal_picture?: string | null;
 }
 
 export interface LastFmChartTrack {

@@ -25,8 +25,8 @@ import type {
   LastFmTopTrack,
   LastFmUserInfo,
   LastFmWeeklyScrobble,
-  AotyAlbum,
   AotyGenre,
+  AotyPage,
   LocalFile,
   LocalVideo,
   Lyrics,
@@ -313,22 +313,35 @@ export const api = {
       ),
     chartTopArtists: (limit = 50) =>
       req<LastFmChartArtist[]>(`/api/lastfm/chart/top-artists?limit=${limit}`),
+    /** One page of Last.fm's top artists resolved to Tidal (id + cover)
+     *  server-side. Paginated so the tab no longer fires ~100 concurrent
+     *  per-card Tidal searches on mount (the burst that tripped Tidal's
+     *  abuse backoff). */
+    chartTopArtistsResolved: (opts?: { offset?: number; limit?: number }) => {
+      const params = new URLSearchParams();
+      if (opts?.offset !== undefined) params.set("offset", String(opts.offset));
+      if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
+      const qs = params.toString();
+      return req<{ items: LastFmChartArtist[]; has_more: boolean }>(
+        `/api/lastfm/chart/top-artists-resolved${qs ? `?${qs}` : ""}`,
+      );
+    },
     chartTopTracks: (limit = 50) =>
       req<LastFmChartTrack[]>(`/api/lastfm/chart/top-tracks?limit=${limit}`),
     /** Last.fm top tracks pre-resolved to Tidal Track objects. One
      *  round-trip instead of the N+1 resolve-on-client pattern. */
-    chartTopTracksResolved: (limit = 50) =>
-      // Cold-load takes ~18s server-side (Last.fm chart fetch + N
-      // parallel Tidal search resolves for each entry). The default
-      // 15s timeout aborts before the server finishes, so the
-      // Popular Tracks tab always errored on first load. The
-      // resolved list is cached for an hour after that first
-      // resolve, so the 60s budget is paid at most once per hour.
-      req<Track[]>(
-        `/api/lastfm/chart/top-tracks-resolved?limit=${limit}`,
-        undefined,
-        { timeoutMs: 60_000 },
-      ),
+    /** One page of Last.fm's top tracks resolved to Tidal Tracks. Now
+     *  paginated, so a page of ~18 resolves well under the default
+     *  timeout (the whole 50 used to take ~18s and error out). */
+    chartTopTracksResolved: (opts?: { offset?: number; limit?: number }) => {
+      const params = new URLSearchParams();
+      if (opts?.offset !== undefined) params.set("offset", String(opts.offset));
+      if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
+      const qs = params.toString();
+      return req<{ items: Track[]; has_more: boolean }>(
+        `/api/lastfm/chart/top-tracks-resolved${qs ? `?${qs}` : ""}`,
+      );
+    },
     chartTopTags: (limit = 50) =>
       req<LastFmChartTag[]>(`/api/lastfm/chart/top-tags?limit=${limit}`),
     nowPlaying: (track: {
@@ -368,28 +381,43 @@ export const api = {
     /** Top-rated albums of the given year per AlbumOfTheYear, with
      *  each entry decorated with a Tidal album dict when one exists.
      *  Year defaults server-side to the current year. */
-    topOfYear: (opts?: { year?: number; limit?: number; genre?: string }) => {
+    topOfYear: (opts?: {
+      year?: number;
+      offset?: number;
+      limit?: number;
+      genre?: string;
+    }) => {
       const params = new URLSearchParams();
       if (opts?.year !== undefined) params.set("year", String(opts.year));
+      if (opts?.offset !== undefined) params.set("offset", String(opts.offset));
       if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
       if (opts?.genre) params.set("genre", opts.genre);
       const qs = params.toString();
-      return req<AotyAlbum[]>(`/api/aoty/top-of-year${qs ? `?${qs}` : ""}`);
+      return req<AotyPage>(`/api/aoty/top-of-year${qs ? `?${qs}` : ""}`);
     },
-    /** Recently-released albums per AOTY's /releases/ grid, with each
-     *  entry decorated with a Tidal album dict when one exists. */
-    recentReleases: (limit = 30) =>
-      req<AotyAlbum[]>(`/api/aoty/recent-releases?limit=${limit}`),
+    /** One page of AOTY's recent releases, each decorated with a Tidal
+     *  album dict when one exists. */
+    recentReleases: (opts?: { offset?: number; limit?: number }) => {
+      const params = new URLSearchParams();
+      if (opts?.offset !== undefined) params.set("offset", String(opts.offset));
+      if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
+      const qs = params.toString();
+      return req<AotyPage>(`/api/aoty/recent-releases${qs ? `?${qs}` : ""}`);
+    },
     /** AOTY's genre list ({slug, name}) for the New-releases genre
      *  picker. */
     genres: () => req<AotyGenre[]>(`/api/aoty/genres`),
-    /** Recent albums for one AOTY genre (the "Recent {Genre}
-     *  Albums" section of /genre/{slug}/), each decorated with a
-     *  Tidal album dict when one exists. */
-    genreReleases: (slug: string, limit = 60) =>
-      req<AotyAlbum[]>(
-        `/api/aoty/genre-releases?genre=${encodeURIComponent(slug)}&limit=${limit}`,
-      ),
+    /** One page of recent albums for one AOTY genre, each decorated with
+     *  a Tidal album dict when one exists. */
+    genreReleases: (
+      slug: string,
+      opts?: { offset?: number; limit?: number },
+    ) => {
+      const params = new URLSearchParams({ genre: slug });
+      if (opts?.offset !== undefined) params.set("offset", String(opts.offset));
+      if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
+      return req<AotyPage>(`/api/aoty/genre-releases?${params.toString()}`);
+    },
     /** Scraper health. `blocked` is true when AOTY has recently
      *  served us a Cloudflare challenge instead of HTML — the
      *  Home page reads this to render a "report on GitHub" notice

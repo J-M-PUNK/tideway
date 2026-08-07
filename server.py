@@ -4170,22 +4170,23 @@ def lastfm_chart_top_tracks(limit: int = 50) -> list[dict]:
 
 
 @app.get("/api/lastfm/chart/top-tracks-resolved")
-def lastfm_chart_top_tracks_resolved(limit: int = 50) -> list[dict]:
-    """Last.fm top tracks already resolved to Tidal Track objects.
+def lastfm_chart_top_tracks_resolved(offset: int = 0, limit: int = 18) -> dict:
+    """One page of Last.fm's top tracks resolved to Tidal Tracks (#perf).
 
-    The Popular page's Tracks tab used to fire N separate search
-    requests from the browser to resolve each Last.fm entry —
-    cold-load was 5-10 s for 50 rows. We now do the whole fan-out
-    server-side with a bounded thread pool and cache the result, so
-    the client is back to one round-trip.
+    The Popular > Tracks tab used to resolve all 50 chart entries up front
+    — ~18s cold, past the request timeout, which is why it was the slowest
+    page in the app. It now resolves only the requested ~18-track page (the
+    chart scrape and the per-track resolutions are both cached) and the UI
+    streams more on scroll. Returns {items, has_more}.
     """
     _require_auth()
-    limit = max(1, min(limit, 100))
+    offset = max(0, int(offset))
+    limit = max(1, min(int(limit), 40))
 
-    def _resolve_all() -> list[dict]:
+    def _resolve_page() -> list[dict]:
         from app import lastfm_disk_cache
 
-        entries = lastfm.get_chart_top_tracks(limit=limit)
+        entries = lastfm.get_chart_top_tracks(limit=100)
 
         pref = (settings.explicit_content_preference or "explicit").lower()
         username = lastfm.status().get("username") or ""
@@ -4296,8 +4297,9 @@ def lastfm_chart_top_tracks_resolved(limit: int = 50) -> list[dict]:
         # chart-cache miss usually only fires a handful of fresh
         # searches (the entries that changed), so the wall-clock
         # bursts are typically much smaller in practice.
+        page = entries[offset:offset + limit]
         with ThreadPoolExecutor(max_workers=3) as pool:
-            results = list(pool.map(_one, entries))
+            results = list(pool.map(_one, page))
 
         resolved = [r for r in results if r is not None]
         # When Last.fm returned chart entries but we couldn't
@@ -4305,9 +4307,9 @@ def lastfm_chart_top_tracks_resolved(limit: int = 50) -> list[dict]:
         # (rate limit, expired session, etc.). Log the chart-level
         # outcome; the cache_empty=False below ensures we don't
         # pin this empty result for an hour like we used to.
-        if entries and not resolved:
+        if page and not resolved:
             print(
-                f"[lastfm] chart resolve fully failed: {len(entries)} "
+                f"[lastfm] chart resolve fully failed: {len(page)} "
                 f"Last.fm entries, zero Tidal matches. Empty result "
                 f"will NOT be cached; next visit retries.",
                 file=sys.stderr,
@@ -4329,13 +4331,116 @@ def lastfm_chart_top_tracks_resolved(limit: int = 50) -> list[dict]:
     # any results" message that stuck until the cache expired even
     # after Tidal had recovered. Now an empty result re-fetches on
     # the next visit, costing ~18 s of resolve once Tidal is back.
-    return _lastfm_cached(
-        f"chart-top-tracks-resolved:{limit}",
-        _resolve_all,
+    items = _lastfm_cached(
+        f"chart-top-tracks-resolved:{offset}:{limit}",
+        _resolve_page,
         ttl_sec=3600.0,
         persistent=True,
         cache_empty=False,
     )
+    # `has_more` from the cheap, cached chart length — not the resolved
+    # count (some entries never resolve to Tidal).
+    total = len(lastfm.get_chart_top_tracks(limit=100))
+    return {"items": items, "has_more": offset + limit < total}
+
+
+@app.get("/api/lastfm/chart/top-artists-resolved")
+def lastfm_chart_top_artists_resolved(offset: int = 0, limit: int = 18) -> dict:
+    """One page of Last.fm's top artists resolved to Tidal (#perf).
+
+    The Popular > Artists tab rendered all 50 chart cards at once, and
+    each card fired its own Tidal search for the artist id *and* another
+    for the artist image on mount — ~100 concurrent `/api/search` calls
+    the instant the tab opened, which is exactly the burst that trips
+    Tidal's abuse backoff (a 429 that pauses the whole session). This
+    resolves the requested ~18-artist page server-side in a bounded pool
+    instead, with the same per-entry disk cache the tracks tab uses, and
+    the UI streams more on scroll. Each item is the Last.fm chart artist
+    dict plus `tidal_id` / `tidal_picture` (null when unresolved). Returns
+    {items, has_more}.
+    """
+    _require_auth()
+    offset = max(0, int(offset))
+    limit = max(1, min(int(limit), 40))
+
+    def _resolve_page() -> list[dict]:
+        from app import lastfm_disk_cache
+
+        entries = lastfm.get_chart_top_artists(limit=100)
+        username = lastfm.status().get("username") or ""
+
+        # Same 30-day per-entry cache rationale as the tracks tab: a
+        # chart-cache miss then only pays the resolve cost for artists
+        # that actually changed between visits. Failures (None id) are
+        # not cached — a transient Tidal hiccup shouldn't blank a top
+        # artist for 30 days.
+        _PER_ARTIST_TTL = 86400.0 * 30  # 30 days
+
+        def _one(entry: dict) -> Optional[dict]:
+            name = (entry.get("name") or "").strip()
+            if not name:
+                return None
+
+            cache_key = f"{username}|resolve-artist:{name.lower()}"
+            cached = lastfm_disk_cache.get(cache_key, _PER_ARTIST_TTL)
+            if cached is not None:
+                return {**entry, **cached}
+
+            tidal_jitter_sleep()
+            try:
+                results = tidal.search(name, limit=10)
+            except Exception as exc:  # noqa: BLE001
+                # Surface the cause — a fully-empty Artists tab otherwise
+                # gives no hint that Tidal was the culprit.
+                print(
+                    f"[lastfm] chart artist resolve exception "
+                    f"({name}): {exc!r}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return {**entry, "tidal_id": None, "tidal_picture": None}
+
+            artists = list(results.get("artists", []))
+            wa = name.lower()
+            match = next(
+                (a for a in artists if getattr(a, "name", "").lower() == wa),
+                None,
+            ) or (artists[0] if artists else None)
+            if match is None:
+                # A genuine "not on Tidal" — resolvable to a stable
+                # answer, so cache it (unlike a transient exception).
+                resolved = {"tidal_id": None, "tidal_picture": None}
+            else:
+                resolved = {
+                    "tidal_id": str(match.id),
+                    "tidal_picture": _image_url(match, 750),
+                }
+            try:
+                lastfm_disk_cache.set(cache_key, resolved)
+            except Exception:
+                # Persistence is a perf optimisation, not correctness —
+                # fall through with the resolved value.
+                pass
+            return {**entry, **resolved}
+
+        page = entries[offset:offset + limit]
+        # 3 workers — the same bounded fan-out the tracks tab uses. The
+        # point of this endpoint is that the burst is bounded and
+        # server-side (3 searches in flight, jittered) instead of ~100
+        # concurrent browser searches.
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            results = list(pool.map(_one, page))
+        return [r for r in results if r is not None]
+
+    items = _lastfm_cached(
+        f"chart-top-artists-resolved:{offset}:{limit}",
+        _resolve_page,
+        ttl_sec=3600.0,
+        persistent=True,
+        cache_empty=False,
+    )
+    total = len(lastfm.get_chart_top_artists(limit=100))
+    return {"items": items, "has_more": offset + limit < total}
 
 
 @app.get("/api/lastfm/chart/top-tags")
@@ -4361,33 +4466,70 @@ def lastfm_chart_top_tags(limit: int = 50) -> list[dict]:
 # year).
 
 
+# Fetch a generous slab of the (cheap, cached) AOTY listing so paging is
+# just a cache hit; only the page's albums pay the Tidal-resolution cost.
+_AOTY_LISTING_MAX = 100
+
+
+def _aoty_listing_genres(listing: list[dict]) -> list[dict]:
+    """Genre picker options from the full unresolved listing (no Tidal
+    calls) — so the drill-down keeps its sub-genre options even though the
+    grid itself is paginated."""
+    seen: dict = {}
+    for e in listing:
+        for slug, name in zip(e.get("genre_slugs") or [], e.get("genres") or []):
+            if slug and name and slug not in seen:
+                seen[slug] = name
+    return sorted(
+        ({"slug": s, "name": n} for s, n in seen.items()),
+        key=lambda g: g["name"].lower(),
+    )
+
+
+def _aoty_page(listing: list[dict], offset: int, limit: int) -> tuple[list[dict], bool]:
+    """Resolve ONE page of an AOTY listing to Tidal. The full listing is
+    cheap and cached; resolving is the slow part, so we only resolve the
+    slice actually being shown — the fix for pages that used to resolve all
+    100 albums up front and take 25s+ (#315-adjacent perf report)."""
+    offset = max(0, int(offset))
+    limit = max(1, min(int(limit), 40))
+    page = listing[offset:offset + limit]
+    resolved = aoty_resolver.resolve_listing(page)
+    return resolved, offset + limit < len(listing)
+
+
 @app.get("/api/aoty/top-of-year")
 def aoty_top_of_year(
-    year: int | None = None, limit: int = 50, genre: str | None = None
-) -> list[dict]:
-    """AOTY's highest-rated albums for the given year, decorated with
-    Tidal album dicts under `tidal_album` (or None when Tidal has no
-    match). With `genre` (an AOTY "{id}-{slug}" segment) it returns
-    that genre's real year chart instead of the global one."""
+    year: int | None = None,
+    offset: int = 0,
+    limit: int = 18,
+    genre: str | None = None,
+) -> dict:
+    """One page of AOTY's highest-rated albums for the year, each decorated
+    with a Tidal album dict under `tidal_album`. `{items, has_more}` plus,
+    on the first page, `genres` for the picker. With `genre` it pages that
+    genre's chart instead of the global one."""
     _require_auth()
     y = year if year is not None else datetime.now().year
     if genre:
-        listing = aoty_module.top_albums_of_year_by_genre(
-            genre, y, limit=limit
-        )
+        listing = aoty_module.top_albums_of_year_by_genre(genre, y, limit=_AOTY_LISTING_MAX)
     else:
-        listing = aoty_module.top_albums_of_year(y, limit=limit)
-    return aoty_resolver.resolve_listing(listing)
+        listing = aoty_module.top_albums_of_year(y, limit=_AOTY_LISTING_MAX)
+    items, has_more = _aoty_page(listing, offset, limit)
+    out: dict = {"items": items, "has_more": has_more}
+    if offset == 0 and not genre:
+        out["genres"] = _aoty_listing_genres(listing)
+    return out
 
 
 @app.get("/api/aoty/recent-releases")
-def aoty_recent_releases(limit: int = 30) -> list[dict]:
-    """Recently-released albums from AOTY's /releases/ grid, decorated
-    with Tidal album dicts under `tidal_album` (or None when Tidal
-    doesn't have a match)."""
+def aoty_recent_releases(offset: int = 0, limit: int = 18) -> dict:
+    """One page of AOTY's recent releases, each decorated with a Tidal
+    album dict under `tidal_album`. Returns `{items, has_more}`."""
     _require_auth()
-    listing = aoty_module.recent_releases(limit=limit)
-    return aoty_resolver.resolve_listing(listing)
+    listing = aoty_module.recent_releases(limit=_AOTY_LISTING_MAX)
+    items, has_more = _aoty_page(listing, offset, limit)
+    return {"items": items, "has_more": has_more}
 
 
 @app.get("/api/aoty/genres")
@@ -4400,13 +4542,14 @@ def aoty_genres() -> list[dict]:
 
 
 @app.get("/api/aoty/genre-releases")
-def aoty_genre_releases(genre: str, limit: int = 60) -> list[dict]:
-    """Recent albums for one AOTY genre (the "Recent {Genre} Albums"
-    section of /genre/{slug}/), decorated with Tidal album dicts
-    under `tidal_album` (or None when Tidal has no match)."""
+def aoty_genre_releases(genre: str, offset: int = 0, limit: int = 18) -> dict:
+    """One page of recent albums for one AOTY genre (the "Recent {Genre}
+    Albums" section of /genre/{slug}/), each decorated with a Tidal album
+    dict under `tidal_album`. Returns `{items, has_more}`."""
     _require_auth()
-    listing = aoty_module.recent_releases_by_genre(genre, limit=limit)
-    return aoty_resolver.resolve_listing(listing)
+    listing = aoty_module.recent_releases_by_genre(genre, limit=_AOTY_LISTING_MAX)
+    items, has_more = _aoty_page(listing, offset, limit)
+    return {"items": items, "has_more": has_more}
 
 
 @app.get("/api/aoty/status")
