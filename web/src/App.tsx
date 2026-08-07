@@ -697,10 +697,7 @@ function Shell({
                         path="/feed"
                         element={<FeedPage onDownload={enqueue} />}
                       />
-                      <Route
-                        path="/for-you"
-                        element={<ForYouPage onDownload={enqueue} />}
-                      />
+                      <Route path="/for-you" element={<ForYouPage />} />
                       <Route
                         path="/history"
                         element={<HistoryPage onDownload={enqueue} />}

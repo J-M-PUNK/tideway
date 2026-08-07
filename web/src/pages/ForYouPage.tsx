@@ -3,11 +3,11 @@ import { Link } from "react-router-dom";
 import { Compass, Music, Sparkles, X } from "lucide-react";
 import { api } from "@/api/client";
 import type { Album } from "@/api/types";
-import type { OnDownload } from "@/api/download";
 import { useApi } from "@/hooks/useApi";
 import { queryKeys } from "@/api/queryKeys";
 import { Button } from "@/components/ui/button";
-import { DownloadButton } from "@/components/DownloadButton";
+import { InlineHeart } from "@/components/MediaCard";
+import { PlayMediaButton } from "@/components/PlayMediaButton";
 import { EmptyState } from "@/components/EmptyState";
 import { ErrorView } from "@/components/ErrorView";
 import { GridSkeleton } from "@/components/Skeletons";
@@ -28,7 +28,7 @@ type Section = {
  * listened to X" modules), each already ranked; this page just lays them
  * out as horizontal shelves.
  */
-export function ForYouPage({ onDownload }: { onDownload: OnDownload }) {
+export function ForYouPage() {
   const { data, loading, error } = useApi(() => api.recommendations(), [], {
     cacheKey: queryKeys.recommendations,
   });
@@ -102,12 +102,7 @@ export function ForYouPage({ onDownload }: { onDownload: OnDownload }) {
       <PageHeading />
       <div className="flex flex-col gap-10">
         {sections.map((section) => (
-          <Shelf
-            key={section.key}
-            section={section}
-            onDownload={onDownload}
-            onDismiss={onDismiss}
-          />
+          <Shelf key={section.key} section={section} onDismiss={onDismiss} />
         ))}
       </div>
     </div>
@@ -130,11 +125,9 @@ function PageHeading() {
 
 function Shelf({
   section,
-  onDownload,
   onDismiss,
 }: {
   section: Section;
-  onDownload: OnDownload;
   onDismiss: (item: RecAlbum) => void;
 }) {
   return (
@@ -146,12 +139,7 @@ function Shelf({
       {!section.subtitle && <div className="mb-3" />}
       <div className="flex gap-4 overflow-x-auto pb-2 scrollbar-thin">
         {section.albums.map((item) => (
-          <RecCard
-            key={item.id}
-            item={item}
-            onDownload={onDownload}
-            onDismiss={onDismiss}
-          />
+          <RecCard key={item.id} item={item} onDismiss={onDismiss} />
         ))}
       </div>
     </section>
@@ -160,15 +148,17 @@ function Shelf({
 
 function RecCard({
   item,
-  onDownload,
   onDismiss,
 }: {
   item: RecAlbum;
-  onDownload: OnDownload;
   onDismiss: (item: RecAlbum) => void;
 }) {
   const cover = imageProxy(item.cover);
   const artist = item.artists?.map((a) => a.name).join(", ") ?? "";
+  // Same hover-reveal contract as MediaCard: play (bottom-left) and like
+  // (bottom-right) sit on the cover and fade in on hover / keyboard focus.
+  const hoverActions =
+    "opacity-0 transition-all duration-200 ease-out group-hover:opacity-100 focus-within:opacity-100";
   return (
     <div className="group relative flex w-44 shrink-0 flex-col gap-3 rounded-lg bg-card p-4 transition-colors hover:bg-accent">
       <button
@@ -185,7 +175,7 @@ function RecCard({
         <X className="h-4 w-4" />
       </button>
       <Link to={`/album/${item.id}`} className="flex flex-col gap-3">
-        <div className="aspect-square overflow-hidden rounded-md bg-secondary">
+        <div className="relative aspect-square overflow-hidden rounded-md bg-secondary">
           {cover ? (
             <img
               src={cover}
@@ -198,6 +188,16 @@ function RecCard({
               <Music className="h-10 w-10" />
             </div>
           )}
+          <PlayMediaButton
+            kind="album"
+            id={item.id}
+            className={`absolute bottom-2 left-2 h-10 w-10 ${hoverActions}`}
+          />
+          <InlineHeart
+            kind="album"
+            id={item.id}
+            className={`absolute bottom-2 right-2 ${hoverActions}`}
+          />
         </div>
         <div className="min-w-0">
           <div className="truncate font-semibold">{item.name}</div>
@@ -212,16 +212,6 @@ function RecCard({
           )}
         </div>
       </Link>
-      <div className="absolute right-3 top-3 opacity-0 transition-opacity group-hover:opacity-100">
-        <DownloadButton
-          kind="album"
-          id={item.id}
-          onPick={onDownload}
-          iconOnly
-          variant="secondary"
-          size="sm"
-        />
-      </div>
     </div>
   );
 }
