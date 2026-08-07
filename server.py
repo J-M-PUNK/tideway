@@ -12096,6 +12096,11 @@ _SECTION_SIZE = 18
 # Tidal search per album, so we rank the (cheap) AOTY listing first and
 # only resolve the top slice — not the whole 60-row scrape.
 _SECTION_RESOLVE_POOL = 24
+# Similar artists to resolve for "Fans Also Like". Each costs a Tidal
+# search plus an album fetch, and yields up to 2 albums, so this sits
+# comfortably above _SECTION_SIZE to survive unavailable albums and the
+# per-artist cap without over-fetching.
+_FANS_CANDIDATES = 12
 
 
 def _rec_safe(fn, default):
@@ -12438,7 +12443,29 @@ def _section_fans_also_like() -> dict:
                 else:
                     entry["score"] += match
 
-    ranked = sorted(scored.values(), key=lambda e: e["score"], reverse=True)[:12]
+    # Round-robin across seeds rather than taking the global top by score.
+    # Summed match favours whichever seed has the densest neighbourhood on
+    # Last.fm's graph, and a seed like a game soundtrack sits in a tight
+    # cluster where everything scores high — left unchecked it filled a
+    # third of the shelf with one cluster. Taking the strongest remaining
+    # pick from each seed in turn spans the user's taste instead, the same
+    # way _album_recommendations round-robins across reasons.
+    by_seed: "OrderedDict[str, list]" = OrderedDict()
+    for e in sorted(scored.values(), key=lambda e: e["score"], reverse=True):
+        by_seed.setdefault(e["seed"], []).append(e)
+
+    ranked: list[dict] = []
+    while len(ranked) < _FANS_CANDIDATES:
+        progressed = False
+        for entries in by_seed.values():
+            if not entries:
+                continue
+            ranked.append(entries.pop(0))
+            progressed = True
+            if len(ranked) >= _FANS_CANDIDATES:
+                break
+        if not progressed:
+            break
 
     def _albums_for(entry):
         res = _rec_safe(lambda: tidal.search(entry["name"], limit=3), {}) or {}

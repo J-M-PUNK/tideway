@@ -601,6 +601,40 @@ def test_dismiss_persists_and_reloads(stub_auth, monkeypatch, tmp_path):
 # ---------------------------------------------------------------------------
 
 
+def test_fans_also_like_spans_seeds_when_one_floods(stub_auth, monkeypatch):
+    """A seed sitting in a dense Last.fm neighbourhood (a game soundtrack,
+    say) has every neighbour scoring high, so ranking purely by summed
+    match let it fill most of the shelf. Picks must span the seeds."""
+    import server
+
+    monkeypatch.setattr(
+        server.lastfm, "get_top_artists",
+        lambda period, limit: [{"name": "Dense"}, {"name": "Sparse"}],
+    )
+
+    def _sims(name, limit=15):
+        if name == "Dense":
+            # Ten tightly-clustered neighbours, all scoring above Sparse's.
+            return [{"name": f"D{i}", "match": 0.99} for i in range(10)]
+        return [{"name": "S1", "match": 0.5}, {"name": "S2", "match": 0.4}]
+
+    monkeypatch.setattr(server.lastfm, "get_similar_artists", _sims)
+    monkeypatch.setattr(
+        server.tidal, "search",
+        lambda q, limit=25: {"artists": [
+            StubArtist(q, albums=[StubAlbum(f"{q}-1", f"{q} LP", q)])
+        ]},
+    )
+
+    sec = server._section_fans_also_like()
+    seeds = [a["reason"] for a in sec["albums"]]
+    sparse = [r for r in seeds if "Sparse" in r]
+    # Ranking by score alone would put all ten Dense picks first and bury
+    # Sparse entirely; the round-robin must surface it near the top.
+    assert sparse, f"Sparse seed was crowded out entirely: {seeds}"
+    assert "Sparse" in seeds[1], f"expected seeds to alternate, got {seeds[:4]}"
+
+
 def test_fans_also_like_builds_from_similar(stub_auth, monkeypatch):
     import server
 
