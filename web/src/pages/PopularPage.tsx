@@ -7,18 +7,14 @@ import {
   User as UserIcon,
 } from "lucide-react";
 import { api } from "@/api/client";
-import { queryKeys } from "@/api/queryKeys";
 import type { LastFmChartArtist, Track } from "@/api/types";
 import type { OnDownload } from "@/api/download";
-import { useApi } from "@/hooks/useApi";
 import { useInfinitePages } from "@/hooks/useInfinitePages";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/EmptyState";
 import { Skeleton, TrackListSkeleton } from "@/components/Skeletons";
 import { useToast } from "@/components/toast";
 import { preseedSpotifyPlaycounts } from "@/hooks/useSpotifyEnrichment";
-import { useTidalArt } from "@/hooks/useTidalArt";
-import { useTidalArtistId } from "@/hooks/useTidalResolve";
 import { TrackList } from "@/components/TrackList";
 import { cn, imageProxy } from "@/lib/utils";
 
@@ -140,25 +136,42 @@ function TabButton({
 // ---------------------------------------------------------------------------
 
 function ChartArtists() {
-  const { data, loading } = useApi(() => api.lastfm.chartTopArtists(50), [], {
-    cacheKey: queryKeys.popularArtists,
-  });
-  if (loading && !data) return <ArtistGridSkeleton />;
-  if (!data || data.length === 0) {
+  const { items, hasMore, loading, error, sentinelRef } = useInfinitePages<
+    LastFmChartArtist,
+    { items: LastFmChartArtist[]; has_more: boolean }
+  >(
+    (offset) => api.lastfm.chartTopArtistsResolved({ offset, limit: 18 }),
+    18,
+    [],
+  );
+
+  if (loading && items.length === 0) return <ArtistGridSkeleton />;
+  if (items.length === 0) {
     return (
       <EmptyState
         icon={UserIcon}
-        title="No data"
-        description="Last.fm didn't return any results."
+        title={error ? "Couldn't load" : "No data"}
+        description={
+          error
+            ? `Couldn't load chart artists: ${error}`
+            : "Last.fm didn't return any results."
+        }
       />
     );
   }
   return (
-    <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6 min-[1920px]:grid-cols-7 min-[2400px]:grid-cols-8">
-      {data.map((a, i) => (
-        <ArtistChartCard key={`${a.name}-${i}`} rank={i + 1} artist={a} />
-      ))}
-    </div>
+    <>
+      <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6 min-[1920px]:grid-cols-7 min-[2400px]:grid-cols-8">
+        {items.map((a, i) => (
+          <ArtistChartCard key={`${a.name}-${i}`} rank={i + 1} artist={a} />
+        ))}
+      </div>
+      {hasMore && (
+        <div ref={sentinelRef} className="mt-4" aria-hidden>
+          <ArtistGridSkeleton />
+        </div>
+      )}
+    </>
   );
 }
 
@@ -171,16 +184,15 @@ function ArtistChartCard({
 }) {
   const navigate = useNavigate();
   const toast = useToast();
-  const tidalId = useTidalArtistId(artist.name);
-  const tidalArt = useTidalArt("artist", artist.name);
-  const img = imageProxy(artist.image || tidalArt || undefined);
+  const img = imageProxy(artist.image || artist.tidal_picture || undefined);
 
   const onClick = async () => {
-    // Prefer the cached Tidal id from the background hook. If it isn't
-    // ready yet (user clicked before the search resolved), do the
-    // lookup inline so there's no visible stall.
-    if (tidalId) {
-      navigate(`/artist/${tidalId}`);
+    // The id is resolved server-side with the page. Only fall back to an
+    // inline lookup when it came back null (a transient miss, or an
+    // artist that genuinely didn't resolve) — never a burst of searches
+    // on mount.
+    if (artist.tidal_id) {
+      navigate(`/artist/${artist.tidal_id}`);
       return;
     }
     try {

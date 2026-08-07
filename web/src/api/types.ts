@@ -683,6 +683,12 @@ export interface LastFmChartArtist {
   url: string;
   image: string;
   mbid: string;
+  /** Present on the resolved endpoint (`chart/top-artists-resolved`):
+   *  the Tidal artist id + cover, resolved server-side so the cards
+   *  don't each fire their own Tidal search. Null when the artist
+   *  doesn't resolve to Tidal; absent on the unresolved endpoint. */
+  tidal_id?: string | null;
+  tidal_picture?: string | null;
 }
 
 export interface LastFmChartTrack {

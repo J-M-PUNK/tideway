@@ -4344,6 +4344,105 @@ def lastfm_chart_top_tracks_resolved(offset: int = 0, limit: int = 18) -> dict:
     return {"items": items, "has_more": offset + limit < total}
 
 
+@app.get("/api/lastfm/chart/top-artists-resolved")
+def lastfm_chart_top_artists_resolved(offset: int = 0, limit: int = 18) -> dict:
+    """One page of Last.fm's top artists resolved to Tidal (#perf).
+
+    The Popular > Artists tab rendered all 50 chart cards at once, and
+    each card fired its own Tidal search for the artist id *and* another
+    for the artist image on mount — ~100 concurrent `/api/search` calls
+    the instant the tab opened, which is exactly the burst that trips
+    Tidal's abuse backoff (a 429 that pauses the whole session). This
+    resolves the requested ~18-artist page server-side in a bounded pool
+    instead, with the same per-entry disk cache the tracks tab uses, and
+    the UI streams more on scroll. Each item is the Last.fm chart artist
+    dict plus `tidal_id` / `tidal_picture` (null when unresolved). Returns
+    {items, has_more}.
+    """
+    _require_auth()
+    offset = max(0, int(offset))
+    limit = max(1, min(int(limit), 40))
+
+    def _resolve_page() -> list[dict]:
+        from app import lastfm_disk_cache
+
+        entries = lastfm.get_chart_top_artists(limit=100)
+        username = lastfm.status().get("username") or ""
+
+        # Same 30-day per-entry cache rationale as the tracks tab: a
+        # chart-cache miss then only pays the resolve cost for artists
+        # that actually changed between visits. Failures (None id) are
+        # not cached — a transient Tidal hiccup shouldn't blank a top
+        # artist for 30 days.
+        _PER_ARTIST_TTL = 86400.0 * 30  # 30 days
+
+        def _one(entry: dict) -> Optional[dict]:
+            name = (entry.get("name") or "").strip()
+            if not name:
+                return None
+
+            cache_key = f"{username}|resolve-artist:{name.lower()}"
+            cached = lastfm_disk_cache.get(cache_key, _PER_ARTIST_TTL)
+            if cached is not None:
+                return {**entry, **cached}
+
+            tidal_jitter_sleep()
+            try:
+                results = tidal.search(name, limit=10)
+            except Exception as exc:  # noqa: BLE001
+                # Surface the cause — a fully-empty Artists tab otherwise
+                # gives no hint that Tidal was the culprit.
+                print(
+                    f"[lastfm] chart artist resolve exception "
+                    f"({name}): {exc!r}",
+                    file=sys.stderr,
+                    flush=True,
+                )
+                return {**entry, "tidal_id": None, "tidal_picture": None}
+
+            artists = list(results.get("artists", []))
+            wa = name.lower()
+            match = next(
+                (a for a in artists if getattr(a, "name", "").lower() == wa),
+                None,
+            ) or (artists[0] if artists else None)
+            if match is None:
+                # A genuine "not on Tidal" — resolvable to a stable
+                # answer, so cache it (unlike a transient exception).
+                resolved = {"tidal_id": None, "tidal_picture": None}
+            else:
+                resolved = {
+                    "tidal_id": str(match.id),
+                    "tidal_picture": _image_url(match, 750),
+                }
+            try:
+                lastfm_disk_cache.set(cache_key, resolved)
+            except Exception:
+                # Persistence is a perf optimisation, not correctness —
+                # fall through with the resolved value.
+                pass
+            return {**entry, **resolved}
+
+        page = entries[offset:offset + limit]
+        # 3 workers — the same bounded fan-out the tracks tab uses. The
+        # point of this endpoint is that the burst is bounded and
+        # server-side (3 searches in flight, jittered) instead of ~100
+        # concurrent browser searches.
+        with ThreadPoolExecutor(max_workers=3) as pool:
+            results = list(pool.map(_one, page))
+        return [r for r in results if r is not None]
+
+    items = _lastfm_cached(
+        f"chart-top-artists-resolved:{offset}:{limit}",
+        _resolve_page,
+        ttl_sec=3600.0,
+        persistent=True,
+        cache_empty=False,
+    )
+    total = len(lastfm.get_chart_top_artists(limit=100))
+    return {"items": items, "has_more": offset + limit < total}
+
+
 @app.get("/api/lastfm/chart/top-tags")
 def lastfm_chart_top_tags(limit: int = 50) -> list[dict]:
     _require_auth()

@@ -313,6 +313,19 @@ export const api = {
       ),
     chartTopArtists: (limit = 50) =>
       req<LastFmChartArtist[]>(`/api/lastfm/chart/top-artists?limit=${limit}`),
+    /** One page of Last.fm's top artists resolved to Tidal (id + cover)
+     *  server-side. Paginated so the tab no longer fires ~100 concurrent
+     *  per-card Tidal searches on mount (the burst that tripped Tidal's
+     *  abuse backoff). */
+    chartTopArtistsResolved: (opts?: { offset?: number; limit?: number }) => {
+      const params = new URLSearchParams();
+      if (opts?.offset !== undefined) params.set("offset", String(opts.offset));
+      if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
+      const qs = params.toString();
+      return req<{ items: LastFmChartArtist[]; has_more: boolean }>(
+        `/api/lastfm/chart/top-artists-resolved${qs ? `?${qs}` : ""}`,
+      );
+    },
     chartTopTracks: (limit = 50) =>
       req<LastFmChartTrack[]>(`/api/lastfm/chart/top-tracks?limit=${limit}`),
     /** Last.fm top tracks pre-resolved to Tidal Track objects. One

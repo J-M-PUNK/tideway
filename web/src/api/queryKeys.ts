@@ -54,8 +54,15 @@ const LIBRARY_PREFETCH_TTL_MS = 30 * 1000;
 export const prefetch = {
   pageHome: () => prefetchApi(queryKeys.pageHome, () => api.page("home")),
   feed: () => prefetchApi(queryKeys.feed, () => api.feed()),
+  // Warms the resolved first page's server-side cache on nav hover. The
+  // Artists tab reads through useInfinitePages (not this client cache),
+  // so the value stored here is unused — the point is the network call,
+  // which primes the 1-hour disk cache so the tab's own page-0 fetch is
+  // instant.
   popularArtists: () =>
-    prefetchApi(queryKeys.popularArtists, () => api.lastfm.chartTopArtists(50)),
+    prefetchApi(queryKeys.popularArtists, () =>
+      api.lastfm.chartTopArtistsResolved({ offset: 0, limit: 18 }),
+    ),
   libraryAlbums: () =>
     prefetchApi(
       queryKeys.libraryAlbums,
