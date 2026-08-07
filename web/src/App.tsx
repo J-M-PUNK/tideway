@@ -40,6 +40,7 @@ import {
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { VideoPlayerProvider } from "@/hooks/useVideoPlayer";
 import { useMouseNavButtons } from "@/hooks/useMouseNavButtons";
+import { useScrollRestoration } from "@/hooks/useScrollRestoration";
 import { VideoPlayerModal } from "@/components/VideoPlayerModal";
 import { SelectionBar } from "@/components/SelectionBar";
 import { useAuth } from "@/hooks/useAuth";
@@ -469,19 +470,12 @@ function Shell({
     el.classList.add("animate-route");
   }, [location.pathname]);
 
-  // Reset the scroll container to the top on navigation. The routed
-  // view lives inside a custom overflow-y-auto <main> (not the
-  // window), so the browser's default scroll-to-top on navigation
-  // never fires. Without this, opening a short page like an album
-  // from a long scrolled one (artist, search, library) leaves the
-  // container clamped at the previous offset, so the new page renders
-  // scrolled to its bottom. Keyed on pathname only: it sets scrollTop,
-  // it does not remount the subtree, so the param-change state the
-  // fade wrapper above preserves stays intact.
+  // Scroll handling for the custom overflow-y-auto <main> (the routed view
+  // scrolls inside it, not the window, so the browser never restores
+  // scroll on its own): top on a forward navigation, restore-where-you-
+  // were on back/forward (#315).
   const scrollRef = useRef<HTMLElement | null>(null);
-  useEffect(() => {
-    scrollRef.current?.scrollTo({ top: 0 });
-  }, [location.pathname]);
+  useScrollRestoration(scrollRef);
 
   // Esc closes any open side panel. Lyrics wins over queue so the user can
   // stack them without ambiguity.
