@@ -597,41 +597,22 @@ def test_dismiss_persists_and_reloads(stub_auth, monkeypatch, tmp_path):
 
 
 # ---------------------------------------------------------------------------
-# MusicBrainz relationship discovery ("More From These People")
+# Listener-overlap discovery ("Fans Also Like")
 # ---------------------------------------------------------------------------
 
 
-def test_more_from_people_builds_from_mb_relations(stub_auth, monkeypatch):
+def test_fans_also_like_builds_from_similar(stub_auth, monkeypatch):
     import server
 
     monkeypatch.setattr(
         server.lastfm, "get_top_artists",
-        lambda period, limit: [{"name": "venturing", "mbid": "mbid-venturing"}],
+        lambda period, limit: [{"name": "Boards of Canada"}],
     )
     monkeypatch.setattr(
-        server.musicbrainz_module, "related_artists",
-        lambda mbid, seed: [{"name": "Jane Remover", "reason": "The artist behind venturing"}],
-    )
-    resolved = StubArtist("Jane Remover", albums=[StubAlbum("77", "Frailty", "Jane Remover")])
-    monkeypatch.setattr(server.tidal, "search", lambda q, limit=25: {"artists": [resolved]})
-
-    sec = server._section_more_from_these_people()
-    # Fewer than 3 albums here, so the opportunistic row drops out...
-    assert sec["albums"] == []
-
-
-def test_more_from_people_shows_when_rich(stub_auth, monkeypatch):
-    import server
-
-    monkeypatch.setattr(
-        server.lastfm, "get_top_artists",
-        lambda period, limit: [{"name": "Boards of Canada", "mbid": "mbid-boc"}],
-    )
-    monkeypatch.setattr(
-        server.musicbrainz_module, "related_artists",
-        lambda mbid, seed: [
-            {"name": "Marcus Eoin", "reason": "Bandmate of Boards of Canada"},
-            {"name": "Michael Sandison", "reason": "Bandmate of Boards of Canada"},
+        server.lastfm, "get_similar_artists",
+        lambda name, limit=15: [
+            {"name": "Bibio", "match": 0.9},
+            {"name": "Tycho", "match": 0.7},
         ],
     )
 
@@ -642,21 +623,76 @@ def test_more_from_people_shows_when_rich(stub_auth, monkeypatch):
         ])]}
 
     monkeypatch.setattr(server.tidal, "search", _search)
-    sec = server._section_more_from_these_people()
-    assert sec["title"] == "More From These People"
+    sec = server._section_fans_also_like()
+    assert sec["title"] == "Fans Also Like"
     assert len(sec["albums"]) >= 3
-    assert sec["albums"][0]["reason"].startswith("Bandmate of")
+    # Every pick is attributed to the seed whose fans overlap.
+    assert sec["albums"][0]["reason"] == "Fans of Boards of Canada also like"
 
 
-def test_more_from_people_empty_when_mb_has_nothing(stub_auth, monkeypatch):
+def test_fans_also_like_excludes_own_top_artists(stub_auth, monkeypatch):
+    """A similar-artist result that's already one of the user's top artists
+    is discovery noise — don't recommend back what they already play."""
     import server
 
     monkeypatch.setattr(
         server.lastfm, "get_top_artists",
-        lambda period, limit: [{"name": "Brand New Artist", "mbid": "mbid-x"}],
+        lambda period, limit: [{"name": "Aphex Twin"}, {"name": "Bibio"}],
+    )
+    # Aphex Twin's fans also like Bibio — but Bibio is a top artist already.
+    monkeypatch.setattr(
+        server.lastfm, "get_similar_artists",
+        lambda name, limit=15: (
+            [{"name": "Bibio", "match": 0.9}] if name == "Aphex Twin" else []
+        ),
+    )
+    searched = []
+
+    def _search(q, limit=25):
+        searched.append(q)
+        return {"artists": [StubArtist(q, albums=[StubAlbum(f"{q}-1", f"{q} LP", q)])]}
+
+    monkeypatch.setattr(server.tidal, "search", _search)
+    sec = server._section_fans_also_like()
+    assert "Bibio" not in searched
+    assert sec["albums"] == []
+
+
+def test_fans_also_like_excludes_resolved_own_artist(stub_auth, monkeypatch):
+    """Tidal search can collapse a distinct similar-artist name onto an
+    artist the user already plays (e.g. "John Mayer Trio" -> John Mayer).
+    The exclusion must look at the *resolved* artist, not just the candidate
+    name, or the row hands back more of what they already listen to."""
+    import server
+
+    monkeypatch.setattr(
+        server.lastfm, "get_top_artists",
+        lambda period, limit: [{"name": "John Mayer"}],
     )
     monkeypatch.setattr(
-        server.musicbrainz_module, "related_artists", lambda mbid, seed: []
+        server.lastfm, "get_similar_artists",
+        lambda name, limit=15: [{"name": "John Mayer Trio", "match": 0.8}],
     )
-    sec = server._section_more_from_these_people()
+    # Searching the candidate resolves back to the seed artist himself.
+    monkeypatch.setattr(
+        server.tidal, "search",
+        lambda q, limit=25: {"artists": [
+            StubArtist("John Mayer", albums=[StubAlbum("9", "Sob Rock", "John Mayer")])
+        ]},
+    )
+    sec = server._section_fans_also_like()
+    assert sec["albums"] == []
+
+
+def test_fans_also_like_empty_when_no_overlap(stub_auth, monkeypatch):
+    import server
+
+    monkeypatch.setattr(
+        server.lastfm, "get_top_artists",
+        lambda period, limit: [{"name": "Brand New Artist"}],
+    )
+    monkeypatch.setattr(
+        server.lastfm, "get_similar_artists", lambda name, limit=15: []
+    )
+    sec = server._section_fans_also_like()
     assert sec["albums"] == []
