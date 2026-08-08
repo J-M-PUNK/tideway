@@ -100,16 +100,14 @@ def test_different_albums_do_not_collide():
     assert by["row"]["played"] == 1
 
 
-def test_dismissed_and_liked_are_exact_by_id():
+def test_liked_is_exact_by_id():
     rec_analytics.record_impressions([
         _section("row", [
             _album("1", "A", "X"), _album("2", "B", "Y"), _album("3", "C", "Z"),
         ])
     ])
-    out = rec_analytics.stats(dismissed_ids={"1"}, liked_ids={"2"})
-    row = out["sections"][0]
-    assert row["dismissed"] == 1 and row["liked"] == 1
-    assert row["dismiss_rate"] == round(1 / 3, 4)
+    out = rec_analytics.stats(liked_ids={"2"})
+    assert out["sections"][0]["liked"] == 1
 
 
 def test_sections_ranked_by_play_rate():

@@ -9,11 +9,10 @@ This records what each row actually showed, then joins that against what
 the listener did afterwards, so a row can be compared against another row
 with a number instead of a vibe.
 
-Three outcome signals, in descending order of trustworthiness:
+Two outcome signals, in descending order of trustworthiness:
 
-* **dismissed** — exact. The "not interested" button writes Tidal album
-  ids to `rec_feedback.json`; those ids are the same ones recorded here.
-* **liked** — exact. Favorited album ids, same id space.
+* **liked** — exact. Favorited album ids, the same id space recorded here,
+  and account-level so it holds across the listener's devices.
 * **played** — approximate. There is no server-side record of "this album
   id was played": `/api/player/load` only receives a track id and
   `/api/now-playing` only carries a display name. The nearest durable
@@ -152,17 +151,15 @@ def record_impressions(sections: list) -> None:
 
 
 def stats(played_keys: Optional[set] = None,
-          dismissed_ids: Optional[set] = None,
           liked_ids: Optional[set] = None) -> dict:
     """Per-section engagement.
 
     `played_keys` is a set of `_key(artist, album)` strings built by the
-    caller from the listener's scrobbles; `dismissed_ids` and `liked_ids`
-    are Tidal album id sets. All are optional so the caller can report
-    whatever signals it can actually obtain.
+    caller from the listener's scrobbles; `liked_ids` is a set of Tidal
+    album ids. Both are optional so the caller can report whatever signals
+    it can actually obtain.
     """
     played_keys = played_keys or set()
-    dismissed_ids = dismissed_ids or set()
     liked_ids = liked_ids or set()
 
     with _lock:
@@ -174,14 +171,12 @@ def stats(played_keys: Optional[set] = None,
         for skey, count in (entry.get("sections") or {}).items():
             s = per.setdefault(skey, {
                 "section": skey, "impressions": 0, "albums": 0,
-                "played": 0, "dismissed": 0, "liked": 0,
+                "played": 0, "liked": 0,
             })
             s["impressions"] += int(count or 0)
             s["albums"] += 1
             if hit:
                 s["played"] += 1
-            if aid in dismissed_ids:
-                s["dismissed"] += 1
             if aid in liked_ids:
                 s["liked"] += 1
 
@@ -189,7 +184,6 @@ def stats(played_keys: Optional[set] = None,
     for s in per.values():
         n = s["albums"] or 1
         s["play_rate"] = round(s["played"] / n, 4)
-        s["dismiss_rate"] = round(s["dismissed"] / n, 4)
         out.append(s)
     # Best-performing row first — the whole point is the comparison.
     out.sort(key=lambda s: (s["play_rate"], s["albums"]), reverse=True)
