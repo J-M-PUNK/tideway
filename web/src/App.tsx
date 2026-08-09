@@ -129,6 +129,11 @@ const FeedPage = lazy(() =>
 const ForYouPage = lazy(() =>
   import("@/pages/ForYouPage").then((m) => ({ default: m.ForYouPage })),
 );
+const ForYouGenresPage = lazy(() =>
+  import("@/pages/ForYouHubPage").then((m) => ({
+    default: m.ForYouGenresPage,
+  })),
+);
 const HistoryPage = lazy(() =>
   import("@/pages/HistoryPage").then((m) => ({ default: m.HistoryPage })),
 );
@@ -698,6 +703,10 @@ function Shell({
                         element={<FeedPage onDownload={enqueue} />}
                       />
                       <Route path="/for-you" element={<ForYouPage />} />
+                      <Route
+                        path="/for-you/genres"
+                        element={<ForYouGenresPage />}
+                      />
                       <Route
                         path="/history"
                         element={<HistoryPage onDownload={enqueue} />}

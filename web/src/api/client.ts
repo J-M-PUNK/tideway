@@ -114,6 +114,24 @@ async function req<T>(
   }
 }
 
+/** Shape shared by the For You page and its drill-downs — the rows are
+ *  the same sections, blended on the main page and split on the hubs. */
+export type RecommendationSections = {
+  enabled: boolean;
+  sections: {
+    key: string;
+    title: string;
+    subtitle: string;
+    albums: (Album & { reason?: string })[];
+    /** Present only on rows that have a drill-down page. */
+    view_more?: string;
+    /** Paging fields, present on drill-down rows that can load more. */
+    slug?: string;
+    offset?: number;
+    has_more?: boolean;
+  }[];
+};
+
 export const api = {
   auth: {
     status: () => req<AuthStatus>("/api/auth/status"),
@@ -966,15 +984,19 @@ export const api = {
       editorial: TidalPage | null;
     }>("/api/feed"),
   recommendations: () =>
+    req<RecommendationSections>("/api/recommendations/albums"),
+  /** Drill-down behind "From Your Genres" — one row per genre. */
+  recommendationGenres: () =>
+    req<RecommendationSections>("/api/recommendations/genres"),
+  /** One further page of a single genre, for "load more". */
+  recommendationGenrePage: (slug: string, offset: number, limit = 18) =>
     req<{
       enabled: boolean;
-      sections: {
-        key: string;
-        title: string;
-        subtitle: string;
-        albums: (Album & { reason?: string })[];
-      }[];
-    }>("/api/recommendations/albums"),
+      section: RecommendationSections["sections"][number] | null;
+    }>(
+      `/api/recommendations/genre/${encodeURIComponent(slug)}` +
+        `?offset=${offset}&limit=${limit}`,
+    ),
   player: {
     available: () => req<{ available: boolean }>("/api/player/available"),
     state: () => req<PlayerSnapshot>("/api/player/state"),
