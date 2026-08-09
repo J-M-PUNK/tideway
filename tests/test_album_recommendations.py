@@ -1,10 +1,10 @@
 """Tests for the "For You" album-recommendations endpoint (#307).
 
-The ranking/blend logic in `_album_recommendations` is the risky part:
-it composes Tidal `album.similar()` / `artist.get_similar()` with the
-Last.fm similar-artist graph, dedupes, filters out already-favorited
-albums, caps per-artist, and attaches a human "reason" to each pick.
-These pin that behavior with stubbed Tidal/Last.fm surfaces.
+The page is assembled from AOTY genre listings, AOTY's year chart, and
+Last.fm's similar-artist graph. The risky parts are the ordering rules —
+excluding saved albums before a row is capped, spanning genres and seeds
+rather than letting one dominate, and the blended top row — so those get
+the coverage, with the upstream surfaces stubbed.
 """
 from types import SimpleNamespace
 
@@ -43,23 +43,6 @@ def stub_auth(monkeypatch):
             "available": a.available,
         },
     )
-    # Default: Tidal's For You page contributes nothing unless a test opts
-    # in. Also teach the album predicate to recognize our stubs (real
-    # tidalapi.Album instances need a live session to construct).
-    monkeypatch.setattr(server.tidal.session, "for_you", lambda: StubPage([]))
-    monkeypatch.setattr(server, "_is_tidal_album", lambda i: isinstance(i, StubAlbum))
-
-
-class StubPage:
-    def __init__(self, categories):
-        self.categories = categories
-
-
-class StubCategory:
-    def __init__(self, title, items, subtitle=""):
-        self.title = title
-        self.subtitle = subtitle
-        self.items = items
 
 
 class StubAlbum:
@@ -98,7 +81,7 @@ def _no_lastfm(monkeypatch):
     import server
 
     monkeypatch.setattr(server.lastfm, "status", lambda: {"connected": False})
-    # "Made For You" reads the top artists and the similar-artist graph
+    # "Fans Also Like" reads the top artists and the similar-artist graph
     # regardless of the connected flag (an empty result is the disconnected
     # case), so stub both rather than leaning on ambient credentials.
     monkeypatch.setattr(server.lastfm, "get_top_artists", lambda period, limit: [])
@@ -116,6 +99,12 @@ def _no_aoty(monkeypatch):
     monkeypatch.setattr(server.aoty_module, "top_albums_of_year", lambda year, limit=50: [])
     monkeypatch.setattr(
         server.aoty_module, "top_albums_of_year_by_genre", lambda slug, year, limit=60: []
+    )
+    monkeypatch.setattr(
+        server.aoty_module, "recent_releases_by_genre", lambda slug, limit=60: []
+    )
+    monkeypatch.setattr(
+        server.aoty_module, "top_albums_by_genre", lambda slug, limit=60: []
     )
     monkeypatch.setattr(server.aoty_module, "genre_index", lambda: [])
 
@@ -136,10 +125,12 @@ def test_disabled_setting_returns_empty(stub_auth, monkeypatch):
 
 
 def test_favorited_albums_are_filtered_from_every_section(stub_auth, monkeypatch):
-    """Only _album_recommendations used to exclude saved albums, so the
-    AOTY-backed rows recommended the listener their own library back —
-    11 of 18 in "Popular in Your Orbit" on a real profile. The filter
-    belongs to section assembly so it covers every row."""
+    """Saved albums must not come back as recommendations in any row.
+
+    Originally only _album_recommendations excluded them, so the
+    AOTY-backed rows handed the listener their own library — 11 of 18 in
+    "Popular in Your Orbit" on a real profile. Every builder now excludes
+    them through _dedupe_cap_albums, ahead of the row being capped."""
     import server
 
     monkeypatch.setattr(
@@ -151,16 +142,22 @@ def test_favorited_albums_are_filtered_from_every_section(stub_auth, monkeypatch
     owned = StubAlbum("99", "Already Saved", "Artist Z")
     _set_library(monkeypatch, fav_albums=[owned])
 
-    # An AOTY-backed row that offers the saved album plus a fresh one.
-    def _fake_section(key, title, subtitle, listing, profile, taste_rank, deep=False):
+    # An AOTY-backed row offering the saved album plus a fresh one. It
+    # runs its candidates through the shared tail exactly as the real
+    # builders do, which is where the exclusion happens.
+    def _fake_section(key, title, subtitle, listing, profile, taste_rank,
+                      deep=False, owned=None):
         return {
             "key": key, "title": title, "subtitle": subtitle,
-            "albums": [
-                {"id": "99", "name": "Already Saved",
-                 "artists": [{"name": "Artist Z"}], "available": True},
-                {"id": "100", "name": "Brand New",
-                 "artists": [{"name": "Artist Y"}], "available": True},
-            ],
+            "albums": server._dedupe_cap_albums(
+                [
+                    {"id": "99", "name": "Already Saved",
+                     "artists": [{"name": "Artist Z"}], "available": True},
+                    {"id": "100", "name": "Brand New",
+                     "artists": [{"name": "Artist Y"}], "available": True},
+                ],
+                server._SECTION_SIZE, exclude=owned,
+            ),
         }
 
     monkeypatch.setattr(server, "_aoty_section", _fake_section)
@@ -170,7 +167,10 @@ def test_favorited_albums_are_filtered_from_every_section(stub_auth, monkeypatch
     assert "100" in served, "the unsaved album should still be offered"
 
 
-def test_enabled_returns_made_for_you_section(stub_auth, monkeypatch):
+def test_enabled_returns_genre_rows(stub_auth, monkeypatch):
+    """The page is genre-scoped now: "New Releases For You" and "From Your
+    Genres" both blend the listener's genres rather than re-ranking a
+    global chart, and neither is restricted to the current year."""
     import server
 
     monkeypatch.setattr(
@@ -178,347 +178,32 @@ def test_enabled_returns_made_for_you_section(stub_auth, monkeypatch):
     )
     _no_lastfm(monkeypatch)
     _no_aoty(monkeypatch)
-    seed = StubAlbum("1", "Seed", "Artist A", similar=[
-        StubAlbum("2", "Rec One", "Artist B"),
-        StubAlbum("3", "Rec Two", "Artist C"),
-        StubAlbum("4", "Rec Three", "Artist D"),
-    ])
-    _set_library(monkeypatch, fav_albums=[seed])
+    monkeypatch.setattr(
+        server, "_taste_profile",
+        lambda: {"connected": True, "artist_names": set(),
+                 "genres": [("26-shoegaze", "Shoegaze", 1.0)],
+                 "mainstream_ratio": 0.5},
+    )
+    monkeypatch.setattr(
+        server.aoty_module, "top_albums_by_genre",
+        lambda slug, limit=60: [{"artist": "Slowdive", "title": "Souvlaki"}],
+    )
+    monkeypatch.setattr(
+        server.aoty_resolver, "resolve_listing",
+        lambda listing: [
+            {**it, "tidal_album": {"id": "7", "name": it["title"],
+                                   "artists": [{"name": it["artist"]}],
+                                   "available": True}}
+            for it in listing
+        ],
+    )
+    _set_library(monkeypatch)
     out = server.recommendations_albums()
-    assert out["enabled"] is True
-    made = [s for s in out["sections"] if s["key"] == "made_for_you"]
-    assert made, "Made For You section should be present"
-    assert [a["id"] for a in made[0]["albums"]] == ["2", "3", "4"]
-    assert made[0]["albums"][0]["reason"] == "Because you saved Seed"
-
-
-# ---------------------------------------------------------------------------
-# "Made For You": library-seeded discovery
-#
-# Two pools, each ranked by corroboration across seeds: saved albums
-# through Tidal `album.similar()`, followed artists through Last.fm's
-# `artist.getSimilar`. Neither pool may rank against the other, so the row
-# interleaves them.
-# ---------------------------------------------------------------------------
-
-
-def _made(monkeypatch, floor=1, **kw):
-    """Build the row and return its albums. `floor` overrides the minimum
-    that keeps the row on the page, so filtering tests aren't fighting it;
-    the floor itself has its own test at the real value."""
-    import server
-
-    monkeypatch.setattr(server, "_MADE_MIN_ALBUMS", floor)
-    _set_library(monkeypatch, **kw)
-    return server._section_made_for_you()["albums"]
-
-
-def _lastfm_graph(monkeypatch, graph, top=()):
-    """Point the Last.fm surface at an in-memory similar-artist graph."""
-    import server
-
-    monkeypatch.setattr(server.lastfm, "status", lambda: {"connected": True})
-    monkeypatch.setattr(
-        server.lastfm, "get_top_artists",
-        lambda period, limit: [{"name": n} for n in top],
-    )
-    monkeypatch.setattr(
-        server.lastfm, "get_similar_artists",
-        lambda name, limit=30: graph.get(name, []),
-    )
-
-
-def _tidal_artists(monkeypatch, artists):
-    """Resolve a search query to a stub artist by name."""
-    import server
-
-    monkeypatch.setattr(
-        server.tidal, "search",
-        lambda q, limit=25: (
-            {"artists": [artists[q]]} if q in artists else {"artists": []}
-        ),
-    )
-
-
-def test_owned_albums_are_filtered_out(stub_auth, monkeypatch):
-    import server
-
-    _no_lastfm(monkeypatch)
-    # Seed's "similar" includes an album the user already owns (id 1) plus
-    # genuinely new ones. Only the new ones should surface.
-    seed = StubAlbum("1", "Owned Seed", "Artist A", similar=[
-        StubAlbum("1", "Owned Seed", "Artist A"),
-        StubAlbum("9", "Fresh Pick", "Artist Z"),
-    ])
-    ids = [a["id"] for a in _made(monkeypatch, fav_albums=[seed])]
-    assert ids == ["9"]
-
-
-def test_unavailable_albums_dropped(stub_auth, monkeypatch):
-    import server
-
-    _no_lastfm(monkeypatch)
-    seed = StubAlbum("1", "Seed", "Artist A", similar=[
-        StubAlbum("2", "Not Streamable", "Artist B", available=False),
-        StubAlbum("3", "Streamable", "Artist C", available=True),
-    ])
-    ids = [a["id"] for a in _made(monkeypatch, fav_albums=[seed])]
-    assert ids == ["3"]
-
-
-def test_per_artist_cap(stub_auth, monkeypatch):
-    import server
-
-    _no_lastfm(monkeypatch)
-    # Five candidate albums all by the same artist; the cap is 2.
-    same_artist = [
-        StubAlbum(str(i), f"Album {i}", "One Artist") for i in range(10, 15)
-    ]
-    seed = StubAlbum("1", "Seed", "Seed Artist", similar=same_artist)
-    out = _made(monkeypatch, fav_albums=[seed])
-    assert len(out) == server._RECS_PER_ARTIST_CAP
-
-
-def test_saved_album_corroboration_outranks_position(stub_auth, monkeypatch):
-    """An album several saves independently point at beats one that a
-    single save ranks first. This is the fix for source-constant ranking:
-    agreement across seeds decides placement, not a per-source base score.
-
-    `shared` is never first in any list (0.5 x 3 = 1.5); `solo` is first in
-    one and corroborated by nothing (1.0)."""
-    import server
-
-    _no_lastfm(monkeypatch)
-    shared = StubAlbum("42", "Shared", "Artist X")
-    solo = StubAlbum("7", "Solo", "Artist S")
-    seeds = [
-        StubAlbum("1", "Seed One", "A", similar=[solo, shared]),
-        StubAlbum("2", "Seed Two", "B", similar=[
-            StubAlbum("8", "Filler", "Artist F"), shared,
-        ]),
-        StubAlbum("3", "Seed Three", "C", similar=[
-            StubAlbum("9", "Filler Two", "Artist G"), shared,
-        ]),
-    ]
-    ids = [a["id"] for a in _made(monkeypatch, fav_albums=seeds)]
-    assert ids.count("42") == 1, "corroborated album must not duplicate"
-    assert ids[0] == "42"
-    assert ids.index("42") < ids.index("7")
-
-
-def test_followed_artists_resolve_through_lastfm(stub_auth, monkeypatch):
-    """Followed artists reach candidates through Last.fm's listener-overlap
-    graph, not Tidal's artist.get_similar()."""
-    import server
-
-    _lastfm_graph(monkeypatch, {"Fav": [{"name": "SimA", "match": 0.9}]})
-    _tidal_artists(monkeypatch, {
-        "SimA": StubArtist("SimA", albums=[
-            StubAlbum("55", "Lastfm Pick", "SimA"),
-            StubAlbum("56", "Lastfm Pick Two", "SimA"),
-        ]),
-    })
-    out = _made(monkeypatch, fav_artists=[StubArtist("Fav")])
-    assert [a["id"] for a in out] == ["55", "56"]
-    assert out[0]["reason"] == "Because you follow Fav"
-
-
-def test_lastfm_match_sums_across_follows(stub_auth, monkeypatch):
-    """An artist several follows share outranks one a single follow points
-    at, even when that single suggestion has the higher raw match.
-    Shared: 0.4 x 3 = 1.2 beats Loner's lone 0.95."""
-    import server
-
-    _lastfm_graph(monkeypatch, {
-        "FavOne": [{"name": "Shared", "match": 0.4}, {"name": "Loner", "match": 0.95}],
-        "FavTwo": [{"name": "Shared", "match": 0.4}],
-        "FavThree": [{"name": "Shared", "match": 0.4}],
-    })
-    _tidal_artists(monkeypatch, {
-        "Shared": StubArtist("Shared", albums=[StubAlbum("1", "Shared LP", "Shared")]),
-        "Loner": StubArtist("Loner", albums=[StubAlbum("2", "Loner LP", "Loner")]),
-    })
-    out = _made(monkeypatch, fav_artists=[
-        StubArtist("FavOne"), StubArtist("FavTwo"), StubArtist("FavThree"),
-    ])
-    ids = [a["id"] for a in out]
-    assert ids.count("1") == 1
-    assert ids == ["1", "2"]
-
-
-def test_artists_already_in_the_library_are_excluded(stub_auth, monkeypatch):
-    """Discovery means new names. A candidate the user already follows,
-    already saved, or already plays heavily is not a recommendation."""
-    import server
-
-    _lastfm_graph(
-        monkeypatch,
-        {"Fav": [
-            {"name": "Heavy", "match": 0.9},   # already in heavy rotation
-            {"name": "Fav", "match": 0.85},    # already followed
-            {"name": "Saved", "match": 0.8},   # artist of a saved album
-            {"name": "New", "match": 0.7},
-        ]},
-        top=["Heavy"],
-    )
-    _tidal_artists(monkeypatch, {
-        "New": StubArtist("New", albums=[StubAlbum("3", "New LP", "New")]),
-    })
-    out = _made(
-        monkeypatch,
-        fav_artists=[StubArtist("Fav")],
-        fav_albums=[StubAlbum("77", "Owned", "Saved")],
-    )
-    assert [a["id"] for a in out] == ["3"]
-
-
-def test_resolved_artist_in_library_is_excluded(stub_auth, monkeypatch):
-    """Tidal search can collapse a distinct name back onto a library artist
-    (e.g. "John Mayer Trio" -> John Mayer). Judge the resolved artist, not
-    the candidate string, so only the genuinely new name survives."""
-    import server
-
-    _lastfm_graph(monkeypatch, {"Fav": [
-        {"name": "Fav Trio", "match": 0.95},
-        {"name": "Real Find", "match": 0.6},
-    ]})
-    _tidal_artists(monkeypatch, {
-        # Different candidate name, resolves back to the followed artist.
-        "Fav Trio": StubArtist("Fav", albums=[StubAlbum("9", "Nope", "Fav")]),
-        "Real Find": StubArtist(
-            "Real Find", albums=[StubAlbum("10", "Yes", "Real Find")]
-        ),
-    })
-    out = _made(monkeypatch, fav_artists=[StubArtist("Fav")])
-    assert [a["id"] for a in out] == ["10"]
-
-
-def test_pools_interleave(stub_auth, monkeypatch):
-    """Saved-album and followed-artist picks measure different things, so
-    the row alternates between them rather than letting one pool's scale
-    dominate the top of the shelf."""
-    import server
-
-    _lastfm_graph(monkeypatch, {"Fav": [{"name": "SimA", "match": 0.9}]})
-    _tidal_artists(monkeypatch, {
-        "SimA": StubArtist("SimA", albums=[StubAlbum("a1", "Artist Pick", "SimA")]),
-    })
-    seed = StubAlbum("1", "Seed", "Seed Artist", similar=[
-        StubAlbum("b1", "Album Pick One", "Artist B"),
-        StubAlbum("b2", "Album Pick Two", "Artist C"),
-    ])
-    out = _made(monkeypatch, fav_albums=[seed], fav_artists=[StubArtist("Fav")])
-    # One from each pool, then the deeper pool's remainder.
-    assert [a["id"] for a in out] == ["a1", "b1", "b2"]
-    assert out[0]["reason"] == "Because you follow Fav"
-    assert out[1]["reason"] == "Because you saved Seed"
-
-
-def test_row_drops_when_too_thin(stub_auth, monkeypatch):
-    """Under the floor the shelf looks broken, so the row drops out instead
-    of rendering a stub. Exercised at the real floor value."""
-    import server
-
-    _no_lastfm(monkeypatch)
-    assert server._MADE_MIN_ALBUMS == 3
-    picks = [StubAlbum("2", "One", "B"), StubAlbum("3", "Two", "C")]
-    thin = StubAlbum("1", "Seed", "A", similar=picks)
-    assert _made(monkeypatch, floor=3, fav_albums=[thin]) == []
-    # One more candidate clears the floor.
-    full = StubAlbum("1", "Seed", "A", similar=picks + [StubAlbum("4", "Three", "D")])
-    assert len(_made(monkeypatch, floor=3, fav_albums=[full])) == 3
-
-
-def test_reissues_collapsed_by_title_and_artist(stub_auth, monkeypatch):
-    """Same album under two Tidal ids (deluxe/explicit/regional) should
-    appear once — the id-dedupe can't catch it, the title+artist one does."""
-    import server
-
-    _no_lastfm(monkeypatch)
-    seed = StubAlbum("1", "Seed", "A", similar=[
-        StubAlbum("100", "Power Ballad", "Same Artist"),
-        StubAlbum("200", "power ballad", "Same Artist"),  # reissue, other id
-    ])
-    out = _made(monkeypatch, fav_albums=[seed])
-    assert [a["id"] for a in out] == ["100"]
-
-
-def test_no_library_yields_no_row(stub_auth, monkeypatch):
-    """With nothing saved and nobody followed there is no seed, so the row
-    drops rather than falling back to listening history — that is what
-    "Fans Also Like" is for."""
-    import server
-
-    _no_lastfm(monkeypatch)
-    assert _made(monkeypatch) == []
-
-
-def test_similar_failure_is_non_fatal(stub_auth, monkeypatch):
-    """A seed whose similar() blows up must not sink the row."""
-    import server
-
-    _no_lastfm(monkeypatch)
-
-    class Exploding(StubAlbum):
-        def similar(self):
-            raise RuntimeError("tidal similar 500")
-
-    bad = Exploding("1", "Bad Seed", "A")
-    good = StubAlbum("2", "Good Seed", "B", similar=[
-        StubAlbum("9", "Still Here", "C"),
-        StubAlbum("10", "Also Here", "D"),
-        StubAlbum("11", "And Here", "E"),
-    ])
-    ids = [a["id"] for a in _made(monkeypatch, fav_albums=[bad, good])]
-    assert ids == ["9", "10", "11"]
-
-
-# ---------------------------------------------------------------------------
-# Tidal's own "For You" album modules, each rendered as its own section
-# ---------------------------------------------------------------------------
-
-
-def test_for_you_album_modules_harvested(stub_auth, monkeypatch):
-    import server
-
-    # An album module (harvested, labelled by title + subtitle) alongside a
-    # non-album item, which is ignored.
-    page = StubPage([
-        StubCategory(
-            "Because you listened to",
-            [StubAlbum(str(i), f"Native {i}", f"Artist {i}") for i in range(4)]
-            + [object()],
-            subtitle="Radiohead",
-        ),
-    ])
-    monkeypatch.setattr(server.tidal.session, "for_you", lambda: page)
-    sections = server._for_you_album_sections()
-    assert len(sections) == 1
-    assert sections[0]["title"] == "Because you listened to Radiohead"
-    assert [a["id"] for a in sections[0]["albums"]] == ["0", "1", "2", "3"]
-
-
-def test_for_you_thin_modules_skipped(stub_auth, monkeypatch):
-    """Fewer than four albums is a broken-looking shelf, so the module is
-    skipped rather than rendered."""
-    import server
-
-    page = StubPage([
-        StubCategory("Suggested new albums", [StubAlbum("1", "Only One", "A")]),
-    ])
-    monkeypatch.setattr(server.tidal.session, "for_you", lambda: page)
-    assert server._for_you_album_sections() == []
-
-
-def test_for_you_failure_is_non_fatal(stub_auth, monkeypatch):
-    """A broken For You fetch yields no sections rather than raising."""
-    import server
-
-    def _boom():
-        raise RuntimeError("tidal for_you 500")
-
-    monkeypatch.setattr(server.tidal.session, "for_you", _boom)
-    assert server._for_you_album_sections() == []
+    keys = [s["key"] for s in out["sections"]]
+    assert "from_your_genres" in keys
+    assert "made_for_you" not in keys
+    assert not any(k.startswith("genre:") for k in keys), "year-scoped rows are gone"
+    assert "deep_cuts" not in keys
 
 
 # ---------------------------------------------------------------------------
@@ -701,19 +386,18 @@ def test_section_assembly_orders_and_drops_empty(stub_auth, monkeypatch):
         lambda year, limit=50: [{"id": "p1", "title": "Pop", "artist": "PA", "score": 95, "genre_slugs": []}],
     )
     monkeypatch.setattr(server.aoty_module, "genre_index", lambda: [])
-    # Enough picks to clear the row's minimum, or it drops off the page.
-    seed = StubAlbum("1", "Seed", "SA", similar=[
-        StubAlbum("m1", "Made Pick", "MB"),
-        StubAlbum("m2", "Made Pick Two", "MC"),
-        StubAlbum("m3", "Made Pick Three", "MD"),
-    ])
-    _set_library(monkeypatch, fav_albums=[seed])
+    monkeypatch.setattr(
+        server.aoty_module, "recent_releases_by_genre", lambda slug, limit=60: []
+    )
+    monkeypatch.setattr(
+        server.aoty_module, "top_albums_by_genre", lambda slug, limit=60: []
+    )
+    _set_library(monkeypatch)
 
     sections = server._build_recommendation_sections()
-    # Genre rows absent (no inferred genres); order is made -> new -> popular.
-    assert [s["key"] for s in sections] == ["made_for_you", "new_releases", "popular"]
-    made = next(s for s in sections if s["key"] == "made_for_you")
-    assert [a["id"] for a in made["albums"]] == ["m1", "m2", "m3"]
+    # No inferred genres, so both genre-blended rows come back empty and
+    # drop; only the year-chart row survives.
+    assert [s["key"] for s in sections] == ["popular"]
 
 
 # ---------------------------------------------------------------------------
@@ -850,3 +534,109 @@ def test_fans_also_like_empty_when_no_overlap(stub_auth, monkeypatch):
     )
     sec = server._section_fans_also_like()
     assert sec["albums"] == []
+
+
+# ---------------------------------------------------------------------------
+# Blended top row
+# ---------------------------------------------------------------------------
+
+
+def _row(key, title, ids):
+    return {
+        "key": key, "title": title, "subtitle": "",
+        "albums": [
+            {"id": i, "name": f"{i} album", "artists": [{"name": f"{i} artist"}]}
+            for i in ids
+        ],
+    }
+
+
+def test_blend_round_robins_across_rows():
+    """No source may dominate. A row with many candidates must not crowd
+    out a thinner one — that was the failure the seed round-robin fixed
+    in Fans Also Like, and the same rule applies across rows."""
+    import server
+
+    rows = [
+        _row("big", "Big Row", [f"b{i}" for i in range(10)]),
+        _row("small", "Small Row", ["s1", "s2"]),
+    ]
+    blend = server._blend_top_row(rows)
+    reasons = [a["reason"] for a in blend["albums"]]
+    # First two picks alternate; the thin row is represented up front
+    # rather than buried behind ten from the big row.
+    assert reasons[0] == "Big Row"
+    assert reasons[1] == "Small Row"
+    assert reasons.count("Small Row") == 2
+
+
+def test_blend_keeps_existing_reasons():
+    """A card that already explains itself keeps its own wording; only
+    rows whose albums carry no reason fall back to the row title."""
+    import server
+
+    rows = [_row("a", "Row A", ["1", "3", "5"]), _row("b", "Row B", ["2", "4", "6"])]
+    rows[0]["albums"][0]["reason"] = "Fans of Someone also like"
+    blend = server._blend_top_row(rows)
+    by_id = {a["id"]: a["reason"] for a in blend["albums"]}
+    assert by_id["1"] == "Fans of Someone also like"
+    assert by_id["2"] == "Row B"
+
+
+def test_blend_removes_its_picks_from_source_rows():
+    """The same album must not appear twice on one page."""
+    import server
+
+    rows = [_row("a", "Row A", ["1", "2"]), _row("b", "Row B", ["3", "4"])]
+    blend = server._blend_top_row(rows)
+    blended = {a["id"] for a in blend["albums"]}
+    remaining = {a["id"] for r in rows for a in r["albums"]}
+    assert not (blended & remaining), "an album is on both the blend and its row"
+
+
+def test_blend_skipped_when_only_one_row():
+    """Blending one row just renames it, so don't."""
+    import server
+
+    assert server._blend_top_row([_row("a", "Row A", ["1", "2", "3"])]) is None
+
+
+def test_blend_dedupes_across_rows():
+    """An album offered by two sources appears once, attributed to
+    whichever row reached it first."""
+    import server
+
+    rows = [
+        _row("a", "Row A", ["dup", "1", "3"]),
+        _row("b", "Row B", ["dup", "2", "4"]),
+    ]
+    blend = server._blend_top_row(rows)
+    ids = [a["id"] for a in blend["albums"]]
+    assert ids.count("dup") == 1
+
+
+def test_owned_filter_runs_before_truncation():
+    """Excluding saved albums after truncating spends the shelf's slots on
+    albums that are then discarded. On a real library that left "Popular
+    in Your Orbit" showing 3 of 18 — the chart was mostly albums already
+    saved. The exclusion has to happen before the row is capped."""
+    import server
+
+    # 20 candidates, the first 15 already saved. A row of 5 can still be
+    # filled entirely from the tail.
+    albums = [
+        {"id": str(i), "name": f"Album {i}", "artists": [{"name": f"Artist {i}"}]}
+        for i in range(20)
+    ]
+    owned = {str(i) for i in range(15)}
+    out = server._dedupe_cap_albums(albums, 5, exclude=owned)
+    assert len(out) == 5, "row should fill from the unowned tail"
+    assert all(a["id"] not in owned for a in out)
+
+
+def test_owned_filter_is_optional():
+    """Callers without an exclusion set get the old behaviour."""
+    import server
+
+    albums = [{"id": "1", "name": "A", "artists": [{"name": "X"}]}]
+    assert len(server._dedupe_cap_albums(albums, 5)) == 1

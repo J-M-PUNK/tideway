@@ -11859,21 +11859,23 @@ def _album_primary_artist_key(album) -> str:
         return ""
 
 
-def _is_tidal_album(item) -> bool:
-    """Whether a page item is an Album (vs a mix/playlist/track/link).
-    Factored out so tests can inject stub albums without constructing real
-    tidalapi objects, which need a live session."""
-    import tidalapi
-
-    return isinstance(item, tidalapi.Album)
-
-
 # How many albums each section shows.
 _SECTION_SIZE = 18
 # How many AOTY rows to resolve to Tidal per section. Resolving hits a
 # Tidal search per album, so we rank the (cheap) AOTY listing first and
 # only resolve the top slice — not the whole 60-row scrape.
-_SECTION_RESOLVE_POOL = 24
+#
+# Sized at twice the shelf because a chart the listener actually likes is
+# a chart they already own a lot of: on a real library half of the year's
+# top albums were already saved, and whether an entry is saved isn't
+# knowable until it has been resolved to a Tidal id. At 24 the row came
+# back with 9 of 18; 36 fills it, and 48 measured no better — so this is
+# the smallest pool that fills the shelf, not a guess.
+_SECTION_RESOLVE_POOL = 36
+# Genres blended into each genre-scoped row. AOTY lists only a handful of
+# albums per genre section, so one genre can't fill a shelf; five covers
+# the shelf while still reflecting the listener's actual spread.
+_GENRE_BLEND_SEEDS = 5
 # Similar artists to resolve for "Fans Also Like". Each costs a Tidal
 # search plus an album fetch, and yields up to 2 albums, so this sits
 # comfortably above _SECTION_SIZE to survive unavailable albums and the
@@ -11893,14 +11895,38 @@ def _album_dict_artist_key(d) -> str:
     return (arts[0].get("name", "") if arts else "").strip().lower()
 
 
-def _dedupe_cap_albums(albums: list, limit: int) -> list[dict]:
-    """Collapse reissues (title, artist), cap per artist, and truncate —
-    the shared tail every section runs its candidates through."""
+def _owned_album_ids() -> set:
+    """Tidal ids of the listener's saved albums.
+
+    Every recommendation row excludes these — offering someone an album
+    they already saved is wrong everywhere, and it's account-level state
+    so it holds across their devices.
+    """
+    return {
+        str(getattr(a, "id", "") or "")
+        for a in _rec_safe(lambda: list(tidal.get_favorite_albums() or []), [])
+    }
+
+
+def _dedupe_cap_albums(albums: list, limit: int, exclude: Optional[set] = None) -> list[dict]:
+    """Collapse reissues (title, artist), drop excluded ids, cap per
+    artist, and truncate — the shared tail every section runs its
+    candidates through.
+
+    `exclude` is normally the listener's saved albums. It belongs here,
+    ahead of the truncation, rather than as a pass over the finished
+    row: filtering afterwards spends the row's slots on albums that are
+    then thrown away, which on a real library left "Popular in Your
+    Orbit" showing 7 of 18 because the other 11 were already saved.
+    """
+    exclude = exclude or set()
     out: list[dict] = []
     seen: set = set()
     per_artist: dict[str, int] = {}
     for d in albums:
         if not d:
+            continue
+        if str(d.get("id") or "") in exclude:
             continue
         key = _album_dict_artist_key(d)
         sig = ((d.get("name") or "").strip().lower(), key)
@@ -12007,7 +12033,7 @@ def _taste_profile() -> dict:
         if hit and hit[0] and hit[0] not in seen_slugs:
             seen_slugs.add(hit[0])
             genres.append((hit[0], hit[1], _w))
-        if len(genres) >= 4:
+        if len(genres) >= _GENRE_BLEND_SEEDS:
             break
 
     # Obscurity: how much of your top rotation overlaps Last.fm's global
@@ -12029,7 +12055,8 @@ def _taste_profile() -> dict:
     }
 
 
-def _aoty_section(key, title, subtitle, listing, profile, taste_rank, deep=False) -> dict:
+def _aoty_section(key, title, subtitle, listing, profile, taste_rank, deep=False,
+                  owned: Optional[set] = None) -> dict:
     """Build one AOTY-backed section. When `taste_rank`, re-order the
     (cheap) AOTY listing by a blend of popularity (AOTY score) and genre
     affinity before resolving only the top slice to Tidal.
@@ -12070,212 +12097,11 @@ def _aoty_section(key, title, subtitle, listing, profile, taste_rank, deep=False
         "key": key,
         "title": title,
         "subtitle": subtitle,
-        "albums": _dedupe_cap_albums(albums, _SECTION_SIZE),
+        "albums": _dedupe_cap_albums(albums, _SECTION_SIZE, exclude=owned),
     }
 
 
-def _for_you_album_sections() -> list[dict]:
-    """Tidal's own For You *album* modules, each as its own section, using
-    Tidal's built-in "Because you listened to X" module labels."""
-    page = _rec_safe(lambda: tidal.session.for_you(), None)
-    if page is None:
-        return []
-    sections: list[dict] = []
-    for cat in _rec_safe(lambda: list(getattr(page, "categories", []) or []), []):
-        title = (getattr(cat, "title", None) or "").strip()
-        sub = (
-            getattr(cat, "subtitle", None) or getattr(cat, "description", None) or ""
-        ).strip()
-        if sub and sub == title:
-            sub = ""
-        label = f"{title} {sub}".strip()
-        if not label:
-            continue
-        items = _rec_safe(lambda c=cat: list(getattr(c, "items", []) or []), [])
-        albums = []
-        for item in items:
-            if _is_tidal_album(item):
-                d = _rec_safe(lambda a=item: album_to_dict(a), None)
-                if d and d.get("available"):
-                    albums.append(d)
-        albums = _dedupe_cap_albums(albums, _SECTION_SIZE)
-        if len(albums) >= 4:  # skip thin rows
-            sections.append(
-                {"key": f"for_you:{label}", "title": label, "subtitle": "", "albums": albums}
-            )
-    return sections
-
-
-# How many library seeds feed "Made For You", and how many similar artists
-# it resolves to Tidal. Resolving costs a search plus an album fetch each,
-# so the artist pool is capped well below the candidate count.
-_MADE_SEED_ALBUMS = 8
-_MADE_SEED_ARTISTS = 8
-_MADE_RESOLVE_ARTISTS = 10
-# Below this the shelf looks broken, so the row drops instead of rendering
-# a stub. Matches the floor "Fans Also Like" uses.
-_MADE_MIN_ALBUMS = 3
-
-
-def _section_made_for_you() -> dict:
-    """Discovery seeded by the library you curated rather than the one you
-    play. "Fans Also Like" works off Last.fm's top artists, i.e. what you
-    actually listened to this half-year. This row works off what you chose
-    to keep: albums you saved and artists you follow.
-
-    Two signals, each ranked by corroboration across seeds:
-
-      A. Followed artists -> Last.fm `artist.getSimilar`, with `match`
-         summed across seeds, so an artist that several of your follows
-         point at outranks one a single follow suggested.
-      B. Saved albums -> Tidal `album.similar()`, scored by reciprocal rank
-         summed across seeds. A similar-album list is ordered but carries
-         no score, so position is the only strength signal it has, and
-         summing rewards albums several of your saves agree on.
-
-    The two scores measure different things and are not comparable, so the
-    row interleaves the pools instead of inventing a common scale. Within
-    a pool the strongest candidate always wins, which is what stops a thin
-    seed from buying a slot it did not earn."""
-    fav_albums = _rec_safe(lambda: list(tidal.get_favorite_albums() or []), [])
-    fav_artists = _rec_safe(lambda: list(tidal.get_favorite_artists() or []), [])
-    owned_ids = {str(getattr(a, "id", "") or "") for a in fav_albums}
-
-    # Artists already in the library or in heavy rotation. This row is for
-    # discovery, so an album by someone you already follow, already saved,
-    # or already play a lot is not a recommendation.
-    known = {(getattr(a, "name", "") or "").strip().lower() for a in fav_artists}
-    known |= {_album_primary_artist_key(a) for a in fav_albums}
-    top = _rec_safe(lambda: lastfm.get_top_artists("6month", limit=15), [])
-    known |= {(t.get("name") or "").strip().lower() for t in top if t.get("name")}
-    known.discard("")
-
-    # -- Pool A: followed artists -> Last.fm listener overlap --------------
-    seeds_a = [(getattr(a, "name", "") or "").strip() for a in fav_artists]
-    seeds_a = [s for s in seeds_a if s][:_MADE_SEED_ARTISTS]
-
-    def _sims(seed):
-        return _rec_safe(lambda s=seed: lastfm.get_similar_artists(s, limit=15), [])
-
-    scored_a: dict[str, dict] = {}
-    if seeds_a:
-        with ThreadPoolExecutor(max_workers=6, thread_name_prefix="madeart") as pool:
-            for seed, sims in zip(seeds_a, pool.map(_sims, seeds_a)):
-                for s in sims:
-                    nm = (s.get("name") or "").strip()
-                    low = nm.lower()
-                    if not nm or low in known:
-                        continue
-                    try:
-                        match = float(s.get("match") or 0.0)
-                    except (TypeError, ValueError):
-                        match = 0.0
-                    entry = scored_a.get(low)
-                    if entry is None:
-                        scored_a[low] = {
-                            "name": nm, "score": match, "seed": seed, "best": match,
-                        }
-                        continue
-                    entry["score"] += match
-                    if match > entry["best"]:
-                        entry["best"] = match
-                        entry["seed"] = seed
-    ranked_a = sorted(scored_a.values(), key=lambda e: e["score"], reverse=True)
-    ranked_a = ranked_a[:_MADE_RESOLVE_ARTISTS]
-
-    # -- Pool B: saved albums -> Tidal album adjacency ---------------------
-    seeds_b = fav_albums[:_MADE_SEED_ALBUMS]
-
-    def _similar_albums(seed):
-        return _rec_safe(lambda s=seed: list(s.similar())[:10], [])
-
-    scored_b: dict[str, dict] = {}
-    if seeds_b:
-        with ThreadPoolExecutor(max_workers=6, thread_name_prefix="madealb") as pool:
-            for seed, sims in zip(seeds_b, pool.map(_similar_albums, seeds_b)):
-                seed_name = (getattr(seed, "name", "") or "").strip()
-                for rank, alb in enumerate(sims):
-                    aid = str(getattr(alb, "id", "") or "")
-                    key = _album_primary_artist_key(alb)
-                    if not aid or aid in owned_ids:
-                        continue
-                    if key in known:
-                        continue
-                    weight = 1.0 / (rank + 1)
-                    entry = scored_b.get(aid)
-                    if entry is None:
-                        scored_b[aid] = {
-                            "album": alb, "score": weight,
-                            "seed": seed_name, "best": weight,
-                        }
-                        continue
-                    entry["score"] += weight
-                    if weight > entry["best"]:
-                        entry["best"] = weight
-                        entry["seed"] = seed_name
-    ranked_b = sorted(scored_b.values(), key=lambda e: e["score"], reverse=True)
-
-    def _albums_for(entry):
-        res = _rec_safe(lambda: tidal.search(entry["name"], limit=3), {}) or {}
-        arts = res.get("artists") or []
-        if not arts:
-            return []
-        artist_obj = arts[0]
-        # Tidal search can collapse a distinct similar-artist name back onto
-        # someone already in the library, so judge the *resolved* artist
-        # rather than the candidate string.
-        if (getattr(artist_obj, "name", "") or "").strip().lower() in known:
-            return []
-        albs = _rec_safe(lambda a=artist_obj: list(a.get_albums(limit=2) or []), [])
-        out = []
-        for alb in albs:
-            if str(getattr(alb, "id", "") or "") in owned_ids:
-                continue
-            d = _rec_safe(lambda a=alb: album_to_dict(a), None)
-            if d and d.get("available"):
-                d["reason"] = f"Because you follow {entry['seed']}"
-                out.append(d)
-        return out
-
-    pool_a: list = []
-    if ranked_a:
-        with ThreadPoolExecutor(max_workers=6, thread_name_prefix="maderes") as pool:
-            for a in pool.map(_albums_for, ranked_a):
-                pool_a.extend(a)
-
-    pool_b: list = []
-    for entry in ranked_b:
-        d = _rec_safe(lambda a=entry["album"]: album_to_dict(a), None)
-        if not d or not d.get("available"):
-            continue
-        d["reason"] = (
-            f"Because you saved {entry['seed']}"
-            if entry["seed"]
-            else "Similar to an album you saved"
-        )
-        pool_b.append(d)
-
-    # Alternate the pools. Neither score can rank against the other, so
-    # each signal gets an equal share of the row and whichever pool runs
-    # deeper fills the remainder.
-    albums: list = []
-    for i in range(max(len(pool_a), len(pool_b))):
-        if i < len(pool_a):
-            albums.append(pool_a[i])
-        if i < len(pool_b):
-            albums.append(pool_b[i])
-
-    albums = _dedupe_cap_albums(albums, _SECTION_SIZE)
-    return {
-        "key": "made_for_you",
-        "title": "Made For You",
-        "subtitle": "From the albums you saved and the artists you follow",
-        # Drop the row unless it earns its place — opportunistic by design.
-        "albums": albums if len(albums) >= _MADE_MIN_ALBUMS else [],
-    }
-
-
-def _section_fans_also_like() -> dict:
+def _section_fans_also_like(owned: Optional[set] = None) -> dict:
     """Listener-overlap discovery (#307): artists that people who like your
     top artists also play, resolved to their Tidal albums. Driven by
     Last.fm's `artist.getSimilar` collaborative-filtering graph — "fans of X
@@ -12382,7 +12208,7 @@ def _section_fans_also_like() -> dict:
         with ThreadPoolExecutor(max_workers=6, thread_name_prefix="fansres") as pool:
             for a in pool.map(_albums_for, ranked):
                 albums.extend(a)
-    albums = _dedupe_cap_albums(albums, _SECTION_SIZE)
+    albums = _dedupe_cap_albums(albums, _SECTION_SIZE, exclude=owned)
     return {
         "key": "fans_also_like",
         "title": "Fans Also Like",
@@ -12392,52 +12218,100 @@ def _section_fans_also_like() -> dict:
     }
 
 
+def _genre_blend(key: str, title: str, subtitle: str, fetch, profile,
+                 owned: Optional[set] = None) -> dict:
+    """One row blended across the listener's top genres.
+
+    AOTY's genre page yields only a handful of albums per section, so a
+    single genre can't fill a shelf. Interleaving the listener's genres
+    round-robin fills it while keeping the row representative of their
+    taste rather than of whichever genre happens to be listed deepest —
+    the same reason "Fans Also Like" round-robins across seeds.
+    """
+    genres = profile.get("genres", [])[:_GENRE_BLEND_SEEDS]
+    if not genres:
+        return {"key": key, "title": title, "subtitle": subtitle, "albums": []}
+
+    def _for(seed):
+        slug, name, _w = seed
+        return name, _rec_safe(lambda s=slug: fetch(s), []) or []
+
+    per_genre: "OrderedDict[str, list]" = OrderedDict()
+    with ThreadPoolExecutor(max_workers=5, thread_name_prefix="genreblend") as pool:
+        for name, rows in pool.map(_for, genres):
+            if rows:
+                per_genre[name] = rows
+
+    interleaved: list[dict] = []
+    while True:
+        progressed = False
+        for rows in per_genre.values():
+            if rows:
+                interleaved.append(rows.pop(0))
+                progressed = True
+        if not progressed:
+            break
+
+    resolved = _rec_safe(
+        lambda: aoty_resolver.resolve_listing(interleaved[:_SECTION_RESOLVE_POOL]), []
+    ) or []
+    albums = [
+        it["tidal_album"]
+        for it in resolved
+        if it.get("tidal_album") and it["tidal_album"].get("available")
+    ]
+    return {
+        "key": key,
+        "title": title,
+        "subtitle": subtitle,
+        "albums": _dedupe_cap_albums(albums, _SECTION_SIZE, exclude=owned),
+    }
+
+
 def _build_recommendation_sections() -> list[dict]:
     """Assemble the sectioned "For You" page. Section builders run in
     parallel (each fans out its own Tidal/AOTY calls); empty sections are
     dropped so the page never shows a bare heading."""
     profile = _taste_profile()
     year = datetime.now().year
+    # Resolved once and handed to every builder so each excludes saved
+    # albums *before* truncating to the shelf size, rather than spending
+    # slots on albums a later pass would discard.
+    owned = _owned_album_ids()
 
     builders: list[tuple[str, Any]] = [
-        ("made", _section_made_for_you),
-        ("new", lambda: _aoty_section(
+        # New releases scoped to the listener's genres. The previous
+        # version pulled AOTY's global this-week list and re-ranked it by
+        # taste, which mostly surfaced whatever was popular that week
+        # regardless of whether it was anywhere near their genres.
+        ("new", lambda: _genre_blend(
             "new_releases", "New Releases For You",
-            "Fresh this week, ranked for your taste",
-            _rec_safe(lambda: aoty_module.recent_releases(60), []), profile, True,
+            "Fresh in the genres you listen to",
+            lambda s: aoty_module.recent_releases_by_genre(s, 20), profile,
+            owned=owned,
+        )),
+        # The genre canon, all-time rather than "best of <this year>".
+        ("genres", lambda: {
+            **_genre_blend(
+                "from_your_genres", "From Your Genres",
+                "Highest rated in the genres you listen to",
+                lambda s: aoty_module.top_albums_by_genre(s, 20), profile,
+                owned=owned,
+            ),
+            # Drill-down: a row per genre instead of one blended shelf.
+            "view_more": "/for-you/genres",
+        }),
+        ("popular", lambda: _aoty_section(
+            "popular", "Popular in Your Orbit",
+            "Highly rated this year, tuned to your genres",
+            _rec_safe(lambda: aoty_module.top_albums_of_year(year, 60), []), profile, True,
+            owned=owned,
         )),
     ]
-    genre_seeds = profile.get("genres", [])[:2]
-    for slug, name, _w in genre_seeds:
-        builders.append((
-            f"genre:{slug}",
-            lambda s=slug, n=name: _aoty_section(
-                f"genre:{s}", f"Best of {n}", f"Top-rated {n} of {year}",
-                _rec_safe(lambda: aoty_module.top_albums_of_year_by_genre(s, year, 60), []),
-                profile, False,
-            ),
-        ))
-    builders.append(("popular", lambda: _aoty_section(
-        "popular", "Popular in Your Orbit",
-        "Highly rated this year, tuned to your genres",
-        _rec_safe(lambda: aoty_module.top_albums_of_year(year, 60), []), profile, True,
-    )))
-    # Deep Cuts: the hidden-gem end of your top genre — genre fit with a
-    # popularity penalty so it surfaces what the canon rows won't.
-    if genre_seeds:
-        d_slug, d_name, _dw = genre_seeds[0]
-        builders.append((
-            "deep",
-            lambda s=d_slug, n=d_name: _aoty_section(
-                "deep_cuts", f"Deep Cuts: {n}", f"Lesser-known {n}, off the canon",
-                _rec_safe(lambda: aoty_module.top_albums_of_year_by_genre(s, year, 60), []),
-                profile, taste_rank=False, deep=True,
-            ),
-        ))
     # Listener-overlap discovery — only when Last.fm is connected (that's
     # where the seed artists and their getSimilar graph come from).
     if profile.get("connected"):
-        builders.append(("fans", _section_fans_also_like))
+        builders.append(("fans", lambda: _section_fans_also_like(owned=owned)))
 
     results: dict[str, dict] = {}
     with ThreadPoolExecutor(max_workers=6, thread_name_prefix="recsec") as pool:
@@ -12447,37 +12321,94 @@ def _build_recommendation_sections() -> list[dict]:
             if r:
                 results[futs[fut]] = r
 
-    because = _rec_safe(lambda: _for_you_album_sections(), [])[:2]
+    ordered = [
+        results.get("new"),
+        results.get("genres"),
+        results.get("popular"),
+        results.get("fans"),
+    ]
+    # Saved albums are already excluded inside each builder, ahead of
+    # truncation, so nothing to filter here — just drop empty rows.
+    out = [s for s in ordered if s and s.get("albums")]
 
-    ordered = [results.get("made"), results.get("new")]
-    for slug, _n, _w in genre_seeds:
-        ordered.append(results.get(f"genre:{slug}"))
-    ordered.append(results.get("popular"))
-    ordered.append(results.get("deep"))
-    ordered.append(results.get("fans"))
-    ordered.extend(because)
+    blend = _blend_top_row(out)
+    if not blend:
+        return out
+    # Pulling picks up into the blend thins the rows below it. A shelf
+    # left with one or two cards reads as broken rather than short, and
+    # its albums are still on the page — they moved up into the blend —
+    # so drop it rather than render a stub.
+    return [blend] + [s for s in out if len(s["albums"]) >= _BLEND_MIN_REMAINDER]
 
-    # Drop anything already in the listener's favorites across every
-    # section, then drop sections left empty. The filter belongs here
-    # rather than in the individual builders: recommending an album back
-    # to someone who already saved it is wrong in every row, and only
-    # _album_recommendations was excluding favorites, so the AOTY-backed
-    # rows were handing back the library.
-    owned = {
-        str(getattr(a, "id", "") or "")
-        for a in _rec_safe(lambda: list(tidal.get_favorite_albums() or []), [])
-    }
-    out: list[dict] = []
-    for s in ordered:
-        if not s:
-            continue
-        s["albums"] = [
-            a for a in s.get("albums", [])
-            if a and str(a.get("id") or "") not in owned
+
+# Albums on the blended top row.
+_BLEND_SIZE = 18
+# A row left thinner than this once the blend has taken its picks is
+# dropped — the albums are still on the page, one shelf higher.
+_BLEND_MIN_REMAINDER = 3
+
+
+def _blend_top_row(sections: list[dict]) -> Optional[dict]:
+    """One shelf drawing the strongest remaining pick from every row in
+    turn (#307).
+
+    Deliberately *not* a scored merge. The signals feeding these rows —
+    AOTY's 0..100 rating, Last.fm's 0..1 overlap, Tidal's module position
+    — measure different things on incomparable scales, and the previous
+    attempt at reconciling them used hand-picked constants that made a
+    weak Tidal pick outrank a near-perfect Last.fm match. Round-robin
+    needs no common scale: it just guarantees no source can dominate.
+
+    Every card keeps a reason, falling back to the row it came from, so
+    the shelf stays legible — you can always see why something is there,
+    and a source producing junk is visible rather than buried.
+
+    Built from the already-assembled rows, so it costs no extra fetches.
+    Picks are removed from their source row to avoid showing an album
+    twice on one page.
+    """
+    pools = [(s, list(s.get("albums") or [])) for s in sections if s.get("albums")]
+    if len(pools) < 2:
+        # A "blend" of one row is just that row with a different title.
+        return None
+
+    picked: list[dict] = []
+    taken: set = set()
+    while len(picked) < _BLEND_SIZE:
+        progressed = False
+        for section, pool in pools:
+            while pool:
+                album = pool.pop(0)
+                aid = str(album.get("id") or "")
+                if not aid or aid in taken:
+                    continue
+                entry = dict(album)
+                if not entry.get("reason"):
+                    entry["reason"] = section["title"]
+                picked.append(entry)
+                taken.add(aid)
+                progressed = True
+                break
+            if len(picked) >= _BLEND_SIZE:
+                break
+        if not progressed:
+            break
+
+    if len(picked) < 4:
+        return None
+
+    # Don't repeat the blended picks further down the page.
+    for section in sections:
+        section["albums"] = [
+            a for a in section["albums"] if str(a.get("id") or "") not in taken
         ]
-        if s["albums"]:
-            out.append(s)
-    return out
+
+    return {
+        "key": "recommended",
+        "title": "Recommended For You",
+        "subtitle": "The best of every source, side by side",
+        "albums": picked,
+    }
 
 
 @app.get("/api/recommendations/albums")
@@ -12504,6 +12435,105 @@ def recommendations_albums() -> dict:
     with _recs_cache_lock:
         _recs_cache["sections"] = (time.monotonic(), payload)
     return payload
+
+
+def _genre_drilldown_sections() -> list[dict]:
+    """One section per top genre — the drill-down behind "From Your Genres".
+
+    The shelf on the main page blends the genres together to fill a row;
+    here each genre keeps its own row, which is the point of drilling in.
+    Both read the same cached genre pages, so opening this costs nothing
+    beyond resolving the extra albums to Tidal.
+    """
+    profile = _taste_profile()
+    genres = profile.get("genres", [])[:_GENRE_BLEND_SEEDS]
+    if not genres:
+        return []
+    owned = _owned_album_ids()
+
+    def _build(seed):
+        slug, name, _w = seed
+        return _genre_page(slug, name, 0, _GENRE_PAGE_SIZE, owned)
+
+    with ThreadPoolExecutor(max_workers=5, thread_name_prefix="genredrill") as pool:
+        return [s for s in pool.map(_build, genres) if s["albums"]]
+
+
+# Albums per genre row on the drill-down, and per "load more" press.
+_GENRE_PAGE_SIZE = 18
+
+
+def _genre_page(slug: str, name: str, offset: int, limit: int,
+                owned: Optional[set] = None) -> dict:
+    """One window of a genre's canon, for paging in from the drill-down.
+
+    Pagination is over AOTY's listing, not over the rendered albums: an
+    entry can drop out here because Tidal doesn't carry it or because the
+    listener already owns it, so a window of N rarely renders exactly N.
+    Reporting `has_more` off the listing keeps "load more" honest — it
+    means "AOTY has further entries", which is the thing that actually
+    runs out.
+    """
+    want = offset + limit
+    # One extra row purely to answer "is there another page after this".
+    listing = _rec_safe(lambda: aoty_module.top_albums_by_genre(slug, want + 1), [])
+    has_more = len(listing) > want
+    window = listing[offset:want]
+    resolved = _rec_safe(lambda: aoty_resolver.resolve_listing(window), []) or []
+    albums = [
+        it["tidal_album"]
+        for it in resolved
+        if it.get("tidal_album") and it["tidal_album"].get("available")
+    ]
+    return {
+        "key": f"genre:{slug}",
+        "title": name,
+        "subtitle": f"Highest rated {name}",
+        "slug": slug,
+        "offset": offset,
+        "has_more": has_more,
+        "albums": _dedupe_cap_albums(albums, limit, exclude=owned),
+    }
+
+
+@app.get("/api/recommendations/genres")
+def recommendations_genres() -> dict:
+    """A row per genre the listener actually plays (#307)."""
+    _require_auth()
+    if not getattr(settings, "album_recommendations_enabled", True):
+        return {"enabled": False, "sections": []}
+    now = time.monotonic()
+    with _recs_cache_lock:
+        c = _recs_cache.get("genres")
+        if c and (now - c[0]) < _RECS_CACHE_TTL_SEC:
+            return c[1]
+    payload = {"enabled": True, "sections": _genre_drilldown_sections()}
+    with _recs_cache_lock:
+        _recs_cache["genres"] = (time.monotonic(), payload)
+    return payload
+
+
+@app.get("/api/recommendations/genre/{slug}")
+def recommendations_genre(slug: str, offset: int = 0, limit: int = 18) -> dict:
+    """One page of a single genre's canon — backs "load more" (#307).
+
+    Not cached: the drill-down's first page comes from the cached
+    `/genres` payload, and later pages are a deliberate user action, so
+    caching them would mostly hold windows nobody asks for twice. The
+    underlying AOTY listing and album resolutions are both cached
+    anyway, so a repeat press is cheap.
+    """
+    _require_auth()
+    if not getattr(settings, "album_recommendations_enabled", True):
+        return {"enabled": False, "section": None}
+    offset = max(0, int(offset))
+    limit = max(1, min(int(limit), 50))
+    name = next(
+        (n for s_, n, _w in _taste_profile().get("genres", []) if s_ == slug),
+        slug.partition("-")[2].replace("-", " ").title(),
+    )
+    section = _genre_page(slug, name, offset, limit, _owned_album_ids())
+    return {"enabled": True, "section": section}
 
 
 @app.get("/api/recommendations/stats")
