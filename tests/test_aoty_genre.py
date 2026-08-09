@@ -60,6 +60,12 @@ _GENRE_PAGE_HTML = f"""
     {_block("Canon Band", "All Time Classic")}
   </div>
   <div class="section">
+    <h2 class="subHeadline"><a href="/genre/7-rock/all/">
+      Users' Highest Rated Rock Albums of All Time</a></h2>
+    {_block("Canon Act", "The Canon")}
+    {_block("Second Canon", "Also Canon")}
+  </div>
+  <div class="section">
     <h2 class="subHeadline"><a href="/genre/7-rock/recent/">
       Recent Rock Albums</a></h2>
     {_block("Fresh Act", "Brand New LP")}
@@ -172,3 +178,85 @@ def test_top_by_genre_rejects_malformed_slug(monkeypatch):
     )
     assert aoty.top_albums_of_year_by_genre("../../secrets", 2026) == []
     assert called == []
+
+
+# ---------------------------------------------------------------------------
+# All-time genre canon (drives the "From Your Genres" row)
+# ---------------------------------------------------------------------------
+
+
+def _rating_row(artist: str, title: str) -> str:
+    return (
+        "<div class='albumListRow'>"
+        "<h2 class='albumListTitle'>"
+        f"<a href='/album/1-x.php' itemprop='url'>{artist} - {title}</a>"
+        "</h2></div>"
+    )
+
+
+def _ratings_page(*pairs) -> str:
+    return "<html><body>" + "".join(_rating_row(a, t) for a, t in pairs) + "</body></html>"
+
+
+def test_top_by_genre_reads_the_ratings_listing_not_the_teaser(monkeypatch):
+    """The genre landing page shows only five as a teaser. The canon has
+    to come from the listing behind its header link, which is keyed by
+    the genre's *name* rather than its numeric slug."""
+    import app.aoty as aoty_mod
+
+    seen = []
+
+    def _fake(url):
+        seen.append(url)
+        return _ratings_page(("Slowdive", "Souvlaki"))
+
+    monkeypatch.setattr(aoty_mod, "_fetch", _fake)
+    out = aoty.top_albums_by_genre("26-shoegaze", limit=1)
+    assert [a["title"] for a in out] == ["Souvlaki"]
+    assert "/ratings/user-highest-rated/all/shoegaze/1/" in seen[0]
+    assert "/genre/26-shoegaze/" not in seen[0], "read the teaser page"
+
+
+def test_top_by_genre_pages_until_limit(monkeypatch):
+    """Each listing page carries ~25 rows, so filling a deep request has
+    to walk pages rather than stopping at the first."""
+    pages = {
+        1: _ratings_page(("A", "a1"), ("B", "b1")),
+        2: _ratings_page(("C", "c1"), ("D", "d1")),
+        3: _ratings_page(("E", "e1")),
+    }
+    seen = []
+
+    def _fake(url):
+        n = int(url.rstrip("/").rsplit("/", 1)[-1])
+        seen.append(n)
+        return pages.get(n, "")
+
+    monkeypatch.setattr(aoty, "_fetch", _fake)
+    out = aoty.top_albums_by_genre("26-shoegaze", limit=5)
+    assert [a["title"] for a in out] == ["a1", "b1", "c1", "d1", "e1"]
+    assert seen == [1, 2, 3]
+
+
+def test_top_by_genre_stops_on_empty_page(monkeypatch):
+    """A genre with fewer albums than requested must not keep fetching."""
+    def _fake(url):
+        n = int(url.rstrip("/").rsplit("/", 1)[-1])
+        return _ratings_page(("A", "a1")) if n == 1 else "<html><body></body></html>"
+
+    monkeypatch.setattr(aoty, "_fetch", _fake)
+    out = aoty.top_albums_by_genre("26-shoegaze", limit=50)
+    assert [a["title"] for a in out] == ["a1"]
+
+
+def test_top_by_genre_rejects_malformed_slug(monkeypatch):
+    called = []
+    monkeypatch.setattr(aoty, "_fetch", lambda url: called.append(url) or "")
+    assert aoty.top_albums_by_genre("../../etc/passwd") == []
+    assert aoty.top_albums_by_genre("rock") == []
+    assert called == [], "a malformed slug must not reach the network"
+
+
+def test_top_by_genre_survives_fetch_failure(monkeypatch):
+    monkeypatch.setattr(aoty, "_fetch", lambda url: None)
+    assert aoty.top_albums_by_genre("7-rock") == []

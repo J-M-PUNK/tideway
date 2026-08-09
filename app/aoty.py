@@ -144,6 +144,10 @@ _RECENT_RELEASES_TTL_SEC = 1800.0  # 30 min
 # per-genre recent grid turns over like the global one.
 _GENRE_INDEX_TTL_SEC = 86400.0  # 24 hours
 _GENRE_RELEASES_TTL_SEC = 1800.0  # 30 min
+# A genre's all-time canon moves on the order of years, so it doesn't
+# want the recent-releases cadence — that would re-fetch several pages
+# per genre every half hour to learn nothing.
+_GENRE_ALLTIME_TTL_SEC = 86400.0  # 24 hours
 
 # AOTY genre slugs are "{numeric-id}-{kebab-name}" (e.g. "7-rock",
 # "22-r-and-b"). Pin the shape so a caller-supplied value can't be
@@ -365,6 +369,58 @@ def recent_releases_by_genre(genre_slug: str, limit: int = 60) -> list[dict]:
         return []
     rows = _parse_album_block_cards(str(section))[:limit]
     payload = [a.to_dict() for a in rows]
+    _cache_set(cache_key, payload)
+    return payload
+
+
+def top_albums_by_genre(genre_slug: str, limit: int = 60) -> list[dict]:
+    """A genre's all-time canon, highest user-rated first.
+
+    The year charts (`top_albums_of_year_by_genre`) answer "what was good
+    in 2026"; this answers "what is good in this genre", which is what a
+    listener actually means by "recommend me shoegaze".
+
+    Reads the dedicated ratings listing rather than the genre landing
+    page. The landing page shows a teaser of five, which is nowhere near
+    a shelf, let alone something to page through; the listing behind its
+    header link paginates ~25 a page and goes hundreds deep. Same URL
+    family and row markup as `top_albums_of_year`, so it reuses that
+    parser and pagination shape.
+
+    Users' rather than critics' scores: AOTY's community covers
+    underground and recent releases far more deeply, and the critics'
+    list for most genres collapses onto the same handful of records.
+    """
+    limit = max(1, min(int(limit), 200))
+    if not _GENRE_SLUG_RE.match(genre_slug or ""):
+        log.warning("aoty: rejecting malformed genre slug %r", genre_slug)
+        return []
+    # The ratings listing is keyed by the genre's name, not its numeric
+    # slug: /genre/26-shoegaze/ links to /ratings/.../all/shoegaze/.
+    _, _, name = genre_slug.partition("-")
+    if not name:
+        return []
+    cache_key = f"genre-alltime:{name}:{limit}"
+    cached = _cache_get(cache_key, _GENRE_ALLTIME_TTL_SEC)
+    if cached is not None:
+        return cached
+
+    out: list[AotyAlbum] = []
+    page = 1
+    # Same bound as the year chart: stop at the limit, at an empty page,
+    # or after a fixed number of pages so a layout change can't spin.
+    while len(out) < limit and page <= 8:
+        html = _fetch(
+            urljoin(_BASE_URL, f"/ratings/user-highest-rated/all/{name}/{page}/")
+        )
+        if html is None:
+            break
+        rows = _parse_album_list_rows(html)
+        if not rows:
+            break
+        out.extend(rows)
+        page += 1
+    payload = [a.to_dict() for a in out[:limit]]
     _cache_set(cache_key, payload)
     return payload
 
