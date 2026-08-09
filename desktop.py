@@ -243,6 +243,20 @@ def _run_uvicorn_in_thread() -> "uvicorn.Server":  # type: ignore[name-defined]
         # Keep the access log quiet in packaged builds; uvicorn's default
         # formatter is noisy for a GUI app.
         access_log=False,
+        # Stay on the stock asyncio loop rather than letting uvicorn pick
+        # uvloop, which `uvicorn[standard]` pulls in and selects by
+        # default. python-zeroconf's QueryScheduler keeps uvloop's idle
+        # handle armed, so the loop busy-spins instead of sleeping: one
+        # service browser costs ~9% of a core, and Cast and Tidal Connect
+        # each start one, which is the ~20% idle burn reported in #308.
+        # Measured on the same machine, idle with no client attached:
+        # uvloop 24.8%, asyncio 0.1%.
+        #
+        # uvloop earns its keep on servers juggling thousands of
+        # connections. This one serves a single local WebView plus the
+        # occasional audio stream to a speaker on the LAN, so there is no
+        # throughput here for it to win back.
+        loop="asyncio",
     )
     server = uvicorn.Server(config)
 

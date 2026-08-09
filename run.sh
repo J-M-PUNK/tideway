@@ -32,7 +32,10 @@ trap cleanup EXIT INT TERM
 # dev because uvicorn is actually on 8000.
 export TIDAL_DL_PORT=8000
 echo "Starting FastAPI on http://127.0.0.1:$TIDAL_DL_PORT"
-"$PY" -m uvicorn server:app --host 127.0.0.1 --port "$TIDAL_DL_PORT" --reload &
+# --loop asyncio matches the packaged app; see the note in desktop.py.
+# uvloop busy-spins under python-zeroconf's service browsers (#308), and
+# dev should reproduce what users actually run.
+"$PY" -m uvicorn server:app --host 127.0.0.1 --port "$TIDAL_DL_PORT" --reload --loop asyncio &
 API_PID=$!
 
 echo "Starting Vite on http://127.0.0.1:5173"
