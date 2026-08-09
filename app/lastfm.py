@@ -512,6 +512,80 @@ class LastFmClient:
             })
         return out
 
+    def get_similar_artists(
+        self, artist: str, limit: int = 30
+    ) -> list[dict]:
+        """Last.fm's `artist.getSimilar` — artists listeners of `artist`
+        also play, ordered by a 0..1 `match` score. A public (non-user)
+        method: it's the same for everyone, so it doesn't need a
+        scrobbling account, only an API key. Powers taste-based
+        recommendations by broadening a seed artist into its neighborhood
+        on Last.fm's collaborative-filtering graph."""
+        artist = (artist or "").strip()
+        if not artist:
+            return []
+        data = self._public_get_no_user({
+            "method": "artist.getSimilar",
+            "artist": artist,
+            "autocorrect": "1",
+            "limit": str(max(1, min(100, int(limit)))),
+        })
+        if not data:
+            return []
+        raw = (data.get("similarartists") or {}).get("artist") or []
+        if isinstance(raw, dict):
+            raw = [raw]
+        out: list[dict] = []
+        for a in raw:
+            if not isinstance(a, dict):
+                continue
+            name = a.get("name") or ""
+            if not name:
+                continue
+            try:
+                match = float(a.get("match") or 0.0)
+            except (TypeError, ValueError):
+                match = 0.0
+            out.append({
+                "name": name,
+                "match": match,
+                "url": a.get("url") or "",
+                "image": _best_lastfm_image(a.get("image") or []),
+                "mbid": a.get("mbid") or "",
+            })
+        return out
+
+    def get_artist_top_tags(self, artist: str, limit: int = 5) -> list[dict]:
+        """Last.fm's `artist.getTopTags` — the community's most-applied
+        tags for an artist, which in practice are genres ("rock",
+        "electronic", "hip hop", …) plus noise. Each has a 0..100 `count`.
+        Aggregated across a user's top artists, this is how we infer their
+        genres for the taste profile (#307) without any manual tagging."""
+        artist = (artist or "").strip()
+        if not artist:
+            return []
+        data = self._public_get_no_user({
+            "method": "artist.getTopTags",
+            "artist": artist,
+            "autocorrect": "1",
+        })
+        if not data:
+            return []
+        raw = (data.get("toptags") or {}).get("tag") or []
+        if isinstance(raw, dict):
+            raw = [raw]
+        out: list[dict] = []
+        for t in raw:
+            if not isinstance(t, dict):
+                continue
+            name = (t.get("name") or "").strip()
+            if not name:
+                continue
+            out.append({"name": name, "count": _safe_int(t.get("count"))})
+            if len(out) >= max(1, int(limit)):
+                break
+        return out
+
     def get_loved_tracks(self, limit: int = 50) -> list[dict]:
         """Tracks the user has "loved" (heart-clicked) on Last.fm."""
         data = self._public_get({

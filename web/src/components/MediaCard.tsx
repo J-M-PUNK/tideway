@@ -114,7 +114,7 @@ export function MediaCard({
  * liked. Stops propagation so clicking it never follows the parent
  * Link.
  */
-function InlineHeart({
+export function InlineHeart({
   kind,
   id,
   className,

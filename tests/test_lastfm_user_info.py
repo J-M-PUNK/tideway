@@ -33,6 +33,35 @@ def test_get_user_info_returns_none_when_no_user_in_payload():
         assert client.get_user_info() is None
 
 
+def test_get_similar_artists_parses_and_scores():
+    """`artist.getSimilar` returns a `match` string in 0..1; parse it to
+    float, drop entries with no name, and normalize a single-dict payload
+    to a list. Powers the taste-based recommendations blend (#307)."""
+    client = LastFmClient.__new__(LastFmClient)
+    payload = {
+        "similarartists": {
+            "artist": [
+                {"name": "Radiohead", "match": "1.0", "url": "u", "image": []},
+                {"name": "", "match": "0.5"},  # dropped: no name
+                {"name": "Muse", "match": "0.42"},
+            ]
+        }
+    }
+    with patch.object(client, "_public_get_no_user", return_value=payload):
+        out = client.get_similar_artists("Coldplay")
+    assert [a["name"] for a in out] == ["Radiohead", "Muse"]
+    assert out[0]["match"] == 1.0
+    assert out[1]["match"] == 0.42
+
+
+def test_get_similar_artists_empty_on_no_data():
+    client = LastFmClient.__new__(LastFmClient)
+    with patch.object(client, "_public_get_no_user", return_value=None):
+        assert client.get_similar_artists("Coldplay") == []
+    # Blank seed never hits the network.
+    assert client.get_similar_artists("  ") == []
+
+
 def test_get_user_info_returns_none_when_user_has_no_name():
     """A `user` key with an empty `name` field is the same shape Last.fm
     returns for malformed/partial responses — also treat as None so
