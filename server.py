@@ -46,6 +46,7 @@ from app import album_collections
 from app import aoty as aoty_module
 from app import aoty_resolver
 from app import deezer_import
+from app import rec_analytics
 from app import global_keys as global_keys_mod
 from app.audio.eq import (
     default_parametric_bands,
@@ -11873,6 +11874,11 @@ _SECTION_SIZE = 18
 # Tidal search per album, so we rank the (cheap) AOTY listing first and
 # only resolve the top slice — not the whole 60-row scrape.
 _SECTION_RESOLVE_POOL = 24
+# Similar artists to resolve for "Fans Also Like". Each costs a Tidal
+# search plus an album fetch, and yields up to 2 albums, so this sits
+# comfortably above _SECTION_SIZE to survive unavailable albums and the
+# per-artist cap without over-fetching.
+_FANS_CANDIDATES = 12
 
 
 def _rec_safe(fn, default):
@@ -11909,65 +11915,6 @@ def _dedupe_cap_albums(albums: list, limit: int) -> list[dict]:
         if len(out) >= limit:
             break
     return out
-
-
-# --- "Not interested" feedback (#307) -------------------------------------
-# Dismissing a rec removes that album everywhere and down-weights its
-# artist in the taste-driven sections, so the page visibly learns. Stored
-# per-device (it's local taste, not account state), atomically.
-def _rec_feedback_file():
-    from app.paths import user_data_dir
-    return user_data_dir() / "rec_feedback.json"
-
-
-_rec_feedback_lock = threading.Lock()
-
-
-def _load_rec_feedback() -> dict:
-    """{'albums': set[str], 'artists': set[str]} — dismissed album ids and
-    the lower-cased artist names to down-weight."""
-    try:
-        with open(_rec_feedback_file()) as f:
-            data = json.load(f)
-        return {
-            "albums": {str(x) for x in (data.get("albums") or [])},
-            "artists": {str(x).strip().lower() for x in (data.get("artists") or [])},
-        }
-    except Exception:
-        return {"albums": set(), "artists": set()}
-
-
-def _dismiss_recommendation(album_id: str, artist: Optional[str]) -> None:
-    album_id = str(album_id or "").strip()
-    if not album_id:
-        return
-    with _rec_feedback_lock:
-        fb = _load_rec_feedback()
-        fb["albums"].add(album_id)
-        if artist and artist.strip():
-            fb["artists"].add(artist.strip().lower())
-        target = _rec_feedback_file()
-        tmp_fd, tmp_path = tempfile.mkstemp(
-            prefix=".rec_feedback.", suffix=".tmp", dir=str(target.parent)
-        )
-        try:
-            with os.fdopen(tmp_fd, "w") as f:
-                json.dump(
-                    {"albums": sorted(fb["albums"]), "artists": sorted(fb["artists"])}, f
-                )
-            os.replace(tmp_path, target)
-        except Exception:
-            try:
-                os.unlink(tmp_path)
-            except OSError:
-                pass
-    # Drop the cached page so the dismissed album disappears on next load.
-    with _recs_cache_lock:
-        _recs_cache.pop("sections", None)
-
-
-def _filter_dismissed(albums: list, dismissed_ids: set) -> list:
-    return [a for a in albums if a and str(a.get("id") or "") not in dismissed_ids]
 
 
 _GENRE_MAP_TTL_SEC = 24 * 3600.0
@@ -12190,9 +12137,6 @@ def _section_made_for_you() -> dict:
     row interleaves the pools instead of inventing a common scale. Within
     a pool the strongest candidate always wins, which is what stops a thin
     seed from buying a slot it did not earn."""
-    feedback = _load_rec_feedback()
-    dismissed_albums, dismissed_artists = feedback["albums"], feedback["artists"]
-
     fav_albums = _rec_safe(lambda: list(tidal.get_favorite_albums() or []), [])
     fav_artists = _rec_safe(lambda: list(tidal.get_favorite_artists() or []), [])
     owned_ids = {str(getattr(a, "id", "") or "") for a in fav_albums}
@@ -12220,7 +12164,7 @@ def _section_made_for_you() -> dict:
                 for s in sims:
                     nm = (s.get("name") or "").strip()
                     low = nm.lower()
-                    if not nm or low in known or low in dismissed_artists:
+                    if not nm or low in known:
                         continue
                     try:
                         match = float(s.get("match") or 0.0)
@@ -12253,9 +12197,9 @@ def _section_made_for_you() -> dict:
                 for rank, alb in enumerate(sims):
                     aid = str(getattr(alb, "id", "") or "")
                     key = _album_primary_artist_key(alb)
-                    if not aid or aid in owned_ids or aid in dismissed_albums:
+                    if not aid or aid in owned_ids:
                         continue
-                    if key in known or key in dismissed_artists:
+                    if key in known:
                         continue
                     weight = 1.0 / (rank + 1)
                     entry = scored_b.get(aid)
@@ -12387,7 +12331,29 @@ def _section_fans_also_like() -> dict:
                 else:
                     entry["score"] += match
 
-    ranked = sorted(scored.values(), key=lambda e: e["score"], reverse=True)[:12]
+    # Round-robin across seeds rather than taking the global top by score.
+    # Summed match favours whichever seed has the densest neighbourhood on
+    # Last.fm's graph, and a seed like a game soundtrack sits in a tight
+    # cluster where everything scores high — left unchecked it filled a
+    # third of the shelf with one cluster. Taking the strongest remaining
+    # pick from each seed in turn spans the user's taste instead, the same
+    # way _album_recommendations round-robins across reasons.
+    by_seed: "OrderedDict[str, list]" = OrderedDict()
+    for e in sorted(scored.values(), key=lambda e: e["score"], reverse=True):
+        by_seed.setdefault(e["seed"], []).append(e)
+
+    ranked: list[dict] = []
+    while len(ranked) < _FANS_CANDIDATES:
+        progressed = False
+        for entries in by_seed.values():
+            if not entries:
+                continue
+            ranked.append(entries.pop(0))
+            progressed = True
+            if len(ranked) >= _FANS_CANDIDATES:
+                break
+        if not progressed:
+            break
 
     def _albums_for(entry):
         res = _rec_safe(lambda: tidal.search(entry["name"], limit=3), {}) or {}
@@ -12491,14 +12457,24 @@ def _build_recommendation_sections() -> list[dict]:
     ordered.append(results.get("fans"))
     ordered.extend(because)
 
-    # Drop anything the user said "not interested" in, across every
-    # section, then drop sections left empty.
-    dismissed = _load_rec_feedback()["albums"]
+    # Drop anything already in the listener's favorites across every
+    # section, then drop sections left empty. The filter belongs here
+    # rather than in the individual builders: recommending an album back
+    # to someone who already saved it is wrong in every row, and only
+    # _album_recommendations was excluding favorites, so the AOTY-backed
+    # rows were handing back the library.
+    owned = {
+        str(getattr(a, "id", "") or "")
+        for a in _rec_safe(lambda: list(tidal.get_favorite_albums() or []), [])
+    }
     out: list[dict] = []
     for s in ordered:
         if not s:
             continue
-        s["albums"] = _filter_dismissed(s.get("albums", []), dismissed)
+        s["albums"] = [
+            a for a in s.get("albums", [])
+            if a and str(a.get("id") or "") not in owned
+        ]
         if s["albums"]:
             out.append(s)
     return out
@@ -12522,25 +12498,31 @@ def recommendations_albums() -> dict:
         if c and (now - c[0]) < _RECS_CACHE_TTL_SEC:
             return c[1]
     payload = {"enabled": True, "sections": _build_recommendation_sections()}
+    # Record what this build served so row quality can be compared against
+    # what actually got played later. Never let analytics break the page.
+    _rec_safe(lambda: rec_analytics.record_impressions(payload["sections"]), None)
     with _recs_cache_lock:
         _recs_cache["sections"] = (time.monotonic(), payload)
     return payload
 
 
-class DismissRecommendationRequest(BaseModel):
-    album_id: str
-    # Optional so the artist can be down-weighted, not just the one album.
-    artist: Optional[str] = None
+@app.get("/api/recommendations/stats")
+def recommendations_stats() -> dict:
+    """Per-row engagement for the For You page (#307).
 
-
-@app.post("/api/recommendations/dismiss")
-def recommendations_dismiss(req: DismissRecommendationRequest) -> dict:
-    """Mark an album "not interested" (#307): it's removed from every
-    section and its artist is down-weighted in the taste-driven rows, so
-    the page learns. Persisted per-device."""
+    Answers "which rows are actually working" with numbers rather than
+    opinion. Compare `play_rate` *between* rows: the play signal is joined
+    from scrobble text so it under-counts, but it under-counts every row
+    the same way. `liked` is exact.
+    """
     _require_auth()
-    _dismiss_recommendation(req.album_id, req.artist)
-    return {"ok": True}
+    scrobbles = _rec_safe(lambda: lastfm.get_recent_tracks(limit=200), [])
+    played = rec_analytics.played_keys_from_scrobbles(scrobbles)
+    liked = {
+        str(getattr(a, "id", "") or "")
+        for a in _rec_safe(lambda: list(tidal.get_favorite_albums() or []), [])
+    }
+    return rec_analytics.stats(played_keys=played, liked_ids=liked)
 
 
 # ---------------------------------------------------------------------------

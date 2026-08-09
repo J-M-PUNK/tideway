@@ -135,6 +135,41 @@ def test_disabled_setting_returns_empty(stub_auth, monkeypatch):
     assert out == {"enabled": False, "sections": []}
 
 
+def test_favorited_albums_are_filtered_from_every_section(stub_auth, monkeypatch):
+    """Only _album_recommendations used to exclude saved albums, so the
+    AOTY-backed rows recommended the listener their own library back —
+    11 of 18 in "Popular in Your Orbit" on a real profile. The filter
+    belongs to section assembly so it covers every row."""
+    import server
+
+    monkeypatch.setattr(
+        server.settings, "album_recommendations_enabled", True, raising=False
+    )
+    _no_lastfm(monkeypatch)
+    _no_aoty(monkeypatch)
+
+    owned = StubAlbum("99", "Already Saved", "Artist Z")
+    _set_library(monkeypatch, fav_albums=[owned])
+
+    # An AOTY-backed row that offers the saved album plus a fresh one.
+    def _fake_section(key, title, subtitle, listing, profile, taste_rank, deep=False):
+        return {
+            "key": key, "title": title, "subtitle": subtitle,
+            "albums": [
+                {"id": "99", "name": "Already Saved",
+                 "artists": [{"name": "Artist Z"}], "available": True},
+                {"id": "100", "name": "Brand New",
+                 "artists": [{"name": "Artist Y"}], "available": True},
+            ],
+        }
+
+    monkeypatch.setattr(server, "_aoty_section", _fake_section)
+    out = server.recommendations_albums()
+    served = [a["id"] for s in out["sections"] for a in s["albums"]]
+    assert "99" not in served, "a saved album was recommended back to the user"
+    assert "100" in served, "the unsaved album should still be offered"
+
+
 def test_enabled_returns_made_for_you_section(stub_auth, monkeypatch):
     import server
 
@@ -682,94 +717,42 @@ def test_section_assembly_orders_and_drops_empty(stub_auth, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# "Not interested" feedback loop
-# ---------------------------------------------------------------------------
-
-
-def test_filter_dismissed_drops_by_id():
-    import server
-
-    albums = [{"id": "1"}, {"id": "2"}, {"id": "3"}]
-    assert [a["id"] for a in server._filter_dismissed(albums, {"2"})] == ["1", "3"]
-
-
-def test_dismissed_album_excluded_from_core(stub_auth, monkeypatch):
-    import server
-
-    _no_lastfm(monkeypatch)
-    monkeypatch.setattr(
-        server, "_load_rec_feedback", lambda: {"albums": {"9"}, "artists": set()}
-    )
-    seed = StubAlbum("1", "Seed", "A", similar=[
-        StubAlbum("9", "Dismissed", "Z"),
-        StubAlbum("8", "Kept", "Q"),
-    ])
-    assert [a["id"] for a in _made(monkeypatch, fav_albums=[seed])] == ["8"]
-
-
-def test_dismissed_artist_excluded(stub_auth, monkeypatch):
-    """"Not interested" on an album drops that artist's other picks from
-    the row entirely rather than merely nudging them down the order."""
-    import server
-
-    _no_lastfm(monkeypatch)
-    monkeypatch.setattr(
-        server, "_load_rec_feedback", lambda: {"albums": set(), "artists": {"artist z"}}
-    )
-    seed = StubAlbum("1", "Seed", "S", similar=[
-        StubAlbum("2", "By Z", "Artist Z"),
-        StubAlbum("3", "By Q", "Artist Q"),
-    ])
-    assert [a["id"] for a in _made(monkeypatch, fav_albums=[seed])] == ["3"]
-
-
-def test_dismissed_artist_excluded_from_followed_pool(stub_auth, monkeypatch):
-    """The same exclusion applies to the Last.fm side of the row."""
-    import server
-
-    monkeypatch.setattr(
-        server, "_load_rec_feedback", lambda: {"albums": set(), "artists": {"nope"}}
-    )
-    _lastfm_graph(monkeypatch, {"Fav": [
-        {"name": "Nope", "match": 0.9},
-        {"name": "Yes", "match": 0.5},
-    ]})
-    _tidal_artists(monkeypatch, {
-        "Nope": StubArtist("Nope", albums=[StubAlbum("1", "No", "Nope")]),
-        "Yes": StubArtist("Yes", albums=[StubAlbum("2", "Yes", "Yes")]),
-    })
-    out = _made(monkeypatch, fav_artists=[StubArtist("Fav")])
-    assert [a["id"] for a in out] == ["2"]
-
-
-def test_dismiss_endpoint_records(stub_auth, monkeypatch):
-    import server
-
-    calls = []
-    monkeypatch.setattr(
-        server, "_dismiss_recommendation",
-        lambda album_id, artist: calls.append((album_id, artist)),
-    )
-    out = server.recommendations_dismiss(
-        server.DismissRecommendationRequest(album_id="55", artist="Some Artist")
-    )
-    assert out == {"ok": True}
-    assert calls == [("55", "Some Artist")]
-
-
-def test_dismiss_persists_and_reloads(stub_auth, monkeypatch, tmp_path):
-    import server
-
-    monkeypatch.setattr(server, "_rec_feedback_file", lambda: tmp_path / "fb.json")
-    server._dismiss_recommendation("100", "Cool Band")
-    fb = server._load_rec_feedback()
-    assert "100" in fb["albums"]
-    assert "cool band" in fb["artists"]
-
-
-# ---------------------------------------------------------------------------
 # Listener-overlap discovery ("Fans Also Like")
 # ---------------------------------------------------------------------------
+
+
+def test_fans_also_like_spans_seeds_when_one_floods(stub_auth, monkeypatch):
+    """A seed sitting in a dense Last.fm neighbourhood (a game soundtrack,
+    say) has every neighbour scoring high, so ranking purely by summed
+    match let it fill most of the shelf. Picks must span the seeds."""
+    import server
+
+    monkeypatch.setattr(
+        server.lastfm, "get_top_artists",
+        lambda period, limit: [{"name": "Dense"}, {"name": "Sparse"}],
+    )
+
+    def _sims(name, limit=15):
+        if name == "Dense":
+            # Ten tightly-clustered neighbours, all scoring above Sparse's.
+            return [{"name": f"D{i}", "match": 0.99} for i in range(10)]
+        return [{"name": "S1", "match": 0.5}, {"name": "S2", "match": 0.4}]
+
+    monkeypatch.setattr(server.lastfm, "get_similar_artists", _sims)
+    monkeypatch.setattr(
+        server.tidal, "search",
+        lambda q, limit=25: {"artists": [
+            StubArtist(q, albums=[StubAlbum(f"{q}-1", f"{q} LP", q)])
+        ]},
+    )
+
+    sec = server._section_fans_also_like()
+    seeds = [a["reason"] for a in sec["albums"]]
+    sparse = [r for r in seeds if "Sparse" in r]
+    # Ranking by score alone would put all ten Dense picks first and bury
+    # Sparse entirely; the round-robin must surface it near the top.
+    assert sparse, f"Sparse seed was crowded out entirely: {seeds}"
+    assert "Sparse" in seeds[1], f"expected seeds to alternate, got {seeds[:4]}"
 
 
 def test_fans_also_like_builds_from_similar(stub_auth, monkeypatch):

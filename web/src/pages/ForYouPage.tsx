@@ -1,6 +1,5 @@
-import { useCallback, useState } from "react";
 import { Link } from "react-router-dom";
-import { Compass, Music, Sparkles, X } from "lucide-react";
+import { Compass, Music, Sparkles } from "lucide-react";
 import { api } from "@/api/client";
 import type { Album } from "@/api/types";
 import { useApi } from "@/hooks/useApi";
@@ -32,18 +31,6 @@ export function ForYouPage() {
   const { data, loading, error } = useApi(() => api.recommendations(), [], {
     cacheKey: queryKeys.recommendations,
   });
-  // Dismissed albums vanish immediately; the backend persists the choice
-  // and down-weights the artist on the next (re)load.
-  const [dismissed, setDismissed] = useState<Set<string>>(() => new Set());
-  const onDismiss = useCallback((item: RecAlbum) => {
-    setDismissed((prev) => new Set(prev).add(item.id));
-    void api
-      .dismissRecommendation(item.id, item.artists?.[0]?.name)
-      .catch(() => {
-        /* best-effort — it's gone from the view either way */
-      });
-  }, []);
-
   if (loading) {
     return (
       <div>
@@ -73,12 +60,7 @@ export function ForYouPage() {
     );
   }
 
-  const sections = data.sections
-    .map((s) => ({
-      ...s,
-      albums: s.albums.filter((a) => !dismissed.has(a.id)),
-    }))
-    .filter((s) => s.albums.length > 0);
+  const sections = data.sections.filter((s) => s.albums.length > 0);
   if (sections.length === 0) {
     return (
       <div>
@@ -102,7 +84,7 @@ export function ForYouPage() {
       <PageHeading />
       <div className="flex flex-col gap-10">
         {sections.map((section) => (
-          <Shelf key={section.key} section={section} onDismiss={onDismiss} />
+          <Shelf key={section.key} section={section} />
         ))}
       </div>
     </div>
@@ -123,13 +105,7 @@ function PageHeading() {
   );
 }
 
-function Shelf({
-  section,
-  onDismiss,
-}: {
-  section: Section;
-  onDismiss: (item: RecAlbum) => void;
-}) {
+function Shelf({ section }: { section: Section }) {
   return (
     <section>
       <h3 className="text-lg font-bold tracking-tight">{section.title}</h3>
@@ -139,20 +115,14 @@ function Shelf({
       {!section.subtitle && <div className="mb-3" />}
       <div className="flex gap-4 overflow-x-auto pb-2 scrollbar-thin">
         {section.albums.map((item) => (
-          <RecCard key={item.id} item={item} onDismiss={onDismiss} />
+          <RecCard key={item.id} item={item} />
         ))}
       </div>
     </section>
   );
 }
 
-function RecCard({
-  item,
-  onDismiss,
-}: {
-  item: RecAlbum;
-  onDismiss: (item: RecAlbum) => void;
-}) {
+function RecCard({ item }: { item: RecAlbum }) {
   const cover = imageProxy(item.cover);
   const artist = item.artists?.map((a) => a.name).join(", ") ?? "";
   // Same hover-reveal contract as MediaCard: play (bottom-left) and like
@@ -161,19 +131,6 @@ function RecCard({
     "opacity-0 transition-all duration-200 ease-out group-hover:opacity-100 focus-within:opacity-100";
   return (
     <div className="group relative flex w-44 shrink-0 flex-col gap-3 rounded-lg bg-card p-4 transition-colors hover:bg-accent">
-      <button
-        type="button"
-        onClick={(e) => {
-          e.preventDefault();
-          e.stopPropagation();
-          onDismiss(item);
-        }}
-        title="Not interested — hide this and show less like it"
-        aria-label={`Not interested in ${item.name}`}
-        className="absolute left-3 top-3 z-10 flex h-7 w-7 items-center justify-center rounded-full bg-black/70 text-white opacity-0 transition-opacity hover:bg-black/90 focus-visible:opacity-100 group-hover:opacity-100"
-      >
-        <X className="h-4 w-4" />
-      </button>
       <Link to={`/album/${item.id}`} className="flex flex-col gap-3">
         <div className="relative aspect-square overflow-hidden rounded-md bg-secondary">
           {cover ? (
