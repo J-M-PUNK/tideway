@@ -145,3 +145,46 @@ def test_albums_without_ids_are_skipped():
         _section("row", [{"name": "No Id", "artists": [{"name": "X"}]}])
     ])
     assert rec_analytics.stats()["tracked_albums"] == 0
+
+
+def test_pruning_does_not_evict_the_albums_that_worked(monkeypatch):
+    """Retention must not correlate with the outcome being measured.
+
+    Acting on a recommendation (saving it) excludes the album from every
+    row afterwards, so it stops being served and its serving-recency goes
+    stale — while an album the listener ignored stays in rotation and
+    keeps looking fresh. Evicting by serving-recency therefore drops the
+    successes and keeps the failures, sagging every measured rate over
+    time for no real reason. Eviction has to key on first sighting, which
+    no outcome can influence.
+    """
+    monkeypatch.setattr(rec_analytics, "_MAX_ALBUMS", 3)
+    clock = [100]
+    monkeypatch.setattr(rec_analytics.time, "time", lambda: clock[0])
+
+    ignored = [_album(f"ignored{i}", f"Ignored {i}", "B") for i in range(3)]
+    rec_analytics.record_impressions([_section("row", ignored)])
+
+    # Seen later than the ignored ones, then acted on — never served again.
+    clock[0] = 200
+    rec_analytics.record_impressions([
+        _section("row", [_album("acted-on", "Acted On", "A")])
+    ])
+
+    # The ignored albums keep getting re-served, refreshing their recency.
+    clock[0] = 500
+    rec_analytics.record_impressions([_section("row", ignored)])
+
+    # One more sighting tips the store past the cap and triggers eviction.
+    clock[0] = 600
+    rec_analytics.record_impressions([
+        _section("row", [_album("newest", "Newest", "C")])
+    ])
+
+    with rec_analytics._lock:
+        remaining = set(rec_analytics._load()["albums"])
+    # Keying on serving-recency would evict "acted-on" first: it has the
+    # stalest last_seen precisely because the listener acted on it.
+    assert "acted-on" in remaining, "the album that worked was evicted"
+    assert "newest" in remaining
+    assert len(remaining) == 3

@@ -143,8 +143,17 @@ def record_impressions(sections: list) -> None:
                 entry["last_seen"] = now
                 entry["sections"][skey] = int(entry["sections"].get(skey, 0)) + 1
         if len(albums) > _MAX_ALBUMS:
-            # Drop the least recently served entries.
-            ordered = sorted(albums.items(), key=lambda kv: kv[1].get("last_seen", 0))
+            # Retain by age, not by how recently the album was last served.
+            # Serving-recency looks like the obvious choice and is exactly
+            # wrong here: an album the listener acts on gets excluded from
+            # every row afterwards (they saved it), so it stops being
+            # served, goes stale, and is evicted — while one they ignored
+            # stays in rotation and survives. That prunes the successes and
+            # keeps the failures, dragging every measured rate toward zero
+            # over time and making the recommendations look like they were
+            # decaying when nothing had changed. A fixed window on first
+            # sighting ages both outcomes at the same rate.
+            ordered = sorted(albums.items(), key=lambda kv: kv[1].get("first_seen", 0))
             for aid, _ in ordered[: len(albums) - _MAX_ALBUMS]:
                 albums.pop(aid, None)
         _save(data)
