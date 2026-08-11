@@ -128,6 +128,9 @@ export type RecommendationSections = {
     /** Paging fields, present on drill-down rows that can load more. */
     slug?: string;
     offset?: number;
+    /** Listing position the next page starts at. Not derivable from the
+     *  rendered album count — filtering makes those diverge. */
+    next_offset?: number;
     has_more?: boolean;
   }[];
 };

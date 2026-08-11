@@ -19,6 +19,8 @@ export type RecSection = {
   /** Paging state, on drill-down rows that can fetch further pages. */
   slug?: string;
   offset?: number;
+  /** Listing position the next page starts at, supplied by the backend. */
+  next_offset?: number;
   has_more?: boolean;
 };
 
