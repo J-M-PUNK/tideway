@@ -14,7 +14,7 @@ them apart. These pin the corrected behavior:
   - success            -> refreshed and validated
 """
 import json
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import pytest
 import tidalapi
@@ -25,9 +25,17 @@ from app.tidal_client import TransientRefreshError
 
 @pytest.fixture
 def expired_session(tmp_path, monkeypatch):
-    """Point SESSION_FILE at a file whose access token expired 2h ago."""
+    """Point SESSION_FILE at a file whose access token expired 2h ago.
+
+    Naive UTC, because that is the frame the app actually writes
+    (tidalapi's `datetime.utcnow()`). This used to use `datetime.now()`,
+    which agreed with the reader's own wrong frame and so hid #309 —
+    off-UTC machines never took the branch these tests exercise.
+    """
     f = tmp_path / "tidal_session.json"
-    expiry = (datetime.now() - timedelta(hours=2)).isoformat()
+    expiry = (
+        datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=2)
+    ).isoformat()
     f.write_text(json.dumps({
         "token_type": "Bearer",
         "access_token": "stale",

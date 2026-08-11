@@ -39,6 +39,42 @@ def _tlog(msg: str) -> None:
         # stderr line already carried the signal.
         pass
 
+
+def _now_matching(expiry: datetime) -> datetime:
+    """The current time in the same frame as `expiry`.
+
+    Token expiry is stored as *naive UTC*: tidalapi builds it with
+    `datetime.utcnow()` (session.py) and `_token_refresh_capturing`
+    matches that convention deliberately. Comparing such a value
+    against `datetime.now()` compares UTC against local time, so the
+    remaining lifetime comes out wrong by the machine's UTC offset in
+    whichever direction that offset points:
+
+      - West of UTC the remaining time is *overstated*. The refresh
+        watchdog only acts inside a 5 minute window, so an offset of
+        several hours means it never fires at all: the token dies
+        while the countdown still reads hours, and `load_session`'s
+        `expiry <= now` test misses for the same reason, so the launch
+        refresh is skipped too. The user is silently signed out with
+        no log line explaining it.
+      - East of UTC it is *understated*, so refreshes fire an offset
+        early and every launch takes the refresh path, rotating the
+        refresh token far more often than necessary.
+
+    Only machines sitting exactly on UTC behave correctly, which is
+    why this survived: the tests built their fixture expiry with
+    `datetime.now()` too, so they agreed with the reader and never
+    exercised the frame the writer actually uses (#309).
+
+    An aware `expiry` is handled for its own sake, so this stays
+    correct if tidalapi ever moves off naive datetimes.
+    """
+    tz = getattr(expiry, "tzinfo", None)
+    if tz is not None:
+        return datetime.now(tz)
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
 SESSION_FILE = user_data_dir() / "tidal_session.json"
 
 # Connection-level failures from either HTTP transport. Loading a
@@ -539,6 +575,7 @@ class TidalClient:
 
     def load_session(self) -> bool:
         if not SESSION_FILE.exists():
+            _tlog(f"load_session: no session file at {SESSION_FILE}")
             return False
         try:
             with open(SESSION_FILE) as f:
@@ -550,6 +587,7 @@ class TidalClient:
             )
             refresh_token = data.get("refresh_token")
             is_pkce = bool(data.get("is_pkce", False))
+            refreshed_on_launch = False
             # For PKCE sessions, swap the client_id to the hi-res-entitled
             # one BEFORE any Tidal call. Otherwise the /sessions call
             # inside load_oauth_session (and the proactive refresh below)
@@ -565,8 +603,7 @@ class TidalClient:
             # 401s propagating to the caller (e.g. download endpoints).
             # If the stored expiry is in the past, skip trying the stale
             # token and refresh up front.
-            now = datetime.now(expiry.tzinfo) if expiry and expiry.tzinfo else datetime.now()
-            if expiry and refresh_token and expiry <= now:
+            if expiry and refresh_token and expiry <= _now_matching(expiry):
                 # The stored access token is already expired, so this refresh
                 # is what keeps a relaunch (app was closed past the token
                 # lifetime) from bouncing the user to the login screen. It
@@ -580,6 +617,7 @@ class TidalClient:
                 try:
                     if self._token_refresh_capturing(refresh_token):
                         self.save_session()
+                        refreshed_on_launch = True
                         _tlog("load_session: expired token refreshed on launch")
                 except tidalapi.exceptions.AuthenticationError as exc:
                     _tlog(
@@ -609,7 +647,18 @@ class TidalClient:
             # — including a False, which is a genuine rejection and not
             # something a retry would fix.
             self._session_load_deferred = False
-            return self.session.check_login()
+            ok = self.session.check_login()
+            if not ok:
+                # The one logout that leaves no other trace: Tidal
+                # rejects the stored session even though we either
+                # refreshed it just now or judged it unexpired. Silence
+                # here is what made #309 undiagnosable from a user's log.
+                _tlog(
+                    "load_session: Tidal rejected the stored session "
+                    f"(stored expiry={expiry}, "
+                    f"refreshed on launch={refreshed_on_launch})"
+                )
+            return ok
         except _NETWORK_ERRORS:
             # No route to Tidal. load_oauth_session never populated
             # session.user / session_id, which makes check_login()
@@ -631,7 +680,13 @@ class TidalClient:
             # the abuse case), so this is reachable on a normal start.
             self._session_load_deferred = bool(refresh_token)
             return False
-        except Exception:
+        except Exception as exc:
+            # Anything left is a malformed or unreadable session file
+            # (bad JSON, missing key, unparseable expiry). Treating that
+            # as "not signed in" is right, but doing it silently means a
+            # user who suddenly has to log in again finds nothing in the
+            # log to explain why.
+            _tlog(f"load_session: could not restore session: {exc!r}")
             return False
 
     def _token_refresh_capturing(self, refresh_token: str) -> bool:
@@ -948,12 +1003,7 @@ class TidalClient:
                 refresh_token = getattr(self.session, "refresh_token", None)
                 if not expiry or not refresh_token:
                     continue
-                now = (
-                    datetime.now(expiry.tzinfo)
-                    if getattr(expiry, "tzinfo", None)
-                    else datetime.now()
-                )
-                seconds_left = (expiry - now).total_seconds()
+                seconds_left = (expiry - _now_matching(expiry)).total_seconds()
                 if seconds_left > self._REFRESH_WINDOW_SEC:
                     continue
                 _tlog(
