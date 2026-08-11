@@ -128,7 +128,36 @@ def test_ordinary_clicks_pass_through(monkeypatch):
     assert handled is False
 
 
-def test_an_unmapped_extra_button_is_named_in_the_log(monkeypatch, caplog):
+@pytest.fixture
+def audio_log():
+    """Capture what reaches the logger that writes audio.log.
+
+    Attached straight to that logger rather than going through caplog:
+    app.audio.player sets propagate=False on it, so once anything has
+    imported that module the records never reach caplog's root handler
+    and the assertion passes against an empty string.
+    """
+    import logging
+
+    records = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record):
+            records.append(record.getMessage())
+
+    logger = logging.getLogger("tideway.audio")
+    handler = _Capture()
+    logger.addHandler(handler)
+    previous = logger.level
+    logger.setLevel(logging.INFO)
+    try:
+        yield records
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(previous)
+
+
+def test_an_unmapped_extra_button_is_named_in_the_log(monkeypatch, audio_log):
     """The 8/9 numbering is X11 convention, not something GDK's docs
     promise, and it could not be tried on a real widget before shipping.
     If a mouse reports something else, the log has to say which number so
@@ -136,24 +165,22 @@ def test_an_unmapped_extra_button_is_named_in_the_log(monkeypatch, caplog):
     webview = _wired_webview(monkeypatch)
     handler = webview.connected["button-press-event"]
 
-    with caplog.at_level("INFO", logger="tideway.audio"):
-        handler(None, types.SimpleNamespace(button=6))
+    handler(None, types.SimpleNamespace(button=6))
 
-    assert "unmapped mouse button 6" in caplog.text
+    assert any("unmapped mouse button 6" in m for m in audio_log)
     assert webview.moves == []
 
 
-def test_normal_buttons_do_not_log(monkeypatch, caplog):
+def test_normal_buttons_do_not_log(monkeypatch, audio_log):
     """Left/middle/right clicks are constant traffic; logging them would
     bury the signal above."""
     webview = _wired_webview(monkeypatch)
     handler = webview.connected["button-press-event"]
 
-    with caplog.at_level("INFO", logger="tideway.audio"):
-        for button in (1, 2, 3):
-            handler(None, types.SimpleNamespace(button=button))
+    for button in (1, 2, 3):
+        handler(None, types.SimpleNamespace(button=button))
 
-    assert caplog.text == ""
+    assert audio_log == []
 
 
 @pytest.mark.parametrize("button", [8, 9])
