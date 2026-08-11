@@ -128,6 +128,34 @@ def test_ordinary_clicks_pass_through(monkeypatch):
     assert handled is False
 
 
+def test_an_unmapped_extra_button_is_named_in_the_log(monkeypatch, caplog):
+    """The 8/9 numbering is X11 convention, not something GDK's docs
+    promise, and it could not be tried on a real widget before shipping.
+    If a mouse reports something else, the log has to say which number so
+    it takes one report rather than a round trip."""
+    webview = _wired_webview(monkeypatch)
+    handler = webview.connected["button-press-event"]
+
+    with caplog.at_level("INFO", logger="tideway.audio"):
+        handler(None, types.SimpleNamespace(button=6))
+
+    assert "unmapped mouse button 6" in caplog.text
+    assert webview.moves == []
+
+
+def test_normal_buttons_do_not_log(monkeypatch, caplog):
+    """Left/middle/right clicks are constant traffic; logging them would
+    bury the signal above."""
+    webview = _wired_webview(monkeypatch)
+    handler = webview.connected["button-press-event"]
+
+    with caplog.at_level("INFO", logger="tideway.audio"):
+        for button in (1, 2, 3):
+            handler(None, types.SimpleNamespace(button=button))
+
+    assert caplog.text == ""
+
+
 @pytest.mark.parametrize("button", [8, 9])
 def test_ends_of_history_are_a_no_op(monkeypatch, button):
     """Pressing Back on the first page must not navigate, but must still

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import argparse
 import io
+import logging
 import os
 import sys
 import threading
@@ -560,8 +561,21 @@ def _wire_gtk_mouse_nav() -> None:
         original_init(self, window)
 
         def on_button_press(_widget, event):  # type: ignore[no-untyped-def]
-            move = gdk_history_move(getattr(event, "button", 0))
+            button = getattr(event, "button", 0)
+            move = gdk_history_move(button)
             if move is None:
+                # 8 and 9 are what X11 reports for the thumb buttons, but
+                # that is convention rather than something GDK's docs
+                # promise, and this could not be tried on a real GTK
+                # widget before shipping. Naming any other extra button
+                # we see means a report says which number to map instead
+                # of costing another round trip, the way #309's silent
+                # paths did.
+                if button > 3:
+                    logging.getLogger("tideway.audio").info(
+                        f"[desktop] unmapped mouse button {button} "
+                        "(expected 8=back, 9=forward)"
+                    )
                 return False
             # WebKit's own back/forward list, which is what the router's
             # pushState entries land in, so moving through it delivers
