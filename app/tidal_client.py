@@ -41,6 +41,25 @@ def _tlog(msg: str) -> None:
 
 SESSION_FILE = user_data_dir() / "tidal_session.json"
 
+
+def _stored_refresh_token() -> Optional[str]:
+    """The refresh token currently on disk, if any.
+
+    Read at save time so an in-memory session that has lost its refresh
+    token cannot overwrite a good one. Returns None when the file is
+    missing or unreadable, which puts the caller back where it already
+    was rather than inventing a credential.
+    """
+    try:
+        with open(SESSION_FILE) as f:
+            return json.load(f).get("refresh_token") or None
+    except FileNotFoundError:
+        return None
+    except (OSError, ValueError):
+        # Unreadable or malformed. Nothing to preserve, and the caller
+        # is about to replace the file anyway.
+        return None
+
 # Connection-level failures from either HTTP transport. Loading a
 # persisted session over a dead network has to be told apart from
 # Tidal rejecting the credentials — see load_session.
@@ -505,6 +524,9 @@ class TidalClient:
         # yet. Read by the server's auth check (offline ≠ signed out)
         # and cleared by the watchdog's retry once the network is back.
         self._session_load_deferred = False
+        # One-shot latch so the watchdog's "this session can never be
+        # renewed" warning is logged once rather than every tick.
+        self._warned_no_refresh_token = False
         # Serializes the deferred-load retry across the watchdog tick
         # and connectivity-triggered retries, which can land together.
         self._deferred_retry_lock = threading.Lock()
@@ -947,6 +969,23 @@ class TidalClient:
                 expiry = getattr(self.session, "expiry_time", None)
                 refresh_token = getattr(self.session, "refresh_token", None)
                 if not expiry or not refresh_token:
+                    # A signed-in session with no refresh token can never
+                    # be renewed, so this loop will skip it every tick
+                    # until the access token expires and the user is
+                    # silently signed out. Say so once, rather than once
+                    # a minute, so the log explains the logout that is
+                    # coming instead of only recording the aftermath.
+                    if (
+                        refresh_token is None
+                        and expiry is not None
+                        and not self._warned_no_refresh_token
+                    ):
+                        self._warned_no_refresh_token = True
+                        _tlog(
+                            "refresh watchdog: session has no refresh token, "
+                            f"so it cannot be renewed and ends at {expiry} "
+                            "(UTC) — a re-login will be required"
+                        )
                     continue
                 now = (
                     datetime.now(expiry.tzinfo)
@@ -1087,10 +1126,40 @@ class TidalClient:
         every other user can read them.
         """
         expiry = self.session.expiry_time
+        refresh_token = self.session.refresh_token
+        if not refresh_token:
+            # Never write away a refresh token we still hold on disk.
+            #
+            # It is the only credential that can renew a session, and an
+            # absent value on the session object means "unchanged", not
+            # "revoked": Tidal omits the field unless it rotates, and
+            # tidalapi drops it when it does. `_token_refresh_capturing`
+            # already applies that rule at the HTTP layer; persistence
+            # has to apply it too or one save undoes the other.
+            #
+            # Writing the None instead disables renewal permanently. The
+            # watchdog skips a session with no refresh token, so the
+            # access token just expires and the user is signed out with
+            # nothing in the log to explain it. That is how #309
+            # reproduced here: a session file written with a null refresh
+            # token and a four hour access token, signed out on the dot
+            # when it expired.
+            refresh_token = _stored_refresh_token()
+            if refresh_token:
+                _tlog(
+                    "save_session: session had no refresh token, kept the "
+                    "stored one"
+                )
+            else:
+                _tlog(
+                    "save_session: no refresh token to store — this session "
+                    "cannot be renewed and will end when the access token "
+                    "expires"
+                )
         data = {
             "token_type": self.session.token_type,
             "access_token": self.session.access_token,
-            "refresh_token": self.session.refresh_token,
+            "refresh_token": refresh_token,
             "expiry_time": expiry.isoformat() if expiry else None,
             # Track PKCE sessions separately — their client_id/secret
             # need to be re-swapped to the hi-res-entitled pair after
