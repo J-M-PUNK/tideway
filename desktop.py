@@ -502,6 +502,89 @@ def _enable_webview_media_prefs() -> None:
     BrowserView.__init__ = patched_init
 
 
+# X11/GDK button numbers for the mouse's dedicated side buttons, and the
+# history move each one means. GDK numbers buttons from 1, so these are
+# the 8th and 9th physical buttons — the same pair X11 reports for the
+# thumb rest on essentially every mouse that has them.
+_GDK_BUTTON_BACK = 8
+_GDK_BUTTON_FORWARD = 9
+_GDK_HISTORY_BUTTONS = {
+    _GDK_BUTTON_BACK: "back",
+    _GDK_BUTTON_FORWARD: "forward",
+}
+
+
+def gdk_history_move(button: int) -> Optional[str]:
+    """Which history move a GDK button number means, if any.
+
+    Split out from the signal handler so the mapping is testable
+    without a GTK main loop.
+    """
+    return _GDK_HISTORY_BUTTONS.get(button)
+
+
+def _wire_gtk_mouse_nav() -> None:
+    """Route the mouse's Back/Forward side buttons to history on the GTK
+    backend (#316).
+
+    These buttons cannot be handled in the web layer on Linux. WebKitGTK
+    does not deliver the 4th and 5th buttons to the DOM at all, which
+    MDN states plainly: "On Linux (GTK), the 4th button and the 5th
+    button are not supported." So the app's `mouseup` listener — which
+    does work on WebView2 and WKWebView — never fires there, and the
+    buttons instead did whatever GTK did with them, which is what the
+    reporter saw as unpredictable behaviour over the sidebar.
+
+    GDK does deliver them, as buttons 8 and 9 on `button-press-event`,
+    so the handler belongs at that layer. Returning True marks the event
+    handled so WebKitGTK does not also act on it.
+
+    pywebview only connects that signal itself for frameless windows
+    with easy_drag, and Tideway sets easy_drag=False, so the signal is
+    free. We hook the BrowserView constructor because the widget does
+    not exist before then — the same approach _enable_webview_media_prefs
+    already uses for Cocoa.
+    """
+    if not sys.platform.startswith("linux"):
+        return
+    try:
+        from webview.platforms.gtk import BrowserView
+    except Exception:
+        # No GTK backend in this environment (Qt, or the AppImage's
+        # no-backend fallback). Nothing to wire up.
+        return
+
+    original_init = BrowserView.__init__
+
+    def patched_init(self, window):  # type: ignore[no-untyped-def]
+        original_init(self, window)
+
+        def on_button_press(_widget, event):  # type: ignore[no-untyped-def]
+            move = gdk_history_move(getattr(event, "button", 0))
+            if move is None:
+                return False
+            # WebKit's own back/forward list, which is what the router's
+            # pushState entries land in, so moving through it delivers
+            # the popstate React Router navigates on. Preferred over
+            # evaluating `history.back()`: pywebview's evaluate_js blocks
+            # on a semaphore that only the GTK main loop can release, and
+            # this handler runs on that loop, so calling it here would
+            # deadlock the way the geometry read used to.
+            if move == "back":
+                if self.webview.can_go_back():
+                    self.webview.go_back()
+            elif self.webview.can_go_forward():
+                self.webview.go_forward()
+            # Consume it either way: at the ends of the history there is
+            # nothing to do, but letting it through would hand the button
+            # back to whatever GTK did with it before.
+            return True
+
+        self.webview.connect("button-press-event", on_button_press)
+
+    BrowserView.__init__ = patched_init
+
+
 def _guard_cocoa_window_move() -> None:
     """Stop a macOS 26 (Tahoe) startup crash in pywebview's Cocoa
     backend (issue #215).
@@ -612,6 +695,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         import webview  # pywebview
         _enable_webview_media_prefs()
         _guard_cocoa_window_move()
+        _wire_gtk_mouse_nav()
     except ImportError:
         print(
             "[desktop] pywebview not installed; falling back to default browser. "
