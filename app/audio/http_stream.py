@@ -277,6 +277,17 @@ class RingBuffer:
         """
         deadline = time.monotonic() + block_timeout
         with self._cv:
+            # A stream that has been marked finished accepts no more
+            # bytes. The re-encode fallback (FlacStreamEncoder via
+            # push_pcm) must not append a second FLAC stream — fresh
+            # header + PCM — after the passthrough's source ran out:
+            # the renderer is still reading the first stream and
+            # decodes the boundary as garbage (UAPP avcodec
+            # -1094995529). The next stream starts through flush(),
+            # which clears _source_done, so this only ever drops
+            # bytes that belong to an already-ended stream.
+            if self._source_done:
+                return True
             # Fill head cache under the lock so write() and flush()
             # don't race on _head (flush clears it under the lock).
             if len(self._head) < self._head_max:

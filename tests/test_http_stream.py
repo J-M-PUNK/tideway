@@ -126,6 +126,34 @@ class TestRingBuffer:
         # returns "" — first read drains).
         assert out == b"alive"
 
+    def test_write_after_source_done_is_silent_drop(self):
+        """A stream that has been marked finished must not accept a
+        second encoder's output. The DLNA re-encode fallback picks
+        up on the realtime thread after the passthrough source runs
+        out; appending its fresh FLAC header onto the ended stream
+        corrupts the renderer's decoder (-1094995529). The bytes
+        are dropped and the next stream starts via flush()."""
+        buf = RingBuffer(max_bytes=1024)
+        buf.write(b"first-stream")
+        buf.source_done()
+        buf.write(b"second-stream-append")
+        out = buf.read(100, timeout=0.05)
+        assert out == b"first-stream"
+        assert buf.is_source_done is True
+
+    def test_flush_clears_source_done_for_next_stream(self):
+        """flush() resets the ended-stream state so the next track's
+        stream can write again — that's the start_passthrough path
+        on every track change."""
+        buf = RingBuffer(max_bytes=1024)
+        buf.write(b"first-stream")
+        buf.source_done()
+        buf.flush()
+        buf.write(b"next-stream")
+        out = buf.read(100, timeout=0.05)
+        assert out == b"next-stream"
+        assert buf.is_source_done is False
+
     def test_attach_supersedes_prior_generation(self):
         """A second attach() bumps the generation so the first
         consumer sees is_superseded — the single-active-consumer
