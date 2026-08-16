@@ -24,6 +24,7 @@ from app.audio.http_stream import (
     RingBuffer,
     _StreamRequestHandler,
     _build_flac_stream_header,
+    _renderer_rejects_bare_206,
     primary_lan_ip,
     start_stream_http_server,
 )
@@ -735,3 +736,137 @@ class TestDlnaHttpCompliance:
             server.shutdown()
             server.server_close()
             buffer.close()
+
+    # -- Renderer-profile matrix -------------------------------------
+    # A Rygel/GStreamer renderer (e.g. KEF LS50 Wireless II) rejects a
+    # 206 sent to a request with no Range header (UPnP 716 at
+    # SetAVTransportURI -> connected but silent). For those User-Agents
+    # a no-Range request must get 200 + chunked instead. UAPP/TVs and
+    # explicit Range requests are unchanged (206 + Content-Length).
+    # Observed UAs: the SetAVTransportURI-time probe is a Rygel HEAD;
+    # the stream pull is a GStreamer souphttpsrc GET.
+    _RYGEL_UA = b"Rygel/0.42.5 DLNADOC/1.50 UPnP/1.0"
+    _GSTREAMER_UA = b"GStreamer souphttpsrc 1.22.12 libsoup/2.74.3"
+
+    def test_rygel_head_probe_no_range_gets_200_chunked(self):
+        """Rygel HEAD-probes the URL while processing
+        SetAVTransportURI. A 206 to that no-Range probe is what it
+        rejects with 716, so it must see a 200 + chunked instead."""
+        server, buffer = self._seeded_server()
+        try:
+            data = self._request(
+                server,
+                b"HEAD /dlna/stream HTTP/1.1\r\n"
+                b"Host: localhost\r\n"
+                b"User-Agent: " + self._RYGEL_UA + b"\r\n\r\n",
+            )
+            assert data.startswith(b"HTTP/1.1 200"), (
+                f"Rygel no-Range probe should get 200, got: {data!r}"
+            )
+            assert b"Transfer-Encoding: chunked" in data, (
+                f"expected chunked framing, got: {data!r}"
+            )
+            assert b"HTTP/1.1 206" not in data
+            assert b"Content-Range" not in data
+        finally:
+            server.shutdown()
+            server.server_close()
+            buffer.close()
+
+    def test_gstreamer_plain_get_no_range_gets_200_chunked(self):
+        """The stream pull is a GStreamer souphttpsrc GET. A plain GET
+        (no Range) must get 200 + chunked -- the only shape this
+        renderer class plays end-to-end."""
+        server, buffer = self._seeded_server()
+        try:
+            data = self._request(
+                server,
+                b"GET /dlna/stream HTTP/1.1\r\n"
+                b"Host: localhost\r\n"
+                b"User-Agent: " + self._GSTREAMER_UA + b"\r\n\r\n",
+            )
+            assert data.startswith(b"HTTP/1.1 200"), (
+                f"GStreamer plain GET should get 200, got: {data!r}"
+            )
+            assert b"Transfer-Encoding: chunked" in data
+            assert b"Content-Range" not in data
+        finally:
+            server.shutdown()
+            server.server_close()
+            buffer.close()
+
+    def test_rygel_class_range_request_still_gets_206(self):
+        """An explicit Range is a conformant range request: every
+        renderer, Rygel included, gets a 206 from the offset. The quirk
+        only diverts the no-Range case."""
+        server, buffer = self._seeded_server()
+        try:
+            data = self._request(
+                server,
+                b"GET /dlna/stream HTTP/1.1\r\n"
+                b"Host: localhost\r\n"
+                b"User-Agent: " + self._GSTREAMER_UA + b"\r\n"
+                b"Range: bytes=0-\r\n\r\n",
+            )
+            assert data.startswith(b"HTTP/1.1 206"), (
+                f"Range request should get 206 even from Rygel, got: {data!r}"
+            )
+            assert b"Content-Range: bytes 0-" in data
+        finally:
+            server.shutdown()
+            server.server_close()
+            buffer.close()
+
+    def test_uapp_style_no_range_stays_206_with_content_length(self):
+        """A non-Rygel renderer (UAPP is OkHttp) sending a plain GET is
+        unchanged: 206 + Content-Length, which it needs for SEEK_END
+        during decoder-init. Guards against regressing #234/#239."""
+        server, buffer = self._seeded_server()
+        try:
+            data = self._request(
+                server,
+                b"GET /dlna/stream HTTP/1.1\r\n"
+                b"Host: localhost\r\n"
+                b"User-Agent: okhttp/4.9.3\r\n\r\n",
+            )
+            assert data.startswith(b"HTTP/1.1 206"), (
+                f"non-Rygel plain GET should stay 206, got: {data!r}"
+            )
+            assert b"Content-Length: " in data
+            assert b"Transfer-Encoding: chunked" not in data
+        finally:
+            server.shutdown()
+            server.server_close()
+            buffer.close()
+
+    def test_rygel_ua_on_cast_session_unaffected(self):
+        """The quirk is DLNA-scoped. A Cast session (dlna=False) that
+        happens to carry a Rygel-class UA must still get a plain 200 +
+        chunked with no DLNA/range headers."""
+        server, buffer = self._seeded_server(dlna=False)
+        try:
+            data = self._request(
+                server,
+                b"GET /dlna/stream HTTP/1.1\r\n"
+                b"Host: localhost\r\n"
+                b"User-Agent: " + self._GSTREAMER_UA + b"\r\n\r\n",
+            )
+            assert data.startswith(b"HTTP/1.1 200")
+            assert b"Content-Range" not in data
+            assert b"contentFeatures.dlna.org" not in data
+        finally:
+            server.shutdown()
+            server.server_close()
+            buffer.close()
+
+    def test_renderer_rejects_bare_206_token_match(self):
+        """Pin the User-Agent tokens the quirk keys on."""
+        assert _renderer_rejects_bare_206("Rygel/0.42.5 DLNADOC/1.50 UPnP/1.0")
+        assert _renderer_rejects_bare_206(
+            "GStreamer souphttpsrc 1.22.12 libsoup/2.74.3"
+        )
+        assert _renderer_rejects_bare_206("rygel/1.0")  # case-insensitive
+        # UAPP (OkHttp), Hisense, empty, and unknown UAs are unaffected.
+        assert not _renderer_rejects_bare_206("okhttp/4.9.3")
+        assert not _renderer_rejects_bare_206("")
+        assert not _renderer_rejects_bare_206("Some Random TV Firmware/2.0")

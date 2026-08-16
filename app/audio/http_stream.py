@@ -72,6 +72,31 @@ DLNA_CONTENT_FEATURES = (
 # technique squeeze2upnp uses for renderers that reject an open range.
 _STREAM_SYNTHETIC_TOTAL = 1 << 40
 
+# Renderers whose HTTP client rejects a 206 sent to a request that
+# carried no Range header. Per RFC 9110 15.3.7 a 206 answers a *range*
+# request; a strict renderer treats an unsolicited 206 as malformed. A
+# Rygel/GStreamer renderer (e.g. KEF LS50 Wireless II firmware) rejects
+# our open-ended 206 + synthetic Content-Length with UPnP 716 at
+# SetAVTransportURI -> connected but silent. Observed User-Agents from
+# one such device: the SetAVTransportURI-time probe is a HEAD as
+# "Rygel/0.42.5 DLNADOC/1.50 UPnP/1.0"; the stream pull is a GET as
+# "GStreamer souphttpsrc 1.22.12 libsoup/2.74.3". Match either token
+# (and souphttpsrc) case-insensitively. These renderers play a plain
+# 200 + chunked stream (the same shape Cast uses) end-to-end. UAPP
+# (OkHttp) and TV firmwares don't carry these tokens, so their
+# 206 + Content-Length response -- which they need for SEEK_END during
+# decoder init (#234/#239) -- is unchanged.
+_CHUNKED_ON_BARE_GET_UA_TOKENS = ("rygel", "gstreamer", "souphttpsrc")
+
+
+def _renderer_rejects_bare_206(user_agent: str) -> bool:
+    """True if the renderer's User-Agent marks it as one that rejects a
+    206 response to a request without a Range header (Rygel/GStreamer).
+    """
+    ua = (user_agent or "").lower()
+    return any(token in ua for token in _CHUNKED_ON_BARE_GET_UA_TOKENS)
+
+
 # Upper bound on how long attach() waits for the outgoing consumer to
 # serve its first chunk before superseding it. Returns the instant that
 # chunk is served, so this cap only bites when the encoder hasn't
@@ -1081,10 +1106,18 @@ class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
         Takes the isinstance-validated server so it never reaches
         through the unnarrowed self.server for the session config.
 
-        DLNA: always 206 + Content-Length + Content-Range, never
+        DLNA default: 206 + Content-Length + Content-Range, never
         chunked. Strict renderers (UAPP) do a plain GET without a
         Range header and still need Content-Length for SEEK_END during
         decoder-init. Chunked → contentLength=-1 → seek fails.
+
+        DLNA Rygel/GStreamer quirk: those renderers reject a 206 sent
+        to a request without a Range header (UPnP 716 at
+        SetAVTransportURI → connected but silent). When the User-Agent
+        marks such a renderer and no Range was sent, answer 200 +
+        chunked instead (see _renderer_rejects_bare_206). An explicit
+        Range still gets a conformant 206 from the offset for every
+        renderer.
 
         Cast: plain 200 + chunked transfer, unchanged.
         """
@@ -1094,21 +1127,33 @@ class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
         self._range_start = 0
         if server.dlna:
             range_hdr = self.headers.get("Range", "")
+            has_range = range_hdr.startswith("bytes=")
             start = 0
-            if range_hdr.startswith("bytes="):
+            if has_range:
                 try:
                     start = int(range_hdr[6:].split("-")[0] or 0)
                 except ValueError:
                     start = 0
             self._range_start = start
-            self.send_response(206)
-            self.send_header(
-                "Content-Range",
-                f"bytes {start}-{_STREAM_SYNTHETIC_TOTAL - 1}/{_STREAM_SYNTHETIC_TOTAL}",
-            )
-            self.send_header("Content-Length", str(_STREAM_SYNTHETIC_TOTAL - start))
-            self._chunked = False
-            self.send_header("Accept-Ranges", "bytes")
+            if not has_range and _renderer_rejects_bare_206(
+                self.headers.get("User-Agent", "")
+            ):
+                # Rygel/GStreamer plain GET: 200 + chunked, the only
+                # shape this renderer class plays end-to-end.
+                self.send_response(200)
+                self.send_header("Transfer-Encoding", "chunked")
+                self._chunked = True
+            else:
+                # Default (UAPP/TVs) or any explicit Range: 206 with a
+                # Content-Length the renderer can seek against.
+                self.send_response(206)
+                self.send_header(
+                    "Content-Range",
+                    f"bytes {start}-{_STREAM_SYNTHETIC_TOTAL - 1}/{_STREAM_SYNTHETIC_TOTAL}",
+                )
+                self.send_header("Content-Length", str(_STREAM_SYNTHETIC_TOTAL - start))
+                self._chunked = False
+                self.send_header("Accept-Ranges", "bytes")
         else:
             self.send_response(200)
             self.send_header("Transfer-Encoding", "chunked")
