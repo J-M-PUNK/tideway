@@ -1220,7 +1220,7 @@ class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
             flush=True,
         )
 
-    def _send_stream_headers(self, server: "StreamHTTPServer") -> None:
+    def _send_stream_headers(self, server: "StreamHTTPServer", method: str) -> None:
         """Send the response line + headers shared by HEAD and GET.
 
         Takes the isinstance-validated server so it never reaches
@@ -1239,13 +1239,21 @@ class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
         GET now gets 200 + the same Content-Length instead of 206.
 
         Cast: plain 200 + chunked transfer, unchanged.
+
+        Logs the response shape (status + body framing + whether the
+        request carried a Range) right after the headers go out. Paired
+        with the request line from _log_connection, a connect report
+        then shows both what the renderer asked for and what we
+        answered — e.g. a 206 sent to a request with range=none is the
+        RFC 9110 §15.3.7 violation that strict renderers (Rygel) reject
+        with UPnP 716, visible in the log without a packet capture.
         """
         # Body offset the do_GET loop starts serving from. DLNA
         # parse of Range: bytes=N- updates this to N so the body
         # actually starts at N (not 0). Cast path leaves it at 0.
         self._range_start = 0
+        range_hdr = self.headers.get("Range", "")
         if server.dlna:
-            range_hdr = self.headers.get("Range", "")
             has_range = range_hdr.startswith("bytes=")
             start = 0
             if has_range:
@@ -1256,7 +1264,8 @@ class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
             self._range_start = start
             self._chunked = False
             if has_range:
-                self.send_response(206)
+                status = 206
+                self.send_response(status)
                 self.send_header(
                     "Content-Range",
                     f"bytes {start}-{_STREAM_SYNTHETIC_TOTAL - 1}/{_STREAM_SYNTHETIC_TOTAL}",
@@ -1265,15 +1274,19 @@ class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
                     "Content-Length", str(_STREAM_SYNTHETIC_TOTAL - start)
                 )
             else:
-                self.send_response(200)
+                status = 200
+                self.send_response(status)
                 self.send_header(
                     "Content-Length", str(_STREAM_SYNTHETIC_TOTAL)
                 )
             self.send_header("Accept-Ranges", "bytes")
+            body_desc = f"content-length:{_STREAM_SYNTHETIC_TOTAL - start}"
         else:
-            self.send_response(200)
+            status = 200
+            self.send_response(status)
             self.send_header("Transfer-Encoding", "chunked")
             self._chunked = True
+            body_desc = "chunked"
         self.send_header("Content-Type", server.content_type)
         if server.dlna:
             self.send_header("transferMode.dlna.org", "Streaming")
@@ -1283,6 +1296,12 @@ class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
                 )
         self.send_header("Connection", "close")
         self.end_headers()
+        print(
+            f"[http_stream] ANSWERED {method} {status} "
+            f"type={server.content_type} body={body_desc} "
+            f"range={range_hdr or 'none'} to {self.client_address[0]}",
+            flush=True,
+        )
 
     def _serve_track(self, server: "StreamHTTPServer", head: bool = False) -> None:
         """Serve a fully-buffered track file with the REAL byte length.
@@ -1377,7 +1396,7 @@ class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
         if server.buffer is None:
             self.send_error(503, "stream session not ready")
             return
-        self._send_stream_headers(server)
+        self._send_stream_headers(server, "HEAD")
 
     def do_GET(self) -> None:  # noqa: N802 - stdlib API
         self._log_connection("GET")
@@ -1422,7 +1441,7 @@ class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
         if not buf.data_ready.wait(timeout=10.0):
             self.send_error(503, "stream data not ready")
             return
-        self._send_stream_headers(server)
+        self._send_stream_headers(server, "GET")
         # Set a socket write timeout so that _write_chunk doesn't
         # block for minutes when the receiver stops reading the
         # socket (UAPP pauses reading for ~3.5 min after each seek).
