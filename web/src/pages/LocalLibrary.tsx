@@ -615,7 +615,7 @@ function LocalRow({
         </div>
       </div>
       <div className="flex min-w-0 items-center gap-1.5 text-muted-foreground">
-        <Disc3 className="h-3.5 w-3.5 flex-shrink-0" />
+        <Disc3 className="h-3.5 w-3.5 shrink-0" />
         <span className="truncate text-xs">{file.album}</span>
       </div>
       <div className="truncate text-xs uppercase tracking-wider text-muted-foreground">
@@ -659,7 +659,7 @@ function SortToggle<T extends string>({
             className={cn(
               "flex items-center gap-1.5 rounded px-3 py-1 text-xs font-semibold transition-colors",
               active
-                ? "bg-background text-foreground shadow-sm"
+                ? "bg-background text-foreground shadow-xs"
                 : "text-muted-foreground hover:text-foreground",
             )}
           >

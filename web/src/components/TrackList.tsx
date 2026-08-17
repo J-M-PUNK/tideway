@@ -511,7 +511,7 @@ function TrackRow({
                   <span
                     title="Downloaded — plays from disk"
                     className={cn(
-                      "flex-shrink-0 rounded-sm bg-primary/15 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-primary",
+                      "shrink-0 rounded-sm bg-primary/15 px-1.5 py-0.5 text-[9px] font-bold uppercase tracking-wider text-primary",
                       justDownloaded && "animate-saved-pop",
                     )}
                   >

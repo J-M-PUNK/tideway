@@ -77,7 +77,7 @@ export function ArtistHero({
             className="absolute inset-0 h-full w-full scale-110 object-cover blur-xl brightness-[0.55]"
           />
         ) : (
-          <div className="absolute inset-0 bg-gradient-to-b from-[#2a2a2a] to-[#0a0a0a]" />
+          <div className="absolute inset-0 bg-linear-to-b from-[#2a2a2a] to-[#0a0a0a]" />
         )}
         {cover && (
           // `object-contain` so the artist's full photo shows at its
@@ -103,7 +103,7 @@ export function ArtistHero({
             }}
           />
         )}
-        <div className="absolute inset-0 bg-gradient-to-t from-background via-background/40 to-transparent" />
+        <div className="absolute inset-0 bg-linear-to-t from-background via-background/40 to-transparent" />
       </div>
 
       {/* Foreground: name + action row, positioned over the bottom of
@@ -354,7 +354,7 @@ function ArtistPlaycountLine({
       : "";
 
   return (
-    <div className="mt-3 flex flex-wrap items-center gap-x-6 text-xs font-semibold uppercase tracking-wider text-muted-foreground drop-shadow">
+    <div className="mt-3 flex flex-wrap items-center gap-x-6 text-xs font-semibold uppercase tracking-wider text-muted-foreground drop-shadow-sm">
       {monthlyLabel && <span>{monthlyLabel}</span>}
       {personal && <span className="text-primary">{personal}</span>}
     </div>

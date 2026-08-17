@@ -86,7 +86,7 @@ function UserRow({ user }: { user: TidalUser }) {
       to={`/user/${user.id}`}
       className="group flex items-center gap-3 rounded-md p-3 transition-colors hover:bg-accent"
     >
-      <div className="flex h-12 w-12 flex-shrink-0 items-center justify-center overflow-hidden rounded-full bg-secondary text-lg font-bold">
+      <div className="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-full bg-secondary text-lg font-bold">
         {avatar ? (
           <img
             src={avatar}

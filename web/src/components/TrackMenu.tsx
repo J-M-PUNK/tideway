@@ -269,7 +269,7 @@ function TrackHeader({ parts, track }: { parts: MenuParts; track: Track }) {
   return (
     <>
       <div className="flex items-center gap-3 px-3 py-2">
-        <div className="h-10 w-10 flex-shrink-0 overflow-hidden rounded bg-secondary">
+        <div className="h-10 w-10 shrink-0 overflow-hidden rounded bg-secondary">
           {cover ? (
             <img src={cover} alt="" className="h-full w-full object-cover" />
           ) : (

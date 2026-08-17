@@ -548,7 +548,7 @@ function Shell({
         <main
           ref={scrollRef}
           data-scroll-container
-          className="min-w-0 flex-1 overflow-y-auto rounded-lg bg-gradient-to-b from-secondary to-background scrollbar-thin"
+          className="min-w-0 flex-1 overflow-y-auto rounded-lg bg-linear-to-b from-secondary to-background scrollbar-thin"
         >
           {/* The scroll container itself carries no padding — otherwise
               `sticky top-0` on NavBar would anchor at the padding edge

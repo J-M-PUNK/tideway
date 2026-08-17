@@ -52,7 +52,7 @@ export function LastfmConnectNudge() {
 
   return (
     <div className="mb-8 flex items-start gap-4 rounded-lg border border-primary/30 bg-primary/10 px-4 py-3">
-      <Radio className="mt-0.5 h-5 w-5 flex-shrink-0 text-primary" />
+      <Radio className="mt-0.5 h-5 w-5 shrink-0 text-primary" />
       <div className="min-w-0 flex-1">
         <div className="font-semibold">Connect Last.fm for full stats</div>
         <p className="mt-0.5 text-sm text-muted-foreground">

@@ -116,7 +116,7 @@ export function SelectionBar() {
   };
 
   return (
-    <div className="pointer-events-auto border-t border-border bg-primary/90 px-6 py-3 text-primary-foreground backdrop-blur-sm">
+    <div className="pointer-events-auto border-t border-border bg-primary/90 px-6 py-3 text-primary-foreground backdrop-blur-xs">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-3">
           <span className="text-sm font-semibold">

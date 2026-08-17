@@ -110,7 +110,7 @@ export function UrlDropTarget() {
   return (
     <div
       className={cn(
-        "pointer-events-none fixed inset-0 z-[90] flex items-center justify-center bg-primary/20 backdrop-blur-sm transition-opacity",
+        "pointer-events-none fixed inset-0 z-90 flex items-center justify-center bg-primary/20 backdrop-blur-xs transition-opacity",
         active ? "opacity-100" : "opacity-0",
       )}
       aria-hidden={!active}

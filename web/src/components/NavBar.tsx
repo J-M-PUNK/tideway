@@ -71,7 +71,7 @@ export function NavBar({
   const canForward = depth < maxDepth;
 
   return (
-    <div className="sticky top-0 z-10 flex items-center gap-3 bg-background/50 px-8 py-3 backdrop-blur-sm">
+    <div className="sticky top-0 z-10 flex items-center gap-3 bg-background/50 px-8 py-3 backdrop-blur-xs">
       <button
         onClick={() => canBack && navigate(-1)}
         disabled={!canBack}

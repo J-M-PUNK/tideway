@@ -214,7 +214,7 @@ export function AotyCard({
         )}
         {entry.score !== null && (
           <div
-            className="absolute left-2 top-2 rounded bg-black/75 px-1.5 py-0.5 text-xs font-bold text-white shadow"
+            className="absolute left-2 top-2 rounded bg-black/75 px-1.5 py-0.5 text-xs font-bold text-white shadow-sm"
             aria-label={`AOTY score: ${entry.score} out of 100`}
             title={`AOTY score: ${entry.score}/100`}
           >
@@ -223,7 +223,7 @@ export function AotyCard({
         )}
         {entry.must_hear && (
           <div
-            className="absolute right-2 top-2 flex h-6 w-6 items-center justify-center rounded-full bg-amber-500 text-white shadow"
+            className="absolute right-2 top-2 flex h-6 w-6 items-center justify-center rounded-full bg-amber-500 text-white shadow-sm"
             aria-label="AOTY must hear"
             title="AOTY must hear"
           >

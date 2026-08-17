@@ -252,7 +252,7 @@ function SectionHeader({
           (ctxPath ? (
             <Link
               to={ctxPath}
-              className="h-12 w-12 flex-shrink-0 overflow-hidden rounded bg-secondary transition-transform hover:scale-105"
+              className="h-12 w-12 shrink-0 overflow-hidden rounded bg-secondary transition-transform hover:scale-105"
               title={context.title}
             >
               {ctxCover ? (
@@ -268,7 +268,7 @@ function SectionHeader({
               )}
             </Link>
           ) : (
-            <div className="h-12 w-12 flex-shrink-0 overflow-hidden rounded bg-secondary">
+            <div className="h-12 w-12 shrink-0 overflow-hidden rounded bg-secondary">
               {ctxCover ? (
                 <img
                   src={ctxCover}
@@ -578,7 +578,7 @@ function PageLinkTile({ link }: { link: PageLinkItem }) {
     <Link
       to={`/browse/${encodeURIComponent(link.path)}`}
       className={cn(
-        "relative flex aspect-[5/3] items-start overflow-hidden rounded-lg p-4 text-lg font-bold tracking-tight text-foreground transition-transform hover:scale-[1.02]",
+        "relative flex aspect-5/3 items-start overflow-hidden rounded-lg p-4 text-lg font-bold tracking-tight text-foreground transition-transform hover:scale-[1.02]",
       )}
       style={{
         background: `linear-gradient(135deg, hsl(${hue}, 60%, 35%), hsl(${(hue + 40) % 360}, 70%, 20%))`,

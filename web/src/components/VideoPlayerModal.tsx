@@ -533,7 +533,7 @@ export function VideoPlayerModal() {
     <div
       ref={modalRef}
       className={cn(
-        "fixed z-[60] flex flex-col overflow-hidden bg-black text-foreground",
+        "fixed z-60 flex flex-col overflow-hidden bg-black text-foreground",
         minimized
           ? "bottom-4 right-4 w-[360px] rounded-lg shadow-2xl ring-1 ring-white/10"
           : "inset-0",
@@ -704,7 +704,7 @@ function TopBar({
       <div className="min-w-0 truncate text-sm text-muted-foreground">
         {video.artist?.name}
       </div>
-      <div className="flex flex-shrink-0 items-center gap-2">
+      <div className="flex shrink-0 items-center gap-2">
         <TopBarButton
           label="Similar videos"
           icon={VideoIcon}
@@ -912,7 +912,7 @@ function BottomBar({
             active={repeat}
           />
         </div>
-        <div className="flex w-[320px] flex-shrink-0 items-center justify-end gap-3">
+        <div className="flex w-[320px] shrink-0 items-center justify-end gap-3">
           <InlineVolumeControl
             volume={volume}
             muted={muted}
@@ -969,9 +969,9 @@ function VideoInfo({ video }: { video: Video }) {
     ? (imageProxy(video.cover) ?? undefined)
     : undefined;
   return (
-    <div className="flex w-[280px] min-w-0 flex-shrink-0 items-center gap-3">
+    <div className="flex w-[280px] min-w-0 shrink-0 items-center gap-3">
       {cover && (
-        <div className="h-11 w-11 flex-shrink-0 overflow-hidden rounded bg-secondary">
+        <div className="h-11 w-11 shrink-0 overflow-hidden rounded bg-secondary">
           <img src={cover} alt="" className="h-full w-full object-cover" />
         </div>
       )}
@@ -979,7 +979,7 @@ function VideoInfo({ video }: { video: Video }) {
         <div className="flex items-center gap-1 truncate text-sm font-semibold">
           <span className="truncate">{video.name}</span>
           {video.explicit && (
-            <span className="flex-shrink-0 rounded-sm bg-white/10 px-1 text-[10px] font-bold">
+            <span className="shrink-0 rounded-sm bg-white/10 px-1 text-[10px] font-bold">
               E
             </span>
           )}
@@ -993,7 +993,7 @@ function VideoInfo({ video }: { video: Video }) {
               {video.artist.name}
             </Link>
           ) : null}
-          <span className="flex-shrink-0 opacity-70">· Video</span>
+          <span className="shrink-0 opacity-70">· Video</span>
         </div>
       </div>
       <VideoOverflowMenu video={video} />
@@ -1029,14 +1029,14 @@ function VideoOverflowMenu({ video }: { video: Video }) {
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <button
-          className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-white/10 hover:text-foreground data-[state=open]:text-primary"
+          className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-white/10 hover:text-foreground data-[state=open]:text-primary"
           title="More"
           aria-label="More"
         >
           <MoreHorizontal className="h-4 w-4" />
         </button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" className="z-[65] w-52">
+      <DropdownMenuContent align="start" className="z-65 w-52">
         <DropdownMenuItem onSelect={copy}>
           <Copy className="h-3.5 w-3.5" /> Copy link
         </DropdownMenuItem>
@@ -1076,7 +1076,7 @@ function QualityPicker({
           {label}
         </button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="z-[65] w-40">
+      <DropdownMenuContent align="end" className="z-65 w-40">
         <DropdownMenuItem onSelect={() => onChange(undefined)}>
           Auto
         </DropdownMenuItem>
@@ -1182,7 +1182,7 @@ function SimilarVideosPanel({
   }, [videoId]);
 
   return (
-    <aside className="flex w-80 flex-shrink-0 flex-col border-l border-white/10 bg-black/60">
+    <aside className="flex w-80 shrink-0 flex-col border-l border-white/10 bg-black/60">
       <div className="flex items-center justify-between px-4 py-3">
         <div className="text-sm font-semibold">Similar videos</div>
         <button
@@ -1210,7 +1210,7 @@ function SimilarVideosPanel({
             onClick={() => open(v, videos)}
             className="group flex w-full items-center gap-3 rounded-md p-2 text-left transition-colors hover:bg-white/10"
           >
-            <div className="h-12 w-20 flex-shrink-0 overflow-hidden rounded bg-secondary">
+            <div className="h-12 w-20 shrink-0 overflow-hidden rounded bg-secondary">
               {v.cover ? (
                 <img
                   src={imageProxy(v.cover) ?? ""}
@@ -1275,7 +1275,7 @@ function VideoCreditsDialog({
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
-      <DialogContent className="z-[65] max-h-[80vh] overflow-y-auto">
+      <DialogContent className="z-65 max-h-[80vh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle>Credits</DialogTitle>
           <DialogDescription className="truncate">

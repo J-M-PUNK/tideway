@@ -320,7 +320,7 @@ function SuggestionRow({
     >
       <div
         className={cn(
-          "h-9 w-9 flex-shrink-0 overflow-hidden bg-secondary",
+          "h-9 w-9 shrink-0 overflow-hidden bg-secondary",
           round ? "rounded-full" : "rounded",
         )}
       >

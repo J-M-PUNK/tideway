@@ -41,7 +41,7 @@ export function MediaListRow({
       className="group flex items-center gap-4 rounded-md px-3 py-2 transition-colors hover:bg-accent"
     >
       <div
-        className={`relative h-12 w-12 flex-shrink-0 overflow-hidden bg-secondary ${rounded}`}
+        className={`relative h-12 w-12 shrink-0 overflow-hidden bg-secondary ${rounded}`}
       >
         {cover ? (
           <img
@@ -75,7 +75,7 @@ export function MediaListRow({
       <Trailing item={item} />
       {onDownload && item.kind !== "artist" && (
         <div
-          className={`flex-shrink-0 transition-opacity ${
+          className={`shrink-0 transition-opacity ${
             menuOpen ? "opacity-100" : "opacity-0 group-hover:opacity-100"
           }`}
         >
@@ -161,14 +161,14 @@ function Subtitle({
 function Trailing({ item }: { item: Item }) {
   if (item.kind === "album") {
     return (
-      <div className="hidden w-24 flex-shrink-0 text-right text-xs text-muted-foreground sm:block">
+      <div className="hidden w-24 shrink-0 text-right text-xs text-muted-foreground sm:block">
         {item.year ?? ""}
       </div>
     );
   }
   if (item.kind === "playlist") {
     return (
-      <div className="hidden w-32 flex-shrink-0 text-right text-xs text-muted-foreground sm:block">
+      <div className="hidden w-32 shrink-0 text-right text-xs text-muted-foreground sm:block">
         {item.num_tracks} tracks
         {item.duration ? ` · ${formatDuration(item.duration)}` : ""}
       </div>
