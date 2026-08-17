@@ -334,7 +334,7 @@ function PlayablePill({
         onClick={onPlay}
         disabled={busy}
         aria-label={ariaPlay}
-        className="relative h-12 w-12 flex-shrink-0 overflow-hidden rounded bg-secondary disabled:opacity-80"
+        className="relative h-12 w-12 shrink-0 overflow-hidden rounded bg-secondary disabled:opacity-80"
       >
         {cover ? (
           <img
@@ -440,7 +440,7 @@ function TrackPill({
                 }}
                 aria-label={`More actions for ${track.name}`}
                 title="More"
-                className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground data-[state=open]:bg-accent data-[state=open]:text-foreground"
+                className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-muted-foreground transition-colors hover:bg-accent hover:text-foreground data-[state=open]:bg-accent data-[state=open]:text-foreground"
               >
                 <MoreHorizontal className="h-4 w-4" />
               </button>
@@ -599,7 +599,7 @@ function useCollectionPlay({
 
 function PillCover({ cover }: { cover: string | null }) {
   return (
-    <div className="h-12 w-12 flex-shrink-0 overflow-hidden rounded bg-secondary">
+    <div className="h-12 w-12 shrink-0 overflow-hidden rounded bg-secondary">
       {cover ? (
         <img
           src={imageProxy(cover)}

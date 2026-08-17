@@ -110,7 +110,7 @@ export function FullScreenPlayer({
 
   return (
     <div
-      className="fixed inset-0 z-[70] flex flex-col text-foreground transition-opacity"
+      className="fixed inset-0 z-70 flex flex-col text-foreground transition-opacity"
       style={{ background: bg }}
       role="dialog"
       aria-modal="true"
@@ -190,7 +190,7 @@ export function FullScreenPlayer({
       <SignalPathStrip open={open} streamInfo={streamInfo} />
 
       {/* Footer controls */}
-      <div className="border-t border-white/10 bg-black/30 px-6 py-4 backdrop-blur-sm">
+      <div className="border-t border-white/10 bg-black/30 px-6 py-4 backdrop-blur-xs">
         <div className="flex items-center gap-4">
           <div className="flex min-w-0 flex-1 items-center gap-3">
             <div className="min-w-0">
@@ -385,7 +385,7 @@ function SyncedLyricsPane({
 function LyricsPlaceholder() {
   return (
     <div className="flex items-center gap-3 rounded-lg bg-white/5 p-6 text-sm text-foreground/60">
-      <Mic2 className="h-5 w-5 flex-shrink-0" />
+      <Mic2 className="h-5 w-5 shrink-0" />
       <span>No lyrics available for this track.</span>
     </div>
   );
@@ -448,7 +448,7 @@ function CreditsPane({
   if (!credits || credits.length === 0) {
     return (
       <div className="flex items-center gap-3 rounded-lg bg-white/5 p-6 text-sm text-foreground/60">
-        <Info className="h-5 w-5 flex-shrink-0" />
+        <Info className="h-5 w-5 shrink-0" />
         <span>No credits listed for this track.</span>
       </div>
     );
@@ -495,7 +495,7 @@ function SimilarPlaceholder() {
   // panel that reads as broken.
   return (
     <div className="flex items-start gap-3 rounded-lg bg-white/5 p-6 text-sm text-foreground/70">
-      <Sparkles className="mt-0.5 h-5 w-5 flex-shrink-0" />
+      <Sparkles className="mt-0.5 h-5 w-5 shrink-0" />
       <div className="flex flex-col gap-1">
         <div className="font-semibold text-foreground">Similar tracks</div>
         <p className="text-foreground/60">

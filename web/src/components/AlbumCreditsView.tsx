@@ -82,7 +82,7 @@ function TrackCreditsCard({ track }: { track: TrackCredits }) {
     <div className="overflow-hidden rounded-lg border border-border/50 bg-card/40">
       {/* Header bar — track number + title + primary artist */}
       <div className="flex items-center gap-4 border-b border-border/50 bg-card/60 px-5 py-3">
-        <span className="w-6 flex-shrink-0 text-sm tabular-nums text-muted-foreground">
+        <span className="w-6 shrink-0 text-sm tabular-nums text-muted-foreground">
           {track.track_num}
         </span>
         <div className="min-w-0 flex-1">

@@ -103,7 +103,7 @@ export function DetailHero({
       >
         {(() => {
           const cls = cn(
-            "flex-shrink-0 overflow-hidden bg-secondary shadow-2xl",
+            "shrink-0 overflow-hidden bg-secondary shadow-2xl",
             blurredBackdrop ? "h-60 w-60" : "h-56 w-56",
             round ? "rounded-full" : "rounded-md",
             onCoverClick &&
@@ -189,7 +189,7 @@ function ArtistPill({
       to={`/artist/${artist.id}`}
       className="mt-3 inline-flex items-center gap-2 text-sm font-semibold text-foreground hover:underline"
     >
-      <span className="flex h-6 w-6 flex-shrink-0 items-center justify-center overflow-hidden rounded-full bg-secondary">
+      <span className="flex h-6 w-6 shrink-0 items-center justify-center overflow-hidden rounded-full bg-secondary">
         {pic ? (
           <img src={pic} alt="" className="h-full w-full object-cover" />
         ) : (

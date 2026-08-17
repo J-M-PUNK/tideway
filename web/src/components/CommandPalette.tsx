@@ -246,7 +246,7 @@ export function CommandPalette({
 
   return (
     <div
-      className="fixed inset-0 z-[80] flex items-start justify-center bg-black/60 backdrop-blur-sm pt-[15vh]"
+      className="fixed inset-0 z-80 flex items-start justify-center bg-black/60 backdrop-blur-xs pt-[15vh]"
       onClick={onClose}
     >
       <div
@@ -260,7 +260,7 @@ export function CommandPalette({
             value={query}
             onChange={(e) => setQuery(e.target.value)}
             placeholder="Type a command, song, artist, or album…"
-            className="w-full bg-transparent py-4 pl-12 pr-12 text-base outline-none"
+            className="w-full bg-transparent py-4 pl-12 pr-12 text-base outline-hidden"
           />
           {loading && (
             <Loader2 className="absolute right-4 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-muted-foreground" />
@@ -349,13 +349,13 @@ function PaletteRow({
       )}
     >
       {Icon ? (
-        <div className="flex h-9 w-9 flex-shrink-0 items-center justify-center rounded bg-secondary text-muted-foreground">
+        <div className="flex h-9 w-9 shrink-0 items-center justify-center rounded bg-secondary text-muted-foreground">
           <Icon className="h-4 w-4" />
         </div>
       ) : (
         <div
           className={cn(
-            "h-9 w-9 flex-shrink-0 overflow-hidden bg-secondary",
+            "h-9 w-9 shrink-0 overflow-hidden bg-secondary",
             round ? "rounded-full" : "rounded",
           )}
         >

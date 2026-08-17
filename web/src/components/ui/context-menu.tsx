@@ -21,7 +21,7 @@ const ContextMenuContent = React.forwardRef<
         onCloseAutoFocus?.(e);
       }}
       className={cn(
-        "z-50 min-w-[14rem] overflow-hidden rounded-md border border-border bg-popover p-1 text-popover-foreground shadow-xl",
+        "z-50 min-w-56 overflow-hidden rounded-md border border-border bg-popover p-1 text-popover-foreground shadow-xl",
         className,
       )}
       {...props}
@@ -37,7 +37,7 @@ const ContextMenuItem = React.forwardRef<
   <ContextMenuPrimitive.Item
     ref={ref}
     className={cn(
-      "relative flex cursor-pointer select-none items-center gap-2 rounded-sm px-3 py-2 text-sm outline-none transition-colors focus:bg-accent focus:text-accent-foreground data-[disabled]:pointer-events-none data-[disabled]:opacity-50 [&>svg]:h-3.5 [&>svg]:w-3.5 [&>svg]:flex-shrink-0",
+      "relative flex cursor-pointer select-none items-center gap-2 rounded-sm px-3 py-2 text-sm outline-hidden transition-colors focus:bg-accent focus:text-accent-foreground data-disabled:pointer-events-none data-disabled:opacity-50 [&>svg]:h-3.5 [&>svg]:w-3.5 [&>svg]:shrink-0",
       className,
     )}
     {...props}
@@ -53,7 +53,7 @@ const ContextMenuSubTrigger = React.forwardRef<
   <ContextMenuPrimitive.SubTrigger
     ref={ref}
     className={cn(
-      "relative flex cursor-pointer select-none items-center gap-2 rounded-sm px-3 py-2 text-sm outline-none transition-colors focus:bg-accent data-[state=open]:bg-accent [&>svg]:h-3.5 [&>svg]:w-3.5 [&>svg]:flex-shrink-0",
+      "relative flex cursor-pointer select-none items-center gap-2 rounded-sm px-3 py-2 text-sm outline-hidden transition-colors focus:bg-accent data-[state=open]:bg-accent [&>svg]:h-3.5 [&>svg]:w-3.5 [&>svg]:shrink-0",
       className,
     )}
     {...props}
@@ -68,7 +68,7 @@ const ContextMenuSubContent = React.forwardRef<
   <ContextMenuPrimitive.SubContent
     ref={ref}
     className={cn(
-      "z-50 min-w-[14rem] overflow-hidden rounded-md border border-border bg-popover p-1 shadow-xl",
+      "z-50 min-w-56 overflow-hidden rounded-md border border-border bg-popover p-1 shadow-xl",
       className,
     )}
     {...props}

@@ -34,7 +34,7 @@ export function CrossDevicePauseBanner() {
       role="status"
       className="flex items-center gap-3 border-t border-muted bg-muted/40 px-6 py-2 text-sm"
     >
-      <Pause className="h-4 w-4 flex-shrink-0 text-muted-foreground" />
+      <Pause className="h-4 w-4 shrink-0 text-muted-foreground" />
       <div className="min-w-0 flex-1">
         <span className="font-medium">Paused</span>
         <span className="text-muted-foreground">

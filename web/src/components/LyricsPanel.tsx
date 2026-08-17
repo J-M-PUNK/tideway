@@ -42,14 +42,14 @@ export function LyricsPanel({
     <>
       <div
         className={cn(
-          "fixed inset-0 z-40 bg-black/40 backdrop-blur-sm transition-opacity",
+          "fixed inset-0 z-40 bg-black/40 backdrop-blur-xs transition-opacity",
           open ? "opacity-100" : "pointer-events-none opacity-0",
         )}
         onClick={onClose}
       />
       <aside
         className={cn(
-          "fixed right-0 top-0 z-50 flex h-full w-[28rem] flex-col border-l border-border bg-card shadow-2xl transition-transform",
+          "fixed right-0 top-0 z-50 flex h-full w-md flex-col border-l border-border bg-card shadow-2xl transition-transform",
           open ? "translate-x-0" : "translate-x-full",
         )}
         aria-hidden={!open}
@@ -71,7 +71,7 @@ export function LyricsPanel({
 
         {track && (
           <div className="flex items-center gap-3 border-b border-border px-4 py-3">
-            <div className="h-12 w-12 flex-shrink-0 overflow-hidden rounded bg-secondary">
+            <div className="h-12 w-12 shrink-0 overflow-hidden rounded bg-secondary">
               {track.album?.cover ? (
                 <img
                   src={imageProxy(track.album.cover)}

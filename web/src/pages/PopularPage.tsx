@@ -224,7 +224,7 @@ function ArtistChartCard({
       onClick={onClick}
       className="group relative flex flex-col gap-3 rounded-lg bg-card p-4 text-left transition-colors hover:bg-accent"
     >
-      <span className="absolute left-5 top-5 z-10 flex h-6 min-w-6 items-center justify-center rounded-full bg-background/80 px-1.5 text-[10px] font-bold tabular-nums text-foreground shadow">
+      <span className="absolute left-5 top-5 z-10 flex h-6 min-w-6 items-center justify-center rounded-full bg-background/80 px-1.5 text-[10px] font-bold tabular-nums text-foreground shadow-sm">
         {rank}
       </span>
       <div className="relative aspect-square overflow-hidden rounded-full bg-secondary">

@@ -42,7 +42,7 @@ export function ViewMoreLink({ to }: { to: string }) {
   return (
     <Link
       to={to}
-      className="flex flex-shrink-0 items-center gap-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground hover:text-foreground"
+      className="flex shrink-0 items-center gap-1 text-xs font-semibold uppercase tracking-wider text-muted-foreground hover:text-foreground"
     >
       View more <ChevronRight className="h-3.5 w-3.5" />
     </Link>

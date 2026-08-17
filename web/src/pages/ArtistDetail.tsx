@@ -276,7 +276,7 @@ function LikedSummaryCard({
             <Music className="h-8 w-8" />
           </div>
         )}
-        <div className="absolute bottom-1 right-1 flex h-6 w-6 items-center justify-center rounded-full bg-primary text-primary-foreground shadow">
+        <div className="absolute bottom-1 right-1 flex h-6 w-6 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-sm">
           <Heart className="h-3.5 w-3.5 fill-current" />
         </div>
       </div>

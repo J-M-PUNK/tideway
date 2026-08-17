@@ -69,7 +69,7 @@ export function PlayAllButton({
       disabled={tracks.length === 0}
       className={cn(
         dim,
-        "flex flex-shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-lg transition-all hover:scale-105 active:scale-95 disabled:opacity-40",
+        "flex shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground shadow-lg transition-all hover:scale-105 active:scale-95 disabled:opacity-40",
       )}
       aria-label={isPlaying ? "Pause" : "Play"}
     >

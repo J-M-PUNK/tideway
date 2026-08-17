@@ -59,11 +59,11 @@ export function StreamQualityBadge({
       <TooltipTrigger asChild>
         <span
           className={cn(
-            // flex-shrink-0 so a truncating parent (e.g. the
+            // shrink-0 so a truncating parent (e.g. the
             // artist/metadata row in NowPlaying) can't clip the pill
             // out of existence — the label is already small and the
             // tooltip carries the rest.
-            "flex-shrink-0 whitespace-nowrap rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider cursor-default",
+            "shrink-0 whitespace-nowrap rounded px-1.5 py-0.5 text-[10px] font-bold uppercase tracking-wider cursor-default",
             tone,
             className,
           )}

@@ -1,19 +1,182 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import 'tailwindcss';
 
-/* Fullscreen defaults — WebKit's ::backdrop and :fullscreen pseudo
+@plugin 'tailwindcss-animate';
+
+@custom-variant dark (&:is(.dark *));
+
+@utility container {
+  margin-inline: auto;
+  padding-inline: 2rem;
+  @media (width >= --theme(--breakpoint-sm)) {
+    max-width: none;
+  }
+  @media (width >= 1400px) {
+    max-width: 1400px;
+  }
+}
+
+@theme {
+  --color-border: hsl(var(--border));
+  --color-input: hsl(var(--input));
+  --color-ring: hsl(var(--ring));
+  --color-background: hsl(var(--background));
+  --color-foreground: hsl(var(--foreground));
+
+  --color-primary: hsl(var(--primary));
+  --color-primary-foreground: hsl(var(--primary-foreground));
+
+  --color-secondary: hsl(var(--secondary));
+  --color-secondary-foreground: hsl(var(--secondary-foreground));
+
+  --color-destructive: hsl(var(--destructive));
+  --color-destructive-foreground: hsl(var(--destructive-foreground));
+
+  --color-muted: hsl(var(--muted));
+  --color-muted-foreground: hsl(var(--muted-foreground));
+
+  --color-accent: hsl(var(--accent));
+  --color-accent-foreground: hsl(var(--accent-foreground));
+
+  --color-card: hsl(var(--card));
+  --color-card-foreground: hsl(var(--card-foreground));
+
+  --color-popover: hsl(var(--popover));
+  --color-popover-foreground: hsl(var(--popover-foreground));
+
+  --radius-lg: var(--radius);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-sm: calc(var(--radius) - 4px);
+}
+
+/*
+  The default border color has changed to `currentcolor` in Tailwind CSS v4,
+  so we've added these compatibility styles to make sure everything still
+  looks the same as it did with Tailwind CSS v3.
+
+  If we ever want to remove these styles, we need to add an explicit border
+  color utility to any element that depends on these defaults.
+*/
+@layer base {
+  *,
+  ::after,
+  ::before,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: var(--color-gray-200, currentcolor);
+  }
+}
+
+@utility scrollbar-thin {
+  &::-webkit-scrollbar {
+    width: 10px;
+    height: 10px;
+  }
+
+  &::-webkit-scrollbar-thumb {
+    background: hsl(var(--scrollbar-thumb));
+    border-radius: 999px;
+  }
+
+  &::-webkit-scrollbar-thumb:hover {
+    background: hsl(var(--scrollbar-thumb-hover));
+  }
+
+  &::-webkit-scrollbar-track {
+    background: transparent;
+  }
+}
+
+@utility animate-route {
+  /* Subtle fade-in applied to the routed view on every navigation.
+     Keyed on location.pathname in App.tsx so the animation replays. */
+  animation: route-fade 120ms ease-out;
+  @media (prefers-reduced-motion: reduce) {
+    animation: none;
+  }
+}
+
+@utility animate-heart-pop {
+  /* Heart-pop: the brief scale pulse that fires when a user toggles
+     a like ON. Same shape every social app uses (Twitter, Instagram).
+     Applied via a transient `popping` flag in HeartButton so it only
+     runs on the false→true transition, not on every render where the
+     heart happens to already be liked. */
+  animation: heart-pop 320ms cubic-bezier(0.34, 1.56, 0.64, 1);
+  transform-origin: center;
+  @media (prefers-reduced-motion: reduce) {
+    animation: none;
+  }
+}
+
+@utility animate-skeleton {
+  /* Card lift: a tiny vertical raise on hover, paired with the
+     existing `group-hover:scale-105` cover zoom in MediaCard. The
+     translate is small (1px) so it reads as a subtle weight shift
+     rather than a moving target. */
+
+  /* Skeleton shimmer — softer than Tailwind's default animate-pulse,
+     which fades the whole block to ~50 %. Shimmer keeps the surface
+     visible while sweeping a highlight across, which reads as
+     "loading" without creating a strobing-block effect on dense
+     pages with many skeleton rows. */
+  background: linear-gradient(
+    90deg,
+    hsl(var(--secondary)) 0%,
+    hsl(var(--accent)) 50%,
+    hsl(var(--secondary)) 100%
+  );
+  background-size: 200% 100%;
+  animation: skeleton-shimmer 1.4s ease-in-out infinite;
+  @media (prefers-reduced-motion: reduce) {
+    animation: none;
+  }
+}
+
+@utility animate-track-change {
+  /* Track-change crossfade — fires on the now-playing bar's
+     cover + title block when the player advances to a new track.
+     Keyed on track.id so React replays the animation when the id
+     changes; no animation when the same track restarts (loop). */
+  animation: track-change-fade 200ms ease-out;
+  @media (prefers-reduced-motion: reduce) {
+    animation: none;
+  }
+}
+
+@utility animate-saved-pop {
+  /* Sidebar / tab-rail active indicator slide. The indicator itself
+     is an absolute-positioned 3px bar on the left edge of the active
+     row; the parent's `transition-all` glides it between rows. We
+     keep the keyframe-less transition path since `top` interpolates
+     smoothly and we don't need a non-linear easing for a bar that's
+     just sliding 36-44 px. */
+
+  /* Saved-state arrival — runs once on the false→true transition of
+     a "downloaded" / "saved" check icon. Same overshoot curve as
+     heart-pop so the celebratory beat reads as a family. */
+  animation: saved-pop 280ms cubic-bezier(0.34, 1.56, 0.64, 1);
+  transform-origin: center;
+
+  /* Users who prefer reduced motion get no animations. */
+  @media (prefers-reduced-motion: reduce) {
+    animation: none;
+  }
+}
+
+@layer utilities {
+  /* Fullscreen defaults — WebKit's ::backdrop and :fullscreen pseudo
  * elements default to white, which shows through as a flash behind
  * the video while exiting fullscreen. Force both to black so the
  * transition stays dark. */
-:fullscreen,
-:-webkit-full-screen {
-  background: #000;
-}
+  :fullscreen,
+  :-webkit-full-screen {
+    background: #000;
+  }
 
-::backdrop,
-::-webkit-backdrop {
-  background: #000;
+  ::backdrop,
+  ::-webkit-backdrop {
+    background: #000;
+  }
 }
 
 @layer base {
@@ -121,26 +284,6 @@
 }
 
 @layer utilities {
-  .scrollbar-thin::-webkit-scrollbar {
-    width: 10px;
-    height: 10px;
-  }
-
-  .scrollbar-thin::-webkit-scrollbar-thumb {
-    background: hsl(var(--scrollbar-thumb));
-    border-radius: 999px;
-  }
-
-  .scrollbar-thin::-webkit-scrollbar-thumb:hover {
-    background: hsl(var(--scrollbar-thumb-hover));
-  }
-
-  .scrollbar-thin::-webkit-scrollbar-track {
-    background: transparent;
-  }
-
-  /* Subtle fade-in applied to the routed view on every navigation.
-     Keyed on location.pathname in App.tsx so the animation replays. */
   @keyframes route-fade {
     from {
       opacity: 0;
@@ -152,16 +295,6 @@
       transform: translateY(0);
     }
   }
-
-  .animate-route {
-    animation: route-fade 120ms ease-out;
-  }
-
-  /* Heart-pop: the brief scale pulse that fires when a user toggles
-     a like ON. Same shape every social app uses (Twitter, Instagram).
-     Applied via a transient `popping` flag in HeartButton so it only
-     runs on the false→true transition, not on every render where the
-     heart happens to already be liked. */
   @keyframes heart-pop {
     0% {
       transform: scale(1);
@@ -179,16 +312,6 @@
       transform: scale(1);
     }
   }
-
-  .animate-heart-pop {
-    animation: heart-pop 320ms cubic-bezier(0.34, 1.56, 0.64, 1);
-    transform-origin: center;
-  }
-
-  /* Card lift: a tiny vertical raise on hover, paired with the
-     existing `group-hover:scale-105` cover zoom in MediaCard. The
-     translate is small (1px) so it reads as a subtle weight shift
-     rather than a moving target. */
   @keyframes card-press {
     from {
       transform: scale(1);
@@ -198,12 +321,6 @@
       transform: scale(0.97);
     }
   }
-
-  /* Skeleton shimmer — softer than Tailwind's default animate-pulse,
-     which fades the whole block to ~50 %. Shimmer keeps the surface
-     visible while sweeping a highlight across, which reads as
-     "loading" without creating a strobing-block effect on dense
-     pages with many skeleton rows. */
   @keyframes skeleton-shimmer {
     0% {
       background-position: -200% 0;
@@ -213,22 +330,6 @@
       background-position: 200% 0;
     }
   }
-
-  .animate-skeleton {
-    background: linear-gradient(
-      90deg,
-      hsl(var(--secondary)) 0%,
-      hsl(var(--accent)) 50%,
-      hsl(var(--secondary)) 100%
-    );
-    background-size: 200% 100%;
-    animation: skeleton-shimmer 1.4s ease-in-out infinite;
-  }
-
-  /* Track-change crossfade — fires on the now-playing bar's
-     cover + title block when the player advances to a new track.
-     Keyed on track.id so React replays the animation when the id
-     changes; no animation when the same track restarts (loop). */
   @keyframes track-change-fade {
     from {
       opacity: 0;
@@ -240,21 +341,6 @@
       transform: translateY(0);
     }
   }
-
-  .animate-track-change {
-    animation: track-change-fade 200ms ease-out;
-  }
-
-  /* Sidebar / tab-rail active indicator slide. The indicator itself
-     is an absolute-positioned 3px bar on the left edge of the active
-     row; the parent's `transition-all` glides it between rows. We
-     keep the keyframe-less transition path since `top` interpolates
-     smoothly and we don't need a non-linear easing for a bar that's
-     just sliding 36-44 px. */
-
-  /* Saved-state arrival — runs once on the false→true transition of
-     a "downloaded" / "saved" check icon. Same overshoot curve as
-     heart-pop so the celebratory beat reads as a family. */
   @keyframes saved-pop {
     0% {
       opacity: 0;
@@ -269,22 +355,6 @@
     100% {
       opacity: 1;
       transform: scale(1);
-    }
-  }
-
-  .animate-saved-pop {
-    animation: saved-pop 280ms cubic-bezier(0.34, 1.56, 0.64, 1);
-    transform-origin: center;
-  }
-
-  /* Users who prefer reduced motion get no animations. */
-  @media (prefers-reduced-motion: reduce) {
-    .animate-route,
-    .animate-heart-pop,
-    .animate-skeleton,
-    .animate-track-change,
-    .animate-saved-pop {
-      animation: none;
     }
   }
 }

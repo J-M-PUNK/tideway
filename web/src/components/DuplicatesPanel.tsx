@@ -139,7 +139,7 @@ export function DuplicatesPanel({
                     {g.track.artists.map((a) => a.name).join(", ")}
                   </div>
                 </div>
-                <div className="flex-shrink-0 text-xs text-muted-foreground">
+                <div className="shrink-0 text-xs text-muted-foreground">
                   ×{g.indices.length}
                 </div>
               </li>

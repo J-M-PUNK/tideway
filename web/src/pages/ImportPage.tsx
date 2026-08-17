@@ -342,14 +342,14 @@ function HubCard({
       onClick={onClick}
       className="group flex items-start gap-3 rounded-lg border border-border/50 bg-card/40 p-4 text-left transition-colors hover:bg-accent/40"
     >
-      <Icon className="mt-0.5 h-5 w-5 flex-shrink-0 text-primary" />
+      <Icon className="mt-0.5 h-5 w-5 shrink-0 text-primary" />
       <div className="min-w-0 flex-1">
         <div className="font-semibold">{title}</div>
         <div className="mt-0.5 text-sm text-muted-foreground">
           {description}
         </div>
       </div>
-      <ChevronRight className="mt-1 h-4 w-4 flex-shrink-0 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
+      <ChevronRight className="mt-1 h-4 w-4 shrink-0 text-muted-foreground transition-transform group-hover:translate-x-0.5" />
     </button>
   );
 }
@@ -654,7 +654,7 @@ function ConnectForm({
       </p>
 
       <div className="mt-4 flex items-start gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 p-3 text-sm">
-        <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0 text-amber-600 dark:text-amber-400" />
+        <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-600 dark:text-amber-400" />
         <div className="text-amber-900 dark:text-amber-200">
           <strong>Spotify Premium required (on the Spotify side).</strong> As of
           2024, Spotify rejects API calls from Developer apps unless the account
@@ -686,7 +686,7 @@ function ConnectForm({
 
       {status.auth_error && (
         <div className="mt-4 flex items-start gap-2 rounded-md border border-destructive/50 bg-destructive/10 p-3 text-sm">
-          <AlertTriangle className="mt-0.5 h-4 w-4 flex-shrink-0 text-destructive" />
+          <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-destructive" />
           <div className="text-destructive">{status.auth_error}</div>
         </div>
       )}
@@ -809,7 +809,7 @@ function PlaylistPicker({ onPick }: { onPick: (p: SpotifyPlaylist) => void }) {
           onClick={() => onPick(p)}
           className="group flex items-center gap-4 rounded-md px-3 py-2 text-left transition-colors hover:bg-accent"
         >
-          <div className="h-14 w-14 flex-shrink-0 overflow-hidden rounded-md bg-secondary">
+          <div className="h-14 w-14 shrink-0 overflow-hidden rounded-md bg-secondary">
             {p.image ? (
               <img
                 src={imageProxy(p.image) ?? p.image}

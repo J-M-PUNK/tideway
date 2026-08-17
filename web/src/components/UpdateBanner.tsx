@@ -119,7 +119,7 @@ export function UpdateBanner() {
 
   return (
     <div className="flex items-center gap-3 border-b border-primary/30 bg-primary/10 px-6 py-2 text-sm">
-      <Download className="h-4 w-4 flex-shrink-0 text-primary" />
+      <Download className="h-4 w-4 shrink-0 text-primary" />
       <div className="min-w-0 flex-1">
         <span className="font-medium">Update available:</span>{" "}
         <span className="text-muted-foreground">{update.latest}</span>

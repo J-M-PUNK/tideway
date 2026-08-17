@@ -612,7 +612,7 @@ function SettingsTab({
       // default and grows to h-5 with primary tint when the tab is
       // active. The h-transition makes clicking between tabs read
       // as the indicator growing into the new row.
-      className="!relative !justify-start !rounded-md !px-3 !py-2 text-left text-sm font-medium text-muted-foreground before:absolute before:left-0 before:top-1/2 before:h-0 before:w-0.5 before:-translate-y-1/2 before:rounded-r before:bg-primary before:opacity-0 before:transition-all before:duration-200 hover:!bg-accent/40 data-[state=active]:!bg-accent data-[state=active]:!text-foreground data-[state=active]:before:h-5 data-[state=active]:before:opacity-100"
+      className="relative! justify-start! rounded-md! px-3! py-2! text-left text-sm font-medium text-muted-foreground before:absolute before:left-0 before:top-1/2 before:h-0 before:w-0.5 before:-translate-y-1/2 before:rounded-r before:bg-primary before:opacity-0 before:transition-all before:duration-200 hover:bg-accent/40! data-[state=active]:bg-accent! data-[state=active]:text-foreground! data-[state=active]:before:h-5 data-[state=active]:before:opacity-100"
     >
       <Icon className="mr-2 h-4 w-4 shrink-0" />
       {label}
@@ -773,7 +773,7 @@ function ThemePicker({
             className={cn(
               "flex items-center gap-2 rounded px-3 py-1.5 text-sm font-medium transition-colors",
               active
-                ? "bg-background text-foreground shadow-sm"
+                ? "bg-background text-foreground shadow-xs"
                 : "text-muted-foreground hover:text-foreground",
             )}
           >
@@ -1350,7 +1350,7 @@ function EqField() {
                     {state.active_profile.preamp_db.toFixed(1)} dB
                   </div>
                 </div>
-                <span className="flex-shrink-0 self-center rounded border border-primary/40 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-primary">
+                <span className="shrink-0 self-center rounded border border-primary/40 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-primary">
                   Change
                 </span>
               </button>
@@ -1482,7 +1482,7 @@ function ModeCard({
     >
       <div
         className={cn(
-          "mt-0.5 h-3.5 w-3.5 flex-shrink-0 rounded-full border-2 transition-colors",
+          "mt-0.5 h-3.5 w-3.5 shrink-0 rounded-full border-2 transition-colors",
           active ? "border-primary bg-primary" : "border-muted-foreground/40",
         )}
       />
@@ -2160,7 +2160,7 @@ function ParametricPresetCard({
       onClick={onClick}
       title={`Apply preset "${name}"`}
       className={cn(
-        "flex flex-shrink-0 flex-col items-center gap-1 rounded-md border px-2 py-1.5 transition-colors",
+        "flex shrink-0 flex-col items-center gap-1 rounded-md border px-2 py-1.5 transition-colors",
         active
           ? "border-primary bg-primary/10"
           : "border-input bg-secondary hover:bg-accent",
@@ -2243,7 +2243,7 @@ function BandRow({
         className="h-3.5 w-3.5 cursor-pointer accent-primary"
       />
       <span
-        className="h-2.5 w-2.5 flex-shrink-0 rounded-full"
+        className="h-2.5 w-2.5 shrink-0 rounded-full"
         style={{ backgroundColor: EQ_TYPE_COLOR[band.type] }}
       />
       <select
@@ -2251,7 +2251,7 @@ function BandRow({
         onChange={(e) =>
           onChange({ type: e.target.value as ParametricBand["type"] })
         }
-        className="h-7 w-24 cursor-pointer rounded-md border border-input bg-background px-2 text-xs outline-none transition-colors focus:border-ring focus:ring-1 focus:ring-ring"
+        className="h-7 w-24 cursor-pointer rounded-md border border-input bg-background px-2 text-xs outline-hidden transition-colors focus:border-ring focus:ring-1 focus:ring-ring"
       >
         {config.filter_types.map((t) => (
           <option key={t} value={t}>
@@ -2361,7 +2361,7 @@ function BandNumberField({
           // Hide the native number spinners — they look cluttered in
           // the dark theme and eat horizontal space. Value stays
           // right-aligned + tabular so digits don't jitter.
-          "bg-transparent text-right tabular-nums text-foreground outline-none",
+          "bg-transparent text-right tabular-nums text-foreground outline-hidden",
           "[appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none",
           width,
         )}
@@ -2623,7 +2623,7 @@ function ProfilesDialog({
                         {p.preamp_db.toFixed(1)} dB
                       </div>
                     </div>
-                    <div className="flex flex-shrink-0 items-center gap-1.5">
+                    <div className="flex shrink-0 items-center gap-1.5">
                       {isActive ? (
                         <span className="rounded bg-primary/20 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-primary">
                           In use
@@ -3018,7 +3018,7 @@ function TiltSlider({
 }) {
   return (
     <label className="flex items-center gap-3 text-xs">
-      <span className="w-32 flex-shrink-0 text-muted-foreground">{label}</span>
+      <span className="w-32 shrink-0 text-muted-foreground">{label}</span>
       <input
         type="range"
         min={-12}
@@ -3037,7 +3037,7 @@ function TiltSlider({
         }
         className="flex-1 cursor-pointer accent-primary"
       />
-      <span className="w-12 flex-shrink-0 text-right tabular-nums">
+      <span className="w-12 shrink-0 text-right tabular-nums">
         {value > 0 ? "+" : ""}
         {value.toFixed(1)} dB
       </span>
@@ -3603,7 +3603,7 @@ function ShortcutRow({ keys, label }: { keys: string[]; label: string }) {
         {keys.map((k, i) => (
           <kbd
             key={i}
-            className="min-w-[1.5rem] rounded border border-border bg-secondary px-1.5 py-0.5 text-center text-[11px] font-semibold text-foreground"
+            className="min-w-6 rounded border border-border bg-secondary px-1.5 py-0.5 text-center text-[11px] font-semibold text-foreground"
           >
             {k}
           </kbd>

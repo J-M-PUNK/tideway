@@ -292,7 +292,7 @@ export function PlaylistDetail({ onDownload }: { onDownload: OnDownload }) {
           onClick={() => setDuplicatesOpen(true)}
           className="mt-6 flex w-full items-center gap-3 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-left text-sm text-amber-200 transition-colors hover:bg-amber-500/15"
         >
-          <AlertTriangle className="h-4 w-4 flex-shrink-0" />
+          <AlertTriangle className="h-4 w-4 shrink-0" />
           <span className="flex-1">
             This playlist has {dupeTrackCount} duplicate{" "}
             {dupeTrackCount === 1 ? "track" : "tracks"} across{" "}

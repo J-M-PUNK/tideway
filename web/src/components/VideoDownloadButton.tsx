@@ -244,8 +244,8 @@ export function VideoDownloadButton({
           {iconEl}
         </button>
       </DropdownMenuTrigger>
-      <DropdownMenuContent align="end" className="z-[70] w-56">
-        {/* z-[70] beats VideoPlayerModal's z-[60] shell + z-[65] siblings.
+      <DropdownMenuContent align="end" className="z-70 w-56">
+        {/* z-70 beats VideoPlayerModal's z-60 shell + z-65 siblings.
             Without the override this menu opens behind the modal and
             every click on it hits the modal instead. */}
         <DropdownMenuLabel>Download quality</DropdownMenuLabel>

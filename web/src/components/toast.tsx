@@ -76,7 +76,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   return (
     <ToastContext.Provider value={value}>
       {children}
-      <div className="pointer-events-none fixed bottom-28 right-4 z-[60] flex w-80 flex-col gap-2">
+      <div className="pointer-events-none fixed bottom-28 right-4 z-60 flex w-80 flex-col gap-2">
         {toasts.map((t) => (
           <ToastView key={t.id} toast={t} onDismiss={() => dismiss(t.id)} />
         ))}
@@ -115,11 +115,11 @@ function ToastView({
     <div
       role="status"
       className={cn(
-        "pointer-events-auto flex items-start gap-3 rounded-lg border border-border bg-card/95 px-4 py-3 shadow-xl backdrop-blur-sm transition-all",
+        "pointer-events-auto flex items-start gap-3 rounded-lg border border-border bg-card/95 px-4 py-3 shadow-xl backdrop-blur-xs transition-all",
         entering ? "translate-x-6 opacity-0" : "translate-x-0 opacity-100",
       )}
     >
-      <Icon className={cn("mt-0.5 h-4 w-4 flex-shrink-0", tint)} />
+      <Icon className={cn("mt-0.5 h-4 w-4 shrink-0", tint)} />
       <div className="min-w-0 flex-1">
         <div className="truncate text-sm font-semibold">{toast.title}</div>
         {toast.description && (

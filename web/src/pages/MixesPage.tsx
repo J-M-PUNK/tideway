@@ -45,7 +45,7 @@ export function MixesPage() {
             to={`/mix/${m.id}`}
             className="group flex flex-col gap-2 rounded-lg p-2 transition-colors hover:bg-accent"
           >
-            <div className="aspect-square overflow-hidden rounded-md bg-secondary shadow">
+            <div className="aspect-square overflow-hidden rounded-md bg-secondary shadow-sm">
               {m.cover ? (
                 <img
                   src={imageProxy(m.cover)}

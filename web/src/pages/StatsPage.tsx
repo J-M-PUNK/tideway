@@ -186,7 +186,7 @@ function UserHeader({
         Your stats
       </div>
       <div className="flex flex-wrap items-center gap-5 rounded-lg border border-border/50 bg-card/40 p-5">
-        <div className="flex h-16 w-16 flex-shrink-0 items-center justify-center overflow-hidden rounded-full bg-secondary text-2xl font-bold">
+        <div className="flex h-16 w-16 shrink-0 items-center justify-center overflow-hidden rounded-full bg-secondary text-2xl font-bold">
           {avatar ? (
             <img src={avatar} alt="" className="h-full w-full object-cover" />
           ) : (
@@ -526,7 +526,7 @@ export function ArtistCard({
       onDoubleClick={() => play(artist.name)}
       className="group relative flex cursor-pointer flex-col gap-3 rounded-lg bg-card p-4 text-left transition-colors hover:bg-accent"
     >
-      <span className="absolute left-5 top-5 z-10 flex h-6 min-w-6 items-center justify-center rounded-full bg-background/80 px-1.5 text-[10px] font-bold tabular-nums text-foreground shadow">
+      <span className="absolute left-5 top-5 z-10 flex h-6 min-w-6 items-center justify-center rounded-full bg-background/80 px-1.5 text-[10px] font-bold tabular-nums text-foreground shadow-sm">
         {rank}
       </span>
       <div className="relative aspect-square overflow-hidden rounded-full bg-secondary">
@@ -612,7 +612,7 @@ export function AlbumCard({
       onDoubleClick={() => play(album.name, album.artist)}
       className="group relative flex cursor-pointer flex-col gap-3 rounded-lg bg-card p-4 text-left transition-colors hover:bg-accent"
     >
-      <span className="absolute left-5 top-5 z-10 flex h-6 min-w-6 items-center justify-center rounded-full bg-background/80 px-1.5 text-[10px] font-bold tabular-nums text-foreground shadow">
+      <span className="absolute left-5 top-5 z-10 flex h-6 min-w-6 items-center justify-center rounded-full bg-background/80 px-1.5 text-[10px] font-bold tabular-nums text-foreground shadow-sm">
         {rank}
       </span>
       <div className="relative aspect-square overflow-hidden rounded-md bg-secondary">
@@ -672,7 +672,7 @@ export function TrackRow({
       <span className="text-xs font-semibold tabular-nums text-muted-foreground">
         {rank}
       </span>
-      <div className="relative h-12 w-12 flex-shrink-0 overflow-hidden rounded bg-secondary">
+      <div className="relative h-12 w-12 shrink-0 overflow-hidden rounded bg-secondary">
         {img ? (
           <img
             src={img}
@@ -732,7 +732,7 @@ export function LovedRow({ row }: { row: LastFmLovedTrack }) {
       onDoubleClick={onPlay}
       className="group grid cursor-default grid-cols-[48px_1fr_auto] items-center gap-4 rounded-md px-3 py-2 text-left text-sm transition-colors select-none hover:bg-accent"
     >
-      <div className="relative h-12 w-12 flex-shrink-0 overflow-hidden rounded bg-secondary">
+      <div className="relative h-12 w-12 shrink-0 overflow-hidden rounded bg-secondary">
         {img ? (
           <img
             src={img}
@@ -760,7 +760,7 @@ export function LovedRow({ row }: { row: LastFmLovedTrack }) {
       <div className="min-w-0">
         <div className="flex items-center gap-2 truncate font-medium">
           <Heart
-            className="h-3.5 w-3.5 flex-shrink-0 text-primary"
+            className="h-3.5 w-3.5 shrink-0 text-primary"
             fill="currentColor"
           />
           <span className="truncate">{row.name}</span>

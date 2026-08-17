@@ -35,7 +35,7 @@ export function ShuffleButton({
       onClick={() => onChange(!value)}
       className={cn(
         dim,
-        "flex flex-shrink-0 items-center justify-center rounded-full bg-transparent transition-colors",
+        "flex shrink-0 items-center justify-center rounded-full bg-transparent transition-colors",
         value
           ? "text-primary hover:text-primary/80"
           : "text-muted-foreground hover:text-foreground",

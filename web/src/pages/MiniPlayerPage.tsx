@@ -44,7 +44,7 @@ export function MiniPlayerPage() {
   return (
     <div className="flex h-full w-full flex-1 select-none flex-col gap-2 bg-[hsl(var(--now-playing-bg))] px-3 py-2">
       <div className="flex items-center gap-3">
-        <div className="h-12 w-12 flex-shrink-0 overflow-hidden rounded bg-secondary">
+        <div className="h-12 w-12 shrink-0 overflow-hidden rounded bg-secondary">
           {cover ? (
             <img src={cover} alt="" className="h-full w-full object-cover" />
           ) : (

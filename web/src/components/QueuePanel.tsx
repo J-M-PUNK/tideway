@@ -24,7 +24,7 @@ export function QueuePanel({
       {/* Backdrop */}
       <div
         className={cn(
-          "fixed inset-0 z-40 bg-black/40 backdrop-blur-sm transition-opacity",
+          "fixed inset-0 z-40 bg-black/40 backdrop-blur-xs transition-opacity",
           open ? "opacity-100" : "pointer-events-none opacity-0",
         )}
         onClick={onClose}
@@ -137,7 +137,7 @@ function QueueRow({
     >
       <button
         onClick={() => actions.jumpTo(index)}
-        className="relative h-10 w-10 flex-shrink-0 overflow-hidden rounded bg-secondary"
+        className="relative h-10 w-10 shrink-0 overflow-hidden rounded bg-secondary"
         title="Jump to this track"
       >
         {cover ? (
@@ -170,7 +170,7 @@ function QueueRow({
         >
           <span className="truncate">{track.name}</span>
           {downloaded && (
-            <span className="flex-shrink-0 rounded-sm bg-primary/15 px-1 py-0.5 text-[8px] font-bold uppercase text-primary">
+            <span className="shrink-0 rounded-sm bg-primary/15 px-1 py-0.5 text-[8px] font-bold uppercase text-primary">
               Saved
             </span>
           )}
