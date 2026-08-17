@@ -37,6 +37,7 @@ sounddevice audio engine behind a single pywebview window.
 ## Contents
 
 - [What's inside](#whats-inside)
+- [How For You works](#how-for-you-works)
 - [Support](#support)
 - [Install a released build](#install-a-released-build)
   - [Why the OS warns you on first launch](#why-the-os-warns-you-on-first-launch)
@@ -237,6 +238,117 @@ the status Tidal returned for each one.
 newer version is available a banner surfaces across the top of the
 UI, and clicking Install downloads the right asset for your OS and
 runs it.
+
+## How For You works
+
+For You is built from your own listening rather than from Tidal's
+recommendations. Three sources feed it: **Last.fm** supplies what you
+play, the community tags on those artists, and its similar-artist graph.
+**AlbumOfTheYear.org** supplies ratings and release listings.
+**Tidal** supplies the catalogue, your saved albums, and playback. No
+AI or language model is involved anywhere in the path.
+
+Most of the page needs Last.fm connected under Settings. Without it only
+the rows that lean on your Tidal library can render.
+
+### Working out your taste
+
+**Which artists count.** Your Last.fm top artists are read over two
+windows and blended: the last month at double weight, the last six
+months at single weight. Each window is normalised against its own top
+artist first, because a six-month play count dwarfs a one-month one and
+the longer window would otherwise always win. The recent window is what
+lets the page follow what you are into now, and the longer one stops a
+single evening on one artist from redefining everything.
+
+**Which genres count.** Each of those artists carries community tags on
+Last.fm, and the twelve strongest are read per artist. A tag's weight is
+divided by how widely it is applied across all of Last.fm, so broad
+labels lose to specific ones. Without that step the ranking just
+recovers whichever vague tag every artist carries, since breadth and tag
+strength rise together. It is the difference between being told you
+listen to "electronic" and being told you listen to IDM.
+
+A tag carried by only one of your artists has to be that artist's
+defining genre, scoring at least 80 out of 100, or it is ignored. One
+artist's passing association is not a genre you have.
+
+Surviving tags are matched against AOTY's genre taxonomy, which knows
+around 360 genres. Anything AOTY does not recognise drops out here,
+which also discards Last.fm descriptors that are not genres at all.
+
+**Your orbit.** Your top eight artists are expanded through Last.fm's
+similar-artist graph into roughly four hundred artists, each carrying a
+score for how strongly it connects back to what you play. This is what
+separates a recommendation from a chart: without it, everyone who
+listens to shoegaze sees the same shoegaze albums.
+
+### The rows
+
+**Recommended For You.** Takes the strongest remaining pick from every
+other row in turn. It deliberately does not score across sources, since
+an AOTY rating and a Last.fm match score measure different things and
+forcing them onto one scale lets a weak pick outrank a strong one.
+Round-robin needs no shared scale and makes it impossible for one source
+to dominate. Every card keeps the reason it came from.
+
+**New Releases For You.** AOTY's recent releases for each of your top
+genres, interleaved. Scoped to your genres rather than re-ranking a
+global chart of everything released that week. This row moves as music
+is actually released rather than on a schedule.
+
+**From Your Genres.** AOTY's highest user-rated albums of all time in
+each of your top six genres, not restricted to any year. Within a genre
+the order is not AOTY's ranking. Candidates are scored on three things:
+whether the artist sits in your orbit, the album's rating once thin vote
+counts are discounted, and a penalty for artists already in your heavy
+rotation. A row of albums by people you already play is a mirror rather
+than a recommendation. **View more** opens a page giving each of your
+top twelve genres its own row, which you can keep loading further into.
+
+**Popular in Your Orbit.** AOTY's highest user-rated albums of the
+current year, re-ordered by how well each fits your genres. The balance
+between raw rating and genre fit shifts with how mainstream your
+listening is, measured as how much your top artists overlap Last.fm's
+global charts. A niche listener gets genre fit weighted more heavily, or
+the row would collapse into the global chart.
+
+**Fans Also Like.** Artists that listeners of your top artists also
+play, from Last.fm's similar-artist graph, resolved to their albums.
+Because that graph is built from listening rather than from who has
+played in a band together, an artist nobody listens to never enters the
+pool. Picks are taken from each seed artist in turn so one seed sitting
+in a dense corner of the graph cannot fill the shelf.
+
+### Rules that apply everywhere
+
+**Albums already in your Tidal favorites are never recommended back to
+you**, in any row. At most two albums by the same artist appear in a
+row, and reissues of the same record collapse together.
+
+**Rows rotate weekly.** Charts move slowly, and an all-time ranking does
+not move at all, so each row walks further into its candidates on a
+weekly schedule. Rotation is bucketed by week rather than randomised, so
+the page is stable across a refresh and within a session, and changes on
+a schedule instead of under your cursor. For the genre rows the rotation
+stays inside the best-ranked candidates, so the variety does not come at
+the cost of fit.
+
+**Ratings are discounted by how many people voted.** A 95 from eleven
+listeners is weaker evidence than an 88 from three thousand, so scores
+are pulled toward the middle until the vote count earns them.
+
+### Refresh and caching
+
+The assembled page is cached for 15 minutes. Underneath, a genre's
+all-time ranking is cached for 24 hours, recent releases for 30 minutes,
+the current year's chart for an hour, and the mapping from an AOTY album
+to a Tidal one for 30 days. A first ever load is therefore slower than
+later ones, and does a lot of catalogue lookups.
+
+AOTY is scraped rather than read through an API, since it does not offer
+one. Requests can be rate limited, in which case rows come back shorter
+than usual or drop out entirely until the limit clears.
 
 ## Support
 

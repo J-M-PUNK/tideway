@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import math
 import os
 import platform
 import re
@@ -12018,7 +12019,84 @@ _SECTION_RESOLVE_POOL = 36
 # Genres blended into each genre-scoped row. AOTY lists only a handful of
 # albums per genre section, so one genre can't fill a shelf; five covers
 # the shelf while still reflecting the listener's actual spread.
-_GENRE_BLEND_SEEDS = 5
+# Genres blended into each genre-scoped row on the main page. Kept small
+# because every genre here costs AOTY fetches and Tidal resolutions on
+# every page build.
+_GENRE_BLEND_SEEDS = 6
+
+# Genres the taste profile ranks. Costs nothing beyond tag arithmetic —
+# no fetches — so it runs deep and lets each surface take the slice it can
+# afford. A real profile ranks around fifty, far past what any row shows.
+_TASTE_GENRE_MAX = 20
+
+# Genre rows on the drill-down. More than the main page because that's the
+# point of drilling in, but still bounded: each row is an AOTY page plus a
+# Tidal search per album it resolves.
+_GENRE_HUB_MAX = 12
+
+# A genre row below this on the drill-down is dropped rather than shown.
+# The other rows already refuse to render a stub; the drill-down didn't,
+# so a throttled AOTY or Tidal fetch produced one-album shelves that read
+# as broken rather than as temporarily unavailable.
+_GENRE_HUB_MIN_ALBUMS = 4
+
+# Listing rows pulled per genre on the drill-down. One AOTY page, sized so
+# the weekly rotation has room to move a shelf-sized window around.
+_GENRE_PAGE_POOL = 25
+
+# How often the rotating rows advance through their candidate pool. A
+# chart that only moves annually still leaves the page looking frozen
+# between updates, so the rows walk deeper into it over time instead of
+# always showing the same head. Bucketed rather than random so a row is
+# stable across a session and a refresh — it changes on a schedule, not
+# under the cursor.
+_ROTATION_PERIOD_SEC = 7 * 86400.0
+# Candidates skipped per rotation. Smaller than a shelf so consecutive
+# weeks overlap rather than swapping the row out wholesale.
+_ROTATION_STRIDE = 6
+# Candidates taken per genre before interleaving. Enough that five genres
+# more than fill a shelf, so the rotation has slack to work with.
+_GENRE_ROTATION_WINDOW = 12
+# Genres advance more gently than the single-source rows. Each genre only
+# contributes a couple of albums to the finished shelf, so a stride near
+# the window size compounds across five of them and swaps the row out
+# wholesale — which reads as a different row each week rather than the
+# same row moving.
+_GENRE_ROTATION_STRIDE = 2
+# Rotation happens inside this many of the best-ranked candidates rather
+# than across the whole listing. Ranking then rotating over everything
+# put the row's best matches at the front and immediately walked past
+# them — the shelf varied, but by trading fit for novelty every week.
+# Bounding it keeps every week's slice drawn from the strongest picks.
+_GENRE_RANK_POOL = 24
+
+
+def _rotation_offset(pool_size: int, stride: int = _ROTATION_STRIDE) -> int:
+    """Where in a ranked pool this week's slice starts.
+
+    Wraps so a pool smaller than the stride still rotates rather than
+    pinning to zero, and returns 0 for pools too small to slice.
+    """
+    if pool_size <= 0:
+        return 0
+    bucket = int(time.time() // _ROTATION_PERIOD_SEC)
+    return (bucket * stride) % pool_size
+
+
+def _rotate(items: list, window: int, stride: int = _ROTATION_STRIDE) -> list:
+    """Take this week's `window` items from a ranked pool, wrapping.
+
+    Wrapping matters: without it the tail of the pool would only ever be
+    reachable in the weeks the offset happened to land there, and the
+    last few entries never at all.
+    """
+    if not items or window <= 0:
+        return []
+    if len(items) <= window:
+        return items
+    start = _rotation_offset(len(items), stride)
+    doubled = items + items
+    return doubled[start:start + window]
 # Similar artists to resolve for "Fans Also Like". Each costs a Tidal
 # search plus an album fetch, and yields up to 2 albums, so this sits
 # comfortably above _SECTION_SIZE to survive unavailable albums and the
@@ -12129,54 +12207,267 @@ def _aoty_genre_slug_map() -> dict:
     return mapping
 
 
+# Listening windows blended into the taste profile, and how much each
+# counts. The recent window is what makes the page move with you; the
+# longer one is ballast so a single evening on one artist doesn't
+# redefine your taste. Play counts aren't comparable between windows (a
+# six-month count dwarfs a one-month one), so each window is normalised
+# against its own top artist before these weights apply.
+_TASTE_WINDOWS: tuple[tuple[str, float], ...] = (("1month", 2.0), ("6month", 1.0))
+
+# Tags pulled per artist. Last.fm orders them strongest-first, and the
+# specific ones a listener actually cares about ("slowcore", "emo rap")
+# sit below the broad ones, so a shallow read only ever sees "rock".
+_TASTE_TAGS_PER_ARTIST = 12
+
+# How hard a tag's global reach discounts it. A logarithmic discount
+# barely separates anything — the broadest tag on Last.fm and one absent
+# from the chart entirely differ by about 1.5x, which higher tag counts
+# on broad tags simply cancel out, so "rock" and "electronic" kept
+# winning. A square root spreads them roughly 9x and lets the sub-genres
+# through. Measured across a real profile's top genres, broad tags in the
+# top twelve: log10 4, **0.25 3, **0.5 1, **0.6 0 — but 0.6 also drops
+# "ambient", which genuinely describes part of that listening. 0.5 keeps
+# the descriptive ones and still surfaces dariacore and experimental hip
+# hop.
+_TAG_REACH_EXPONENT = 0.5
+
+# A tag's reach in Last.fm's global chart, used to discount broad tags.
+# Tags outside the global top chart report no reach at all, which is the
+# common case for exactly the sub-genres worth surfacing — they're scored
+# as if they had this reach rather than as infinitely specific, so a
+# typo'd or junk tag can't outrank a real one on obscurity alone.
+_TAG_REACH_FLOOR = 5000.0
+
+# A tag carried by only one of the listener's artists needs to be that
+# artist's defining genre to count, not a footnote on them. Last.fm's
+# 0..100 tag strength makes the distinction: Quadeca is "art pop" and
+# "folktronica" at 100 and "emo rap" at 59, and a single artist's
+# third-strongest tag was enough to put emo rap on a listener's page as a
+# genre they don't recognise. The niche bonus above made it worse, since
+# a rarely-used tag is exactly the kind that gets boosted.
+#
+# A plain "two or more artists" rule doesn't work: breadth and backer
+# count rise together, so it readmits "electronic" and "indie rock" while
+# still dropping genuinely specific single-artist genres.
+_SOLO_TAG_MIN_STRENGTH = 80.0
+
+
+def _seed_artists() -> list[dict]:
+    """Top artists blended across listening windows, most relevant first.
+
+    Reading a single six-month window made the page effectively static:
+    the same five artists drove it for months. Blending a recent window
+    over a longer one lets it follow what someone is actually listening
+    to now while staying stable against one night's binge.
+    """
+    merged: dict[str, dict] = {}
+    for period, weight in _TASTE_WINDOWS:
+        rows = _rec_safe(lambda p=period: lastfm.get_top_artists(p, limit=15), [])
+        if not rows:
+            continue
+        top_count = max((float(r.get("playcount") or 0) for r in rows), default=0.0)
+        if top_count <= 0:
+            top_count = 1.0
+        for row in rows:
+            name = (row.get("name") or "").strip()
+            if not name:
+                continue
+            # Normalised within its own window so the windows are
+            # comparable before weighting.
+            score = (float(row.get("playcount") or 0) / top_count) * weight
+            entry = merged.get(name.lower())
+            if entry is None:
+                merged[name.lower()] = {"name": name, "score": score}
+            else:
+                entry["score"] += score
+    return sorted(merged.values(), key=lambda e: e["score"], reverse=True)
+
+
+# How far each signal counts when ranking candidates inside a genre.
+# Genre affinity is deliberately absent: every candidate in a genre row
+# shares that genre, so it can't separate them — it does its work when
+# choosing which genres to show at all.
+_SCORE_W_ORBIT = 0.45
+_SCORE_W_QUALITY = 0.30
+_SCORE_W_NOVELTY = 0.25
+
+# Ratings shrink toward this until enough people have voted. AOTY lets a
+# 95 from eleven listeners outrank an 88 from three thousand, which is
+# noise winning over evidence; the prior pulls thin ratings back toward
+# the middle until they've earned their score.
+_QUALITY_PRIOR = 70.0
+_QUALITY_PRIOR_WEIGHT = 60.0
+
+
+def _listening_orbit(seeds: list[dict]) -> dict:
+    """`artist (lower) -> affinity` for everyone within one hop of the
+    listener's top artists on Last.fm's similar-artist graph.
+
+    This is the signal that turns a genre chart into a recommendation.
+    Without it a genre row is the same list for everyone who happens to
+    share that genre; with it, "highly rated shoegaze" becomes "highly
+    rated shoegaze by artists your listening actually connects to". On a
+    real profile about a fifth of a genre's candidates land in here —
+    dense enough to rank on, sparse enough to discriminate.
+
+    """
+    orbit: dict[str, float] = {}
+    if not seeds:
+        return orbit
+
+    def _sims(entry):
+        return entry, _rec_safe(
+            lambda: lastfm.get_similar_artists(entry["name"], limit=50), []
+        )
+
+    with ThreadPoolExecutor(max_workers=6, thread_name_prefix="orbit") as pool:
+        for entry, sims in pool.map(_sims, seeds[:_ORBIT_SEEDS]):
+            affinity = float(entry.get("score") or 0) or 1.0
+            for s in sims:
+                nm = (s.get("name") or "").strip().lower()
+                if not nm:
+                    continue
+                try:
+                    match = float(s.get("match") or 0.0)
+                except (TypeError, ValueError):
+                    match = 0.0
+                orbit[nm] = orbit.get(nm, 0.0) + affinity * match
+    # The seeds are deliberately NOT boosted into their own orbit. Doing
+    # that made a listener's own top artists lead every genre row —
+    # Quadeca headed both "Art Pop" and "Folktronica" for someone whose
+    # most-played artist is Quadeca. They still appear when the graph
+    # links them to another seed, which is a real signal; they just don't
+    # get a free ride to the top of a discovery row.
+    # Normalise so the weights below mean the same thing regardless of how
+    # many seeds contributed or how heavily they're played.
+    peak = max(orbit.values(), default=0.0)
+    if peak > 0:
+        for k in orbit:
+            orbit[k] /= peak
+    return orbit
+
+
+# Seeds expanded into the orbit. Each costs one Last.fm call, and the
+# graph saturates quickly — eight seeds already reach ~400 artists.
+_ORBIT_SEEDS = 8
+
+
+def _rank_by_taste(rows: list, orbit: dict, played: set) -> list:
+    """Order AOTY listing rows by how well they fit this listener.
+
+    Three parts: whether the artist sits in the listener's orbit, how
+    well-rated the album is once thin rating counts are discounted, and a
+    penalty for artists already in heavy rotation — a row of albums by
+    people you already play is a mirror, not a recommendation.
+    """
+    if not rows:
+        return []
+
+    def _score(row) -> float:
+        artist = (row.get("artist") or "").strip().lower()
+        orbit_fit = orbit.get(artist, 0.0)
+
+        raw = float(row.get("score") or 0.0)
+        votes = float(row.get("rating_count") or 0.0)
+        # Bayesian shrink toward the prior until the vote count earns it.
+        quality = (raw * votes + _QUALITY_PRIOR * _QUALITY_PRIOR_WEIGHT) / (
+            votes + _QUALITY_PRIOR_WEIGHT
+        ) / 100.0
+
+        novelty = 0.0 if artist in played else 1.0
+        return (
+            _SCORE_W_ORBIT * orbit_fit
+            + _SCORE_W_QUALITY * quality
+            + _SCORE_W_NOVELTY * novelty
+        )
+
+    return sorted(rows, key=_score, reverse=True)
+
+
 def _taste_profile() -> dict:
-    """Infer taste from Last.fm: play-weighted top artists, and their most
-    common community tags aggregated into top genres mapped to AOTY slugs
-    (the full taxonomy, so sub-genres survive). A disconnected or empty
-    profile is fine — sections that depend on it just don't render. This
-    is the "listening history" half of the popularity-x-history ranking
-    (#307)."""
+    """Infer taste from Last.fm: recency-blended top artists, and their
+    community tags aggregated into genres mapped to AOTY slugs (the full
+    taxonomy, so sub-genres survive). A disconnected or empty profile is
+    fine — sections that depend on it just don't render. This is the
+    "listening history" half of the popularity-x-history ranking (#307).
+    """
     connected = bool(_rec_safe(lambda: lastfm.status().get("connected"), False))
     if not connected:
         return {"connected": False, "artist_names": set(), "genres": []}
-    top = _rec_safe(lambda: lastfm.get_top_artists("6month", limit=15), [])
-    artist_names = {
-        (t.get("name") or "").strip().lower() for t in top if t.get("name")
+    top = _seed_artists()
+    artist_names = {e["name"].strip().lower() for e in top if e.get("name")}
+
+    # How widely each tag is applied across all of Last.fm. Broad tags
+    # ("rock", "electronic") are enormous and say almost nothing about an
+    # individual; the sub-genres worth acting on are far rarer.
+    chart_tags = _rec_safe(lambda: lastfm.get_chart_top_tags(limit=250), [])
+    tag_reach = {
+        (t.get("name") or "").strip().lower(): float(t.get("reach") or 0)
+        for t in chart_tags
     }
 
-    # Aggregate genre tags across top artists, weighting each tag by the
-    # artist's playcount and the tag's 0..100 strength.
-    def _tags_for(t):
-        nm = (t.get("name") or "").strip()
+    def _tags_for(entry):
+        nm = (entry.get("name") or "").strip()
         if not nm:
             return []
-        pc = float(t.get("playcount") or 0) or 1.0
-        tags = _rec_safe(lambda: lastfm.get_artist_top_tags(nm, limit=4), [])
-        return [
-            ((tag.get("name") or "").strip().lower(),
-             pc * (float(tag.get("count") or 0) / 100.0))
-            for tag in tags
-        ]
+        affinity = float(entry.get("score") or 0) or 1.0
+        tags = _rec_safe(
+            lambda: lastfm.get_artist_top_tags(nm, limit=_TASTE_TAGS_PER_ARTIST), []
+        )
+        out = []
+        for tag in tags:
+            name = (tag.get("name") or "").strip().lower()
+            if not name:
+                continue
+            raw_strength = float(tag.get("count") or 0)
+            strength = raw_strength / 100.0
+            # Discount by how commonly the tag is applied globally. Without
+            # this the ranking just recovers the broadest tag every artist
+            # carries, because breadth and tag strength rise together —
+            # Boards of Canada is tagged "electronic" (84) as strongly as
+            # "ambient" (100), and "idm" is the one that actually describes
+            # them. Log so the discount is gentle rather than a cliff.
+            reach = max(tag_reach.get(name, 0.0), _TAG_REACH_FLOOR)
+            out.append((
+                name,
+                affinity * strength / (reach ** _TAG_REACH_EXPONENT),
+                nm,
+                raw_strength,
+            ))
+        return out
 
     weights: dict[str, float] = {}
+    backers: dict[str, set] = {}
+    peak_strength: dict[str, float] = {}
     if top:
         with ThreadPoolExecutor(max_workers=6, thread_name_prefix="taste") as pool:
-            for pairs in pool.map(_tags_for, top[:12]):
-                for name, w in pairs:
-                    if name:
-                        weights[name] = weights.get(name, 0.0) + w
+            for pairs in pool.map(_tags_for, top[:15]):
+                for name, w, artist, raw in pairs:
+                    if not name:
+                        continue
+                    weights[name] = weights.get(name, 0.0) + w
+                    backers.setdefault(name, set()).add(artist)
+                    peak_strength[name] = max(peak_strength.get(name, 0.0), raw)
 
     # Map inferred genre names to AOTY's full-taxonomy slugs so specific
     # sub-genres (shoegaze, slowcore, art pop) survive instead of dropping.
+    # Anything AOTY doesn't recognise falls out here, which also discards
+    # Last.fm descriptors that aren't genres at all ("japanese", "seen
+    # live") without needing a blocklist.
     name_to_slug = _aoty_genre_slug_map()
     genres: list = []
     seen_slugs: set = set()
     for gname, _w in sorted(weights.items(), key=lambda kv: kv[1], reverse=True):
+        # One artist's passing association isn't a genre the listener has.
+        if len(backers.get(gname, ())) < 2 and \
+                peak_strength.get(gname, 0.0) < _SOLO_TAG_MIN_STRENGTH:
+            continue
         hit = name_to_slug.get(gname)
         if hit and hit[0] and hit[0] not in seen_slugs:
             seen_slugs.add(hit[0])
             genres.append((hit[0], hit[1], _w))
-        if len(genres) >= _GENRE_BLEND_SEEDS:
+        if len(genres) >= _TASTE_GENRE_MAX:
             break
 
     # Obscurity: how much of your top rotation overlaps Last.fm's global
@@ -12195,11 +12486,15 @@ def _taste_profile() -> dict:
         "artist_names": artist_names,
         "genres": genres,
         "mainstream_ratio": mainstream_ratio,
+        # Computed once here and handed to every row: it costs eight
+        # Last.fm calls, and each row re-deriving it would multiply that
+        # for no benefit.
+        "orbit": _listening_orbit(top),
     }
 
 
 def _aoty_section(key, title, subtitle, listing, profile, taste_rank, deep=False,
-                  owned: Optional[set] = None) -> dict:
+                  owned: Optional[set] = None, rotate: bool = False) -> dict:
     """Build one AOTY-backed section. When `taste_rank`, re-order the
     (cheap) AOTY listing by a blend of popularity (AOTY score) and genre
     affinity before resolving only the top slice to Tidal.
@@ -12229,7 +12524,10 @@ def _aoty_section(key, title, subtitle, listing, profile, taste_rank, deep=False
                 return pop * pop_w + aff
 
         items.sort(key=_score, reverse=True)
-    items = items[:_SECTION_RESOLVE_POOL]
+    # Rotate rather than always resolving the head of the ranking. The
+    # underlying chart barely moves week to week, so without this the row
+    # shows the same albums until the year turns over.
+    items = _rotate(items, _SECTION_RESOLVE_POOL) if rotate else items[:_SECTION_RESOLVE_POOL]
     resolved = _rec_safe(lambda: aoty_resolver.resolve_listing(items), []) or []
     albums = [
         it["tidal_album"]
@@ -12258,7 +12556,10 @@ def _section_fans_also_like(owned: Optional[set] = None) -> dict:
     Cross-seed corroboration: an artist that several of your favorites share
     ranks highest (their Last.fm `match` scores sum across seeds).
     Opportunistic — drops out when there's too little to fill a shelf."""
-    top = _rec_safe(lambda: lastfm.get_top_artists("6month", limit=8), [])
+    # Same recency-blended seeds the rest of the page uses. Reading a raw
+    # six-month window here left this row anchored to whatever dominated
+    # half a year while the genre rows had already moved on.
+    top = _seed_artists()
     seeds = [(t.get("name") or "").strip() for t in top[:6]]
     seeds = [s for s in seeds if s]
     # Everything the user already plays — this row is for discovery, so we
@@ -12375,15 +12676,25 @@ def _genre_blend(key: str, title: str, subtitle: str, fetch, profile,
     if not genres:
         return {"key": key, "title": title, "subtitle": subtitle, "albums": []}
 
+    orbit = profile.get("orbit") or {}
+    played = profile.get("artist_names") or set()
+
     def _for(seed):
         slug, name, _w = seed
-        return name, _rec_safe(lambda s=slug: fetch(s), []) or []
+        rows = _rec_safe(lambda s=slug: fetch(s), []) or []
+        # Rank by fit before rotating, so the rotation walks through a
+        # list ordered for this listener rather than through AOTY's
+        # ranking. Without this the row is the same chart for everyone
+        # who happens to share the genre.
+        rows = _rank_by_taste(rows, orbit, played)
+        return name, _rotate(rows[:_GENRE_RANK_POOL], _GENRE_ROTATION_WINDOW,
+                             _GENRE_ROTATION_STRIDE)
 
     per_genre: "OrderedDict[str, list]" = OrderedDict()
     with ThreadPoolExecutor(max_workers=5, thread_name_prefix="genreblend") as pool:
         for name, rows in pool.map(_for, genres):
             if rows:
-                per_genre[name] = rows
+                per_genre[name] = list(rows)
 
     interleaved: list[dict] = []
     while True:
@@ -12430,7 +12741,7 @@ def _build_recommendation_sections() -> list[dict]:
         ("new", lambda: _genre_blend(
             "new_releases", "New Releases For You",
             "Fresh in the genres you listen to",
-            lambda s: aoty_module.recent_releases_by_genre(s, 20), profile,
+            lambda s: aoty_module.recent_releases_by_genre(s, 30), profile,
             owned=owned,
         )),
         # The genre canon, all-time rather than "best of <this year>".
@@ -12438,7 +12749,7 @@ def _build_recommendation_sections() -> list[dict]:
             **_genre_blend(
                 "from_your_genres", "From Your Genres",
                 "Highest rated in the genres you listen to",
-                lambda s: aoty_module.top_albums_by_genre(s, 20), profile,
+                lambda s: aoty_module.top_albums_by_genre(s, 50), profile,
                 owned=owned,
             ),
             # Drill-down: a row per genre instead of one blended shelf.
@@ -12447,8 +12758,8 @@ def _build_recommendation_sections() -> list[dict]:
         ("popular", lambda: _aoty_section(
             "popular", "Popular in Your Orbit",
             "Highly rated this year, tuned to your genres",
-            _rec_safe(lambda: aoty_module.top_albums_of_year(year, 60), []), profile, True,
-            owned=owned,
+            _rec_safe(lambda: aoty_module.top_albums_of_year(year, 100), []), profile, True,
+            owned=owned, rotate=True,
         )),
     ]
     # Listener-overlap discovery — only when Last.fm is connected (that's
@@ -12589,25 +12900,35 @@ def _genre_drilldown_sections() -> list[dict]:
     beyond resolving the extra albums to Tidal.
     """
     profile = _taste_profile()
-    genres = profile.get("genres", [])[:_GENRE_BLEND_SEEDS]
+    genres = profile.get("genres", [])[:_GENRE_HUB_MAX]
     if not genres:
         return []
     owned = _owned_album_ids()
+    orbit = profile.get("orbit") or {}
+    played = profile.get("artist_names") or set()
 
     def _build(seed):
         slug, name, _w = seed
-        return _genre_page(slug, name, 0, _GENRE_PAGE_SIZE, owned)
+        return _genre_page(slug, name, 0, _GENRE_PAGE_SIZE, owned, orbit, played)
 
     with ThreadPoolExecutor(max_workers=5, thread_name_prefix="genredrill") as pool:
-        return [s for s in pool.map(_build, genres) if s["albums"]]
+        return [
+            s for s in pool.map(_build, genres)
+            if len(s["albums"]) >= _GENRE_HUB_MIN_ALBUMS
+        ]
 
 
 # Albums per genre row on the drill-down, and per "load more" press.
-_GENRE_PAGE_SIZE = 18
+# Deliberately below a full shelf: the drill-down now carries a dozen
+# genre rows, and each album resolved costs a Tidal search on a cold
+# cache. Twelve rows of twelve is comparable to what five rows of
+# eighteen cost before, and every row can page deeper on demand.
+_GENRE_PAGE_SIZE = 12
 
 
 def _genre_page(slug: str, name: str, offset: int, limit: int,
-                owned: Optional[set] = None) -> dict:
+                owned: Optional[set] = None, orbit: Optional[dict] = None,
+                played: Optional[set] = None) -> dict:
     """One window of a genre's canon, for paging in from the drill-down.
 
     Pagination is over AOTY's listing, not over the rendered albums: an
@@ -12618,10 +12939,31 @@ def _genre_page(slug: str, name: str, offset: int, limit: int,
     runs out.
     """
     want = offset + limit
-    # One extra row purely to answer "is there another page after this".
-    listing = _rec_safe(lambda: aoty_module.top_albums_by_genre(slug, want + 1), [])
-    has_more = len(listing) > want
-    window = listing[offset:want]
+    # Fetch a full listing page even when a small window is asked for, so
+    # the weekly rotation below has somewhere to move. One AOTY page
+    # either way, so this costs nothing extra.
+    listing = _rec_safe(
+        lambda: aoty_module.top_albums_by_genre(slug, max(want + 1, _GENRE_PAGE_POOL)), []
+    )
+    # Start the genre somewhere different each week. Without this the
+    # drill-down is a fixed all-time ranking: the same album leads
+    # "Shoegaze" forever, which is the staleness the main page rotation
+    # was meant to solve — it just never reached this surface.
+    #
+    # Rotating the sequence rather than the client's offset keeps paging
+    # honest: "load more" still walks forward through this week's order
+    # instead of jumping around.
+    # Same taste ranking the main page applies, so drilling into a genre
+    # doesn't drop back to AOTY's generic chart order.
+    listing = _rank_by_taste(listing, orbit or {}, played or set())
+    # Start inside the best-ranked head, then page forward through the
+    # full ranked order — so "load more" still goes deeper rather than
+    # circling the same top slice.
+    base = _rotation_offset(min(len(listing), _GENRE_RANK_POOL),
+                            _GENRE_ROTATION_STRIDE)
+    sequence = listing[base:] + listing[:base]
+    has_more = want < len(sequence)
+    window = sequence[offset:want]
     resolved = _rec_safe(lambda: aoty_resolver.resolve_listing(window), []) or []
     albums = [
         it["tidal_album"]
@@ -12634,6 +12976,12 @@ def _genre_page(slug: str, name: str, offset: int, limit: int,
         "subtitle": f"Highest rated {name}",
         "slug": slug,
         "offset": offset,
+        # Where the next page starts, in listing positions. The client
+        # can't derive this from what it rendered: a window of twelve
+        # rarely renders twelve once saved albums and the per-artist cap
+        # have taken their cut, so paging by the rendered count re-served
+        # rows it had already consumed.
+        "next_offset": want,
         "has_more": has_more,
         "albums": _dedupe_cap_albums(albums, limit, exclude=owned),
     }
@@ -12675,7 +13023,14 @@ def recommendations_genre(slug: str, offset: int = 0, limit: int = 18) -> dict:
         (n for s_, n, _w in _taste_profile().get("genres", []) if s_ == slug),
         slug.partition("-")[2].replace("-", " ").title(),
     )
-    section = _genre_page(slug, name, offset, limit, _owned_album_ids())
+    profile = _taste_profile()
+    name = next(
+        (n for s_, n, _w in profile.get("genres", []) if s_ == slug), name
+    )
+    section = _genre_page(
+        slug, name, offset, limit, _owned_album_ids(),
+        profile.get("orbit") or {}, profile.get("artist_names") or set(),
+    )
     return {"enabled": True, "section": section}
 
 

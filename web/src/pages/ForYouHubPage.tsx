@@ -26,7 +26,10 @@ function ForYouHubPage({
   // stays owned by the fetch. Deriving the rendered rows from both means
   // no effect has to copy fetched data into state and re-sync it.
   const [extra, setExtra] = useState<
-    Record<string, { albums: RecSection["albums"]; has_more: boolean }>
+    Record<
+      string,
+      { albums: RecSection["albums"]; next_offset?: number; has_more: boolean }
+    >
   >({});
   const [busy, setBusy] = useState<string | null>(null);
 
@@ -38,6 +41,7 @@ function ForYouHubPage({
       return {
         ...s,
         albums: [...s.albums, ...more.albums],
+        next_offset: more.next_offset ?? s.next_offset,
         has_more: more.has_more,
       };
     });
@@ -46,9 +50,12 @@ function ForYouHubPage({
     if (!section.slug) return;
     setBusy(section.key);
     try {
+      // The backend tells us where the next page starts. Using the
+      // rendered count instead re-fetched rows already consumed, because
+      // filtering makes rendered and consumed counts diverge.
       const res = await api.recommendationGenrePage(
         section.slug,
-        section.albums.length,
+        section.next_offset ?? section.albums.length,
       );
       const page = res.section;
       if (!page) return;
@@ -63,6 +70,7 @@ function ForYouHubPage({
           ...prev,
           [section.key]: {
             albums: [...held, ...added],
+            next_offset: page.next_offset,
             has_more: page.has_more ?? false,
           },
         };

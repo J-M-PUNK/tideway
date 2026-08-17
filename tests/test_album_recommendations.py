@@ -146,7 +146,7 @@ def test_favorited_albums_are_filtered_from_every_section(stub_auth, monkeypatch
     # runs its candidates through the shared tail exactly as the real
     # builders do, which is where the exclusion happens.
     def _fake_section(key, title, subtitle, listing, profile, taste_rank,
-                      deep=False, owned=None):
+                      deep=False, owned=None, rotate=False):
         return {
             "key": key, "title": title, "subtitle": subtitle,
             "albums": server._dedupe_cap_albums(
@@ -640,3 +640,369 @@ def test_owned_filter_is_optional():
 
     albums = [{"id": "1", "name": "A", "artists": [{"name": "X"}]}]
     assert len(server._dedupe_cap_albums(albums, 5)) == 1
+
+
+# ---------------------------------------------------------------------------
+# Recency blending, tag specificity, and weekly rotation
+# ---------------------------------------------------------------------------
+
+
+def test_seed_artists_blend_recent_over_long_window(stub_auth, monkeypatch):
+    """A single six-month window left the page effectively frozen. Recent
+    listening has to outweigh the long window without erasing it."""
+    import server
+
+    windows = {
+        "1month": [{"name": "NewObsession", "playcount": 100}],
+        "6month": [{"name": "OldFavourite", "playcount": 1000},
+                   {"name": "NewObsession", "playcount": 50}],
+    }
+    monkeypatch.setattr(
+        server.lastfm, "get_top_artists", lambda p, limit: windows.get(p, [])
+    )
+    names = [e["name"] for e in server._seed_artists()]
+    # Raw play counts would rank OldFavourite far ahead; normalising each
+    # window against its own top artist is what lets the recent one lead.
+    assert names[0] == "NewObsession"
+    assert "OldFavourite" in names, "the long window is ballast, not discarded"
+
+
+def test_seed_artists_survive_a_missing_window(stub_auth, monkeypatch):
+    import server
+
+    monkeypatch.setattr(
+        server.lastfm, "get_top_artists",
+        lambda p, limit: [{"name": "Only", "playcount": 5}] if p == "6month" else [],
+    )
+    assert [e["name"] for e in server._seed_artists()] == ["Only"]
+
+
+def test_broad_tags_lose_to_specific_ones(stub_auth, monkeypatch):
+    """Tag strength and breadth rise together, so ranking on strength alone
+    just recovers whichever vague tag every artist carries. Discounting by
+    global reach is what surfaces the sub-genre."""
+    import server
+
+    monkeypatch.setattr(server.lastfm, "status", lambda: {"connected": True})
+    monkeypatch.setattr(
+        server.lastfm, "get_top_artists",
+        lambda p, limit: [{"name": "BoC", "playcount": 100}] if p == "1month" else [],
+    )
+    # "electronic" is tagged nearly as strongly as "idm" but applied to
+    # vastly more artists globally.
+    monkeypatch.setattr(
+        server.lastfm, "get_artist_top_tags",
+        lambda name, limit=8: [
+            {"name": "electronic", "count": 95},
+            {"name": "idm", "count": 90},
+        ],
+    )
+    monkeypatch.setattr(
+        server.lastfm, "get_chart_top_tags",
+        lambda limit=250: [
+            {"name": "electronic", "reach": 262672},
+            {"name": "idm", "reach": 39205},
+        ],
+    )
+    monkeypatch.setattr(server.lastfm, "get_chart_top_artists", lambda limit=500: [])
+    monkeypatch.setattr(
+        server, "_aoty_genre_slug_map",
+        lambda: {"electronic": ("6-electronic", "Electronic"),
+                 "idm": ("47-idm", "IDM")},
+    )
+    genres = [name for _slug, name, _w in server._taste_profile()["genres"]]
+    assert genres[0] == "IDM", f"broad tag won: {genres}"
+
+
+def test_rotation_advances_weekly_and_holds_within_a_week(monkeypatch):
+    import server
+
+    pool = [f"a{i}" for i in range(60)]
+    base = 1_000_000_000.0
+    monkeypatch.setattr(server.time, "time", lambda: base)
+    first = server._rotate(pool, 18)
+    assert server._rotate(pool, 18) == first, "must not shift between calls"
+
+    monkeypatch.setattr(server.time, "time", lambda: base + 7 * 86400)
+    later = server._rotate(pool, 18)
+    assert later != first, "row is frozen week to week"
+    carried = len(set(later) & set(first))
+    # Partial overlap: a full swap gives the row no continuity, none at all
+    # means nothing carries over.
+    assert 0 < carried < 18, f"expected partial turnover, carried {carried}"
+
+
+def test_rotation_wraps_so_the_tail_is_reachable(monkeypatch):
+    """Without wrapping, entries near the end of a pool would only surface
+    in the weeks the offset happened to land there — and the last few
+    never at all."""
+    import server
+
+    pool = [f"a{i}" for i in range(20)]
+    seen = set()
+    for week in range(12):
+        monkeypatch.setattr(
+            server.time, "time", lambda w=week: 1_000_000_000.0 + w * 7 * 86400
+        )
+        seen.update(server._rotate(pool, 6))
+    assert seen == set(pool), f"unreachable entries: {sorted(set(pool) - seen)}"
+
+
+def test_rotation_handles_pools_smaller_than_the_window(monkeypatch):
+    import server
+
+    monkeypatch.setattr(server.time, "time", lambda: 1_000_000_000.0)
+    assert server._rotate(["a", "b"], 18) == ["a", "b"]
+    assert server._rotate([], 18) == []
+
+
+def test_reach_discount_is_steep_enough_to_beat_tag_strength(stub_auth, monkeypatch):
+    """A logarithmic discount separated the broadest tag from an unlisted
+    one by only ~1.5x, which a broad tag's higher count simply cancelled —
+    so "rock" and "electronic" kept winning over the sub-genre. The
+    discount has to outweigh that gap, not merely exist.
+    """
+    import server
+
+    monkeypatch.setattr(server.lastfm, "status", lambda: {"connected": True})
+    monkeypatch.setattr(
+        server.lastfm, "get_top_artists",
+        lambda p, limit: [{"name": "A", "playcount": 10}] if p == "1month" else [],
+    )
+    # The broad tag is applied *more* strongly than the specific one, which
+    # is the realistic case and the one a weak discount gets wrong.
+    monkeypatch.setattr(
+        server.lastfm, "get_artist_top_tags",
+        # Both are defining tags for this artist, so the solo-tag rule
+        # keeps them and the reach discount is what decides the order.
+        lambda name, limit=12: [
+            {"name": "rock", "count": 100},
+            {"name": "dariacore", "count": 90},
+        ],
+    )
+    monkeypatch.setattr(
+        server.lastfm, "get_chart_top_tags",
+        lambda limit=250: [{"name": "rock", "reach": 403263}],
+    )
+    monkeypatch.setattr(server.lastfm, "get_chart_top_artists", lambda limit=500: [])
+    monkeypatch.setattr(
+        server, "_aoty_genre_slug_map",
+        lambda: {"rock": ("7-rock", "Rock"), "dariacore": ("999-dariacore", "Dariacore")},
+    )
+    names = [n for _s, n, _w in server._taste_profile()["genres"]]
+    assert names[0] == "Dariacore", f"broad tag still won: {names}"
+
+
+def test_profile_ranks_deeper_than_any_row_shows(stub_auth, monkeypatch):
+    """The profile is pure tag arithmetic with no fetches, so it ranks well
+    past what the rows use. The main page and the drill-down then take the
+    slice each can afford — keeping that budget decision out of the
+    inference."""
+    import server
+
+    assert server._TASTE_GENRE_MAX > server._GENRE_HUB_MAX > server._GENRE_BLEND_SEEDS
+
+
+def test_genre_page_reports_listing_offset_not_rendered_count(stub_auth, monkeypatch):
+    """Paging has to advance by listing positions consumed.
+
+    A window of N rarely renders N — saved albums and the per-artist cap
+    take their cut — so a client paging by what it rendered re-requests
+    rows the previous page already consumed, and "load more" crawls.
+    """
+    import server
+
+    listing = [{"artist": f"A{i}", "title": f"T{i}"} for i in range(40)]
+    monkeypatch.setattr(
+        server.aoty_module, "top_albums_by_genre", lambda slug, limit=60: listing[:limit]
+    )
+    # Every other entry resolves; the rest drop out, so rendered < window.
+    monkeypatch.setattr(
+        server.aoty_resolver, "resolve_listing",
+        lambda rows: [
+            {**r, "tidal_album": (
+                {"id": r["title"], "name": r["title"],
+                 "artists": [{"name": r["artist"]}], "available": True}
+                if int(r["title"][1:]) % 2 == 0 else None
+            )}
+            for r in rows
+        ],
+    )
+    monkeypatch.setattr(server, "_rotation_offset", lambda *a, **kw: 0)
+
+    page = server._genre_page("26-shoegaze", "Shoegaze", 0, 12)
+    assert len(page["albums"]) < 12, "fixture should render fewer than the window"
+    # The next page starts where this one stopped consuming, not where it
+    # stopped rendering.
+    assert page["next_offset"] == 12
+
+
+def test_genre_drilldown_rotates_between_weeks(stub_auth, monkeypatch):
+    """The drill-down was a fixed all-time ranking: the same album led a
+    genre forever, which is exactly the staleness the main page rotation
+    addressed but never reached this surface."""
+    import server
+
+    listing = [{"artist": f"A{i}", "title": f"T{i}"} for i in range(25)]
+    monkeypatch.setattr(
+        server.aoty_module, "top_albums_by_genre", lambda slug, limit=60: listing[:limit]
+    )
+    monkeypatch.setattr(
+        server.aoty_resolver, "resolve_listing",
+        lambda rows: [
+            {**r, "tidal_album": {"id": r["title"], "name": r["title"],
+                                  "artists": [{"name": r["artist"]}], "available": True}}
+            for r in rows
+        ],
+    )
+    base = 1_000_000_000.0
+    monkeypatch.setattr(server.time, "time", lambda: base)
+    week0 = [a["name"] for a in server._genre_page("26-x", "X", 0, 12)["albums"]]
+    monkeypatch.setattr(server.time, "time", lambda: base + 7 * 86400)
+    week1 = [a["name"] for a in server._genre_page("26-x", "X", 0, 12)["albums"]]
+    assert week0[0] != week1[0], "genre still leads with the same album every week"
+
+
+# ---------------------------------------------------------------------------
+# Taste ranking inside a genre
+# ---------------------------------------------------------------------------
+
+
+def _listing_row(artist, score, votes=1000):
+    return {"artist": artist, "title": f"{artist} LP", "score": score,
+            "rating_count": votes}
+
+
+def test_orbit_artists_outrank_strangers_at_similar_quality():
+    """Without this a genre row is the same chart for everyone who shares
+    the genre — the listener's own listening never enters into it."""
+    import server
+
+    rows = [_listing_row("Stranger", 88), _listing_row("InOrbit", 86)]
+    ranked = server._rank_by_taste(rows, {"inorbit": 1.0}, set())
+    assert ranked[0]["artist"] == "InOrbit"
+
+
+def test_thin_rating_counts_do_not_beat_well_rated_albums():
+    """AOTY lets a 95 from eleven people sit above an 88 from thousands.
+    That's noise outranking evidence, so scores shrink toward a prior
+    until the vote count earns them."""
+    import server
+
+    rows = [_listing_row("Obscure", 95, votes=11), _listing_row("Established", 88, votes=3000)]
+    ranked = server._rank_by_taste(rows, {}, set())
+    assert ranked[0]["artist"] == "Established"
+
+
+def test_already_played_artists_are_demoted():
+    """A row of albums by artists already in heavy rotation is a mirror,
+    not a recommendation."""
+    import server
+
+    rows = [_listing_row("Played", 90), _listing_row("Fresh", 88)]
+    orbit = {"played": 1.0, "fresh": 1.0}
+    ranked = server._rank_by_taste(rows, orbit, {"played"})
+    assert ranked[0]["artist"] == "Fresh"
+
+
+def test_seeds_are_not_boosted_into_their_own_orbit(stub_auth, monkeypatch):
+    """Adding the seeds to their own orbit put a listener's most-played
+    artist at the head of every genre row that artist appears in."""
+    import server
+
+    monkeypatch.setattr(
+        server.lastfm, "get_similar_artists", lambda name, limit=50: []
+    )
+    orbit = server._listening_orbit([{"name": "TopArtist", "score": 5.0}])
+    assert "topartist" not in orbit, "seed boosted itself into its own orbit"
+
+
+def test_orbit_is_normalised_so_weights_stay_meaningful():
+    """Affinities scale with how heavily seeds are played; without
+    normalising, the orbit term would swamp the others for a heavy
+    listener and vanish for a light one."""
+    import server
+
+    class _LF:
+        @staticmethod
+        def get_similar_artists(name, limit=50):
+            return [{"name": "Neighbour", "match": 0.9}]
+
+    import types
+    orig = server.lastfm
+    server.lastfm = types.SimpleNamespace(get_similar_artists=_LF.get_similar_artists)
+    try:
+        light = server._listening_orbit([{"name": "A", "score": 0.1}])
+        heavy = server._listening_orbit([{"name": "A", "score": 900.0}])
+    finally:
+        server.lastfm = orig
+    assert max(light.values()) == max(heavy.values()) == 1.0
+
+
+def test_ranking_survives_missing_scores():
+    """AOTY ships rows with no score during release week."""
+    import server
+
+    rows = [{"artist": "NoScore", "title": "X"}, _listing_row("Scored", 80)]
+    assert len(server._rank_by_taste(rows, {}, set())) == 2
+
+
+def test_one_artists_passing_tag_is_not_a_genre(stub_auth, monkeypatch):
+    """A tag carried by a single artist, and not even that artist's
+    defining one, was enough to put a genre on the page. Quadeca is
+    tagged "emo rap" at 59 out of 100 — a footnote next to their "art
+    pop" and "folktronica" at 100 — and that alone made emo rap a genre
+    for someone who doesn't listen to it. Worse, the niche bonus favours
+    exactly these rarely-used tags.
+    """
+    import server
+
+    monkeypatch.setattr(server.lastfm, "status", lambda: {"connected": True})
+    monkeypatch.setattr(
+        server.lastfm, "get_top_artists",
+        lambda p, limit: [{"name": "Quadeca", "playcount": 100}] if p == "1month" else [],
+    )
+    monkeypatch.setattr(
+        server.lastfm, "get_artist_top_tags",
+        lambda name, limit=12: [
+            {"name": "art pop", "count": 100},
+            {"name": "emo rap", "count": 59},
+        ],
+    )
+    monkeypatch.setattr(server.lastfm, "get_chart_top_tags", lambda limit=250: [])
+    monkeypatch.setattr(server.lastfm, "get_chart_top_artists", lambda limit=500: [])
+    monkeypatch.setattr(server.lastfm, "get_similar_artists", lambda n, limit=50: [])
+    monkeypatch.setattr(
+        server, "_aoty_genre_slug_map",
+        lambda: {"art pop": ("141-art-pop", "Art Pop"),
+                 "emo rap": ("306-emo-rap", "Emo Rap")},
+    )
+    names = [n for _s, n, _w in server._taste_profile()["genres"]]
+    assert "Art Pop" in names, "the artist's defining tag should survive"
+    assert "Emo Rap" not in names, f"a footnote tag became a genre: {names}"
+
+
+def test_a_solo_tag_survives_when_it_defines_the_artist(stub_auth, monkeypatch):
+    """The rule must not simply demand two artists — breadth and backer
+    count rise together, so that readmits "electronic" while dropping
+    genuinely specific genres like folktronica that rest on one artist."""
+    import server
+
+    monkeypatch.setattr(server.lastfm, "status", lambda: {"connected": True})
+    monkeypatch.setattr(
+        server.lastfm, "get_top_artists",
+        lambda p, limit: [{"name": "Quadeca", "playcount": 100}] if p == "1month" else [],
+    )
+    monkeypatch.setattr(
+        server.lastfm, "get_artist_top_tags",
+        lambda name, limit=12: [{"name": "folktronica", "count": 100}],
+    )
+    monkeypatch.setattr(server.lastfm, "get_chart_top_tags", lambda limit=250: [])
+    monkeypatch.setattr(server.lastfm, "get_chart_top_artists", lambda limit=500: [])
+    monkeypatch.setattr(server.lastfm, "get_similar_artists", lambda n, limit=50: [])
+    monkeypatch.setattr(
+        server, "_aoty_genre_slug_map",
+        lambda: {"folktronica": ("104-folktronica", "Folktronica")},
+    )
+    names = [n for _s, n, _w in server._taste_profile()["genres"]]
+    assert names == ["Folktronica"]
