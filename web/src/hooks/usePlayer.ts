@@ -959,24 +959,28 @@ export function usePlayer() {
                 ? null
                 : s.source,
         };
-        void (async () => {
-          try {
-            // Single round-trip for load+play — saves ~20-40ms of
-            // await gap between the two HTTP calls and lets the
-            // backend start priming the decoder immediately after
-            // set_media, which is where the audible delay lives.
-            await api.player.playTrack(track.id, qualityRef.current);
-          } catch (err) {
-            setState((cur) => ({
-              ...cur,
-              playing: false,
-              loading: false,
-              error: err instanceof Error ? err.message : String(err),
-            }));
-          }
-        })();
         return next;
       });
+      // Kick off load+play as a side effect OUTSIDE the setState updater.
+      // StrictMode double-invokes updaters in dev, so having this inside
+      // fired two play_track loads (two full teardown+rebuilds) per
+      // action. The updater above is now pure; `track` was bounds-checked
+      // against the queue at the top of playAtIndex.
+      void (async () => {
+        try {
+          // Single round-trip for load+play — saves ~20-40ms of await
+          // gap between two HTTP calls and lets the backend start priming
+          // the decoder immediately after set_media, where the delay lives.
+          await api.player.playTrack(track.id, qualityRef.current);
+        } catch (err) {
+          setState((cur) => ({
+            ...cur,
+            playing: false,
+            loading: false,
+            error: err instanceof Error ? err.message : String(err),
+          }));
+        }
+      })();
     },
     [],
   );
@@ -1017,20 +1021,22 @@ export function usePlayer() {
                 ? null
                 : s.source,
         };
-        void (async () => {
-          try {
-            await api.player.load(track.id, qualityRef.current);
-          } catch (err) {
-            setState((cur) => ({
-              ...cur,
-              playing: false,
-              loading: false,
-              error: err instanceof Error ? err.message : String(err),
-            }));
-          }
-        })();
         return next;
       });
+      // Load (paused) as a side effect OUTSIDE the updater — same
+      // StrictMode dev double-invoke fix as playAtIndex.
+      void (async () => {
+        try {
+          await api.player.load(track.id, qualityRef.current);
+        } catch (err) {
+          setState((cur) => ({
+            ...cur,
+            playing: false,
+            loading: false,
+            error: err instanceof Error ? err.message : String(err),
+          }));
+        }
+      })();
     },
     [],
   );
