@@ -250,7 +250,7 @@
             "name": "python3-fastapi",
             "buildsystem": "simple",
             "build-commands": [
-                "pip3 install --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"fastapi>=0.139.2\" --no-build-isolation"
+                "pip3 install --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"fastapi>=0.140.5\" --no-build-isolation"
             ],
             "sources": [
                 {
@@ -428,7 +428,7 @@
             "name": "python3-sse-starlette",
             "buildsystem": "simple",
             "build-commands": [
-                "pip3 install --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"sse-starlette>=3.4.4\" --no-build-isolation"
+                "pip3 install --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"sse-starlette>=3.4.6\" --no-build-isolation"
             ],
             "sources": [
                 {
@@ -546,7 +546,7 @@
             "name": "python3-numpy",
             "buildsystem": "simple",
             "build-commands": [
-                "pip3 install --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"numpy>=1.26.0\" --no-build-isolation"
+                "pip3 install --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"numpy>=2.5.1\" --no-build-isolation"
             ],
             "sources": [
                 {
@@ -807,7 +807,7 @@
             "name": "python3-async-upnp-client",
             "buildsystem": "simple",
             "build-commands": [
-                "pip3 install --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"async-upnp-client>=0.47.0\" --no-build-isolation"
+                "pip3 install --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"async-upnp-client>=0.48.0\" --no-build-isolation"
             ],
             "sources": [
                 {

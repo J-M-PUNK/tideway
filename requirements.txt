@@ -29,9 +29,9 @@ orjson>=3.11.9
 # together).
 curl-cffi>=0.15.0,<0.16
 pillow>=12.3.0
-fastapi>=0.139.2
+fastapi>=0.140.5
 uvicorn[standard]>=0.52.0
-sse-starlette>=3.4.4
+sse-starlette>=3.4.6
 # Packaged desktop app — pywebview wraps the web UI in a native window.
 # On Windows it requires WebView2 (preinstalled on Win11, auto-installs
 # on Win10 via the Evergreen bootstrapper). On macOS it uses WKWebView,
@@ -44,7 +44,7 @@ pywebview>=6.2.1
 # bit-perfect output.
 av>=18.0.0
 sounddevice>=0.5.5
-numpy>=1.26.0
+numpy>=2.5.1
 # scipy powers the PCM engine's 10-band parametric EQ. Biquad IIR
 # filtering in a Python loop can't keep up with the audio callback
 # at 48k; scipy.signal.sosfilt drops into C and comfortably runs
@@ -104,7 +104,7 @@ dbus-next>=0.2.3; sys_platform == "linux"
 # the Linn / Naim side of the streamer market. Optional: if the
 # wheel fails to install, app/audio/upnp.py silently disables the
 # UPnP output path and the rest of the app keeps working.
-async-upnp-client>=0.47.0
+async-upnp-client>=0.48.0
 # Chromecast sender. Used by app/audio/cast.py for device discovery
 # (mDNS via zeroconf) and the Cast Application Framework control
 # channel. We hand the Cast device an HTTP URL serving Tideway's
