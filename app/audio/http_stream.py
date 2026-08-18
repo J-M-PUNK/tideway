@@ -1092,10 +1092,17 @@ class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
         Takes the isinstance-validated server so it never reaches
         through the unnarrowed self.server for the session config.
 
-        DLNA: always 206 + Content-Length + Content-Range, never
-        chunked. Strict renderers (UAPP) do a plain GET without a
-        Range header and still need Content-Length for SEEK_END during
-        decoder-init. Chunked → contentLength=-1 → seek fails.
+        DLNA: a finite Content-Length (never chunked), so strict
+        renderers (UAPP) that do a plain GET still get a length for
+        SEEK_END during decoder-init — chunked → contentLength=-1 →
+        seek fails. A 206 + Content-Range is sent only when the request
+        actually carried a Range header; a request with no Range gets a
+        plain 200. RFC 7233 forbids a 206 for a request that didn't ask
+        for a range, and Rygel's GStreamer souphttpsrc (KEF LS50 II and
+        other Rygel renderers) enforces it — the unsolicited 206 made it
+        reject the resource with UPnP 716 "Resource not found," so DLNA
+        connected but never played (#332). UAPP is unaffected: its plain
+        GET now gets 200 + the same Content-Length instead of 206.
 
         Cast: plain 200 + chunked transfer, unchanged.
         """
@@ -1105,20 +1112,29 @@ class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
         self._range_start = 0
         if server.dlna:
             range_hdr = self.headers.get("Range", "")
+            has_range = range_hdr.startswith("bytes=")
             start = 0
-            if range_hdr.startswith("bytes="):
+            if has_range:
                 try:
                     start = int(range_hdr[6:].split("-")[0] or 0)
                 except ValueError:
                     start = 0
             self._range_start = start
-            self.send_response(206)
-            self.send_header(
-                "Content-Range",
-                f"bytes {start}-{_STREAM_SYNTHETIC_TOTAL - 1}/{_STREAM_SYNTHETIC_TOTAL}",
-            )
-            self.send_header("Content-Length", str(_STREAM_SYNTHETIC_TOTAL - start))
             self._chunked = False
+            if has_range:
+                self.send_response(206)
+                self.send_header(
+                    "Content-Range",
+                    f"bytes {start}-{_STREAM_SYNTHETIC_TOTAL - 1}/{_STREAM_SYNTHETIC_TOTAL}",
+                )
+                self.send_header(
+                    "Content-Length", str(_STREAM_SYNTHETIC_TOTAL - start)
+                )
+            else:
+                self.send_response(200)
+                self.send_header(
+                    "Content-Length", str(_STREAM_SYNTHETIC_TOTAL)
+                )
             self.send_header("Accept-Ranges", "bytes")
         else:
             self.send_response(200)
