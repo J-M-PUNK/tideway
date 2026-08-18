@@ -31,7 +31,12 @@ import {
 import { Button } from "@/components/ui/button";
 import { HeartButton } from "@/components/HeartButton";
 import { DownloadButton } from "@/components/DownloadButton";
-import { cn, formatDuration, imageProxy } from "@/lib/utils";
+import {
+  cn,
+  darkenForLightText,
+  formatDuration,
+  imageProxy,
+} from "@/lib/utils";
 
 // Right-pane tab in the full-screen player. Matches the affordance
 // the official Tidal desktop client surfaces in the same view —
@@ -104,8 +109,14 @@ export function FullScreenPlayer({
   // killing the "the room is the album cover" mood. Falls back to
   // the old neutral gradient if the dominant-color extraction is
   // still pending or failed.
-  const bg = dominant
-    ? `linear-gradient(180deg, ${dominant} 0%, ${dominant} 70%, color-mix(in srgb, ${dominant} 70%, black) 100%)`
+  //
+  // The whole view lays near-white `text-foreground` over this tone, so
+  // a light-covered album (e.g. Glass Animals — "Life Itself") used to
+  // paint white-on-white lyrics (#327). Darken the base just enough to
+  // guarantee readable contrast; a color that's already dark is kept.
+  const base = dominant ? darkenForLightText(dominant) : null;
+  const bg = base
+    ? `linear-gradient(180deg, ${base} 0%, ${base} 70%, color-mix(in srgb, ${base} 70%, black) 100%)`
     : "linear-gradient(180deg, hsl(0 0% 20%), hsl(0 0% 5%))";
 
   return (
