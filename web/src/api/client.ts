@@ -1032,10 +1032,13 @@ export const api = {
    *  parallel instead of blocking on one build-everything request. */
   recommendationManifest: () =>
     req<RecManifest>("/api/recommendations/manifest"),
-  /** One For You row, resolved on demand (stale-while-revalidate). */
-  recommendationSection: (key: string) =>
+  /** One For You row, resolved on demand (stale-while-revalidate).
+   *  `limit` caps the row — the shelf uses the default; the "show more"
+   *  drill-down asks for more of the already-resolved pool. */
+  recommendationSection: (key: string, limit?: number) =>
     req<{ section: RecommendationSections["sections"][number] | null }>(
-      `/api/recommendations/section/${encodeURIComponent(key)}`,
+      `/api/recommendations/section/${encodeURIComponent(key)}` +
+        (limit !== undefined ? `?limit=${limit}` : ""),
     ),
   /** Drill-down behind "From Your Genres" — one row per genre. */
   recommendationGenres: () =>

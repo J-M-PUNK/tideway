@@ -12571,7 +12571,8 @@ def _taste_profile() -> dict:
 
 
 def _aoty_section(key, title, subtitle, listing, profile, taste_rank, deep=False,
-                  owned: Optional[set] = None, rotate: bool = False) -> dict:
+                  owned: Optional[set] = None, rotate: bool = False,
+                  size: int = _SECTION_SIZE) -> dict:
     """Build one AOTY-backed section. When `taste_rank`, re-order the
     (cheap) AOTY listing by a blend of popularity (AOTY score) and genre
     affinity before resolving only the top slice to Tidal.
@@ -12615,11 +12616,13 @@ def _aoty_section(key, title, subtitle, listing, profile, taste_rank, deep=False
         "key": key,
         "title": title,
         "subtitle": subtitle,
-        "albums": _dedupe_cap_albums(albums, _SECTION_SIZE, exclude=owned),
+        "albums": _dedupe_cap_albums(albums, size, exclude=owned),
     }
 
 
-def _section_fans_also_like(owned: Optional[set] = None) -> dict:
+def _section_fans_also_like(
+    owned: Optional[set] = None, size: int = _SECTION_SIZE
+) -> dict:
     """Listener-overlap discovery (#307): artists that people who like your
     top artists also play, resolved to their Tidal albums. Driven by
     Last.fm's `artist.getSimilar` collaborative-filtering graph — "fans of X
@@ -12729,7 +12732,7 @@ def _section_fans_also_like(owned: Optional[set] = None) -> dict:
         with ThreadPoolExecutor(max_workers=6, thread_name_prefix="fansres") as pool:
             for a in pool.map(_albums_for, ranked):
                 albums.extend(a)
-    albums = _dedupe_cap_albums(albums, _SECTION_SIZE, exclude=owned)
+    albums = _dedupe_cap_albums(albums, size, exclude=owned)
     return {
         "key": "fans_also_like",
         "title": "Fans Also Like",
@@ -12740,7 +12743,7 @@ def _section_fans_also_like(owned: Optional[set] = None) -> dict:
 
 
 def _genre_blend(key: str, title: str, subtitle: str, fetch, profile,
-                 owned: Optional[set] = None) -> dict:
+                 owned: Optional[set] = None, size: int = _SECTION_SIZE) -> dict:
     """One row blended across the listener's top genres.
 
     AOTY's genre page yields only a handful of albums per section, so a
@@ -12795,7 +12798,7 @@ def _genre_blend(key: str, title: str, subtitle: str, fetch, profile,
         "key": key,
         "title": title,
         "subtitle": subtitle,
-        "albums": _dedupe_cap_albums(albums, _SECTION_SIZE, exclude=owned),
+        "albums": _dedupe_cap_albums(albums, size, exclude=owned),
     }
 
 
@@ -12804,62 +12807,73 @@ def _genre_blend(key: str, title: str, subtitle: str, fetch, profile,
 # before any section resolves; each row's albums then arrive from its own
 # /recommendations/section/<key> request. "fans" is listener-overlap
 # discovery and only exists when Last.fm is connected.
+# key, title, subtitle, view_more. Each row now has a "show more"
+# drill-down: "genres" opens its richer row-per-genre page; the rest open
+# a generic grid of that row at /for-you/<key>. The shelf shows
+# _SECTION_SIZE and the drill-down shows the rest of the already-resolved
+# pool, so "show more" costs no extra Tidal resolution.
 _REC_SECTION_META: list[tuple[str, str, str, Optional[str]]] = [
-    ("new", "New Releases For You", "Fresh in the genres you listen to", None),
+    ("new", "New Releases For You",
+     "Fresh in the genres you listen to", "/for-you/new"),
     ("genres", "From Your Genres",
      "Highest rated in the genres you listen to", "/for-you/genres"),
     ("popular", "Popular in Your Orbit",
-     "Highly rated this year, tuned to your genres", None),
+     "Highly rated this year, tuned to your genres", "/for-you/popular"),
     ("fans", "Fans Also Like",
-     "Artists listeners of your favorites also play", None),
+     "Artists listeners of your favorites also play", "/for-you/fans"),
 ]
 _REC_SECTION_KEYS = [k for k, *_ in _REC_SECTION_META]
+_REC_VIEW_MORE = {k: vm for k, _t, _s, vm in _REC_SECTION_META}
 
 
 def _build_one_rec_section(
-    key: str, profile: dict, owned: set
+    key: str, profile: dict, owned: set, size: int = _SECTION_SIZE
 ) -> Optional[dict]:
-    """Build a single For You row. Shared by the whole-page build and the
-    per-section endpoint so the two can't drift; each row fans out its own
-    AOTY / Tidal / Last.fm calls."""
+    """Build a single For You row, capped to `size` albums. Shared by the
+    whole-page build and the per-section endpoint so the two can't drift;
+    each row fans out its own AOTY / Tidal / Last.fm calls. `size` is the
+    display cap only — the resolve pool is unchanged, so the drill-down's
+    larger `size` shows more of the already-resolved albums for free."""
+    section: Optional[dict] = None
     if key == "new":
         # New releases scoped to the listener's genres, rather than AOTY's
         # global this-week list re-ranked by taste (which mostly surfaced
         # whatever was popular that week regardless of genre).
-        return _genre_blend(
+        section = _genre_blend(
             "new_releases", "New Releases For You",
             "Fresh in the genres you listen to",
             lambda s: aoty_module.recent_releases_by_genre(s, 30), profile,
-            owned=owned,
+            owned=owned, size=size,
         )
-    if key == "genres":
+    elif key == "genres":
         # The genre canon, all-time rather than "best of <this year>".
-        return {
-            **_genre_blend(
-                "from_your_genres", "From Your Genres",
-                "Highest rated in the genres you listen to",
-                lambda s: aoty_module.top_albums_by_genre(s, 50), profile,
-                owned=owned,
-            ),
-            # Drill-down: a row per genre instead of one blended shelf.
-            "view_more": "/for-you/genres",
-        }
-    if key == "popular":
+        section = _genre_blend(
+            "from_your_genres", "From Your Genres",
+            "Highest rated in the genres you listen to",
+            lambda s: aoty_module.top_albums_by_genre(s, 50), profile,
+            owned=owned, size=size,
+        )
+    elif key == "popular":
         year = datetime.now().year
-        return _aoty_section(
+        section = _aoty_section(
             "popular", "Popular in Your Orbit",
             "Highly rated this year, tuned to your genres",
             _rec_safe(lambda: aoty_module.top_albums_of_year(year, 100), []),
-            profile, True, owned=owned, rotate=True,
+            profile, True, owned=owned, rotate=True, size=size,
         )
-    if key == "fans":
+    elif key == "fans":
         # Listener-overlap discovery — only when Last.fm is connected
         # (that's where the seed artists and their getSimilar graph
         # come from).
         if not profile.get("connected"):
             return None
-        return _section_fans_also_like(owned=owned)
-    return None
+        section = _section_fans_also_like(owned=owned, size=size)
+    if section is None:
+        return None
+    view_more = _REC_VIEW_MORE.get(key)
+    if view_more:
+        section = {**section, "view_more": view_more}
+    return section
 
 
 def _build_recommendation_sections() -> list[dict]:
@@ -13025,25 +13039,29 @@ def recommendations_manifest() -> dict:
 
 
 @app.get("/api/recommendations/section/{key}")
-def recommendations_section(key: str) -> dict:
+def recommendations_section(key: str, limit: int = _SECTION_SIZE) -> dict:
     """One For You row, built on demand and cached stale-while-revalidate.
 
     The page fetches every row through here in parallel, so each pops in
     as it resolves rather than the whole page blocking on the slowest one.
     All rows share the memoised taste profile, so the ~26-call profile is
-    paid once per page rather than once per section. Returns
-    ``{"section": {...}}`` or ``{"section": null}`` for an off/empty row
-    (e.g. 'fans' with Last.fm disconnected) so the page can drop it."""
+    paid once per page rather than once per section. `limit` caps the row
+    (the shelf's default is _SECTION_SIZE; the "show more" drill-down asks
+    for the rest of the already-resolved pool, up to _SECTION_RESOLVE_POOL,
+    so it costs no extra resolution). Returns ``{"section": {...}}`` or
+    ``{"section": null}`` for an off/empty row (e.g. 'fans' with Last.fm
+    disconnected) so the page can drop it."""
     _require_auth()
     if not getattr(settings, "album_recommendations_enabled", True):
         return {"section": None}
     if key not in _REC_SECTION_KEYS:
         raise HTTPException(status_code=404, detail="unknown section")
+    size = max(1, min(int(limit), _SECTION_RESOLVE_POOL))
 
     def _build() -> dict:
         profile = _taste_profile_cached()
         owned = _owned_album_ids()
-        section = _build_one_rec_section(key, profile, owned)
+        section = _build_one_rec_section(key, profile, owned, size=size)
         if section and section.get("albums"):
             _rec_safe(
                 lambda: rec_analytics.record_impressions([section]), None
@@ -13051,7 +13069,7 @@ def recommendations_section(key: str) -> dict:
             return {"section": section}
         return {"section": None}
 
-    return _recs_serve_swr(f"section:{key}", _build)
+    return _recs_serve_swr(f"section:{key}:{size}", _build)
 
 
 def _genre_drilldown_sections() -> list[dict]:

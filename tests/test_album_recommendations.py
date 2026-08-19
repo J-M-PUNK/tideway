@@ -149,7 +149,8 @@ def test_favorited_albums_are_filtered_from_every_section(stub_auth, monkeypatch
     # runs its candidates through the shared tail exactly as the real
     # builders do, which is where the exclusion happens.
     def _fake_section(key, title, subtitle, listing, profile, taste_rank,
-                      deep=False, owned=None, rotate=False):
+                      deep=False, owned=None, rotate=False,
+                      size=server._SECTION_SIZE):
         return {
             "key": key, "title": title, "subtitle": subtitle,
             "albums": server._dedupe_cap_albums(
@@ -159,7 +160,7 @@ def test_favorited_albums_are_filtered_from_every_section(stub_auth, monkeypatch
                     {"id": "100", "name": "Brand New",
                      "artists": [{"name": "Artist Y"}], "available": True},
                 ],
-                server._SECTION_SIZE, exclude=owned,
+                size, exclude=owned,
             ),
         }
 
@@ -1136,3 +1137,58 @@ def test_swr_miss_builds_synchronously(monkeypatch):
     server._recs_cache.clear()
     assert server._recs_serve_swr("k2", lambda: {"v": "built"}) == {"v": "built"}
     assert server._recs_cache["k2"][1] == {"v": "built"}
+
+
+def test_section_endpoint_limit_shows_more(stub_auth, monkeypatch):
+    """The 'show more' drill-down asks for a bigger limit and gets more of
+    the already-resolved pool; every content row carries a view_more."""
+    import server
+
+    monkeypatch.setattr(
+        server.settings, "album_recommendations_enabled", True, raising=False
+    )
+    _no_lastfm(monkeypatch)
+    _no_aoty(monkeypatch)
+    monkeypatch.setattr(
+        server, "_taste_profile",
+        lambda: {"connected": True, "artist_names": set(),
+                 "genres": [("26-shoegaze", "Shoegaze", 1.0)],
+                 "mainstream_ratio": 0.5},
+    )
+    # 30 year-chart candidates. "popular" uses _aoty_section, whose
+    # resolve pool (36) is larger than the shelf cap, so a bigger limit
+    # surfaces more of what's already resolved.
+    monkeypatch.setattr(
+        server.aoty_module, "top_albums_of_year",
+        lambda year, limit=100: [
+            {"artist": f"Artist {i}", "title": f"Album {i}"} for i in range(30)
+        ],
+    )
+    monkeypatch.setattr(
+        server.aoty_resolver, "resolve_listing",
+        lambda listing: [
+            {**it, "tidal_album": {"id": it["title"], "name": it["title"],
+                                   "artists": [{"name": it["artist"]}],
+                                   "available": True}}
+            for it in listing
+        ],
+    )
+    _set_library(monkeypatch)
+
+    shelf = server.recommendations_section("popular")["section"]
+    more = server.recommendations_section(
+        "popular", limit=server._SECTION_RESOLVE_POOL
+    )["section"]
+    assert len(more["albums"]) > len(shelf["albums"])
+    assert shelf["view_more"] == "/for-you/popular"
+
+
+def test_manifest_every_row_has_view_more(stub_auth, monkeypatch):
+    import server
+
+    monkeypatch.setattr(
+        server.settings, "album_recommendations_enabled", True, raising=False
+    )
+    monkeypatch.setattr(server.lastfm, "status", lambda: {"connected": True})
+    out = server.recommendations_manifest()
+    assert all(s.get("view_more") for s in out["sections"])
