@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="16px" height="16px" version="1.1" viewBox="0 0 16 16">
+  <g fill="hsl(195, 90%, 52%)" transform="matrix(0.380952, 0, 0, 0.380952, -4.499965, -4.743688)" style="transform-origin: 0.499971px 0.501051px;">
+    <rect y="26.075" width="6" height="16" rx="3" style="stroke-width: 1; fill: rgb(0, 0, 0); opacity: 0.2;" x="11"/>
+    <rect y="24.638" width="6" height="16" rx="3" x="11"/>
+    <rect x="23" y="17.938" width="6" height="32" rx="3" style="stroke-width: 1; fill: rgb(0, 0, 0); opacity: 0.2;"/>
+    <rect x="23" y="16.638" width="6" height="32" rx="3"/>
+    <rect x="35" y="21.875" width="6" height="24" rx="3" style="stroke-width: 1; fill: rgb(0, 0, 0); opacity: 0.2;"/>
+    <rect x="35" y="20.638" width="6" height="24" rx="3"/>
+    <rect x="47" y="27.913" width="6" height="12" rx="3" style="stroke-width: 1; fill: rgb(0, 0, 0); opacity: 0.2;"/>
+    <rect x="47" y="26.638" width="6" height="12" rx="3"/>
+    <path d="M 50 26.6 C 51.657 26.6 53 27.943 53 29.6 L 53 30.876 C 53 29.219 51.657 27.876 50 27.876 C 48.343 27.876 47 29.219 47 30.876 L 47 29.6 C 47 27.943 48.343 26.6 50 26.6 Z" style="stroke-width: 1; fill: rgb(255, 255, 255); opacity: 0.2;"/>
+    <path d="M 38 20.563 C 39.657 20.563 41 21.906 41 23.563 L 41 24.839 C 41 23.182 39.657 21.839 38 21.839 C 36.343 21.839 35 23.182 35 24.839 L 35 23.563 C 35 21.906 36.343 20.563 38 20.563 Z" style="stroke-width: 1; fill: rgb(255, 255, 255); opacity: 0.2;"/>
+    <path d="M 26 16.638 C 27.657 16.638 29 17.981 29 19.638 L 29 20.914 C 29 19.257 27.657 17.914 26 17.914 C 24.343 17.914 23 19.257 23 20.914 L 23 19.638 C 23 17.981 24.343 16.638 26 16.638 Z" style="stroke-width: 1; fill: rgb(255, 255, 255); opacity: 0.2;"/>
+    <path d="M 14 24.763 C 15.657 24.763 17 26.106 17 27.763 L 17 29.039 C 17 27.382 15.657 26.039 14 26.039 C 12.343 26.039 11 27.382 11 29.039 L 11 27.763 C 11 26.106 12.343 24.763 14 24.763 Z" style="stroke-width: 1; fill: rgb(255, 255, 255); opacity: 0.2;"/>
+  </g>
+</svg>
