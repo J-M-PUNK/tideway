@@ -136,6 +136,11 @@ const ForYouGenresPage = lazy(() =>
     default: m.ForYouGenresPage,
   })),
 );
+const ForYouSectionPage = lazy(() =>
+  import("@/pages/ForYouSectionPage").then((m) => ({
+    default: m.ForYouSectionPage,
+  })),
+);
 const HistoryPage = lazy(() =>
   import("@/pages/HistoryPage").then((m) => ({ default: m.HistoryPage })),
 );
@@ -702,6 +707,10 @@ function Shell({
                       <Route
                         path="/for-you/genres"
                         element={<ForYouGenresPage />}
+                      />
+                      <Route
+                        path="/for-you/:key"
+                        element={<ForYouSectionPage />}
                       />
                       <Route
                         path="/history"

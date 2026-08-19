@@ -18,6 +18,9 @@ def _clean_recs_cache():
     def _reset():
         with server._recs_cache_lock:
             server._recs_cache.clear()
+            server._recs_revalidating.clear()
+        with server._taste_cache_lock:
+            server._taste_cache.clear()
         with server._genre_map_lock:
             server._genre_map_cache["at"] = 0.0
             server._genre_map_cache["map"] = None
@@ -146,7 +149,8 @@ def test_favorited_albums_are_filtered_from_every_section(stub_auth, monkeypatch
     # runs its candidates through the shared tail exactly as the real
     # builders do, which is where the exclusion happens.
     def _fake_section(key, title, subtitle, listing, profile, taste_rank,
-                      deep=False, owned=None, rotate=False):
+                      deep=False, owned=None, rotate=False,
+                      size=server._SECTION_SIZE):
         return {
             "key": key, "title": title, "subtitle": subtitle,
             "albums": server._dedupe_cap_albums(
@@ -156,7 +160,7 @@ def test_favorited_albums_are_filtered_from_every_section(stub_auth, monkeypatch
                     {"id": "100", "name": "Brand New",
                      "artists": [{"name": "Artist Y"}], "available": True},
                 ],
-                server._SECTION_SIZE, exclude=owned,
+                size, exclude=owned,
             ),
         }
 
@@ -1006,3 +1010,185 @@ def test_a_solo_tag_survives_when_it_defines_the_artist(stub_auth, monkeypatch):
     )
     names = [n for _s, n, _w in server._taste_profile()["genres"]]
     assert names == ["Folktronica"]
+
+
+# ---------------------------------------------------------------------------
+# Lazy per-section loading, taste-profile cache, stale-while-revalidate
+# ---------------------------------------------------------------------------
+
+
+def test_taste_profile_cached_computes_once(stub_auth, monkeypatch):
+    """The ~26-call profile is memoised: several section requests in a
+    page build share one compute instead of one per row."""
+    import server
+
+    calls = {"n": 0}
+
+    def _profile():
+        calls["n"] += 1
+        return {"connected": True, "artist_names": set(), "genres": [],
+                "mainstream_ratio": 0.5}
+
+    monkeypatch.setattr(server, "_taste_profile", _profile)
+    a = server._taste_profile_cached()
+    b = server._taste_profile_cached()
+    assert a is b
+    assert calls["n"] == 1
+
+
+def test_manifest_lists_rows_without_building(stub_auth, monkeypatch):
+    """The manifest returns row metadata (keys/titles), never albums, and
+    is cheap — it must not invoke the section builders."""
+    import server
+
+    monkeypatch.setattr(
+        server.settings, "album_recommendations_enabled", True, raising=False
+    )
+    monkeypatch.setattr(server.lastfm, "status", lambda: {"connected": True})
+    monkeypatch.setattr(
+        server, "_build_one_rec_section",
+        lambda *a, **k: pytest.fail("manifest must not build sections"),
+    )
+    out = server.recommendations_manifest()
+    keys = [s["key"] for s in out["sections"]]
+    assert out["enabled"] is True
+    assert keys == ["new", "genres", "popular", "fans"]
+    genres = next(s for s in out["sections"] if s["key"] == "genres")
+    assert genres["view_more"] == "/for-you/genres"
+    assert "albums" not in genres
+
+
+def test_manifest_drops_fans_when_disconnected(stub_auth, monkeypatch):
+    import server
+
+    monkeypatch.setattr(
+        server.settings, "album_recommendations_enabled", True, raising=False
+    )
+    monkeypatch.setattr(server.lastfm, "status", lambda: {"connected": False})
+    out = server.recommendations_manifest()
+    assert "fans" not in [s["key"] for s in out["sections"]]
+
+
+def test_section_endpoint_builds_one_row(stub_auth, monkeypatch):
+    """/section/genres resolves just that row, sharing the cached
+    profile."""
+    import server
+
+    monkeypatch.setattr(
+        server.settings, "album_recommendations_enabled", True, raising=False
+    )
+    _no_lastfm(monkeypatch)
+    _no_aoty(monkeypatch)
+    monkeypatch.setattr(
+        server, "_taste_profile",
+        lambda: {"connected": True, "artist_names": set(),
+                 "genres": [("26-shoegaze", "Shoegaze", 1.0)],
+                 "mainstream_ratio": 0.5},
+    )
+    monkeypatch.setattr(
+        server.aoty_module, "top_albums_by_genre",
+        lambda slug, limit=60: [{"artist": "Slowdive", "title": "Souvlaki"}],
+    )
+    monkeypatch.setattr(
+        server.aoty_resolver, "resolve_listing",
+        lambda listing: [
+            {**it, "tidal_album": {"id": "7", "name": it["title"],
+                                   "artists": [{"name": it["artist"]}],
+                                   "available": True}}
+            for it in listing
+        ],
+    )
+    _set_library(monkeypatch)
+    out = server.recommendations_section("genres")
+    assert out["section"] is not None
+    assert out["section"]["key"] == "from_your_genres"
+    assert out["section"]["albums"]
+
+
+def test_section_endpoint_unknown_key_404(stub_auth, monkeypatch):
+    import server
+
+    monkeypatch.setattr(
+        server.settings, "album_recommendations_enabled", True, raising=False
+    )
+    with pytest.raises(server.HTTPException) as exc:
+        server.recommendations_section("does-not-exist")
+    assert exc.value.status_code == 404
+
+
+def test_swr_fresh_hit_skips_build(monkeypatch):
+    import server, time as _t
+
+    server._recs_cache.clear()
+    server._recs_cache["k"] = (_t.monotonic(), {"v": "cached"})
+    built = {"n": 0}
+
+    def _build():
+        built["n"] += 1
+        return {"v": "fresh"}
+
+    assert server._recs_serve_swr("k", _build) == {"v": "cached"}
+    assert built["n"] == 0
+
+
+def test_swr_miss_builds_synchronously(monkeypatch):
+    import server
+
+    server._recs_cache.clear()
+    assert server._recs_serve_swr("k2", lambda: {"v": "built"}) == {"v": "built"}
+    assert server._recs_cache["k2"][1] == {"v": "built"}
+
+
+def test_section_endpoint_limit_shows_more(stub_auth, monkeypatch):
+    """The 'show more' drill-down asks for a bigger limit and gets more of
+    the already-resolved pool; every content row carries a view_more."""
+    import server
+
+    monkeypatch.setattr(
+        server.settings, "album_recommendations_enabled", True, raising=False
+    )
+    _no_lastfm(monkeypatch)
+    _no_aoty(monkeypatch)
+    monkeypatch.setattr(
+        server, "_taste_profile",
+        lambda: {"connected": True, "artist_names": set(),
+                 "genres": [("26-shoegaze", "Shoegaze", 1.0)],
+                 "mainstream_ratio": 0.5},
+    )
+    # 30 year-chart candidates. "popular" uses _aoty_section, whose
+    # resolve pool (36) is larger than the shelf cap, so a bigger limit
+    # surfaces more of what's already resolved.
+    monkeypatch.setattr(
+        server.aoty_module, "top_albums_of_year",
+        lambda year, limit=100: [
+            {"artist": f"Artist {i}", "title": f"Album {i}"} for i in range(30)
+        ],
+    )
+    monkeypatch.setattr(
+        server.aoty_resolver, "resolve_listing",
+        lambda listing: [
+            {**it, "tidal_album": {"id": it["title"], "name": it["title"],
+                                   "artists": [{"name": it["artist"]}],
+                                   "available": True}}
+            for it in listing
+        ],
+    )
+    _set_library(monkeypatch)
+
+    shelf = server.recommendations_section("popular")["section"]
+    more = server.recommendations_section(
+        "popular", limit=server._SECTION_RESOLVE_POOL
+    )["section"]
+    assert len(more["albums"]) > len(shelf["albums"])
+    assert shelf["view_more"] == "/for-you/popular"
+
+
+def test_manifest_every_row_has_view_more(stub_auth, monkeypatch):
+    import server
+
+    monkeypatch.setattr(
+        server.settings, "album_recommendations_enabled", True, raising=False
+    )
+    monkeypatch.setattr(server.lastfm, "status", lambda: {"connected": True})
+    out = server.recommendations_manifest()
+    assert all(s.get("view_more") for s in out["sections"])
