@@ -55,8 +55,12 @@ const LIBRARY_PREFETCH_TTL_MS = 30 * 1000;
 export const prefetch = {
   pageHome: () => prefetchApi(queryKeys.pageHome, () => api.page("home")),
   feed: () => prefetchApi(queryKeys.feed, () => api.feed()),
+  // Warm the cheap manifest on nav hover so the For You shell paints
+  // instantly on click; each row's albums then stream in lazily. (The old
+  // prefetch fired the whole build-everything call on every hover — heavy
+  // Tidal/Last.fm traffic for a page the user might not open.)
   recommendations: () =>
-    prefetchApi(queryKeys.recommendations, () => api.recommendations()),
+    prefetchApi(queryKeys.recommendations, () => api.recommendationManifest()),
   // Warms the resolved first page's server-side cache on nav hover. The
   // Artists tab reads through useInfinitePages (not this client cache),
   // so the value stored here is unused — the point is the network call,

@@ -1,33 +1,32 @@
 import { Link } from "react-router-dom";
 import { Compass, Sparkles } from "lucide-react";
-import { api } from "@/api/client";
-import { useApi } from "@/hooks/useApi";
-import { queryKeys } from "@/api/queryKeys";
 import { Button } from "@/components/ui/button";
 import { RecShelf } from "@/components/RecShelf";
 import { EmptyState } from "@/components/EmptyState";
 import { ErrorView } from "@/components/ErrorView";
-import { GridSkeleton } from "@/components/Skeletons";
+import { GridSkeleton, Skeleton } from "@/components/Skeletons";
+import { useLazyRecommendations } from "@/hooks/useLazyRecommendations";
 
 /**
  * For You (#307) — a sectioned discovery page rather than one flat list.
- * The backend returns titled rows, each already ranked; this page lays
- * them out as horizontal shelves. Rows the backend marks with a
- * `view_more` path get a drill-down link, the same pattern the AOTY rows
- * on Home use.
+ *
+ * The rows load lazily and in parallel: a cheap manifest paints the page
+ * shell immediately, then each row's albums stream in from its own
+ * request and pop in as they resolve, instead of one build-everything
+ * call that made the whole page wait on the slowest section. The
+ * "Recommended For You" blend is folded in on the client once every row
+ * has settled, so the finished layout matches the old one-shot page.
  *
  * No page heading: the sidebar already names the destination, and the
  * row titles carry the structure.
  */
 export function ForYouPage() {
-  const { data, loading, error } = useApi(() => api.recommendations(), [], {
-    cacheKey: queryKeys.recommendations,
-  });
-  if (loading) return <GridSkeleton count={12} />;
-  if (error || !data)
-    return <ErrorView error={error ?? "Couldn't load recommendations"} />;
+  const recs = useLazyRecommendations();
 
-  if (!data.enabled) {
+  if (recs.status === "loading") return <GridSkeleton count={12} />;
+  if (recs.status === "error") return <ErrorView error={recs.error} />;
+
+  if (recs.status === "disabled") {
     return (
       <EmptyState
         icon={Sparkles}
@@ -42,8 +41,7 @@ export function ForYouPage() {
     );
   }
 
-  const sections = data.sections.filter((s) => s.albums.length > 0);
-  if (sections.length === 0) {
+  if (recs.status === "empty") {
     return (
       <EmptyState
         icon={Compass}
@@ -60,9 +58,32 @@ export function ForYouPage() {
 
   return (
     <div className="flex flex-col gap-10">
-      {sections.map((section) => (
-        <RecShelf key={section.key} section={section} />
-      ))}
+      {recs.items.map((item) =>
+        item.kind === "section" ? (
+          <RecShelf key={item.section.key} section={item.section} />
+        ) : (
+          <RecShelfSkeleton key={item.key} />
+        ),
+      )}
+    </div>
+  );
+}
+
+/** Placeholder for a row whose albums haven't arrived yet — a title bar
+ *  plus a strip of card skeletons, matching a real horizontal shelf. */
+function RecShelfSkeleton() {
+  return (
+    <div className="flex flex-col gap-3" aria-hidden>
+      <Skeleton className="h-6 w-48" />
+      <div className="flex gap-4 overflow-hidden">
+        {Array.from({ length: 6 }).map((_, i) => (
+          <div key={i} className="flex w-40 shrink-0 flex-col gap-2">
+            <Skeleton className="aspect-square w-full rounded-lg" />
+            <Skeleton className="h-4 w-3/4" />
+            <Skeleton className="h-3 w-1/2" />
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

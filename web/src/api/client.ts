@@ -135,6 +135,17 @@ export type RecommendationSections = {
   }[];
 };
 
+/** One row's metadata from the For You manifest — no albums; those load
+ *  per-section. */
+export type RecSectionMeta = {
+  key: string;
+  title: string;
+  subtitle: string;
+  view_more?: string;
+};
+
+export type RecManifest = { enabled: boolean; sections: RecSectionMeta[] };
+
 export const api = {
   auth: {
     status: () => req<AuthStatus>("/api/auth/status"),
@@ -1016,6 +1027,16 @@ export const api = {
     }>("/api/feed"),
   recommendations: () =>
     req<RecommendationSections>("/api/recommendations/albums"),
+  /** Lightweight row list (keys/titles, no albums) so the For You page
+   *  paints skeleton rows instantly and loads each row's albums in
+   *  parallel instead of blocking on one build-everything request. */
+  recommendationManifest: () =>
+    req<RecManifest>("/api/recommendations/manifest"),
+  /** One For You row, resolved on demand (stale-while-revalidate). */
+  recommendationSection: (key: string) =>
+    req<{ section: RecommendationSections["sections"][number] | null }>(
+      `/api/recommendations/section/${encodeURIComponent(key)}`,
+    ),
   /** Drill-down behind "From Your Genres" — one row per genre. */
   recommendationGenres: () =>
     req<RecommendationSections>("/api/recommendations/genres"),

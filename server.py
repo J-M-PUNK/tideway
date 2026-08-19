@@ -11985,6 +11985,83 @@ _RECS_CACHE_TTL_SEC = 15 * 60.0
 _recs_cache: dict[str, tuple[float, dict]] = {}
 _recs_cache_lock = threading.Lock()
 
+# The taste profile is ~26 Last.fm calls, and every recs surface — the
+# main page, each of its per-section endpoints, and every genre
+# drill-down — needs the same one. Memoise it so a page assembled from
+# several parallel section requests pays that cost once instead of once
+# per section. It gets its own lock so a cold profile build (seconds of
+# network) serialises concurrent cold requests behind a single compute
+# without blocking section-cache reads on _recs_cache_lock.
+_taste_cache: dict[str, tuple[float, dict]] = {}
+_taste_cache_lock = threading.Lock()
+
+
+def _taste_profile_cached() -> dict:
+    """`_taste_profile()` memoised for the recs TTL (see above)."""
+    now = time.monotonic()
+    with _taste_cache_lock:
+        c = _taste_cache.get("profile")
+        if c and (now - c[0]) < _RECS_CACHE_TTL_SEC:
+            return c[1]
+        profile = _taste_profile()
+        _taste_cache["profile"] = (time.monotonic(), profile)
+        return profile
+
+
+# Keys whose section cache is being rebuilt in the background right now
+# (stale-while-revalidate), so a burst of page loads triggers exactly one
+# rebuild per key rather than one per request.
+_recs_revalidating: set[str] = set()
+
+
+def _recs_serve_swr(key: str, build) -> dict:
+    """Stale-while-revalidate a recs cache entry.
+
+    Fresh hit → return it. Stale hit → return the stale value at once and
+    kick a single background rebuild. Miss → build synchronously. This is
+    what makes the page feel instant after the first visit: an expired
+    entry refreshes *behind* a served-stale page instead of in front of a
+    spinner, so only the very first cold build ever blocks a request.
+    """
+    now = time.monotonic()
+    with _recs_cache_lock:
+        c = _recs_cache.get(key)
+        if c and (now - c[0]) < _RECS_CACHE_TTL_SEC:
+            return c[1]
+        stale = c[1] if c else None
+    if stale is not None:
+        _recs_revalidate_bg(key, build)
+        return stale
+    payload = build()
+    with _recs_cache_lock:
+        _recs_cache[key] = (time.monotonic(), payload)
+    return payload
+
+
+def _recs_revalidate_bg(key: str, build) -> None:
+    """Rebuild one recs cache entry off-thread; at most one per key."""
+    with _recs_cache_lock:
+        if key in _recs_revalidating:
+            return
+        _recs_revalidating.add(key)
+
+    def _run() -> None:
+        try:
+            payload = build()
+            with _recs_cache_lock:
+                _recs_cache[key] = (time.monotonic(), payload)
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "recs background revalidate failed for %s", key
+            )
+        finally:
+            with _recs_cache_lock:
+                _recs_revalidating.discard(key)
+
+    threading.Thread(
+        target=_run, name=f"recs-swr-{key}", daemon=True
+    ).start()
+
 # At most this many albums by one artist in a single row.
 _RECS_PER_ARTIST_CAP = 2
 
@@ -12722,30 +12799,42 @@ def _genre_blend(key: str, title: str, subtitle: str, fetch, profile,
     }
 
 
-def _build_recommendation_sections() -> list[dict]:
-    """Assemble the sectioned "For You" page. Section builders run in
-    parallel (each fans out its own Tidal/AOTY calls); empty sections are
-    dropped so the page never shows a bare heading."""
-    profile = _taste_profile()
-    year = datetime.now().year
-    # Resolved once and handed to every builder so each excludes saved
-    # albums *before* truncating to the shelf size, rather than spending
-    # slots on albums a later pass would discard.
-    owned = _owned_album_ids()
+# Static metadata for the main-page rows, in display order. The manifest
+# endpoint hands these to the frontend so it can paint skeleton rows
+# before any section resolves; each row's albums then arrive from its own
+# /recommendations/section/<key> request. "fans" is listener-overlap
+# discovery and only exists when Last.fm is connected.
+_REC_SECTION_META: list[tuple[str, str, str, Optional[str]]] = [
+    ("new", "New Releases For You", "Fresh in the genres you listen to", None),
+    ("genres", "From Your Genres",
+     "Highest rated in the genres you listen to", "/for-you/genres"),
+    ("popular", "Popular in Your Orbit",
+     "Highly rated this year, tuned to your genres", None),
+    ("fans", "Fans Also Like",
+     "Artists listeners of your favorites also play", None),
+]
+_REC_SECTION_KEYS = [k for k, *_ in _REC_SECTION_META]
 
-    builders: list[tuple[str, Any]] = [
-        # New releases scoped to the listener's genres. The previous
-        # version pulled AOTY's global this-week list and re-ranked it by
-        # taste, which mostly surfaced whatever was popular that week
-        # regardless of whether it was anywhere near their genres.
-        ("new", lambda: _genre_blend(
+
+def _build_one_rec_section(
+    key: str, profile: dict, owned: set
+) -> Optional[dict]:
+    """Build a single For You row. Shared by the whole-page build and the
+    per-section endpoint so the two can't drift; each row fans out its own
+    AOTY / Tidal / Last.fm calls."""
+    if key == "new":
+        # New releases scoped to the listener's genres, rather than AOTY's
+        # global this-week list re-ranked by taste (which mostly surfaced
+        # whatever was popular that week regardless of genre).
+        return _genre_blend(
             "new_releases", "New Releases For You",
             "Fresh in the genres you listen to",
             lambda s: aoty_module.recent_releases_by_genre(s, 30), profile,
             owned=owned,
-        )),
+        )
+    if key == "genres":
         # The genre canon, all-time rather than "best of <this year>".
-        ("genres", lambda: {
+        return {
             **_genre_blend(
                 "from_your_genres", "From Your Genres",
                 "Highest rated in the genres you listen to",
@@ -12754,22 +12843,42 @@ def _build_recommendation_sections() -> list[dict]:
             ),
             # Drill-down: a row per genre instead of one blended shelf.
             "view_more": "/for-you/genres",
-        }),
-        ("popular", lambda: _aoty_section(
+        }
+    if key == "popular":
+        year = datetime.now().year
+        return _aoty_section(
             "popular", "Popular in Your Orbit",
             "Highly rated this year, tuned to your genres",
-            _rec_safe(lambda: aoty_module.top_albums_of_year(year, 100), []), profile, True,
-            owned=owned, rotate=True,
-        )),
-    ]
-    # Listener-overlap discovery — only when Last.fm is connected (that's
-    # where the seed artists and their getSimilar graph come from).
-    if profile.get("connected"):
-        builders.append(("fans", lambda: _section_fans_also_like(owned=owned)))
+            _rec_safe(lambda: aoty_module.top_albums_of_year(year, 100), []),
+            profile, True, owned=owned, rotate=True,
+        )
+    if key == "fans":
+        # Listener-overlap discovery — only when Last.fm is connected
+        # (that's where the seed artists and their getSimilar graph
+        # come from).
+        if not profile.get("connected"):
+            return None
+        return _section_fans_also_like(owned=owned)
+    return None
 
+
+def _build_recommendation_sections() -> list[dict]:
+    """Assemble the sectioned "For You" page. Section builders run in
+    parallel (each fans out its own Tidal/AOTY calls); empty sections are
+    dropped so the page never shows a bare heading."""
+    profile = _taste_profile_cached()
+    # Resolved once and handed to every builder so each excludes saved
+    # albums *before* truncating to the shelf size, rather than spending
+    # slots on albums a later pass would discard.
+    owned = _owned_album_ids()
+
+    keys = [k for k in _REC_SECTION_KEYS if k != "fans" or profile.get("connected")]
     results: dict[str, dict] = {}
     with ThreadPoolExecutor(max_workers=6, thread_name_prefix="recsec") as pool:
-        futs = {pool.submit(fn): key for key, fn in builders}
+        futs = {
+            pool.submit(_build_one_rec_section, k, profile, owned): k
+            for k in keys
+        }
         for fut in futs:
             r = _rec_safe(lambda f=fut: f.result(), None)
             if r:
@@ -12877,18 +12986,72 @@ def recommendations_albums() -> dict:
     _require_auth()
     if not getattr(settings, "album_recommendations_enabled", True):
         return {"enabled": False, "sections": []}
-    now = time.monotonic()
-    with _recs_cache_lock:
-        c = _recs_cache.get("sections")
-        if c and (now - c[0]) < _RECS_CACHE_TTL_SEC:
-            return c[1]
-    payload = {"enabled": True, "sections": _build_recommendation_sections()}
-    # Record what this build served so row quality can be compared against
-    # what actually got played later. Never let analytics break the page.
-    _rec_safe(lambda: rec_analytics.record_impressions(payload["sections"]), None)
-    with _recs_cache_lock:
-        _recs_cache["sections"] = (time.monotonic(), payload)
-    return payload
+
+    def _build() -> dict:
+        payload = {"enabled": True, "sections": _build_recommendation_sections()}
+        # Record what this build served so row quality can be compared
+        # against what actually got played later. Never let analytics
+        # break the page.
+        _rec_safe(
+            lambda: rec_analytics.record_impressions(payload["sections"]), None
+        )
+        return payload
+
+    return _recs_serve_swr("sections", _build)
+
+
+@app.get("/api/recommendations/manifest")
+def recommendations_manifest() -> dict:
+    """The For You page's row list — keys, titles, subtitles only, no
+    albums. Lets the page paint skeleton rows instantly and then load each
+    row's albums in parallel from /recommendations/section/<key>, instead
+    of blocking on one request that builds the whole page. Cheap: an
+    enabled check plus a Last.fm-connected check for the 'fans' row."""
+    _require_auth()
+    if not getattr(settings, "album_recommendations_enabled", True):
+        return {"enabled": False, "sections": []}
+    connected = bool(_rec_safe(lambda: lastfm.status().get("connected"), False))
+    sections = [
+        {
+            "key": key,
+            "title": title,
+            "subtitle": subtitle,
+            **({"view_more": view_more} if view_more else {}),
+        }
+        for key, title, subtitle, view_more in _REC_SECTION_META
+        if key != "fans" or connected
+    ]
+    return {"enabled": True, "sections": sections}
+
+
+@app.get("/api/recommendations/section/{key}")
+def recommendations_section(key: str) -> dict:
+    """One For You row, built on demand and cached stale-while-revalidate.
+
+    The page fetches every row through here in parallel, so each pops in
+    as it resolves rather than the whole page blocking on the slowest one.
+    All rows share the memoised taste profile, so the ~26-call profile is
+    paid once per page rather than once per section. Returns
+    ``{"section": {...}}`` or ``{"section": null}`` for an off/empty row
+    (e.g. 'fans' with Last.fm disconnected) so the page can drop it."""
+    _require_auth()
+    if not getattr(settings, "album_recommendations_enabled", True):
+        return {"section": None}
+    if key not in _REC_SECTION_KEYS:
+        raise HTTPException(status_code=404, detail="unknown section")
+
+    def _build() -> dict:
+        profile = _taste_profile_cached()
+        owned = _owned_album_ids()
+        section = _build_one_rec_section(key, profile, owned)
+        if section and section.get("albums"):
+            _rec_safe(
+                lambda: rec_analytics.record_impressions([section]), None
+            )
+            return {"section": section}
+        return {"section": None}
+
+    return _recs_serve_swr(f"section:{key}", _build)
 
 
 def _genre_drilldown_sections() -> list[dict]:
@@ -12899,7 +13062,7 @@ def _genre_drilldown_sections() -> list[dict]:
     Both read the same cached genre pages, so opening this costs nothing
     beyond resolving the extra albums to Tidal.
     """
-    profile = _taste_profile()
+    profile = _taste_profile_cached()
     genres = profile.get("genres", [])[:_GENRE_HUB_MAX]
     if not genres:
         return []
@@ -13020,10 +13183,10 @@ def recommendations_genre(slug: str, offset: int = 0, limit: int = 18) -> dict:
     offset = max(0, int(offset))
     limit = max(1, min(int(limit), 50))
     name = next(
-        (n for s_, n, _w in _taste_profile().get("genres", []) if s_ == slug),
+        (n for s_, n, _w in _taste_profile_cached().get("genres", []) if s_ == slug),
         slug.partition("-")[2].replace("-", " ").title(),
     )
-    profile = _taste_profile()
+    profile = _taste_profile_cached()
     name = next(
         (n for s_, n, _w in profile.get("genres", []) if s_ == slug), name
     )
