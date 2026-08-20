@@ -311,6 +311,14 @@ class OpenHomeSOAPError(RuntimeError):
     Failed, etc.). `description` is the human-readable string the
     device sent. `action` and `service_type` are echoed for log
     clarity when many calls are in flight.
+
+    `request_envelope` and `response_body` carry the raw SOAP request
+    we sent and the raw fault body the device returned. A bare UPnP
+    code rarely explains a device-specific rejection (e.g. a KEF
+    returning 716 on SetAVTransportURI); the request shows the exact
+    CurrentURI + DIDL the device refused, and the response often
+    carries a more specific errorDescription. Kept off `__str__` (which
+    stays a concise one-liner) so callers choose when to dump them.
     """
 
     def __init__(
@@ -320,11 +328,15 @@ class OpenHomeSOAPError(RuntimeError):
         *,
         action: str = "",
         service_type: str = "",
+        request_envelope: str = "",
+        response_body: str = "",
     ) -> None:
         self.code = code
         self.description = description
         self.action = action
         self.service_type = service_type
+        self.request_envelope = request_envelope
+        self.response_body = response_body
         super().__init__(
             f"UPnP {code} {description!r}"
             f"{f' on {service_type}#{action}' if service_type else ''}"
@@ -389,11 +401,18 @@ def invoke(
     fault = _parse_soap_fault(body)
     if fault is not None:
         code, description = fault
+        # Attach the request we sent + the raw fault body to the error.
+        # The numeric UPnP code alone rarely explains a device-specific
+        # rejection; the caller that treats this fault as significant
+        # (e.g. the DLNA connect path) logs the detail. Truncate the
+        # body so an oversized fault page can't bloat the exception.
         raise OpenHomeSOAPError(
             code,
             description,
             action=action_name,
             service_type=service.service_type,
+            request_envelope=envelope,
+            response_body=body[:2000],
         )
     if resp.status_code >= 400:
         raise RuntimeError(

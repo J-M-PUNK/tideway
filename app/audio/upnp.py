@@ -73,6 +73,7 @@ from app.audio.http_stream import (
 )
 from app.audio.openhome import (
     OpenHomeDevice,
+    OpenHomeSOAPError,
     TrackMetadata,
     build_didl_lite,
     fetch_device,
@@ -518,7 +519,7 @@ class UpnpManager:
     # ---- passthrough -----------------------------------------------
 
     def start_passthrough(
-        self, source, prefetched=None, metadata=None
+        self, source, prefetched=None, metadata=None,
     ) -> None:
         """Start bit-perfect FLAC passthrough for the current track.
 
@@ -611,20 +612,26 @@ class UpnpManager:
             )
             session.passthrough_encoder.start()
 
-        # Notify the renderer of the new track. Falls back to the
-        # metadata provider callback if no metadata dict was passed.
+        # Resolve metadata for the renderer notify below, falling back
+        # to the metadata provider callback if no dict was passed.
         if metadata is None and self._metadata_provider is not None:
             try:
                 metadata = self._metadata_provider()
             except Exception as exc:
                 print(f"[upnp] metadata provider raised: {exc!r}", flush=True)
-        if metadata:
-            self._notify_track_change(metadata, session, track_ts=_track_ts)
-
+        # Passthrough (the encoder -> ring-buffer pipeline) is on as
+        # soon as the encoder starts; the device notify below is a
+        # separate step, so log it here before the notify can raise.
         print(
             "[upnp] passthrough ON -- bitperfect FLAC passthrough enabled",
             flush=True,
         )
+        # Notify the renderer. _notify_track_change raises on failure;
+        # the caller decides how bad that is. connect() (initial notify)
+        # lets it propagate and tears the session down; mid-session
+        # callers in player.py catch and keep the existing stream going.
+        if metadata:
+            self._notify_track_change(metadata, session, track_ts=_track_ts)
 
     # ---- track-change notification ----------------------------------
 
@@ -634,6 +641,15 @@ class UpnpManager:
         """Send SetAVTransportURI + Play to the renderer so it updates
         its now-playing display and initiates a fresh HTTP GET for the
         new track's FLAC stream.
+
+        Raises on failure (an OpenHomeSOAPError if the device rejected
+        the action, or the underlying transport error otherwise). The
+        caller owns the policy, because whether a failed notify is fatal
+        depends on the context, not the exception: connect() treats a
+        rejected initial notify as fatal and tears the session down (a
+        Rygel renderer returning UPnP 716 must not report a false
+        "connected"); a mid-session track change treats it as
+        best-effort and keeps the existing stream flowing.
 
         Without this, the renderer keeps showing the previous track's
         name and its decoder may not re-parse the new STREAMINFO header
@@ -681,10 +697,20 @@ class UpnpManager:
                 flush=True,
             )
         except Exception as exc:
+            # Surface the SOAP fault detail the device sent (the request
+            # it refused + its raw fault body), which the numeric UPnP
+            # code alone doesn't explain, then let the caller decide.
+            detail = ""
+            if isinstance(exc, OpenHomeSOAPError) and exc.request_envelope:
+                detail = (
+                    f"\n  request: {exc.request_envelope}"
+                    f"\n  response: {exc.response_body}"
+                )
             print(
-                f"[upnp] track change notification failed: {exc!r}",
+                f"[upnp] track change notification failed: {exc!r}{detail}",
                 flush=True,
             )
+            raise
 
     def signal_source_done(self) -> None:
         """Signal that the current track's source has reached EOF.
@@ -824,37 +850,38 @@ class UpnpManager:
         # If a track is already loaded, start passthrough before play()
         # so the FLAC header is in the ring buffer when the renderer's
         # first GET arrives. Reduces the race to zero in the common case.
-        _notified = False
+        # A source-provider failure only costs us the header pre-roll;
+        # fall back to the placeholder SetAVTransportURI below rather
+        # than failing the connect over it.
+        urls = None
         if self._source_provider is not None:
             try:
-                urls = self._source_provider()
-                if urls and isinstance(urls, list):
-                    self.start_passthrough(urls)
-                    _notified = True
+                _u = self._source_provider()
+                if _u and isinstance(_u, list):
+                    urls = _u
             except (ValueError, RuntimeError, OSError) as exc:
                 log.debug("upnp: source provider raised: %r", exc)
 
         try:
-            if not _notified:
+            if urls is not None:
+                # Passthrough path: the initial SetAVTransportURI + Play
+                # happens inside start_passthrough -> _notify_track_change,
+                # which raises on failure. A rejected URI (e.g. a Rygel
+                # renderer returning UPnP 716) therefore propagates here
+                # and tears down, instead of a false "connected" with no
+                # audio.
+                self.start_passthrough(urls)
+            else:
                 av.set_av_transport_uri(session.stream_url, didl)
                 av.play()
                 session.media_loaded = True
         except Exception as exc:
-            # Undo the early session registration
-            with self._session_lock:
-                self._session = None
-            # Tear down the HTTP server we just stood up; otherwise
-            # we leak a port until the manager's process exits.
-            try:
-                if session.http_server is not None:
-                    session.http_server.shutdown()
-                    session.http_server.server_close()
-            except Exception:
-                pass
-            try:
-                session.buffer.close()
-            except Exception:
-                pass
+            # Full teardown: disconnect() stops the passthrough encoder
+            # start_passthrough may have started, closes the buffer and
+            # HTTP server, Stops the device, and un-silences local
+            # audio. Then surface the failure so the UI shows an error
+            # rather than a dead "connected" session.
+            self.disconnect()
             raise RuntimeError(
                 f"AVTransport handshake to {device.name} failed: {exc}"
             ) from exc

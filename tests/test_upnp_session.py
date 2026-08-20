@@ -24,7 +24,11 @@ import numpy as np
 import pytest
 import requests
 
-from app.audio.openhome import OpenHomeDevice, OpenHomeService
+from app.audio.openhome import (
+    OpenHomeDevice,
+    OpenHomeService,
+    OpenHomeSOAPError,
+)
 from app.audio.upnp import (
     UpnpDevice,
     UpnpManager,
@@ -423,6 +427,91 @@ class TestConnect:
         assert mock_http_server.shutdown.called
         assert mock_http_server.server_close.called
         # No session should be left dangling.
+        assert mgr._session is None
+
+    def test_notify_track_change_raises_on_fault(self):
+        """_notify_track_change has one contract: it raises on failure,
+        and the caller owns the policy (connect() = fatal, mid-session
+        = best-effort). The raised OpenHomeSOAPError carries the SOAP
+        request + raw fault body so the caller can log what the device
+        actually refused."""
+        mgr = UpnpManager()
+        session = MagicMock()
+        session.stream_url = "http://192.168.1.10:54321/dlna/stream"
+        session.av.set_av_transport_uri.side_effect = OpenHomeSOAPError(
+            716,
+            "Resource not found",
+            action="SetAVTransportURI",
+            service_type="urn:schemas-upnp-org:service:AVTransport:2",
+            request_envelope="<s:Envelope>...CurrentURI...</s:Envelope>",
+            response_body="<UPnPError><errorCode>716</errorCode></UPnPError>",
+        )
+        meta = {"title": "T", "artist": "A", "album": "Al", "duration_s": 1}
+
+        with pytest.raises(OpenHomeSOAPError) as excinfo:
+            mgr._notify_track_change(meta, session)
+        # Play is never attempted once SetAVTransportURI failed.
+        session.av.play.assert_not_called()
+        # The fault detail rides along for the caller to log.
+        assert "CurrentURI" in excinfo.value.request_envelope
+        assert "716" in excinfo.value.response_body
+
+    def test_connect_passthrough_reject_tears_down(
+        self, mock_soap, mock_http_server, monkeypatch,
+    ):
+        """When a track is already loaded, connect() goes through the
+        passthrough path and the initial SetAVTransportURI happens
+        inside start_passthrough. If the device rejects it (716), that
+        failure must propagate: connect tears the session down and
+        raises, instead of the old swallowed-fault false 'connected'
+        with no audio."""
+        mgr = UpnpManager()
+        device = _device_record()
+        mgr._devices = {device.id: device}
+        monkeypatch.setattr(
+            "app.audio.upnp.fetch_device",
+            lambda location, **_kw: _openhome_device(),
+        )
+
+        # A loaded track drives the passthrough path. Stub the encoder
+        # + segment reader so no real network/thread work happens; we
+        # only care about the SOAP handshake outcome.
+        class _StubEncoder:
+            def __init__(self, *a, **k):
+                pass
+
+            def start(self):
+                pass
+
+            def close(self):
+                pass
+
+        class _StubReader:
+            def __init__(self, *a, **k):
+                pass
+
+        monkeypatch.setattr(
+            "app.audio.upnp.FlacPassthroughEncoder", _StubEncoder
+        )
+        monkeypatch.setattr(
+            "app.audio.segment_reader.SegmentReader", _StubReader
+        )
+        mgr.set_source_provider(lambda: ["http://192.168.1.9/seg0"])
+        mgr.set_metadata_provider(lambda: {"title": "T", "artist": "A"})
+
+        # Every SOAP call raises -> the passthrough SetAVTransportURI
+        # fails like a 716-rejecting renderer.
+        def _raising_post(*args, **kwargs):
+            raise RuntimeError("simulated 716 rejection")
+
+        monkeypatch.setattr(requests, "post", _raising_post)
+
+        with pytest.raises(RuntimeError):
+            mgr.connect(device.id)
+
+        # Torn down, not left as a phantom 'connected' session.
+        assert mock_http_server.shutdown.called
+        assert mock_http_server.server_close.called
         assert mgr._session is None
 
 
