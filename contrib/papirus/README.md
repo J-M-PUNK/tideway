@@ -1,24 +1,29 @@
 # Papirus icon
 
-A [Papirus](https://github.com/PapirusDevelopmentTeam/papirus-icon-theme)-style
-Tideway icon, contributed by [@C-O-D](https://github.com/J-M-PUNK/tideway/issues/317)
-(#317). It follows the Papirus circular base with Tideway's equalizer mark in
-the app's cyan, so it sits consistently alongside other Papirus app icons.
+[Papirus](https://github.com/PapirusDevelopmentTeam/papirus-icon-theme)-style
+Tideway icons, contributed by [@C-O-D](https://github.com/J-M-PUNK/tideway/issues/317)
+(#317): the Papirus circular base with Tideway's equalizer mark in the app's
+cyan. Three size-tuned versions are included — Papirus renders app icons
+differently at small sizes, so 16 / 24 / 32 px each get their own drawing.
+
+```
+16x16/apps/com.tidaldownloader.Tideway.svg
+24x24/apps/com.tidaldownloader.Tideway.svg
+32x32/apps/com.tidaldownloader.Tideway.svg
+```
 
 ## Using it
 
-The desktop entry ships `Icon=com.tidaldownloader.Tideway`, so the file here is
-named to match. Drop it into your Papirus theme's app-icon directory and refresh
-the icon cache, for example:
+The desktop entry ships `Icon=com.tidaldownloader.Tideway`, so the files here
+are named to match. The folders mirror Papirus's own tree, so you can copy them
+straight in and refresh the icon cache:
 
 ```sh
-sudo cp com.tidaldownloader.Tideway.svg \
-  /usr/share/icons/Papirus/48x48/apps/
+sudo cp -r 16x16 24x24 32x32 /usr/share/icons/Papirus/
 sudo gtk-update-icon-cache /usr/share/icons/Papirus
 ```
 
-Papirus resolves an SVG placed in any one size bucket across every size, so a
-single copy is enough. To keep it after Papirus updates, drop it in a personal
-theme dir (`~/.local/share/icons/…`) instead.
+To keep the icons after Papirus updates, copy them into a personal theme dir
+(`~/.local/share/icons/…`) instead.
 
-Thanks to @C-O-D for the contribution.
+Thanks to @C-O-D for the artwork.
