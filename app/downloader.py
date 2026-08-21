@@ -20,9 +20,10 @@ from app.http import SESSION
 from app.paths import user_data_dir
 
 # Where the downloader persists its pending-queue snapshot. Written on
-# each add/clear, read once on restore(). Lives next to settings.json and
-# tidal_session.json in the per-user data dir so a packaged build can
-# actually write to it (the .app / Program Files dir is not writable).
+# each add/clear, consumed once per process by restore(). Lives next to
+# settings.json and tidal_session.json in the per-user data dir so a
+# packaged build can actually write to it (the .app / Program Files dir
+# is not writable).
 QUEUE_STATE_FILE = user_data_dir() / "download_queue.json"
 
 # Upper bound on worker threads — the Downloader spawns this many, but at
@@ -328,12 +329,29 @@ class Downloader:
         # same bucket. Guarded by a lock so the write + notify is atomic.
         self._rate_limit_until: float = 0.0
         self._rate_limit_lock = threading.Lock()
-        # Pending-queue snapshot for restore-after-restart. Only items
-        # still in PENDING are persisted — an IN_PROGRESS download
-        # streams through an HTTP connection that can't be resumed, so
-        # remembering it wouldn't help. Keyed by item_id for O(1) update.
+        # Pending-queue snapshot for restore-after-restart. An item is
+        # persisted from the moment it is queued until it reaches a
+        # terminal state, downloading included: Tidal serves no Range
+        # requests so an interrupted transfer can't resume from its
+        # partial bytes, but re-queueing the whole track on the next
+        # launch is exactly what the user wants after a crash or a
+        # reboot. Keyed by item_id for O(1) update.
         self._pending_meta: Dict[str, dict] = {}
         self._pending_lock = threading.Lock()
+        # What the previous process left behind, loaded at construction
+        # by _load_pending_snapshot and drained by restore(). Held
+        # separately from _pending_meta so restore() can tell "queued
+        # before the last shutdown, still needs resubmitting" from
+        # "queued by this process and already in the work queue" —
+        # resubmitting the latter would download it twice.
+        self._unrestored: Dict[str, dict] = {}
+        # restore() drains that set exactly once. Both the boot thread
+        # and the deferred-session callback can reach it, and the
+        # callback can fire more than once over a long session, so
+        # without this a still-pending queue would be resubmitted on
+        # top of itself.
+        self._restored = False
+        self._restore_once_lock = threading.Lock()
         # Side-channel for restore(): when a pending item carries an
         # `album_folder_artist` value persisted from its original album
         # enqueue, restore() stages it here keyed by tidal track id. The
@@ -344,6 +362,10 @@ class Downloader:
         # re-fetched on its own — see _album_artist_name).
         self._restore_overrides: Dict[str, str] = {}
         self._restore_overrides_lock = threading.Lock()
+        # Read the previous process's queue into memory before anything
+        # can write over it. Must happen before the first enqueue of
+        # this process — see _load_pending_snapshot.
+        self._load_pending_snapshot()
         # Sweep any stale `.part` files left behind by a previous crash
         # before workers start — otherwise the user's output folder
         # slowly fills with orphans a skip-existing scan won't touch.
@@ -407,8 +429,24 @@ class Downloader:
             if name:
                 item.album_folder_artist = name
 
-    def submit(self, url: str, quality: Optional[str] = None):
-        threading.Thread(target=self._expand_and_enqueue, args=(url, quality), daemon=True).start()
+    def submit(
+        self,
+        url: str,
+        quality: Optional[str] = None,
+        item_id: Optional[str] = None,
+    ):
+        """Expand a Tidal URL and queue whatever it contains.
+
+        `item_id` is for restore(): reusing the id the item had before
+        the restart keeps the persisted snapshot a single record per
+        track across the resubmit, instead of leaving the old entry
+        stranded under a dead id.
+        """
+        threading.Thread(
+            target=self._expand_and_enqueue,
+            args=(url, quality, item_id),
+            daemon=True,
+        ).start()
 
     def submit_object(self, obj, content_type: str, quality: Optional[str] = None):
         """Enqueue a tidalapi object directly — skips the URL fetch step."""
@@ -534,20 +572,7 @@ class Downloader:
             # its own — we don't re-expand the parent album/playlist
             # (restoring 20 individual track submits is safer than
             # re-expanding an album whose track list may have changed).
-            tid = getattr(track, "id", None)
-            if tid is not None:
-                self._record_pending(
-                    item.item_id,
-                    {
-                        "kind": "track",
-                        "id": str(tid),
-                        "quality": quality,
-                        "title": item.title,
-                        "artist": item.artist,
-                        "album": item.album,
-                        "album_folder_artist": item.album_folder_artist,
-                    },
-                )
+            self._record_pending_track(item, track, quality)
             self._work_queue.put(item)
 
     def _call_with_auth_retry(self, fn, *args, **kwargs):
@@ -668,16 +693,38 @@ class Downloader:
 
     # ------------------------------------------------------------------
 
-    def _expand_and_enqueue(self, url: str, quality: Optional[str] = None):
-        placeholder = DownloadItem(item_id=str(uuid.uuid4()), url=url)
+    def _expand_and_enqueue(
+        self,
+        url: str,
+        quality: Optional[str] = None,
+        item_id: Optional[str] = None,
+    ):
+        placeholder = DownloadItem(item_id=item_id or str(uuid.uuid4()), url=url)
         self.on_add(placeholder)
 
+        # The early returns below are terminal for this placeholder and
+        # clear its snapshot entry, so a restored item that can no
+        # longer be expanded isn't resubmitted on every launch forever.
+        # The fetch_url failure is the exception: it covers both the
+        # permanent case and the network simply being down, and those
+        # need opposite handling — see the branch below.
         try:
             content_type, obj = self.tidal.fetch_url(url)
         except Exception as exc:
             placeholder.status = DownloadStatus.FAILED
             placeholder.error = str(exc)
             self.on_update(placeholder)
+            # Only forget the item when the failure will still be true
+            # next time. A 404 means the id is retired or pulled, and
+            # keeping it would retry on every launch forever. A
+            # timeout, a 5xx or a 429 is the network having a bad
+            # minute — dropping the item for that would be exactly the
+            # data loss this snapshot exists to prevent, and it is the
+            # likeliest failure of all during restore, when a whole
+            # queue is resubmitted at once into a possibly rate-limited
+            # session.
+            if _looks_like_not_found(exc):
+                self._clear_pending(placeholder.item_id)
             return
 
         playlist_name = (
@@ -698,6 +745,7 @@ class Downloader:
             placeholder.status = DownloadStatus.FAILED
             placeholder.error = f"Unsupported type: {content_type}"
             self.on_update(placeholder)
+            self._clear_pending(placeholder.item_id)
             return
 
         # Hard-block AI-generated tracks when the filter is on. Same rule
@@ -715,6 +763,7 @@ class Downloader:
             )
         if not pairs:
             self._surface_ai_blocked(placeholder)
+            self._clear_pending(placeholder.item_id)
             return
 
         # Preflight disk space before committing any track to the queue.
@@ -726,6 +775,7 @@ class Downloader:
             placeholder.error = refusal
             placeholder.title = "Download refused"
             self.on_update(placeholder)
+            self._clear_pending(placeholder.item_id)
             return
 
         is_album_enqueue = content_type == "album"
@@ -744,24 +794,12 @@ class Downloader:
             )
             self._track_map_put(placeholder.item_id, (track, album_obj))
             self.on_update(placeholder)
-            tid = getattr(track, "id", None)
-            if tid is not None:
-                self._record_pending(
-                    placeholder.item_id,
-                    {
-                        "kind": "track",
-                        "id": str(tid),
-                        "quality": quality,
-                        "title": placeholder.title,
-                        "artist": placeholder.artist,
-                        "album": placeholder.album,
-                        "album_folder_artist": placeholder.album_folder_artist,
-                    },
-                )
+            self._record_pending_track(placeholder, track, quality)
             self._work_queue.put(placeholder)
         else:
             # Drop the placeholder entirely — the per-track items replace it.
             self.on_remove(placeholder.item_id)
+            self._clear_pending(placeholder.item_id)
 
             for track, album_obj, pl_idx in pairs:
                 item = DownloadItem(item_id=str(uuid.uuid4()), url=url)
@@ -778,20 +816,7 @@ class Downloader:
                 )
                 self._track_map_put(item.item_id, (track, album_obj))
                 self.on_add(item)
-                tid = getattr(track, "id", None)
-                if tid is not None:
-                    self._record_pending(
-                        item.item_id,
-                        {
-                            "kind": "track",
-                            "id": str(tid),
-                            "quality": quality,
-                            "title": item.title,
-                            "artist": item.artist,
-                            "album": item.album,
-                            "album_folder_artist": item.album_folder_artist,
-                        },
-                    )
+                self._record_pending_track(item, track, quality)
                 self._work_queue.put(item)
 
     def retry(self, item: DownloadItem, quality: Optional[str] = None) -> None:
@@ -808,6 +833,12 @@ class Downloader:
         item.progress = 0.0
         item.error = None
         self.on_update(item)
+        # Back into the snapshot: the earlier failure cleared it, and a
+        # retry the user is still waiting on should survive a restart
+        # the same way a first attempt does.
+        track, _album = self._track_map_get(item.item_id)
+        if track is not None:
+            self._record_pending_track(item, track, item.quality)
         self._work_queue.put(item)
 
     @property
@@ -886,17 +917,50 @@ class Downloader:
                 flush=True,
             )
 
+    def _record_pending_track(
+        self, item: DownloadItem, track, quality: Optional[str]
+    ) -> None:
+        """Persist a queued track so restore() can pick it up again.
+
+        The item's own id is part of the record. restore() reuses it
+        when it resubmits, so the re-enqueued item overwrites its own
+        snapshot entry instead of appending a second one under a fresh
+        uuid — which is what lets the file stay authoritative for the
+        whole queue while a restore is only partway through.
+        """
+        tid = getattr(track, "id", None)
+        if tid is None:
+            return
+        self._record_pending(
+            item.item_id,
+            {
+                "item_id": item.item_id,
+                "kind": "track",
+                "id": str(tid),
+                "quality": quality,
+                "title": item.title,
+                "artist": item.artist,
+                "album": item.album,
+                "album_folder_artist": item.album_folder_artist,
+            },
+        )
+
     def _record_pending(self, item_id: str, meta: dict) -> None:
         """Remember a pending item so restore() can re-enqueue it after
-        a restart. Meta must be self-contained: kind, id, quality,
-        title/artist/album for UI reconstruction."""
+        a restart. Meta must be self-contained: item_id, kind, id,
+        quality, title/artist/album for UI reconstruction."""
         with self._pending_lock:
             self._pending_meta[item_id] = meta
         self._persist_pending()
 
     def _clear_pending(self, item_id: str) -> None:
-        """Drop an item from the persisted queue — called when it starts
-        downloading, finishes, fails, or is cancelled."""
+        """Drop an item from the persisted queue.
+
+        Called only when the item reaches a terminal state: complete,
+        failed, cancelled, or unexpandable. An item that is merely
+        downloading stays in the snapshot, because a download killed
+        mid-flight is exactly the case restore() exists to recover.
+        """
         with self._pending_lock:
             if item_id not in self._pending_meta:
                 return
@@ -942,40 +1006,92 @@ class Downloader:
                 except Exception:
                     pass
 
-    def restore(self) -> int:
-        """Re-enqueue pending items from the persisted snapshot.
+    def _load_pending_snapshot(self) -> None:
+        """Read the previous process's queue into memory at construction.
 
-        Called by the server after the Tidal session is ready —
-        submit() spawns a thread that hits Tidal, so calling restore()
-        before login would just fail every item. Returns the number of
-        items resubmitted; 0 means there was nothing to restore (or
-        the file was missing/corrupt, which we treat the same).
+        This is not the restore — nothing is submitted here, and the
+        entries stay invisible to the UI until restore() runs. The
+        point is only that they are in `_pending_meta` from the start,
+        because `_persist_pending` writes the whole map: without this,
+        the first download queued in this process would write a
+        snapshot that no longer mentions the previous session's items
+        and silently drop them.
+
+        That is not a hypothetical ordering. When the app boots signed
+        out, the boot thread skips the restore entirely, and an
+        interactive sign-in does not fire the deferred-session
+        callback that would otherwise catch it — so the user can queue
+        a new download with the old queue still unread.
         """
         import sys as _sys
 
         if not QUEUE_STATE_FILE.exists():
-            return 0
+            return
         try:
             with open(QUEUE_STATE_FILE) as f:
                 snapshot = json.load(f)
         except Exception as exc:
             print(
-                f"[downloader] restore: couldn't read {QUEUE_STATE_FILE}: {exc!r}",
+                f"[downloader] couldn't read {QUEUE_STATE_FILE}: {exc!r}",
                 file=_sys.stderr,
                 flush=True,
             )
-            return 0
+            return
         if not isinstance(snapshot, list):
-            return 0
-        count = 0
+            return
+
+        loaded: dict[str, dict] = {}
         for entry in snapshot:
             if not isinstance(entry, dict):
                 continue
-            kind = entry.get("kind")
-            obj_id = entry.get("id")
-            quality = entry.get("quality")
-            if not kind or not obj_id:
+            if not entry.get("kind") or not entry.get("id"):
                 continue
+            # Reuse the id the item had before the restart so the
+            # resubmit overwrites its own snapshot entry rather than
+            # appending a second one under a fresh uuid. Snapshots
+            # written by an older build have no item_id.
+            eid = str(entry.get("item_id") or "") or str(uuid.uuid4())
+            entry["item_id"] = eid
+            loaded[eid] = entry
+
+        with self._pending_lock:
+            self._pending_meta.update(loaded)
+        self._unrestored = loaded
+        if loaded:
+            print(
+                f"[downloader] loaded {len(loaded)} pending item(s) from "
+                f"the previous session",
+                file=_sys.stderr,
+                flush=True,
+            )
+
+    def restore(self) -> int:
+        """Re-enqueue the items the previous process left pending.
+
+        Called by the server once the Tidal session is ready —
+        submit() spawns a thread that hits Tidal, so restoring before
+        login would just fail every item. The snapshot itself was
+        already read at construction; this drains it. Returns the
+        number of items resubmitted, 0 when there was nothing pending
+        or this process already restored once.
+        """
+        import sys as _sys
+
+        with self._restore_once_lock:
+            if self._restored:
+                return 0
+            self._restored = True
+            pending = list(self._unrestored.items())
+            self._unrestored = {}
+
+        if not pending:
+            return 0
+
+        count = 0
+        for eid, entry in pending:
+            kind = entry["kind"]
+            obj_id = entry["id"]
+            quality = entry.get("quality")
             # Convert to a canonical Tidal URL and re-submit. Going
             # through the URL path means the existing fetch_url/expand
             # logic handles track vs album vs playlist uniformly.
@@ -993,7 +1109,7 @@ class Downloader:
                 with self._restore_overrides_lock:
                     self._restore_overrides[str(obj_id)] = album_folder_artist
             try:
-                self.submit(url, quality=quality)
+                self.submit(url, quality=quality, item_id=eid)
                 count += 1
             except Exception as exc:
                 print(
@@ -1001,15 +1117,7 @@ class Downloader:
                     file=_sys.stderr,
                     flush=True,
                 )
-        # Clear the file — the new submits will repopulate it as they
-        # enqueue. If login isn't actually complete and submits silently
-        # fail inside the expand thread, those items are just lost; the
-        # alternative (keep the file) risks infinite-loop resubmits on
-        # every restart for an item that will never succeed.
-        try:
-            QUEUE_STATE_FILE.unlink(missing_ok=True)
-        except Exception:
-            pass
+                self._clear_pending(eid)
         print(
             f"[downloader] restore: resubmitted {count} pending item(s)",
             file=_sys.stderr,
@@ -1085,13 +1193,13 @@ class Downloader:
             # case someone else holds the gate full.
             self._run_event.wait()
             self.gate.acquire()
-            # Clear the persisted pending record up front — once we
-            # start a download the item transitions to IN_PROGRESS and
-            # isn't resumable anyway. If we crash mid-download, the
-            # restart shouldn't re-enqueue an item the user can still
-            # see sitting as FAILED in the UI (once the catch-all
-            # handler marks it so).
-            self._clear_pending(item.item_id)
+            # The persisted record deliberately survives the start of
+            # the download. _download clears it when the item reaches a
+            # terminal state; until then a kill, a reboot, or an OOM
+            # leaves the item in the snapshot so the next launch
+            # re-queues it. Tidal's streams have no Range support, so
+            # the resumed item restarts from zero rather than from the
+            # partial .part file the boot sweep deletes.
             try:
                 self._download(item)
             except Exception as exc:
@@ -1127,6 +1235,9 @@ class Downloader:
                     self._publish_update(item)
                 except Exception:
                     pass
+                # Terminal — drop it from the snapshot so a restart
+                # doesn't retry an item that just proved it explodes.
+                self._clear_pending(item.item_id)
             finally:
                 self.gate.release()
 
@@ -1169,6 +1280,7 @@ class Downloader:
                     if tid is not None:
                         self.on_file_ready(str(tid), existing)
                     self._track_map_pop(item.item_id)
+                    self._clear_pending(item.item_id)
                     return
 
             item.status = DownloadStatus.IN_PROGRESS
@@ -1530,6 +1642,11 @@ class Downloader:
                 except Exception:
                     pass
             # Keep track_map entry so retry() still works for failed items.
+            # The snapshot entry does go, though: a failed item is
+            # terminal, and re-queueing it on every launch would turn a
+            # permanently unavailable track into a boot-time loop the
+            # user can't see or stop.
+            self._clear_pending(item.item_id)
             return
 
         print(
@@ -1540,6 +1657,7 @@ class Downloader:
         # Drop the cached tidalapi reference on success so long sessions
         # don't grow unbounded.
         self._track_map_pop(item.item_id)
+        self._clear_pending(item.item_id)
 
     def _fetch_stream_sources(
         self, track, quality: Optional[str], item_id: Optional[str] = None
@@ -1793,6 +1911,21 @@ def _transcode_to_cd_flac(src_path: Path, dst_path: Path) -> None:
             out.close()
     finally:
         inp.close()
+
+
+def _looks_like_not_found(exc: Exception) -> bool:
+    """Detect a 404: the Tidal id is retired, pulled, or otherwise
+    gone. Unlike a timeout or a 429 this will not fix itself on the
+    next launch, which is what makes it safe to drop the item from the
+    persisted queue. Same dual-path shape as the two detectors below —
+    the HTTP layer surfaces the transport's own error with a response
+    attached, while tidalapi's mapped exception carries only a name."""
+    resp = getattr(exc, "response", None)
+    if resp is not None and getattr(resp, "status_code", None) == 404:
+        return True
+    if type(exc).__name__ in ("ObjectNotFound", "MetadataNotAvailable"):
+        return True
+    return "404" in str(exc)
 
 
 def _looks_like_rate_limit(exc: Exception) -> bool:
