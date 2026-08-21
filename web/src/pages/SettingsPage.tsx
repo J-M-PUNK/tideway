@@ -402,6 +402,12 @@ export function SettingsPage({ onLogout }: { onLogout: () => void }) {
                 hint="For old iPods (Rockbox) and other legacy players that can't decode 24-bit or high-sample-rate FLAC in real time. Only hi-res sources are touched; CD-quality and lossy downloads stay bit-exact. Resampling is high quality with TPDF dither."
               />
               <Toggle
+                checked={settings.download_lyrics ?? true}
+                onChange={(v) => patch({ download_lyrics: v })}
+                label="Save lyrics with downloads"
+                hint="Writes the lyrics into the track's own tags, and drops a matching .lrc file beside it when Tidal has a time-coded version, which is what players with scrolling lyrics read. Tracks Tidal has no lyrics for are downloaded as usual. Costs one small request per track."
+              />
+              <Toggle
                 checked={settings.skip_existing}
                 onChange={(v) => patch({ skip_existing: v })}
                 label="Skip downloads that already exist on disk"

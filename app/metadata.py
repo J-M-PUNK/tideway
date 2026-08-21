@@ -3,6 +3,7 @@ import shutil
 import tempfile
 import threading
 from collections import OrderedDict
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 from urllib.parse import urlparse
@@ -51,6 +52,7 @@ def tag_file(
     track,
     cover_data: Optional[bytes] = None,
     album_obj=None,
+    lyrics: Optional["Lyrics"] = None,
 ):
     """Tag a downloaded audio file atomically.
 
@@ -71,9 +73,9 @@ def tag_file(
     try:
         shutil.copy2(file_path, tmp_path)
         if ext == ".flac":
-            _tag_flac(tmp_path, track, cover_data, album_obj)
+            _tag_flac(tmp_path, track, cover_data, album_obj, lyrics)
         else:
-            _tag_m4a(tmp_path, track, cover_data, album_obj)
+            _tag_m4a(tmp_path, track, cover_data, album_obj, lyrics)
         os.replace(tmp_path, file_path)
     except Exception:
         try:
@@ -256,7 +258,96 @@ def fetch_cover_art(
     return data
 
 
-def _tag_flac(path: Path, track, cover_data: Optional[bytes], album_obj=None):
+# ---------------------------------------------------------------------------
+# Lyrics
+#
+# Tidal returns two independent things under one call: `text`, the
+# plain unsynced lyric, and `subtitles`, the same words carrying
+# [mm:ss.xx] cues. They travel to different places on disk. The plain
+# text is embedded in the file's own tags, which every tagger and
+# player can read but which has no notion of timing. The timed version
+# goes out as a sidecar .lrc, because that is the only format the
+# players that do synced display actually look for.
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class Lyrics:
+    """What Tidal has for one track. Either field may be empty."""
+
+    text: str = ""
+    subtitles: str = ""
+
+    def __bool__(self) -> bool:
+        return bool(self.text or self.subtitles)
+
+
+def _is_missing_lyrics(exc: BaseException) -> bool:
+    """True for Tidal's ordinary "this track has no lyrics" answer.
+
+    Most of the catalogue has none and Tidal says so with a 404. Our
+    HTTP layer hands that back as the transport's own HTTPError with
+    the response attached, because curl_cffi replaces tidalapi's
+    request session and the raw error surfaces before tidalapi can map
+    it; the class-name check covers the path where tidalapi does the
+    mapping itself.
+    """
+    resp = getattr(exc, "response", None)
+    if getattr(resp, "status_code", None) == 404:
+        return True
+    return type(exc).__name__ in ("MetadataNotAvailable", "ObjectNotFound")
+
+
+def fetch_lyrics(track) -> Optional[Lyrics]:
+    """Read a track's lyrics off Tidal, or None if it has none.
+
+    Only the no-lyrics answer is swallowed. Everything else — a 429,
+    an expired token, a dropped connection — is raised, because those
+    are indistinguishable from "no lyrics" at this level and the
+    caller has to be able to tell them apart: a rate limit needs to
+    reach the downloader's shared backoff, and a genuine failure needs
+    to be visible rather than shipping a file that quietly has no
+    lyrics in it.
+    """
+    try:
+        raw = track.lyrics()
+    except Exception as exc:
+        if _is_missing_lyrics(exc):
+            return None
+        raise
+    if raw is None:
+        return None
+    lyrics = Lyrics(
+        text=(getattr(raw, "text", "") or "").strip(),
+        subtitles=(getattr(raw, "subtitles", "") or "").strip(),
+    )
+    return lyrics or None
+
+
+def write_lrc_sidecar(audio_path: Path, lyrics: Optional[Lyrics]) -> Optional[Path]:
+    """Write `<track>.lrc` beside the audio file for timed lyrics.
+
+    Returns the path written, or None when there was nothing timed to
+    write. An existing .lrc is left alone: the user may have fetched
+    or hand-corrected a better one, and clobbering it on a re-download
+    would be the kind of silent data loss that is hard to notice.
+    """
+    if lyrics is None or not lyrics.subtitles:
+        return None
+    lrc_path = audio_path.with_suffix(".lrc")
+    if lrc_path.exists():
+        return None
+    lrc_path.write_text(lyrics.subtitles + "\n", encoding="utf-8")
+    return lrc_path
+
+
+def _tag_flac(
+    path: Path,
+    track,
+    cover_data: Optional[bytes],
+    album_obj=None,
+    lyrics: Optional["Lyrics"] = None,
+):
     from mutagen.flac import FLAC, Picture
 
     audio = FLAC(str(path))
@@ -278,6 +369,14 @@ def _tag_flac(path: Path, track, cover_data: Optional[bytes], album_obj=None):
     if track_id is not None:
         audio[TIDAL_ID_TAG.lower()] = str(track_id)
 
+    if lyrics is not None and lyrics.text:
+        # Two fields for one string because Vorbis never settled on
+        # one. foobar2000 and MusicBrainz Picard read UNSYNCEDLYRICS;
+        # VLC, Kodi, and most Android players read LYRICS. Writing
+        # both is what taggers themselves do.
+        audio["lyrics"] = lyrics.text
+        audio["unsyncedlyrics"] = lyrics.text
+
     if cover_data:
         pic = Picture()
         pic.data = cover_data
@@ -288,7 +387,13 @@ def _tag_flac(path: Path, track, cover_data: Optional[bytes], album_obj=None):
     audio.save()
 
 
-def _tag_m4a(path: Path, track, cover_data: Optional[bytes], album_obj=None):
+def _tag_m4a(
+    path: Path,
+    track,
+    cover_data: Optional[bytes],
+    album_obj=None,
+    lyrics: Optional["Lyrics"] = None,
+):
     from mutagen.mp4 import MP4, MP4Cover
 
     audio = MP4(str(path))
@@ -307,6 +412,10 @@ def _tag_m4a(path: Path, track, cover_data: Optional[bytes], album_obj=None):
     track_id = getattr(track, "id", None)
     if track_id is not None:
         audio[M4A_TIDAL_ID_KEY] = [str(track_id).encode("utf-8")]
+
+    if lyrics is not None and lyrics.text:
+        # MP4 has exactly one lyrics atom, and it is unsynced text.
+        audio["\xa9lyr"] = lyrics.text
 
     if cover_data:
         audio["covr"] = [MP4Cover(cover_data, imageformat=MP4Cover.FORMAT_JPEG)]

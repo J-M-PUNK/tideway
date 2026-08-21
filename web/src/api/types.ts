@@ -468,6 +468,10 @@ export interface Settings {
    *  as cover.jpg. "640" / "1280" / "origin" (3000x3000 master).
    *  Default "1280". */
   cover_art_resolution: "640" | "1280" | "origin";
+  /** Write lyrics when downloading a track: plain text into the file's
+   *  tags, plus a sidecar .lrc when Tidal has a time-coded version.
+   *  On by default. */
+  download_lyrics: boolean;
   /** Desktop window geometry, persisted on close. -1 = not set yet
    *  (first run uses the platform default). */
   window_x: number;

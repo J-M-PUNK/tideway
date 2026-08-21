@@ -1426,7 +1426,12 @@ class Downloader:
             # retry would hit skip_existing on the already-complete
             # audio file and silently decline to re-download, leaving
             # the user with an untagged track and a stuck FAILED row.
-            from app.metadata import fetch_cover_art, tag_file
+            from app.metadata import (
+                fetch_cover_art,
+                fetch_lyrics,
+                tag_file,
+                write_lrc_sidecar,
+            )
             tag_error: Optional[str] = None
             resolved_album = album_obj or getattr(track, "album", None)
             try:
@@ -1437,11 +1442,59 @@ class Downloader:
             except Exception as exc:
                 cover = None
                 tag_error = f"cover fetch failed: {exc}"
+            # fetch_lyrics swallows only "this track has none", which
+            # most of the catalogue is, so a miss is silent and the
+            # file is simply tagged without a lyric field. Anything
+            # else it raises, and that has to be handled rather than
+            # ignored: this is an extra Tidal request per track and a
+            # 429 here must reach the shared backoff, or the sibling
+            # workers keep hammering a bucket that just told us to
+            # stop. Recording it on the item matters too, because the
+            # audio is already in place and skip-existing will decline
+            # to redo the file, so a silently dropped lyric never gets
+            # a second attempt.
+            lyrics = None
+            if getattr(s, "download_lyrics", True):
+                try:
+                    lyrics = fetch_lyrics(track)
+                except Exception as exc:
+                    if _looks_like_rate_limit(exc):
+                        self._note_rate_limit(exc, 0)
+                    if not tag_error:
+                        tag_error = f"lyrics fetch failed: {exc}"
+                    print(
+                        f"[downloader] lyrics fetch failed "
+                        f"id={item.item_id[:8]} track_id="
+                        f"{getattr(track, 'id', '?')}: {exc!r}",
+                        file=_sys.stderr,
+                        flush=True,
+                    )
             try:
-                tag_file(out_path, track, cover, album_obj=resolved_album)
+                tag_file(
+                    out_path,
+                    track,
+                    cover,
+                    album_obj=resolved_album,
+                    lyrics=lyrics,
+                )
             except Exception as exc:
                 if not tag_error:
                     tag_error = f"tagging failed: {exc}"
+
+            # Timed lyrics can't live in a tag, so they go beside the
+            # track as the .lrc every synced-lyric player looks for.
+            try:
+                write_lrc_sidecar(out_path, lyrics)
+            except OSError as exc:
+                # A read-only destination or a full disk. The audio is
+                # already safely in place; say so and move on rather
+                # than failing a download over its sidecar.
+                print(
+                    f"[downloader] .lrc write failed id={item.item_id[:8]}: "
+                    f"{exc}",
+                    file=_sys.stderr,
+                    flush=True,
+                )
 
             # Drop a cover.jpg next to the track when the track lives
             # in a per-album (or per-playlist) subfolder. Most music
@@ -1801,6 +1854,13 @@ def _looks_like_rate_limit(exc: Exception) -> bool:
     sometimes re-raises with the code in the message string."""
     resp = getattr(exc, "response", None)
     if resp is not None and getattr(resp, "status_code", None) == 429:
+        return True
+    # tidalapi's own TooManyRequests carries no response, and callers
+    # of it sometimes rewrite the message to something friendlier
+    # (Track.lyrics() replaces it with "Lyrics unavailable"), so the
+    # string check below can't see it. The class is the only signal
+    # left.
+    if type(exc).__name__ == "TooManyRequests":
         return True
     msg = str(exc)
     return "429" in msg or "Too Many Requests" in msg
