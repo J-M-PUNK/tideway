@@ -14,6 +14,14 @@ among results of the same class the artists you actually listen to
 and the more popular ones float up — which is what makes an
 ambiguous query feel like it read your mind.
 
+For a track or an album the class is taken against the credited
+artist as well as against the title, whichever matches better. An
+artist name is a perfectly ordinary thing to type into a search box,
+and without this a nobody's album literally titled "Radiohead"
+scores EXACT while OK Computer scores nothing at all. Popularity
+then separates them, which is the correct outcome and the one Tidal
+itself returns before we touch the order.
+
 The taste signal is the set of artists you listen to (Tidal
 favourites + Last.fm top artists). Building it hits the network, so
 it is cached and refreshed on a background thread; the search
@@ -100,15 +108,22 @@ def score(
 ) -> float:
     """Score one candidate. `name` is the entity's own name (artist
     name, track/album title); `artist_names` are the names of the
-    artists credited on it (so a track by an artist you listen to
-    gets the taste lift even when the title itself doesn't)."""
+    artists credited on it.
+
+    The class is the better of the title's match and the credited
+    artist's, because a query is as likely to be an artist as a
+    title. Artist rescoring passes no `artist_names` — the name is
+    already the artist — so this only affects tracks and albums.
+    """
     name_norm = normalize(name)
-    base = _match_class(query_norm, name_norm)
+    artist_norms = [normalize(a) for a in artist_names]
+    base = max(
+        [_match_class(query_norm, name_norm)]
+        + [_match_class(query_norm, a) for a in artist_norms if a]
+    )
     total = base + _popularity_component(popularity)
     if taste:
-        if name_norm in taste or any(
-            normalize(a) in taste for a in artist_names
-        ):
+        if name_norm in taste or any(a in taste for a in artist_norms):
             total += _TASTE_BONUS
     return total
 

@@ -23,6 +23,17 @@ import {
 type Filter = "all" | "tracks" | "albums" | "artists" | "playlists";
 const FILTERS: Filter[] = ["all", "tracks", "albums", "artists", "playlists"];
 
+/** What the All tab asks for. Its per-type sections are one viewport
+ *  row plus a "View more" link, so a handful past the widest
+ *  breakpoint is all it can show — and this request fires on every
+ *  pause while the user is still typing. */
+const LANDING_LIMIT = 16;
+
+/** What a dedicated tab asks for. Tidal's search stops serving past
+ *  300 of any one type, so this is everything there is; the tab is a
+ *  full list and has no reason to show less. */
+const FULL_LIMIT = 300;
+
 function asFilter(v: string | null): Filter {
   return FILTERS.includes(v as Filter) ? (v as Filter) : "all";
 }
@@ -83,11 +94,17 @@ export function Search({ onDownload }: { onDownload: OnDownload }) {
     return () => window.clearTimeout(t);
   }, [trimmedQ]);
 
+  // The All tab is the landing view and re-runs as the user types, so
+  // it stays cheap. A dedicated tab is a deliberate drill-down into
+  // one kind, reached by an explicit navigation, and asks for the
+  // whole result set — that tab showing sixteen albums and no way to
+  // see the rest is the bug being fixed here.
+  const limit = filter === "all" ? LANDING_LIMIT : FULL_LIMIT;
   const { data: results, loading: fetchLoading } = useApi(
-    () => api.search(debouncedQ, 16),
-    [debouncedQ],
+    () => api.search(debouncedQ, limit),
+    [debouncedQ, limit],
     {
-      cacheKey: debouncedQ ? queryKeys.search(debouncedQ) : undefined,
+      cacheKey: debouncedQ ? queryKeys.search(debouncedQ, limit) : undefined,
       skip: !debouncedQ,
     },
   );
@@ -166,7 +183,16 @@ export function Search({ onDownload }: { onDownload: OnDownload }) {
         </div>
       )}
 
-      {results && hasAny && (
+      {/* Kept mounted while a fetch is in flight, not just when there
+          are results. Switching tabs changes the requested limit,
+          which is a different useApi cache key, which is a cold load
+          that clears `data` — so gating this on `results` made the
+          control the user just clicked vanish for the length of the
+          fetch, leaving the browser's back button as the only way
+          out. `loading` covers that window; once it clears, a query
+          that genuinely matched nothing drops the tabs and shows the
+          empty state instead. */}
+      {!!debouncedQ && (loading || hasAny) && (
         <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
           <Tabs value={filter} onValueChange={(v) => onTabChange(v as Filter)}>
             <TabsList>
