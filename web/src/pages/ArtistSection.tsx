@@ -2,7 +2,14 @@ import { useEffect, useMemo, useState } from "react";
 import { useParams } from "react-router-dom";
 import { List, Video as VideoIcon } from "lucide-react";
 import { api } from "@/api/client";
-import type { Album, Artist, Track, Video } from "@/api/types";
+import type {
+  Album,
+  Artist,
+  ArtistExtras,
+  Playlist,
+  Track,
+  Video,
+} from "@/api/types";
 import type { OnDownload } from "@/api/download";
 import { useApi } from "@/hooks/useApi";
 import { queryKeys } from "@/api/queryKeys";
@@ -103,6 +110,7 @@ export type ArtistSectionKey =
   | "eps"
   | "compilations"
   | "appears-on"
+  | "playlists"
   | "similar"
   | "videos"
   | "liked";
@@ -129,6 +137,7 @@ const SECTIONS: Record<ArtistSectionKey, SectionMeta> = {
     kind: "media",
   },
   "appears-on": { title: "Appears on", field: "appears_on", kind: "media" },
+  playlists: { title: "Playlists", field: "playlists", kind: "media" },
   similar: { title: "Fans also like", field: "similar", kind: "media" },
   videos: { title: "Videos", field: "videos", kind: "videos" },
   // Liked content isn't in the artist payload — comes from the
@@ -148,6 +157,7 @@ interface ArtistData {
   ep_singles: Album[];
   compilations: Album[];
   appears_on: Album[];
+  playlists: Playlist[];
   similar: Artist[];
   videos: Video[];
 }
@@ -170,6 +180,17 @@ export function ArtistSection({ onDownload }: { onDownload: OnDownload }) {
     error,
   } = useApi(() => api.artist(id), [id], {
     cacheKey: queryKeys.artist(id),
+  });
+  // Three of these sections don't live in the main artist payload at
+  // all. Compilations and playlists come only from Tidal's curated
+  // artist page, and the full Appears-on set does too, so they were
+  // split off into /extras to keep the artist page's first paint
+  // fast. Same cache key as ArtistDetail, so arriving through its
+  // "View more" link is a hit rather than a second fetch — but
+  // without fetching them here, the compilations drill-down rendered
+  // an empty grid no matter what the artist page had just shown.
+  const { data: extras } = useApi(() => api.artistExtras(id), [id], {
+    cacheKey: `artist-extras:${id}`,
   });
   const meta = SECTIONS[section as ArtistSectionKey];
   // Liked source: pull from the user's library filtered to this
@@ -231,16 +252,48 @@ export function ArtistSection({ onDownload }: { onDownload: OnDownload }) {
       ) : (
         <SectionBody
           kind={meta.kind}
-          items={
-            ((artist as unknown as ArtistData)[
-              meta.field as keyof ArtistData
-            ] ?? []) as Track[] | Album[] | Artist[] | Video[]
-          }
+          items={sectionItems(
+            artist as unknown as ArtistData,
+            extras,
+            meta.field,
+          )}
           onDownload={onDownload}
         />
       )}
     </div>
   );
+}
+
+type SectionItems = Track[] | Album[] | Artist[] | Video[] | Playlist[];
+
+/**
+ * Pick a section's items, preferring the deferred extras where they
+ * are the real source.
+ *
+ * The main artist payload still carries `compilations` and
+ * `appears_on` keys for compatibility, but compilations is always
+ * empty there and appears_on holds only the thin get_other() set. An
+ * `undefined` extras means the fetch hasn't landed yet, so the
+ * payload's value is the right thing to show in the meantime; an
+ * empty array from extras is an answer and replaces it.
+ */
+function sectionItems(
+  artist: ArtistData,
+  extras: ArtistExtras | null | undefined,
+  field: keyof ArtistData | null,
+): SectionItems {
+  if (!field) return [];
+  const fromPayload = (artist[field] ?? []) as SectionItems;
+  if (!extras) return fromPayload;
+  if (field === "compilations") return extras.compilations;
+  if (field === "playlists") return extras.playlists;
+  if (field === "appears_on") {
+    // The curated page's set is richer when it has one, but it can
+    // come back empty for a lesser-known artist whose page has no
+    // Appears On module. Falling back keeps that case populated.
+    return extras.appears_on.length ? extras.appears_on : fromPayload;
+  }
+  return fromPayload;
 }
 
 /**
@@ -300,7 +353,7 @@ function SectionBody({
   onDownload,
 }: {
   kind: SectionMeta["kind"];
-  items: Track[] | Album[] | Artist[] | Video[];
+  items: SectionItems;
   onDownload: OnDownload;
 }) {
   if (items.length === 0) {
@@ -319,13 +372,13 @@ function SectionBody({
   if (kind === "videos") {
     return <VideosGrid videos={items as Video[]} />;
   }
-  // The "media" kind covers both album lists (albums, EPs,
-  // compilations, appears-on) and artist lists ("similar"). Only
-  // the album lists get the view toggle + sort — sorting artists
-  // by release date is nonsense, and they're rare enough on this
-  // page (only one section, "Fans also like") that the simpler
-  // tile-only render is fine.
-  const firstItemKind = (items as (Album | Artist)[])[0]?.kind ?? "album";
+  // The "media" kind covers album lists (albums, EPs, compilations,
+  // appears-on), artist lists ("similar"), and playlists. Only the
+  // album lists get the view toggle + sort — release-date order means
+  // nothing for an artist or a playlist — so everything else falls
+  // through to the plain tile grid.
+  const firstItemKind =
+    (items as (Album | Artist | Playlist)[])[0]?.kind ?? "album";
   if (firstItemKind === "album") {
     return (
       <AlbumSectionBody albums={items as Album[]} onDownload={onDownload} />
@@ -333,7 +386,7 @@ function SectionBody({
   }
   return (
     <Grid>
-      {(items as Artist[]).map((item) => (
+      {(items as (Artist | Playlist)[]).map((item) => (
         <MediaCard key={item.id} item={item} onDownload={onDownload} />
       ))}
     </Grid>

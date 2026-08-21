@@ -2,7 +2,7 @@ import { useMemo, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { Heart, Music, Video as VideoIcon } from "lucide-react";
 import { api } from "@/api/client";
-import type { Album, Artist, Track, Video } from "@/api/types";
+import type { Album, Artist, Playlist, Track, Video } from "@/api/types";
 import type { OnDownload } from "@/api/download";
 import { useApi } from "@/hooks/useApi";
 import { queryKeys } from "@/api/queryKeys";
@@ -80,6 +80,7 @@ export function ArtistDetail({ onDownload }: { onDownload: OnDownload }) {
       ? extras.appears_on
       : artist.appears_on;
   const artistMixId = extras?.artist_mix_id ?? artist.artist_mix_id;
+  const playlists = extras?.playlists ?? [];
 
   // "Download full discography" needs a single merged list of everything
   // the artist has released (albums + EPs + singles + their own
@@ -179,6 +180,12 @@ export function ArtistDetail({ onDownload }: { onDownload: OnDownload }) {
         title="Appears on"
         items={appearsOn}
         viewMoreTo={`/artist/${id}/all/appears-on`}
+        onDownload={onDownload}
+      />
+      <MediaRow
+        title="Playlists"
+        items={playlists}
+        viewMoreTo={`/artist/${id}/all/playlists`}
         onDownload={onDownload}
       />
       <MediaRow
@@ -296,7 +303,7 @@ function LikedSummaryCard({
  * "View more" link that lands on the dedicated section page. Matches
  * the one-row + view-more convention used on Home, Album, Stats.
  */
-function MediaRow<T extends Album | Artist>({
+function MediaRow<T extends Album | Artist | Playlist>({
   title,
   items,
   viewMoreTo,
