@@ -22,7 +22,12 @@ export const queryKeys = {
   pagePath: (path: string) => `page:path:${path}`,
   popularArtists: "page:popular:artists",
   popularTracks: "page:popular:tracks",
-  search: (query: string) => `search:${query.toLowerCase()}`,
+  // The limit is part of the key: the All tab asks for one row's
+  // worth and a dedicated tab asks for everything Tidal will give, so
+  // two different result sets exist for the same query and must not
+  // share a cache entry.
+  search: (query: string, limit: number) =>
+    `search:${query.toLowerCase()}:${limit}`,
   libraryAlbums: "library:albums",
   libraryArtists: "library:artists",
   libraryPlaylists: "library:playlists",
