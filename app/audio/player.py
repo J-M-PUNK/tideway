@@ -1299,6 +1299,24 @@ class PCMPlayer:
             )
             with self._lock:
                 self._preload = pre
+            # Pre-buffer the next track's DLNA passthrough while this one
+            # plays, so the renderer's track-change can promote it without
+            # a demux pause (gapless). No-ops for local files and when
+            # no UPnP session is active.
+            if pre.source_urls is not None:
+                if (
+                    _upnp_manager is not None
+                    and _upnp_manager.is_active()
+                ):
+                    try:
+                        _upnp_manager.prepare_next_passthrough(
+                            pre.source_urls, prefetched_bytes
+                        )
+                    except Exception as exc:
+                        print(
+                            f"[player] upnp prepare_next failed: {exc!r}",
+                            flush=True,
+                        )
             return {
                 "ok": True,
                 "cached": True,
