@@ -763,3 +763,119 @@ class TestDlnaHttpCompliance:
             server.shutdown()
             server.server_close()
             buffer.close()
+
+
+# ---------------------------------------------------------------------
+# Bounded per-track file serve (real Content-Length)
+# ---------------------------------------------------------------------
+
+
+class TestBoundedTrackServe:
+    """A strict DLNA renderer uses the HTTP Content-Length as the track
+    length. The live RingBuffer path advertised a synthetic ~1TB, so a
+    renderer (UAPP) hit 'unexpected end of stream' and sought past the
+    real end at every track boundary. The bounded path serves a fully
+    buffered track with the REAL byte length so the end is expected."""
+
+    def _server(self, track_id: int):
+        import os
+        import tempfile
+        from types import SimpleNamespace
+
+        buffer = RingBuffer()
+        buffer.write(b"\x00" * 256)
+        buffer.data_ready.set()
+        server = start_stream_http_server(
+            buffer,
+            stream_path="/dlna/stream",
+            content_type="audio/flac",
+            dlna=True,
+        )
+        path = tempfile.NamedTemporaryFile(
+            prefix="tideway-test-", suffix=".flac", delete=False
+        ).name
+        body = b"\xff\xf8FLAC" + b"x" * 1000
+        with open(path, "wb") as f:
+            f.write(body)
+        ready = threading.Event()
+        ready.set()
+        server.track_source = SimpleNamespace(
+            ready=ready,
+            total_size=len(body),
+            path=path,
+            track_id=track_id,
+            failed=False,
+        )
+        return server, buffer, path, len(body)
+
+    def _get_full(self, server, raw_request: bytes) -> bytes:
+        import socket as _socket
+
+        port = server.server_address[1]
+        sock = _socket.create_connection(("127.0.0.1", port), timeout=3.0)
+        try:
+            sock.sendall(raw_request)
+            chunks = []
+            while True:
+                data = sock.recv(4096)
+                if not data:
+                    break
+                chunks.append(data)
+            return b"".join(chunks)
+        finally:
+            sock.close()
+
+    def test_serves_real_content_length_without_range(self):
+        import os
+
+        server, buffer, path, total = self._server(12345)
+        try:
+            raw = self._get_full(
+                server,
+                b"GET /dlna/stream?ts=12345 HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            )
+            assert raw.startswith(b"HTTP/1.1 206"), raw[:60]
+            assert f"Content-Length: {total}".encode() in raw, raw[:200]
+            assert b"Content-Range: bytes 0-" in raw
+            assert b"\xff\xf8FLAC" in raw
+        finally:
+            server.shutdown()
+            server.server_close()
+            buffer.close()
+            os.unlink(path)
+
+    def test_serves_byte_range(self):
+        import os
+
+        server, buffer, path, total = self._server(1)
+        try:
+            raw = self._get_full(
+                server,
+                b"GET /dlna/stream?ts=1 HTTP/1.1\r\nHost: localhost\r\nRange: bytes=10-\r\n\r\n",
+            )
+            assert raw.startswith(b"HTTP/1.1 206"), raw[:60]
+            assert (
+                f"Content-Range: bytes 10-{total - 1}/{total}".encode() in raw
+            ), raw[:200]
+            assert len(raw.split(b"\r\n\r\n", 1)[1]) == total - 10
+        finally:
+            server.shutdown()
+            server.server_close()
+            buffer.close()
+            os.unlink(path)
+
+    def test_stale_ts_rejected(self):
+        import os
+
+        server, buffer, path, _ = self._server(999)
+        try:
+            raw = self._get_full(
+                server,
+                b"GET /dlna/stream?ts=111 HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            )
+            assert raw.startswith(b"HTTP/1.1 410"), raw[:60]
+        finally:
+            server.shutdown()
+            server.server_close()
+            buffer.close()
+            os.unlink(path)
