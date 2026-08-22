@@ -501,6 +501,38 @@ def _attach_session(mgr: UpnpManager) -> _SessionState:
     return sess
 
 
+class TestBoundedServing:
+    def test_no_session_is_false(self):
+        assert UpnpManager().bounded_serving() is False
+
+    def test_dlna_track_source_serving_is_true(self):
+        mgr = UpnpManager()
+        sess = _attach_session(mgr)
+        http = MagicMock()
+        http.dlna = True
+        http.track_source = object()
+        sess.http_server = http
+        assert mgr.bounded_serving() is True
+
+    def test_no_track_source_is_false(self):
+        mgr = UpnpManager()
+        sess = _attach_session(mgr)
+        http = MagicMock()
+        http.dlna = True
+        http.track_source = None
+        sess.http_server = http
+        assert mgr.bounded_serving() is False
+
+    def test_non_dlna_server_is_false(self):
+        mgr = UpnpManager()
+        sess = _attach_session(mgr)
+        http = MagicMock()
+        http.dlna = False
+        http.track_source = object()
+        sess.http_server = http
+        assert mgr.bounded_serving() is False
+
+
 class TestPushPcmNoSession:
     def test_no_session_returns_cheaply(self):
         """Audio callback hits push_pcm on every frame even when

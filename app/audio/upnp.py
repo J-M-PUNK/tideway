@@ -446,6 +446,26 @@ class UpnpManager:
         actually taken."""
         return self._session is not None
 
+    def bounded_serving(self) -> bool:
+        """True while a bounded per-track DLNA file is being served to
+        the renderer (a `TrackFileSource`, not the live RingBuffer).
+
+        Used by the player's seek path: while DLNA is serving a bounded
+        file, the renderer is the playback clock, so a desktop seek must
+        NOT tear down the renderer's source (which would drop it onto
+        the ~1TB synthetic RingBuffer stream). Takes the session lock —
+        only called from non-realtime paths."""
+        with self._session_lock:
+            session = self._session
+        if session is None:
+            return False
+        http = getattr(session, "http_server", None)
+        return bool(
+            http is not None
+            and getattr(http, "dlna", False)
+            and getattr(http, "track_source", None) is not None
+        )
+
     # ---- listener bus ----------------------------------------------
 
     def set_local_silencer(
