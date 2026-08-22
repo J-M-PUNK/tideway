@@ -199,6 +199,11 @@ class _Preload:
     sample_rate: int
     channels: int
     sd_dtype: str
+    # Metadata for THIS preloaded track. Carried on the preload so the
+    # gapless swap notifies the renderer with the track actually being
+    # adopted, not the shared _current_track_meta slot (which the racing
+    # desktop clock may have clobbered with a later track's metadata).
+    track_meta: Optional[dict] = None
 
 
 @dataclass
@@ -1267,8 +1272,10 @@ class PCMPlayer:
             self._drop_preload()
 
             try:
-                source_spec, duration_s, stream_info, prefetched_bytes, _ = (
-                    self._resolve_source(track_id, quality)
+                source_spec, duration_s, stream_info, prefetched_bytes, track_meta = (
+                    self._resolve_source(
+                        track_id, quality, set_current_meta=False
+                    )
                 )
                 source = _build_source(source_spec, prefetched=prefetched_bytes)
                 decoder = Decoder(source)
@@ -1326,6 +1333,7 @@ class PCMPlayer:
                 sample_rate=decoder.output_sample_rate,
                 channels=decoder.channels,
                 sd_dtype=decoder.sounddevice_dtype,
+                track_meta=track_meta,
             )
             with self._lock:
                 self._preload = pre
@@ -3361,7 +3369,7 @@ class PCMPlayer:
                 _upnp_manager.start_passthrough(
                     pre.source_urls,
                     prefetched=None,
-                    metadata=self._current_track_meta,
+                    metadata=pre.track_meta or self._current_track_meta,
                 )
             except (ValueError, RuntimeError, OSError) as exc:
                 print(
@@ -4093,7 +4101,7 @@ class PCMPlayer:
                         _upnp_manager.start_passthrough(
                             pre.source_urls,
                             prefetched=None,
-                            metadata=self._current_track_meta,
+                            metadata=pre.track_meta or self._current_track_meta,
                         )
                     except (ValueError, RuntimeError, OSError) as exc:
                         print(
@@ -4181,6 +4189,11 @@ class PCMPlayer:
             self._current_track_id = pre.track_id
             self._current_duration_ms = pre.duration_ms
             self._current_stream_info = pre.stream_info
+            # Keep the now-playing metadata in sync with the adopted
+            # track, and carry the preload's own meta so the swap
+            # notification uses the track actually being adopted.
+            if pre.track_meta is not None:
+                self._current_track_meta = pre.track_meta
             self._source_urls = pre.source_urls
             self._source_path = pre.source_path
             self._stream_sample_rate = pre.sample_rate
