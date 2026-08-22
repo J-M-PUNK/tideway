@@ -1,9 +1,10 @@
 import { useEffect, useState } from "react";
-import { useSearchParams } from "react-router-dom";
-import { Loader2, Music, Search as SearchIcon } from "lucide-react";
+import { Link, useSearchParams } from "react-router-dom";
+import { Clock, Loader2, Music, Search as SearchIcon, X } from "lucide-react";
 import { api } from "@/api/client";
 import { queryKeys } from "@/api/queryKeys";
 import { useApi } from "@/hooks/useApi";
+import { useSearchHistory } from "@/hooks/useSearchHistory";
 import type { Album, Artist, Playlist, TopHit } from "@/api/types";
 import type { OnDownload } from "@/api/download";
 import { Tabs, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -114,6 +115,23 @@ export function Search({ onDownload }: { onDownload: OnDownload }) {
   // reads as "the app didn't notice my input".
   const loading = fetchLoading || (!!trimmedQ && trimmedQ !== debouncedQ);
 
+  // Recent searches. There is no submit event to hook — the page
+  // searches as you type — so a query earns its place in the history
+  // by coming back with something. A typo that matched nothing is not
+  // worth offering back to the user, and the hook folds the prefixes
+  // that settled through the debounce into the final query.
+  const { history, record, remove, clear } = useSearchHistory();
+  useEffect(() => {
+    if (!debouncedQ || !results) return;
+    const matched =
+      results.tracks.length > 0 ||
+      results.albums.length > 0 ||
+      results.artists.length > 0 ||
+      results.playlists.length > 0 ||
+      !!results.top_hit;
+    if (matched) record(debouncedQ);
+  }, [debouncedQ, results, record]);
+
   const onTabChange = (next: Filter) => {
     const p = new URLSearchParams(params);
     if (next === "all") p.delete("tab");
@@ -209,13 +227,17 @@ export function Search({ onDownload }: { onDownload: OnDownload }) {
         </div>
       )}
 
-      {!results && !q && (
-        <EmptyState
-          icon={SearchIcon}
-          title="Search Tidal"
-          description="Start typing in the search bar at the top to find tracks, albums, artists, or playlists."
-        />
-      )}
+      {!results &&
+        !q &&
+        (history.length > 0 ? (
+          <RecentSearches entries={history} onRemove={remove} onClear={clear} />
+        ) : (
+          <EmptyState
+            icon={SearchIcon}
+            title="Search Tidal"
+            description="Start typing in the search bar at the top to find tracks, albums, artists, or playlists."
+          />
+        ))}
 
       {results && !hasAny && (
         <EmptyState
@@ -323,6 +345,57 @@ export function Search({ onDownload }: { onDownload: OnDownload }) {
           </Grid>
         </>
       )}
+    </div>
+  );
+}
+
+/**
+ * The empty-search landing: queries the user ran before, newest first.
+ * Clicking one re-runs it by navigating to the same URL the search bar
+ * would produce, which also refills the input via its params effect.
+ */
+function RecentSearches({
+  entries,
+  onRemove,
+  onClear,
+}: {
+  entries: string[];
+  onRemove: (query: string) => void;
+  onClear: () => void;
+}) {
+  return (
+    <div className="max-w-2xl">
+      <div className="mb-4 flex items-baseline justify-between gap-4">
+        <h2 className="text-2xl font-bold tracking-tight">Recent searches</h2>
+        <button
+          type="button"
+          onClick={onClear}
+          className="text-sm font-medium text-muted-foreground hover:text-foreground"
+        >
+          Clear all
+        </button>
+      </div>
+      <ul>
+        {entries.map((entry) => (
+          <li key={entry} className="group flex items-center gap-2">
+            <Link
+              to={`/search?q=${encodeURIComponent(entry)}`}
+              className="flex min-w-0 flex-1 items-center gap-3 rounded-md px-2 py-2 hover:bg-accent"
+            >
+              <Clock className="h-4 w-4 shrink-0 text-muted-foreground" />
+              <span className="truncate">{entry}</span>
+            </Link>
+            <button
+              type="button"
+              onClick={() => onRemove(entry)}
+              aria-label={`Remove "${entry}" from recent searches`}
+              className="shrink-0 rounded-md p-2 text-muted-foreground opacity-0 transition-opacity hover:text-foreground focus-visible:opacity-100 group-hover:opacity-100"
+            >
+              <X className="h-4 w-4" />
+            </button>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
