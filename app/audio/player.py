@@ -3321,7 +3321,7 @@ class PCMPlayer:
                 _upnp_manager.start_passthrough(
                     pre.source_urls,
                     prefetched=None,
-                    metadata=pre.track_meta or self._current_track_meta,
+                    metadata=getattr(pre, "track_meta", None) or self._current_track_meta,
                 )
             except (ValueError, RuntimeError, OSError) as exc:
                 print(
@@ -4053,7 +4053,7 @@ class PCMPlayer:
                         _upnp_manager.start_passthrough(
                             pre.source_urls,
                             prefetched=None,
-                            metadata=pre.track_meta or self._current_track_meta,
+                            metadata=getattr(pre, "track_meta", None) or self._current_track_meta,
                         )
                     except (ValueError, RuntimeError, OSError) as exc:
                         print(
@@ -4144,7 +4144,7 @@ class PCMPlayer:
             # Keep the now-playing metadata in sync with the adopted
             # track, and carry the preload's own meta so the swap
             # notification uses the track actually being adopted.
-            if pre.track_meta is not None:
+            if getattr(pre, "track_meta", None) is not None:
                 self._current_track_meta = pre.track_meta
             self._source_urls = pre.source_urls
             self._source_path = pre.source_path
