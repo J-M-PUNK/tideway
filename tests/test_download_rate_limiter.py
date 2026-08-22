@@ -281,3 +281,20 @@ def test_bulk_cooldown_passes_through_after_long_idle(monkeypatch):
     downloader._wait_for_bulk_cooldown()
 
     assert slept == []
+
+
+def test_tidalapi_too_many_requests_is_detected_without_a_response():
+    """tidalapi's own TooManyRequests carries no `.response`, and
+    Track.lyrics() rewrites its message to "Lyrics unavailable" before
+    re-raising, so neither the status check nor the string check can
+    see it. Without the class check a lyrics 429 would slip past the
+    shared backoff and sibling workers would keep hammering."""
+    from app.downloader import _looks_like_rate_limit
+
+    class TooManyRequests(Exception):
+        pass
+
+    exc = TooManyRequests("Lyrics unavailable")
+    assert "429" not in str(exc)
+    assert getattr(exc, "response", None) is None
+    assert _looks_like_rate_limit(exc)

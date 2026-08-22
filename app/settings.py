@@ -125,6 +125,13 @@ class Settings:
     # origin master would. The download path falls back to a smaller
     # size when an album doesn't publish the chosen one.
     cover_art_resolution: str = "1280"
+    # Write the track's lyrics when downloading it: the plain text into
+    # the file's own tags, and a sidecar .lrc alongside it when Tidal
+    # has a time-coded version. On by default — a downloaded library
+    # that silently drops lyrics the streaming view shows is the
+    # surprise, not the other way round. Costs one small JSON request
+    # per track, which is why it can be turned off.
+    download_lyrics: bool = True
     skip_existing: bool = True
     # How many downloads may run in parallel. Gated by the Downloader's
     # semaphore so changing this doesn't require a process restart.
