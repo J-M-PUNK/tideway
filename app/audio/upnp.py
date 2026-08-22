@@ -68,6 +68,7 @@ from app.audio.http_stream import (
     FlacStreamEncoder,
     RingBuffer,
     StreamHTTPServer,
+    TrackFileSource,
     primary_lan_ip,
     start_stream_http_server,
 )
@@ -603,6 +604,34 @@ class UpnpManager:
             session.passthrough_active = True
             session.buffer.flush()
             session.buffer.set_track_id(_track_ts)
+            session.passthrough_encoder = None
+
+        # Bounded per-track file: demux the whole track to a temp file so
+        # the DLNA response can advertise the REAL byte length. The live
+        # RingBuffer encoder (FlacPassthroughEncoder) plus a synthetic
+        # ~1TB Content-Length made strict renderers (UAPP) seek past the
+        # real track end -> 'unexpected end of stream' -> avcodec
+        # -1094995529 (a cut before the end). Buffering per track lets us
+        # serve the actual size instead.
+        http_server = getattr(session, "http_server", None)
+        track_source = None
+        if http_server is not None and getattr(http_server, "dlna", False):
+            # Drop the previous track's buffered file (natural end ->
+            # next track does NOT go through stop_passthrough).
+            prev = getattr(http_server, "track_source", None)
+            if prev is not None:
+                try:
+                    prev.close()
+                except Exception:
+                    pass
+            track_source = TrackFileSource(
+                source=reader,
+                track_id=_track_ts,
+                done_event=done_event,
+            )
+            http_server.track_source = track_source
+            track_source.start()
+        else:
             session.passthrough_encoder = FlacPassthroughEncoder(
                 source=reader,
                 buffer=session.buffer,
@@ -718,6 +747,17 @@ class UpnpManager:
         if encoder is not None:
             try:
                 encoder.close()
+            except Exception:
+                pass
+        # Clear any bounded per-track file so subsequent requests fall
+        # back to the live RingBuffer (PCM re-encode) path, and delete
+        # its temp file.
+        http_server = getattr(session, "http_server", None)
+        track_source = getattr(http_server, "track_source", None) if http_server else None
+        if track_source is not None:
+            http_server.track_source = None
+            try:
+                track_source.close()
             except Exception:
                 pass
         print("[upnp] passthrough OFF", flush=True)
@@ -852,6 +892,12 @@ class UpnpManager:
             except Exception:
                 pass
             try:
+                ts = getattr(session.http_server, "track_source", None)
+                if ts is not None:
+                    ts.close()
+            except Exception:
+                pass
+            try:
                 session.buffer.close()
             except Exception:
                 pass
@@ -930,6 +976,12 @@ class UpnpManager:
                 session.http_server.server_close()
         except Exception as exc:
             log.debug("http server shutdown failed: %r", exc)
+        try:
+            ts = getattr(session.http_server, "track_source", None)
+            if ts is not None:
+                ts.close()
+        except Exception as exc:
+            log.debug("track-source close failed: %r", exc)
         # Tell the device to stop pulling. Best-effort: if the
         # device has already disconnected we'll get a transport
         # error and that's fine.

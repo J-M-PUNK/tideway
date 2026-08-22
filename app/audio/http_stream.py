@@ -34,8 +34,10 @@ from __future__ import annotations
 
 import http.server
 import logging
+import os
 import socket
 import socketserver
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -994,6 +996,131 @@ class FlacPassthroughEncoder:
             pass
 
 
+class TrackFileSource:
+    """Demux a finite fMP4 source into a complete FLAC temp file.
+
+    FlacPassthroughEncoder streams into a live RingBuffer and the stream
+    advertises a synthetic ~1TB Content-Length. Strict DLNA renderers
+    (UAPP) use that Content-Length as the track length, so when the real
+    FLAC ends they seek "ahead" for data that isn't there and hit
+    'unexpected end of stream' / avcodec -1094995529 at every track
+    boundary (perceived as a cut before the end).
+
+    This buffers the ENTIRE track to a temp file so the DLNA response
+    can advertise the REAL byte length. The renderer then knows the
+    exact end, treats it as expected, and never seeks past it.
+
+    `ready` fires once the whole track is on disk and `total_size` is
+    final. The HTTP serve loop waits on `ready` before answering, then
+    streams the file — Content-Length = total_size, Range supported.
+    `done_event`, when given, is set on completion so the UPnP session's
+    passthrough state machine advances exactly as with the live encoder.
+    """
+
+    def __init__(self, source, track_id: int = 0, *, tempdir=None, done_event=None) -> None:
+        self._source = source
+        self.track_id = track_id
+        self.total_size = 0
+        self.failed = False
+        self.ready = threading.Event()
+        self._done_event = done_event
+        self._tempdir = tempdir
+        self._path = None
+        self._thread = None
+        self._container_in = None
+
+    @property
+    def path(self) -> Optional[str]:
+        return self._path
+
+    def start(self) -> None:
+        self._thread = threading.Thread(
+            target=self._run, name="flac-track-filesource", daemon=True
+        )
+        self._thread.start()
+
+    def close(self) -> None:
+        if self._thread is not None:
+            self._thread.join(timeout=5.0)
+        try:
+            if self._container_in is not None:
+                self._container_in.close()
+        except Exception:
+            pass
+        if self._path and os.path.exists(self._path):
+            try:
+                os.unlink(self._path)
+            except OSError:
+                pass
+
+    def _run(self) -> None:
+        import av
+
+        try:
+            self._container_in = av.open(
+                self._source,
+                format="mp4",
+                options={"probesize": "131072", "analyzeduration": "200000"},
+            )
+            stream_in = next(
+                s for s in self._container_in.streams if s.type == "audio"
+            )
+            extradata = getattr(stream_in.codec_context, "extradata", None) or b""
+            raw_streaminfo = extradata[4:] if extradata[:1] == b"\x80" else extradata
+            if len(raw_streaminfo) < 18:
+                raw_streaminfo = b""
+
+            demux_iter = self._container_in.demux(stream_in)
+            first_packet = next(demux_iter)
+            raw_first = bytes(first_packet)
+            frame_bps = _parse_flac_frame_bps(raw_first) if raw_first else 16
+
+            bps = 16
+            if raw_streaminfo and len(raw_streaminfo) >= 18:
+                bps = (((raw_streaminfo[12] & 1) << 4) | (raw_streaminfo[13] >> 4)) + 1
+
+            header = _build_flac_stream_header(
+                sample_rate=stream_in.codec_context.sample_rate,
+                channels=getattr(stream_in.codec_context.layout, "nb_channels", 2) or 2,
+                bits_per_sample=bps if raw_streaminfo else frame_bps,
+                total_samples=0,
+                streaminfo_bytes=raw_streaminfo if raw_streaminfo else None,
+            )
+
+            tf = tempfile.NamedTemporaryFile(
+                prefix="tideway-track-", suffix=".flac",
+                dir=self._tempdir, delete=False,
+            )
+            self._path = tf.name
+            total = 0
+            with tf:
+                tf.write(header)
+                total += len(header)
+                if raw_first:
+                    tf.write(raw_first)
+                    total += len(raw_first)
+                for packet in demux_iter:
+                    raw = bytes(packet)
+                    if not raw:
+                        continue
+                    tf.write(raw)
+                    total += len(raw)
+            self.total_size = total
+        except Exception as exc:
+            self.failed = True
+            print(f"[upnp] track-filesource failed: {exc!r}", flush=True)
+        finally:
+            try:
+                if self._container_in is not None:
+                    self._container_in.close()
+            except Exception:
+                pass
+            self.ready.set()
+            if self._done_event is not None:
+                self._done_event.set()
+            print("[upnp] track-filesource complete", flush=True)
+
+
 class StreamHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     """Dedicated HTTP server, bound to 0.0.0.0 on an ephemeral port,
     used solely for serving an audio stream to a LAN receiver.
@@ -1025,6 +1152,13 @@ class StreamHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     # don't and shouldn't see the header. Set per session so the
     # shared handler only emits DLNA-specific headers on DLNA streams.
     dlna: bool = False
+
+    # When set, DLNA requests are served from a bounded per-track temp
+    # file (TrackFileSource) with the REAL Content-Length instead of
+    # the synthetic ~1TB the live RingBuffer path advertises. Set by
+    # the UPnP session on start_passthrough, cleared when passthrough
+    # stops (fallback PCM re-encode is served from the RingBuffer).
+    track_source: Optional["TrackFileSource"] = None
 
 
 class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
@@ -1134,6 +1268,69 @@ class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
         self.send_header("Connection", "close")
         self.end_headers()
 
+    def _serve_track(self, server: "StreamHTTPServer", head: bool = False) -> None:
+        """Serve a fully-buffered track file with the REAL byte length.
+
+        The renderer's decoder uses the FLAC STREAMINFO (real
+        total_samples) but the HTTP Content-Length we used to advertise
+        was a synthetic ~1TB. That mismatch made strict renderers treat
+        the real track end as 'unexpected end of stream' and seek past
+        it. Here the Content-Length is the actual file size, so the
+        renderer knows the exact end and stops cleanly.
+
+        Always answers 206 (DLNA convention) with a Content-Range over
+        the real total, and honours a byte Range for seek.
+        """
+        src = server.track_source
+        if src is None:
+            self.send_error(503, "no track")
+            return
+        parsed = urllib.parse.urlsplit(self.path)
+        req_ts = int(urllib.parse.parse_qs(parsed.query).get("ts", [0])[0])
+        if req_ts and src.track_id and req_ts != src.track_id:
+            self.send_error(410, "stale track")
+            return
+        if not src.ready.wait(timeout=15.0):
+            self.send_error(503, "track not ready")
+            return
+        if src.failed or src.path is None:
+            self.send_error(502, "track failed")
+            return
+        total = src.total_size
+        range_hdr = self.headers.get("Range", "")
+        start = 0
+        if range_hdr.startswith("bytes="):
+            try:
+                start = int(range_hdr[6:].split("-")[0] or 0)
+            except ValueError:
+                start = 0
+        if start > total:
+            start = total
+        self.send_response(206)
+        self.send_header(
+            "Content-Range", f"bytes {start}-{max(total - 1, 0)}/{total}"
+        )
+        self.send_header("Content-Length", str(total - start))
+        self.send_header("Accept-Ranges", "bytes")
+        self.send_header("Content-Type", server.content_type)
+        self.send_header("transferMode.dlna.org", "Streaming")
+        if self.headers.get("getcontentFeatures.dlna.org"):
+            self.send_header("contentFeatures.dlna.org", DLNA_CONTENT_FEATURES)
+        self.send_header("Connection", "close")
+        self.end_headers()
+        if head:
+            return
+        try:
+            with open(src.path, "rb") as f:
+                f.seek(start)
+                while True:
+                    chunk = f.read(65536)
+                    if not chunk:
+                        break
+                    self.wfile.write(chunk)
+        except (BrokenPipeError, ConnectionResetError, socket.timeout):
+            pass
+
     def do_HEAD(self) -> None:  # noqa: N802 - stdlib API
         # Some receivers (and plenty of middleboxes) probe headers
         # with a HEAD before GET to check Content-Type and confirm
@@ -1141,22 +1338,39 @@ class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
         # uses so they don't fall back or abort.
         self._log_connection("HEAD")
         server = self.server  # type: ignore[assignment]
-        if not isinstance(server, StreamHTTPServer) or server.buffer is None:
+        if not isinstance(server, StreamHTTPServer):
             self.send_error(503, "stream session not ready")
             return
         if self._request_path() != server.stream_path:
             self.send_error(404, "not found")
+            return
+        # Bounded per-track file: headers only, with the real length.
+        if server.dlna and server.track_source is not None:
+            self._serve_track(server, head=True)
+            return
+        if server.buffer is None:
+            self.send_error(503, "stream session not ready")
             return
         self._send_stream_headers(server)
 
     def do_GET(self) -> None:  # noqa: N802 - stdlib API
         self._log_connection("GET")
         server = self.server  # type: ignore[assignment]
-        if not isinstance(server, StreamHTTPServer) or server.buffer is None:
+        if not isinstance(server, StreamHTTPServer):
             self.send_error(503, "stream session not ready")
             return
         if self._request_path() != server.stream_path:
             self.send_error(404, "not found")
+            return
+        # Bounded per-track file: real Content-Length (the whole track
+        # is buffered to disk before we answer), so UAPP never seeks
+        # past the real end or hits the "unexpected end of stream"
+        # recovery that the synthetic ~1TB Content-Length caused.
+        if server.dlna and server.track_source is not None:
+            self._serve_track(server)
+            return
+        if server.buffer is None:
+            self.send_error(503, "stream session not ready")
             return
         buf = server.buffer
         # Parse ?ts= from the request to detect stale requests from
