@@ -212,6 +212,11 @@ export interface AlbumDetail extends Album {
 export interface ArtistExtras {
   appears_on: Album[];
   compilations: Album[];
+  /** Playlists featuring the artist. Only Tidal's curated artist page
+   *  carries these — there is no artists/{id}/playlists endpoint —
+   *  which is why they arrive with the deferred extras rather than in
+   *  the main artist payload. */
+  playlists: Playlist[];
   artist_mix_id: string | null;
 }
 

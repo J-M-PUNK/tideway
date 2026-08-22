@@ -8708,16 +8708,25 @@ def artist_detail(artist_id: int) -> dict:
             lambda: list(tidal.get_artist_albums(artist)) or [],
             [],
         )
+        # `limit=None` is tidalapi's "everything", and Tidal answers
+        # these in a single response: 234 EPs and singles for Taylor
+        # Swift, 1000 compilation credits for Drake, ~200-350ms each.
+        # The previous `limit=40` was an arbitrary cap and was the
+        # whole reason prolific artists showed a fraction of their
+        # catalogue. Don't reintroduce a number here, and don't page
+        # by offset either — Tidal's paged view of these endpoints is
+        # not a partition of the unlimited one, so walking it both
+        # costs more round trips and drops releases at the seams.
         f_eps = pool.submit(
             _safe_t,
             "eps",
-            lambda: list(artist.get_ep_singles(limit=40)) or [],
+            lambda: list(artist.get_ep_singles(limit=None)) or [],
             [],
         )
         f_compilations = pool.submit(
             _safe_t,
             "comps",
-            lambda: list(artist.get_other(limit=40)) or [],
+            lambda: list(artist.get_other(limit=None)) or [],
             [],
         )
         # Credits and videos used to be separate endpoints the
@@ -8977,18 +8986,30 @@ def artist_extras(artist_id: int) -> dict:
 
     raw_appears: list = []
     raw_comps: list = []
+    # Playlists an artist appears on ("This Is …", genre sets, radio
+    # spin-offs) exist only as modules on Tidal's curated page — there
+    # is no artists/{id}/playlists endpoint in the API or in tidalapi.
+    # The loop below already walks those modules for albums; the
+    # Playlist items in them used to be dropped on the floor, which is
+    # why the artist page had no playlists at all.
+    raw_playlists: list = []
     if page is not None:
         try:
             from tidalapi.album import Album as _TidalAlbum
+            from tidalapi.playlist import Playlist as _TidalPlaylist
 
             for cat in getattr(page, "categories", []) or []:
                 t = (getattr(cat, "title", "") or "").strip().lower()
                 is_app = "appear" in t or "featured" in t
                 is_comp = "compilation" in t
-                if not is_app and not is_comp:
-                    continue
                 for item in getattr(cat, "items", []) or []:
-                    if isinstance(item, _TidalAlbum):
+                    # Playlists are collected from every module, not
+                    # just the appears-on/compilation ones, because
+                    # Tidal spreads them across several differently
+                    # titled shelves and the titles are localized.
+                    if isinstance(item, _TidalPlaylist):
+                        raw_playlists.append(item)
+                    elif isinstance(item, _TidalAlbum) and (is_app or is_comp):
                         (raw_comps if is_comp else raw_appears).append(item)
         except Exception:
             pass
@@ -8997,7 +9018,8 @@ def artist_extras(artist_id: int) -> dict:
         seen: set = set()
         out: list = []
         for a in items:
-            aid = getattr(a, "id", None)
+            # Playlists are keyed by uuid rather than id in tidalapi.
+            aid = getattr(a, "id", None) or getattr(a, "uuid", None)
             if aid is None or aid in seen:
                 continue
             seen.add(aid)
@@ -9007,6 +9029,7 @@ def artist_extras(artist_id: int) -> dict:
     result = {
         "appears_on": [album_to_dict(a) for a in _byid(raw_appears)],
         "compilations": [album_to_dict(a) for a in _byid(raw_comps)],
+        "playlists": [playlist_to_dict(p) for p in _byid(raw_playlists)],
         "artist_mix_id": mix_id,
     }
     with _artist_extras_cache_lock:

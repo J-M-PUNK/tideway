@@ -1514,6 +1514,11 @@ class TidalClient:
         return _sort_by_date_added(items)
 
     def get_artist_albums(self, artist) -> list:
+        # No `limit`, which is tidalapi's "everything": Tidal returns
+        # the artist's whole album list in one response (168 for Taylor
+        # Swift, measured) rather than a first page. Don't add a cap
+        # here — a number chosen to look generous is what truncated the
+        # EPs shelf for prolific artists.
         try:
             return list(artist.get_albums())
         except Exception:
