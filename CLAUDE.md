@@ -102,6 +102,13 @@ single deploy, the workflow is:
    the auto-updater (`/releases/latest` excludes them), so a
    tagged-but-unpublished release ships nothing to users. If you
    tag and walk away, no one gets the update.
+
+   Publishing is also what releases the Linux side: the
+   `Publish Flatpak Repo` workflow fires on `release: published` and
+   pushes the OSTree repo to gh-pages, which is what `flatpak update`
+   reads. Up to and including v1.29.0 that step ran on the tag push
+   instead, so Flatpak users got every release at build time, before
+   signing and regardless of whether the draft was ever published.
 10. **Catch main back up.** Fast-forward `main` to the deploy
    branch: `git checkout main && git merge --ff-only deploy/v<X.Y.Z> && git push`.
 11. **Clean up.** Delete merged PR branches locally and on GitHub.
