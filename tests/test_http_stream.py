@@ -539,7 +539,9 @@ class TestDlnaHttpCompliance:
     def test_query_params_do_not_404(self):
         """Hisense pulls `/dlna/stream?mediaPlayerId=1&playMode=2`.
         The handler must match on the path alone, not the raw target,
-        or the stream 404s and the device stays silent."""
+        or the stream 404s and the device stays silent. This request
+        carries no Range header, so a compliant server answers 200
+        (see test_no_range_request_is_200)."""
         server, buffer = self._seeded_server()
         try:
             data = self._request(
@@ -547,8 +549,58 @@ class TestDlnaHttpCompliance:
                 b"GET /dlna/stream?mediaPlayerId=1&playMode=2 HTTP/1.1\r\n"
                 b"Host: localhost\r\n\r\n",
             )
+            assert data.startswith(b"HTTP/1.1 200"), (
+                f"query-param URL should serve, not 404, got: {data!r}"
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+            buffer.close()
+
+    def test_no_range_request_is_200(self):
+        """A DLNA GET without a Range header must get a plain 200 with a
+        Content-Length, not a 206 (#332). RFC 7233 forbids a 206 for a
+        request that didn't ask for a range, and Rygel's GStreamer
+        souphttpsrc (KEF LS50 II and other Rygel renderers) rejects the
+        unsolicited 206 with UPnP 716 "Resource not found." The finite
+        Content-Length is what UAPP needs for SEEK_END, and it's present
+        either way."""
+        server, buffer = self._seeded_server()
+        try:
+            data = self._request(
+                server,
+                b"GET /dlna/stream HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            )
+            assert data.startswith(b"HTTP/1.1 200"), (
+                f"no-Range GET should be 200, got: {data!r}"
+            )
+            assert b"Content-Length:" in data, (
+                f"200 still needs a Content-Length for SEEK_END, got: {data!r}"
+            )
+            assert b"206" not in data.split(b"\r\n", 1)[0], (
+                f"status line must not be 206, got: {data!r}"
+            )
+        finally:
+            server.shutdown()
+            server.server_close()
+            buffer.close()
+
+    def test_range_request_is_206_with_content_range(self):
+        """A GET that *does* carry a Range header still gets 206 +
+        Content-Range — renderers that probe with a range rely on it."""
+        server, buffer = self._seeded_server()
+        try:
+            data = self._request(
+                server,
+                b"GET /dlna/stream HTTP/1.1\r\n"
+                b"Host: localhost\r\n"
+                b"Range: bytes=0-\r\n\r\n",
+            )
             assert data.startswith(b"HTTP/1.1 206"), (
-                f"query-param URL should serve 206, got: {data!r}"
+                f"Range GET should be 206, got: {data!r}"
+            )
+            assert b"Content-Range: bytes 0-" in data, (
+                f"206 must carry a Content-Range, got: {data!r}"
             )
         finally:
             server.shutdown()
@@ -679,25 +731,6 @@ class TestDlnaHttpCompliance:
                 f"expected a Content-Range header, got: {data!r}"
             )
             assert b"Accept-Ranges: bytes" in data
-        finally:
-            server.shutdown()
-            server.server_close()
-            buffer.close()
-
-    def test_no_range_header_gets_206(self):
-        """A DLNA GET without a Range header still gets 206 + Content-Length
-        + Content-Range. Strict renderers (UAPP) need Content-Length on their
-        initial plain GET for SEEK_END during decoder-init."""
-        server, buffer = self._seeded_server()
-        try:
-            data = self._request(
-                server,
-                b"GET /dlna/stream HTTP/1.1\r\nHost: localhost\r\n\r\n",
-            )
-            assert data.startswith(b"HTTP/1.1 206"), (
-                f"non-Range DLNA GET should get 206, got: {data!r}"
-            )
-            assert b"Content-Range" in data
         finally:
             server.shutdown()
             server.server_close()
