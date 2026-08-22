@@ -837,8 +837,8 @@ class PCMPlayer:
             self._transition("loading", track_id=track_id)
 
         try:
-            source_spec, duration_s, stream_info, prefetched_bytes = self._resolve_source(
-                track_id, quality
+            source_spec, duration_s, stream_info, prefetched_bytes, track_meta = (
+                self._resolve_source(track_id, quality)
             )
             t_resolved = time.monotonic()
             initial_source = _build_source(source_spec, prefetched=prefetched_bytes)
@@ -851,7 +851,7 @@ class PCMPlayer:
                         _upnp_manager.start_passthrough(
                             source_spec,
                             prefetched=prefetched_bytes,
-                            metadata=self._current_track_meta,
+                            metadata=track_meta,
                         )
                 except (ValueError, RuntimeError, OSError) as exc:
                     print(
@@ -1237,7 +1237,7 @@ class PCMPlayer:
             self._drop_preload()
 
             try:
-                source_spec, duration_s, stream_info, prefetched_bytes = (
+                source_spec, duration_s, stream_info, prefetched_bytes, _ = (
                     self._resolve_source(track_id, quality)
                 )
                 source = _build_source(source_spec, prefetched=prefetched_bytes)
@@ -1329,8 +1329,8 @@ class PCMPlayer:
         responsible for tearing down the returned pipeline if it
         decides not to adopt it.
         """
-        source_spec, duration_s, stream_info, prefetched_bytes = self._resolve_source(
-            track_id, quality
+        source_spec, duration_s, stream_info, prefetched_bytes, track_meta = (
+            self._resolve_source(track_id, quality)
         )
         source = _build_source(source_spec, prefetched=prefetched_bytes)
 
@@ -1347,7 +1347,7 @@ class PCMPlayer:
                     _upnp_manager.start_passthrough(
                         source_spec,
                         prefetched=prefetched_bytes,
-                        metadata=self._current_track_meta,
+                        metadata=track_meta,
                     )
             except (ValueError, RuntimeError, OSError) as exc:
                 print(
@@ -2037,9 +2037,52 @@ class PCMPlayer:
             self._paused = False
             self._seeking = False
 
+    def _build_track_meta(self, track, duration_s) -> dict:
+        """Extract UPnP/DLNA track metadata from a resolved Tidal track.
+
+        Returns the metadata dict the UPnP layer consumes for
+        SetAVTransportURI. `cover_id` is carried separately so the
+        UPnP layer can build a LAN-local cover URL — the renderer can't
+        reach Tidal's image CDN directly, which is why the cover never
+        showed before.
+        """
+        artist_name = (
+            getattr(track.artist, "name", None)
+            if hasattr(track, "artist")
+            else None
+        )
+        if not artist_name and hasattr(track, "artists") and track.artists:
+            artist_name = track.artists[0].name
+        album_name = (
+            track.album.name
+            if hasattr(track, "album") and track.album
+            else None
+        )
+        cover_id = (
+            track.album.cover
+            if hasattr(track, "album") and track.album
+            else None
+        )
+        return {
+            "title": getattr(track, "name", "") or "",
+            "artist": artist_name or "",
+            "album": album_name or "",
+            "duration_s": duration_s or 0,
+            "cover_id": cover_id or "",
+            "cover_url": (
+                f"https://resources.tidal.com/images/{cover_id}/640x640.jpg"
+                if cover_id
+                else ""
+            ),
+        }
+
     def _resolve_source(
-        self, track_id: str, quality: Optional[str]
-    ) -> tuple[Union[str, list[str]], Optional[float], StreamInfo, dict[int, bytes]]:
+        self,
+        track_id: str,
+        quality: Optional[str],
+        *,
+        set_current_meta: bool = True,
+    ) -> tuple[Union[str, list[str]], Optional[float], StreamInfo, dict[int, bytes], Optional[dict]]:
         """Resolve a track id to a source spec.
 
         Returns either a local filesystem path (str) or a DASH URL
@@ -2052,6 +2095,13 @@ class PCMPlayer:
         sources that have not had byte-level prefetch run against
         them. When populated, SegmentReader seeds its buffer with
         those bytes so decoder_init does not touch the network.
+
+        `set_current_meta` is passed False by speculative resolution
+        (cold-start / hover prefetch): those warm the cache but must
+        NOT overwrite `_current_track_meta`. The renderer's first
+        SetAVTransportURI reads that dict, so a prefetch of a track
+        the user never played would otherwise show up as the wrong
+        "current" track at the start of a session.
         """
         if self._local_lookup is not None:
             local_path = self._local_lookup(track_id)
@@ -2062,6 +2112,7 @@ class PCMPlayer:
                     duration_s,
                     info or StreamInfo(source="local"),
                     {},
+                    None,
                 )
 
         session = self._session_getter()
@@ -2085,7 +2136,17 @@ class PCMPlayer:
         t0 = time.monotonic()
         cached_urls_info = self._manifest_cache.lookup(cache_key)
         if cached_urls_info is not None:
-            urls, duration, info, bytes_map = cached_urls_info
+            urls, duration, info, bytes_map, track_meta = cached_urls_info
+            # Cache HIT must refresh the UPnP metadata for playback too
+            # — the miss path does this inside _resolve_uncached, but a
+            # hit used to leave _current_track_meta pointing at the
+            # previous track, so the renderer was told the wrong
+            # artist/song at session start (and on every replay, since
+            # cold-start prefetch makes the first play a hit). Guarded
+            # by set_current_meta so speculative prefetch doesn't clobber
+            # it.
+            if track_meta is not None and set_current_meta:
+                self._current_track_meta = track_meta
             print(
                 f"[perf] resolve track={track_id} quality={quality} "
                 f"cache=HIT elapsed={(time.monotonic() - t0) * 1000.0:.0f}ms "
@@ -2093,11 +2154,12 @@ class PCMPlayer:
                 file=sys.stderr,
                 flush=True,
             )
-            return (list(urls), duration, info, bytes_map)
+            return (list(urls), duration, info, bytes_map, track_meta)
 
         try:
             return self._resolve_uncached(
-                session, track_id, quality, cache_key, t0
+                session, track_id, quality, cache_key, t0,
+                set_current_meta=set_current_meta,
             )
         except Exception as exc:
             # The playback resolve path must recover from an expired
@@ -2122,6 +2184,7 @@ class PCMPlayer:
                         quality,
                         cache_key,
                         t0,
+                        set_current_meta=set_current_meta,
                     )
                 raise RuntimeError(
                     "Tidal session expired. Please log out and log "
@@ -2136,13 +2199,19 @@ class PCMPlayer:
         quality: Optional[str],
         cache_key: tuple,
         t0: float,
+        *,
+        set_current_meta: bool = True,
     ) -> tuple[
         Union[str, list[str]], Optional[float], StreamInfo, dict[int, bytes]
     ]:
         """Cache-miss network resolution: fetch track + playback-info,
         parse the manifest, populate the cache. Split out of
         _resolve_source so the caller can retry it once after a
-        force-refresh when Tidal returns an expired-token 401."""
+        force-refresh when Tidal returns an expired-token 401.
+
+        `set_current_meta` mirrors _resolve_source: speculative
+        resolution (prefetch) passes False so it doesn't overwrite the
+        metadata of the track that is actually playing."""
         override = None
         if quality:
             try:
@@ -2201,35 +2270,14 @@ class PCMPlayer:
             if not urls:
                 raise RuntimeError("manifest has no segment urls")
             duration = getattr(track, "duration", None)
-            # Save track metadata for UPnP/DLNA track-change notification.
-            artist_name = (
-                getattr(track.artist, "name", None)
-                if hasattr(track, "artist")
-                else None
-            )
-            if not artist_name and hasattr(track, "artists") and track.artists:
-                artist_name = track.artists[0].name
-            album_name = (
-                track.album.name
-                if hasattr(track, "album") and track.album
-                else None
-            )
-            cover_id = (
-                track.album.cover
-                if hasattr(track, "album") and track.album
-                else None
-            )
-            self._current_track_meta = {
-                "title": getattr(track, "name", "") or "",
-                "artist": artist_name or "",
-                "album": album_name or "",
-                "duration_s": duration or 0,
-                "cover_url": (
-                    f"https://resources.tidal.com/images/{cover_id}/640x640.jpg"
-                    if cover_id
-                    else ""
-                ),
-            }
+            # Resolve track metadata for UPnP/DLNA track-change
+            # notification. Also stored on the cache entry (below) so a
+            # later cache HIT carries the correct metadata too. Only for
+            # real loads — speculative prefetch passes set_current_meta
+            # False so it can't clobber the playing track's metadata.
+            track_meta = self._build_track_meta(track, duration)
+            if set_current_meta:
+                self._current_track_meta = track_meta
             info = StreamInfo(
                 source="stream",
                 codec=_normalize_codec(
@@ -2260,7 +2308,9 @@ class PCMPlayer:
                 ),
             )
             duration_s = float(duration) if duration else None
-            self._manifest_cache.store(cache_key, list(urls), duration_s, info)
+            self._manifest_cache.store(
+                cache_key, list(urls), duration_s, info, track_meta
+            )
             # After store, any previously-warmed bytes are preserved
             # — pick them back up so a MISS on manifest that still
             # has bytes cached returns the bytes too.
@@ -2275,7 +2325,7 @@ class PCMPlayer:
                 file=sys.stderr,
                 flush=True,
             )
-            return (list(urls), duration_s, info, bytes_map)
+            return (list(urls), duration_s, info, bytes_map, track_meta)
         finally:
             if override is not None:
                 session.config.quality = original
@@ -2326,7 +2376,9 @@ class PCMPlayer:
 
         tidal_jitter_sleep()
         try:
-            source_spec, _dur, _info, _bytes = self._resolve_source(track_id, quality)
+            source_spec, _dur, _info, _bytes, _ = self._resolve_source(
+                track_id, quality, set_current_meta=False
+            )
         except Exception as exc:
             log.debug("prefetch manifest %s@%s failed: %s", track_id, quality, exc)
             return False
