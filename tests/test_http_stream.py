@@ -949,3 +949,87 @@ class TestBoundedTrackServe:
             server.server_close()
             buffer.close()
             os.unlink(path)
+
+
+
+
+# ---------------------------------------------------------------------
+# Cover-art proxy (renderer can't reach Tidal's image CDN directly)
+# ---------------------------------------------------------------------
+
+
+class TestCoverProxy:
+    """The LAN stream server also proxies album covers so a DLNA
+    renderer (e.g. UAPP) can show art without reaching Tidal's CDN.
+    The endpoint must validate the cover id (no SSRF) and cache the
+    fetched bytes."""
+
+    COVER_ID = "12345678-1234-1234-1234-1234567890ab"
+
+    def _server(self):
+        buffer = RingBuffer()
+        # Seed so a concurrent stream GET doesn't block; the cover path
+        # doesn't touch the buffer but the server still expects one.
+        buffer.write(b"\x00" * 256)
+        buffer.data_ready.set()
+        server = start_stream_http_server(
+            buffer, stream_path="/stream", content_type="audio/flac"
+        )
+        return server, buffer
+
+    def _get(self, server, path):
+        import socket as _socket
+
+        port = server.server_address[1]
+        sock = _socket.create_connection(("127.0.0.1", port), timeout=3.0)
+        try:
+            sock.sendall(
+                f"GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n".encode()
+            )
+            chunks = []
+            while True:
+                data = sock.recv(4096)
+                if not data:
+                    break
+                chunks.append(data)
+            return b"".join(chunks)
+        finally:
+            sock.close()
+
+    def _fake_cover_response(self):
+        resp = MagicMock()
+        resp.raise_for_status.return_value = None
+        resp.content = b"\xff\xd8\xff\xe0COVERJPEG"
+        resp.headers.get.return_value = "image/jpeg"
+        return resp
+
+    def test_cover_proxy_serves_cached_image(self):
+        from app.audio.http_stream import _COVER_SESSION
+
+        fake = self._fake_cover_response()
+        server, buffer = self._server()
+        try:
+            with patch.object(_COVER_SESSION, "get", return_value=fake) as get:
+                raw = self._get(server, f"/cover/{self.COVER_ID}")
+                assert raw.startswith(b"HTTP/1.1 200"), raw[:64]
+                assert b"Content-Type: image/jpeg" in raw, raw[:200]
+                assert b"\xff\xd8\xff\xe0COVERJPEG" in raw, raw
+                # Fetched once; the second request is served from cache.
+                get.assert_called_once()
+                raw2 = self._get(server, f"/cover/{self.COVER_ID}")
+                assert b"\xff\xd8\xff\xe0COVERJPEG" in raw2
+                get.assert_called_once()
+        finally:
+            server.shutdown()
+            server.server_close()
+            buffer.close()
+
+    def test_cover_proxy_rejects_malformed_id(self):
+        server, buffer = self._server()
+        try:
+            raw = self._get(server, "/cover/..%2f..%2fetc%2fpasswd")
+            assert raw.startswith(b"HTTP/1.1 400"), raw[:64]
+        finally:
+            server.shutdown()
+            server.server_close()
+            buffer.close()

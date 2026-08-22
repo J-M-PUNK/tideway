@@ -41,10 +41,11 @@ def test_player_prefetch_jitters_before_first_tidal_call():
     def fake_jitter() -> None:
         call_order.append("jitter")
 
-    def fake_resolve(track_id, quality):
+    def fake_resolve(track_id, quality, *, set_current_meta=True):
         call_order.append("resolve")
-        # Mimic _resolve_source's return shape: (urls, dur, info, bytes_map).
-        return (["http://seg/0", "http://seg/1"], 180.0, None, {})
+        # Mimic _resolve_source's return shape:
+        # (urls, dur, info, bytes_map, track_meta).
+        return (["http://seg/0", "http://seg/1"], 180.0, None, {}, None)
 
     player._resolve_source = fake_resolve  # type: ignore[assignment]
 
