@@ -253,7 +253,15 @@ class Decoder:
         """Return the next chunk of packed native-format PCM, shape
         `(N, channels)`, dtype `self.output_dtype`. Returns None at
         EOF."""
-        if self._done:
+        # A pending seek is handled before the done-check, not after.
+        # The block below clears `_done` precisely so a seek back from
+        # EOF can resume, but an early `if self._done: return None`
+        # above it meant that line was unreachable and the decoder
+        # stayed finished forever. Nothing in PCMPlayer reaches this
+        # today, because seek() always builds a fresh Decoder, so this
+        # is latent rather than a live bug — but the contract the
+        # comment describes is now the one the code implements.
+        if self._done and self._pending_seek_s is None:
             return None
         # Apply any pending seek BEFORE pulling the next frame. This
         # coordinates with PCMPlayer.seek() — the player clears the
@@ -263,9 +271,22 @@ class Decoder:
             target_s = self._pending_seek_s
             self._pending_seek_s = None
             try:
-                # container.seek wants AV_TIME_BASE units (microseconds).
+                # The offset is in the STREAM's time_base, because we
+                # pass `stream=`. AV_TIME_BASE microseconds are what
+                # container.seek() wants only when seeking the
+                # container as a whole (stream=None) — passing both a
+                # stream and microseconds over-scales the target by
+                # `1_000_000 * time_base`, which for a 44.1 kHz FLAC
+                # is 22.7x. Every seek then landed past the end of the
+                # file, FFmpeg's backward seek clamped to the last
+                # frame, the decoder hit EOF within two frames, and
+                # the player advanced to the next track: issue #328,
+                # reported as "seeking ahead on Saved tracks plays the
+                # next track instead". Only local files reach here —
+                # DASH seeks by reopening at the right segment — which
+                # is why it only ever showed up on downloads.
                 self._container.seek(
-                    int(target_s * 1_000_000),
+                    int(target_s / float(self._stream.time_base)),
                     stream=self._stream,
                     any_frame=False,
                 )
