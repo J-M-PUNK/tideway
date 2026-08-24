@@ -4,6 +4,7 @@ import { createRoot, type Root } from "react-dom/client";
 import {
   MAX_HISTORY,
   addToHistory,
+  resetSearchHistoryCache,
   useSearchHistory,
 } from "./useSearchHistory";
 
@@ -95,7 +96,12 @@ describe("useSearchHistory", () => {
     act(() => root.render(<Probe />));
   }
 
-  beforeEach(() => localStorage.clear());
+  beforeEach(() => {
+    localStorage.clear();
+    // The store is module-level, so each case has to start from a
+    // clean read of the (now empty) store.
+    resetSearchHistoryCache();
+  });
 
   afterEach(() => {
     act(() => root.unmount());
@@ -159,6 +165,33 @@ describe("useSearchHistory", () => {
     } finally {
       Object.defineProperty(window, "localStorage", real);
     }
+  });
+
+  it("keeps two mounted readers in sync", () => {
+    // The search bar's dropdown is mounted for the whole session
+    // while the Search page comes and goes. With per-hook state, a
+    // query recorded on the page would never reach the dropdown and
+    // the bar would keep offering a stale list.
+    const second = document.createElement("div");
+    document.body.appendChild(second);
+    const secondRoot = createRoot(second);
+    let other!: ReturnType<typeof useSearchHistory>;
+    function OtherProbe() {
+      other = useSearchHistory();
+      return null;
+    }
+
+    mount();
+    act(() => secondRoot.render(<OtherProbe />));
+
+    act(() => latest.record("daft punk"));
+    expect(other.history).toEqual(["daft punk"]);
+
+    act(() => other.clear());
+    expect(latest.history).toEqual([]);
+
+    act(() => secondRoot.unmount());
+    second.remove();
   });
 
   it("never writes on mount", () => {
