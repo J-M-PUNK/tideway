@@ -1,0 +1,184 @@
+name: Publish Flatpak Repo
+
+# Pushes the OSTree repo built by the Release workflow to GitHub Pages,
+# so `flatpak update` picks up the new version.
+#
+# This is deliberately NOT part of the Release workflow. It used to be,
+# gated on `needs: [publish]` with a comment reasoning that the release
+# draft "signals a real shipping tag". That gate never held: `publish`
+# creates a DRAFT, and a draft is precisely the state where nothing has
+# shipped yet. The maintainer still has to sign the installers
+# (scripts/sign-release.sh) and publish by hand. So on every release the
+# Flatpak channel went live at tag time — minutes after the build, ahead
+# of signing, and with no way to call it back if the draft was scrapped.
+# Observed on v1.29.0.
+#
+# `release: published` is the event that actually means "this shipped",
+# so that is what triggers it now. The one cost is that the OSTree repo
+# is a workflow artifact rather than a release asset, so this run has to
+# reach back into the Release run that built the tag and pull it from
+# there. Artifacts are retained 90 days, which is far longer than a
+# draft ever sits.
+
+on:
+  release:
+    types: [published]
+  # Manual recovery. If the automatic run fails — or an old release
+  # needs re-publishing — dispatch with the tag and it does the same
+  # work. Also the escape hatch if this workflow itself is ever broken
+  # at a bad moment.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish the Flatpak repo for (e.g. v1.29.0)"
+        required: true
+
+concurrency:
+  # One publish at a time. Two overlapping runs would race on the
+  # gh-pages branch and the loser's push would be rejected, leaving the
+  # repo in whichever state won.
+  group: publish-flatpak-repo
+  cancel-in-progress: false
+
+jobs:
+  # Work out which tag we're publishing and which Release run built it.
+  # Split into its own job so the download step below has a plain
+  # `needs.resolve.outputs.*` to read rather than a chain of step
+  # outputs, and so a lookup failure is legible in the job list.
+  resolve:
+    runs-on: ubuntu-latest
+    # Prereleases (any tag with a hyphen — see release.yml) must not go
+    # to the stable Flatpak channel. The old in-Release job had no such
+    # guard, so a `v1.30.0-rc1` tag would have pushed a release
+    # candidate to every subscribed user.
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.release.prerelease == false
+    outputs:
+      tag: ${{ steps.pick.outputs.tag }}
+      run_id: ${{ steps.pick.outputs.run_id }}
+    steps:
+      - id: pick
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.event.inputs.tag || github.event.release.tag_name }}
+        run: |
+          set -euo pipefail
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+          # A tag-triggered Release run records the tag as its
+          # headBranch, so that is how we find the build.
+          RUN_ID=$(gh run list \
+            --repo "$GITHUB_REPOSITORY" \
+            --workflow=release.yml \
+            --branch "$TAG" \
+            --json databaseId,conclusion \
+            --jq '[.[] | select(.conclusion=="success")][0].databaseId')
+
+          if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
+            echo "::error::No successful Release run found for $TAG. \
+          The Flatpak repo cannot be published without the OSTree artifact \
+          that run produced. Re-run the Release workflow for this tag, then \
+          dispatch this workflow manually."
+            exit 1
+          fi
+          echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
+          echo "Publishing Flatpak repo for $TAG from Release run $RUN_ID"
+
+  publish-flatpak-repo:
+    needs: [resolve]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      # Required to read artifacts from a different workflow run.
+      actions: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.resolve.outputs.tag }}
+          fetch-depth: 1
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: Tideway-Linux-Flatpak-Repo
+          path: ostree-repo
+          # The artifact belongs to the Release run, not this one.
+          run-id: ${{ needs.resolve.outputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Drop the .flatpakrepo subscribe file next to the OSTree repo
+        # Users add the remote with `flatpak remote-add ... tideway.flatpakrepo`.
+        # The file lives at flatpak/tideway.flatpakrepo and gets served
+        # at https://j-m-punk.github.io/tideway/tideway.flatpakrepo.
+        #
+        # When the project's GPG public key is committed at
+        # flatpak/tideway-release.pub.gpg (part of the opt-in OSTree
+        # signing setup in docs/flatpak-gpg-signing.md), we append a
+        # `GpgKey=` line containing its base64 so newly-added remotes
+        # turn on signature verification automatically. Without it,
+        # Flatpak adds the remote in no-gpg-verify mode, which still
+        # works but trusts only HTTPS for content authenticity.
+        run: |
+          cp flatpak/tideway.flatpakrepo ostree-repo/tideway.flatpakrepo
+          if [ -f flatpak/tideway-release.pub.gpg ]; then
+            GPGKEY_B64=$(base64 -w 0 flatpak/tideway-release.pub.gpg)
+            printf 'GpgKey=%s\n' "$GPGKEY_B64" >> ostree-repo/tideway.flatpakrepo
+            echo "Embedded GPG public key in tideway.flatpakrepo"
+          else
+            echo "No flatpak/tideway-release.pub.gpg checked in — remote will install in no-gpg-verify mode"
+          fi
+
+      - name: Drop an index.html that links the subscribe file + bundle
+        # GitHub Pages serves whatever you point it at; without an
+        # index page, the bare root URL renders an empty directory
+        # listing. A minimal page that explains the install paths
+        # makes the URL discoverable for anyone landing on it.
+        run: |
+          VERSION=$(cat VERSION)
+          cat > ostree-repo/index.html <<HTML
+          <!doctype html>
+          <html lang="en">
+          <head>
+            <meta charset="utf-8">
+            <title>Tideway — Linux install</title>
+            <style>
+              body { font-family: system-ui, sans-serif; max-width: 720px; margin: 3rem auto; padding: 0 1rem; line-height: 1.5; }
+              h1 { margin-top: 0; }
+              code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+              pre { background: #f5f5f5; padding: 0.75rem 1rem; border-radius: 6px; overflow-x: auto; }
+              a { color: #2563eb; }
+            </style>
+          </head>
+          <body>
+            <h1>Tideway — Linux install</h1>
+            <p>Tideway ships as a Flatpak for Linux. Two ways to install.</p>
+
+            <h2>Auto-updating (recommended)</h2>
+            <p>Subscribe to this Flatpak repo once; <code>flatpak update</code> pulls new releases.</p>
+            <pre>flatpak remote-add --user --if-not-exists tideway \\
+              https://j-m-punk.github.io/tideway/tideway.flatpakrepo
+            flatpak install --user tideway com.tidaldownloader.Tideway</pre>
+
+            <h2>One-shot bundle</h2>
+            <p>Download <code>Tideway-${VERSION}.flatpak</code> from the <a href="https://github.com/J-M-PUNK/tideway/releases/latest">latest release</a>, then:</p>
+            <pre>flatpak install --user --bundle Tideway-${VERSION}.flatpak</pre>
+            <p>Won't auto-update; grab a newer bundle when you want to upgrade.</p>
+
+            <p style="margin-top:3rem; color:#666;">
+              <a href="https://github.com/J-M-PUNK/tideway">Project on GitHub</a>
+            </p>
+          </body>
+          </html>
+          HTML
+
+      - name: Deploy to gh-pages branch
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ostree-repo
+          # Each release replaces the previous OSTree repo content;
+          # users `flatpak update` against the new commit. `keep_files:
+          # false` cleans out stale objects from old releases so the
+          # branch doesn't grow unboundedly.
+          keep_files: false
+          commit_message: "Publish Flatpak repo for ${{ needs.resolve.outputs.tag }}"

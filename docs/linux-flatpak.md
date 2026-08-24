@@ -118,9 +118,14 @@ it.
      and produces two artifacts: a `.flatpak` bundle (attached to
      the GitHub Release, signed by `sign-release.sh` alongside the
      DMG / .exe) and the OSTree repo directory.
-   - **3c — Distribution.** `publish-flatpak-repo` deploys the
-     OSTree repo to the `gh-pages` branch on every tag via
-     `peaceiris/actions-gh-pages`. GitHub Pages serves it at
+   - **3c — Distribution.** The `Publish Flatpak Repo` workflow
+     deploys the OSTree repo to the `gh-pages` branch via
+     `peaceiris/actions-gh-pages`. It triggers on
+     `release: published`, not on the tag push, so the Linux channel
+     goes live at the same moment as the other platforms rather than
+     ahead of signing. It lives in its own workflow file because of
+     that trigger, and reaches back into the Release run that built
+     the tag to fetch the OSTree artifact. GitHub Pages serves it at
      `https://j-m-punk.github.io/tideway/`, with a
      `tideway.flatpakrepo` subscribe file and an `index.html`
      landing page next to the repo. Users run `flatpak remote-add
