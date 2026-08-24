@@ -8744,7 +8744,13 @@ def artist_detail(artist_id: int) -> dict:
         f_videos = pool.submit(
             _safe_t,
             "videos",
-            lambda: [video_to_dict(v) for v in artist.get_videos(limit=50) or []],
+            # No limit: Tidal returns the artist's whole video list in
+            # one response and charges nothing for the extra (59 vs 50
+            # for Drake, same ~160ms). The old cap of 50 silently cut
+            # the tail off any artist with more.
+            lambda: [
+                video_to_dict(v) for v in artist.get_videos(limit=None) or []
+            ],
             [],
         )
         f_credits = pool.submit(
