@@ -150,10 +150,12 @@ function NavBarSearch({ className }: { className?: string }) {
     }
   };
 
-  // Dropdown is "open" only when both: the input has focus AND there's
-  // something to search for. Empty + focused renders nothing — no
-  // gratuitous "Start typing" panel, that's the placeholder's job.
-  const dropdownOpen = focused && value.trim().length > 0;
+  // Open whenever the input has focus. An empty box is no longer a
+  // dead end: SearchSuggestions shows recent searches there, which is
+  // where people look for their history. It renders no panel at all
+  // when there is nothing to offer, so a first-run empty box still
+  // gets the placeholder rather than a gratuitous popover.
+  const dropdownOpen = focused;
 
   const closeDropdown = () => {
     setFocused(false);

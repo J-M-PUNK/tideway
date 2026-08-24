@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { ArrowRight, Loader2, Music } from "lucide-react";
+import { ArrowRight, Clock, Loader2, Music } from "lucide-react";
 import { api } from "@/api/client";
 import type {
   Album,
@@ -9,6 +9,7 @@ import type {
   SearchResponse,
   Track,
 } from "@/api/types";
+import { useSearchHistory } from "@/hooks/useSearchHistory";
 import { cn, imageProxy } from "@/lib/utils";
 
 /**
@@ -16,6 +17,11 @@ import { cn, imageProxy } from "@/lib/utils";
  * input. Reuses /api/search at a smaller limit and renders a compact
  * preview: top hit + a couple of rows from each kind, plus a
  * "Show all results" footer that lands on the full Search page.
+ *
+ * With the input empty it shows recent searches instead. That is
+ * where people look for their history — clicking the search bar —
+ * and 1.29.0 shipped it only on the Search page's empty state, which
+ * a user has to already be on to see.
  *
  * Click target depends on row kind: track → album page (no per-track
  * page exists), album / playlist → detail page, artist → profile.
@@ -31,7 +37,8 @@ type ContentRow =
   | { kind: "artist"; item: Artist }
   | { kind: "playlist"; item: Playlist };
 
-type Row = ContentRow | { kind: "see-all" };
+type Row =
+  ContentRow | { kind: "see-all" } | { kind: "history"; query: string };
 
 export function SearchSuggestions({
   query,
@@ -47,6 +54,7 @@ export function SearchSuggestions({
   /** Fired on Escape so the parent can clear focus / close. */
   onCloseRequested: () => void;
 }) {
+  const { history } = useSearchHistory();
   const [results, setResults] = useState<SearchResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [selected, setSelected] = useState(0);
@@ -95,6 +103,12 @@ export function SearchSuggestions({
   // 2 of each remaining kind. Keep the dropdown short — the full
   // Search page is one Enter / click away.
   const rows = useMemo<Row[]>(() => {
+    // Empty input: offer what the user searched for before. Recents
+    // and results are never both on screen, so they share the row
+    // list and get the same keyboard handling for free.
+    if (query.trim().length === 0) {
+      return history.map((q) => ({ kind: "history", query: q }) as Row);
+    }
     if (!results) return [];
     const out: Row[] = [];
     const topHitId = results.top_hit
@@ -127,7 +141,7 @@ export function SearchSuggestions({
     take("playlist", results.playlists, 1);
     if (out.length > 0) out.push({ kind: "see-all" });
     return out;
-  }, [results]);
+  }, [results, query, history]);
 
   // Reset selection whenever the row set changes so we don't point at
   // a stale index after a query refresh.
@@ -139,6 +153,10 @@ export function SearchSuggestions({
     onActivate();
     if (row.kind === "see-all") {
       navigate(`/search?q=${encodeURIComponent(query.trim())}`);
+      return;
+    }
+    if (row.kind === "history") {
+      navigate(`/search?q=${encodeURIComponent(row.query)}`);
       return;
     }
     const { kind, item } = row;
@@ -201,6 +219,10 @@ export function SearchSuggestions({
   }, [selected]);
 
   if (!open) return null;
+  const isHistoryView = query.trim().length === 0;
+  // An empty box with nothing searched yet has nothing to say. Render
+  // no panel at all rather than an empty popover under the input.
+  if (isHistoryView && rows.length === 0) return null;
 
   const showEmpty = !loading && query.trim().length >= 2 && rows.length === 0;
   const tooShort = query.trim().length > 0 && query.trim().length < 2;
@@ -217,6 +239,11 @@ export function SearchSuggestions({
         ref={listRef}
         className="max-h-[60vh] overflow-y-auto scrollbar-thin"
       >
+        {isHistoryView && (
+          <div className="px-4 pb-1 pt-2.5 text-xs font-semibold uppercase tracking-wider text-muted-foreground">
+            Recent searches
+          </div>
+        )}
         {loading && rows.length === 0 && (
           <div className="flex items-center gap-2 px-4 py-3 text-sm text-muted-foreground">
             <Loader2 className="h-4 w-4 animate-spin" /> Searching…
@@ -249,6 +276,7 @@ export function SearchSuggestions({
 
 function rowKey(row: Row): string {
   if (row.kind === "see-all") return "see-all";
+  if (row.kind === "history") return `history:${row.query}`;
   return `${row.kind}:${row.item.id}`;
 }
 
@@ -279,6 +307,24 @@ function SuggestionRow({
       >
         <span>Show all results</span>
         <ArrowRight className="h-4 w-4" />
+      </button>
+    );
+  }
+
+  if (row.kind === "history") {
+    return (
+      <button
+        data-row-index={index}
+        type="button"
+        onMouseMove={onMouseMove}
+        onClick={onClick}
+        className={cn(
+          "flex w-full items-center gap-3 px-4 py-2.5 text-left text-sm transition-colors",
+          active ? "bg-accent" : "hover:bg-accent/60",
+        )}
+      >
+        <Clock className="h-4 w-4 shrink-0 text-muted-foreground" />
+        <span className="truncate">{row.query}</span>
       </button>
     );
   }

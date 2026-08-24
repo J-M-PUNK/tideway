@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useSyncExternalStore } from "react";
 
 /**
  * Recent search queries, persisted per install.
@@ -88,52 +88,61 @@ export function addToHistory(entries: string[], raw: string): string[] {
   return [query, ...deduped].slice(0, MAX_HISTORY);
 }
 
-export function useSearchHistory() {
-  // Read in the initializer, not an effect: installStorageShim runs
-  // before the first render, so storage is already usable here, and
-  // seeding state directly avoids a second render pass on every mount
-  // of the search page.
-  const [history, setHistory] = useState<string[]>(read);
+// One shared store rather than per-hook state. Two surfaces read this
+// now — the Search page and the search bar's dropdown — and the
+// dropdown is mounted the whole time the app is. With independent
+// useState copies, a query recorded on the Search page would not
+// reach the already-mounted dropdown until a remount, so the bar
+// would keep offering a stale list.
+//
+// `cache` is read from storage once, lazily. useSyncExternalStore
+// requires getSnapshot to return a stable reference for unchanged
+// state, so re-reading storage on every call would loop forever.
+let cache: string[] | null = null;
+const subscribers = new Set<() => void>();
 
-  // Persisting happens here rather than inside the state updaters,
-  // because an updater has to be pure: React may run one
-  // speculatively and discard the result, which would leave
-  // localStorage holding a list that never became state. StrictMode
-  // also double-invokes them in development.
-  //
-  // The mount pass is skipped deliberately. `history` starts as
-  // whatever read() returned, and read() falls back to [] when
-  // storage is unreadable — writing that back immediately would turn
-  // a transient read failure into permanent data loss.
-  const loaded = useRef(false);
-  useEffect(() => {
-    if (!loaded.current) {
-      loaded.current = true;
-      return;
-    }
-    write(history);
-  }, [history]);
+function getSnapshot(): string[] {
+  if (cache === null) cache = read();
+  return cache;
+}
+
+function subscribe(onChange: () => void): () => void {
+  subscribers.add(onChange);
+  return () => {
+    subscribers.delete(onChange);
+  };
+}
+
+/** Commit a new list: persist it, then wake every mounted reader.
+ *  Only ever called from an event handler or an effect, never from a
+ *  render or a state updater. */
+function commit(next: string[]): void {
+  if (sameOrder(next, getSnapshot())) return;
+  cache = next;
+  write(next);
+  for (const notify of subscribers) notify();
+}
+
+/** Drop the in-memory copy so the next read comes from storage again.
+ *  Exists for tests, which need each case to start from a known
+ *  store; nothing in the app calls it. */
+export function resetSearchHistoryCache(): void {
+  cache = null;
+}
+
+export function useSearchHistory() {
+  const history = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
 
   const record = useCallback((query: string) => {
-    // Returning `prev` unchanged when nothing moved keeps React from
-    // re-rendering and keeps the persist effect from firing. The
-    // search page calls this again on every re-fetch of the same
-    // query, so the no-op case is the common one.
-    setHistory((prev) => {
-      const next = addToHistory(prev, query);
-      return sameOrder(next, prev) ? prev : next;
-    });
+    commit(addToHistory(getSnapshot(), query));
   }, []);
 
   const remove = useCallback((query: string) => {
-    setHistory((prev) => {
-      const next = prev.filter((e) => e !== query);
-      return sameOrder(next, prev) ? prev : next;
-    });
+    commit(getSnapshot().filter((e) => e !== query));
   }, []);
 
   const clear = useCallback(() => {
-    setHistory((prev) => (prev.length === 0 ? prev : []));
+    commit([]);
   }, []);
 
   return { history, record, remove, clear };
