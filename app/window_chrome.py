@@ -120,6 +120,44 @@ def get_theme() -> str:
 
 
 # ---------------------------------------------------------------------------
+# Main-thread marshaling
+#
+# AppKit is strict: mutating NSWindow / NSView state (setAppearance_,
+# setStyleMask_, setBackgroundColor_, …) off the main thread trips an
+# assertion that SIGTRAPs the whole process ("Must only be used from
+# the main thread"). set_theme() is driven by the sync
+# /api/_internal/window-theme FastAPI handler, which Starlette runs on
+# an anyio worker thread — so the apply path has to hop back onto the
+# main run loop before it touches any Cocoa object. desktop.py already
+# uses the same AppHelper.callAfter idiom to marshal window.show() from
+# its login poller.
+# ---------------------------------------------------------------------------
+def _on_main_thread() -> bool:
+    """True on the AppKit main thread, or on any non-macOS platform
+    where the constraint doesn't apply. Fails safe to True so a
+    Foundation import problem degrades to the old direct-call behavior
+    rather than silently dropping the apply."""
+    if sys.platform != "darwin":
+        return True
+    try:
+        from Foundation import NSThread  # type: ignore
+
+        return bool(NSThread.isMainThread())
+    except Exception:
+        return True
+
+
+def _dispatch_to_main(fn) -> None:
+    """Schedule fn() on the main run loop. Async (waitUntilDone=NO):
+    the theme endpoint doesn't need the apply to have finished before
+    it responds, and not blocking the worker thread rules out any
+    worker↔main deadlock."""
+    from PyObjCTools import AppHelper  # type: ignore
+
+    AppHelper.callAfter(fn)
+
+
+# ---------------------------------------------------------------------------
 # macOS
 # ---------------------------------------------------------------------------
 
@@ -158,6 +196,14 @@ def reapply_macos_chrome() -> None:
 
 
 def _apply_macos(nswindow: object, theme: str) -> None:
+    # Every Cocoa call below must run on the main thread. When we're on
+    # a worker thread (the theme endpoint runs on anyio's pool),
+    # re-enter through the main run loop instead of touching AppKit
+    # here. Checked before the AppKit import so the hop happens even for
+    # callers that arrive off-thread.
+    if not _on_main_thread():
+        _dispatch_to_main(lambda: _apply_macos(nswindow, theme))
+        return
     try:
         import AppKit  # type: ignore
     except Exception:

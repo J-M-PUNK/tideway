@@ -66,6 +66,66 @@ def test_resolve_color_falls_back_to_dark_for_unknown():
     assert window_chrome._resolve_color("vaporwave") == (5, 5, 5)
 
 
+# ---------------------------------------------------------------------------
+# Main-thread marshaling
+#
+# Regression guard for the v1.25.2 SIGTRAP: the /api/_internal/window-
+# theme endpoint is a sync FastAPI handler, so Starlette runs it on an
+# anyio worker thread. _apply_macos() touching NSWindow state from
+# there trips AppKit's "Must only be used from the main thread"
+# assertion and crashes the process. _apply_macos must hop onto the
+# main run loop instead. The check lives before the AppKit import, so
+# monkeypatching the two seams exercises it on any platform.
+# ---------------------------------------------------------------------------
+
+
+def test_apply_macos_marshals_when_off_main_thread(monkeypatch):
+    """Off the main thread, _apply_macos must defer to the main run
+    loop and must NOT touch any Cocoa object inline (the crash path)."""
+    dispatched = []
+    monkeypatch.setattr(window_chrome, "_on_main_thread", lambda: False)
+    monkeypatch.setattr(
+        window_chrome, "_dispatch_to_main", lambda fn: dispatched.append(fn)
+    )
+
+    # A bare object() would explode if the body ran (it has no
+    # styleMask()/setAppearance_), so "doesn't raise" also proves the
+    # AppKit work was skipped.
+    window_chrome._apply_macos(object(), "dark")
+
+    assert len(dispatched) == 1, (
+        "off-main-thread apply must be marshaled to the main run loop, "
+        "not executed inline"
+    )
+    assert callable(dispatched[0])
+
+
+def test_apply_macos_does_not_redispatch_on_main_thread(monkeypatch):
+    """On the main thread the apply proceeds inline (no marshaling).
+    Off darwin the AppKit import then fails and it returns cleanly;
+    the point of this test is that _dispatch_to_main is never called,
+    so we don't ping-pong callables onto the run loop forever."""
+    dispatched = []
+    monkeypatch.setattr(window_chrome, "_on_main_thread", lambda: True)
+    monkeypatch.setattr(
+        window_chrome, "_dispatch_to_main", lambda fn: dispatched.append(fn)
+    )
+
+    window_chrome._apply_macos(object(), "dark")
+
+    assert dispatched == [], "main-thread apply must not re-marshal"
+
+
+def test_on_main_thread_true_off_platform():
+    """On non-macOS the concept doesn't apply, so the guard must report
+    True and let the (no-op) apply proceed without importing Foundation."""
+    import sys
+
+    if sys.platform == "darwin":
+        return
+    assert window_chrome._on_main_thread() is True
+
+
 def test_register_macos_nswindow_no_op_off_platform():
     """Calling the macOS register from a non-darwin process must
     not append to the tracking list. The cross-platform set_theme
