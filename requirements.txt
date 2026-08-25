@@ -42,7 +42,7 @@ pywebview>=6.2.1
 # is spliced at the sample boundary for true gapless transitions,
 # and samples hit the OS audio API at the track's native rate for
 # bit-perfect output.
-av>=18.0.0
+av>=18.1.0
 sounddevice>=0.5.6
 numpy>=2.5.1
 # scipy powers the PCM engine's 10-band parametric EQ. Biquad IIR
