@@ -16,6 +16,7 @@ on:
     paths:
       - "flatpak/**"
       - ".github/workflows/flatpak-build-check.yml"
+      - ".github/flatpak-node-generator-requirements.txt"
       - ".github/workflows/release.yml"
       - "requirements.txt"
       - "web/package-lock.json"
@@ -25,6 +26,7 @@ on:
     paths:
       - "flatpak/**"
       - ".github/workflows/flatpak-build-check.yml"
+      - ".github/flatpak-node-generator-requirements.txt"
       - ".github/workflows/release.yml"
       - "requirements.txt"
       - "web/package-lock.json"
@@ -34,6 +36,35 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+
+      - name: Regenerate node-sources.json for this build
+        # Regenerated into the working tree and never committed.
+        #
+        # A PR that bumps web/package-lock.json arrives with the
+        # manifest that was committed for the PREVIOUS lockfile, and
+        # building the new lockfile against the old mirror fails with
+        # "npm error code ENOTCACHED ... cache mode is only-if-cached
+        # but no cached response is available". Regenerating here makes
+        # the build test the lockfile actually under review.
+        #
+        # update-flatpak-node-sources.yml owns committing the file, and
+        # only does so on main and deploy/** - committing to a PR
+        # branch is what made Dependabot refuse to rebase its own PRs.
+        # This step is the other half of that split: PRs get a truthful
+        # build, integration branches get the committed artifact.
+        run: |
+          pip install --quiet -r .github/flatpak-node-generator-requirements.txt
+          flatpak-node-generator \
+            --electron-node-headers \
+            npm \
+            web/package-lock.json \
+            -o flatpak/node-sources.json
+          git --no-pager diff --stat -- flatpak/node-sources.json
 
       - name: Install flatpak + flatpak-builder + elfutils
         # elfutils provides eu-strip, which flatpak-builder shells
