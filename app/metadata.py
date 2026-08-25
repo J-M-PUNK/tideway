@@ -353,10 +353,10 @@ def _tag_flac(
     audio = FLAC(str(path))
     audio["title"] = track.name
     audio["artist"] = _artist_names(track)
-    audio["album"] = _safe(getattr(track, "album", None), "name") or ""
+    audio["album"] = _album_attr(track, album_obj, "name") or ""
     audio["albumartist"] = _album_artist_name(track, album_obj)
     audio["tracknumber"] = str(getattr(track, "track_num", 0))
-    num_tracks = _safe(getattr(track, "album", None), "num_tracks")
+    num_tracks = _album_attr(track, album_obj, "num_tracks")
     if num_tracks:
         audio["totaltracks"] = str(num_tracks)
     release_date = _release_date_str(track, album_obj)
@@ -399,9 +399,9 @@ def _tag_m4a(
     audio = MP4(str(path))
     audio["\xa9nam"] = track.name
     audio["\xa9ART"] = _artist_names(track)
-    audio["\xa9alb"] = _safe(getattr(track, "album", None), "name") or ""
+    audio["\xa9alb"] = _album_attr(track, album_obj, "name") or ""
     audio["aART"] = _album_artist_name(track, album_obj)
-    num_tracks = _safe(getattr(track, "album", None), "num_tracks") or 0
+    num_tracks = _album_attr(track, album_obj, "num_tracks") or 0
     audio["trkn"] = [(getattr(track, "track_num", 0), num_tracks)]
     release_date = _release_date_str(track, album_obj)
     if release_date:
@@ -541,3 +541,23 @@ def _safe(obj, attr: str):
         return getattr(obj, attr)
     except Exception:
         return None
+
+
+def _album_attr(track, album_obj, attr: str):
+    """Read an album-level attribute, preferring the album the
+    downloader resolved over the per-track `track.album` blob.
+
+    Same preference order `_release_date_str` and `_album_artist_name`
+    already use, and for the same reason: tidalapi populates
+    `track.album` thinly, so fields it leaves unset are present on a
+    real album fetch. Reading `track.album` directly - which the album
+    name and track count used to do - silently degraded those tags
+    whenever the thin object was all we had.
+    """
+    for source in (album_obj, getattr(track, "album", None)):
+        if source is None:
+            continue
+        value = _safe(source, attr)
+        if value:
+            return value
+    return None
