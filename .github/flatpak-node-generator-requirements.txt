@@ -1,0 +1,19 @@
+# Pinned installer for flatpak-node-generator, shared by
+# update-flatpak-node-sources.yml and flatpak-build-check.yml so the
+# manifest a PR is *built* from and the manifest that gets *committed*
+# can never come from different versions of the tool.
+#
+# Installed from git, not PyPI. The only PyPI release (0.1.1) predates
+# lockfile-v2 support for bundled dependencies: its
+# _process_packages_v2 raises NotImplementedError for any entry with no
+# "resolved" URL, and npm records bundleDependencies exactly that way -
+# they ship inside the parent package's tarball, so there is no
+# separate download to mirror. Tailwind's @tailwindcss/oxide-wasm32-wasi
+# bundles six such packages. Upstream resolves them to a local source
+# and emits no download entry, which is the right answer.
+#
+# Pinned to a commit rather than tracking master so that regenerating
+# node-sources.json stays reproducible.
+aiohttp>=3.8
+aiofiles
+flatpak-node-generator @ git+https://github.com/flatpak/flatpak-builder-tools.git@737c0085912f9f7dabf9341d4608e2a77a51a73a#subdirectory=node

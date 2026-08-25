@@ -1,23 +1,38 @@
 name: Update flatpak node-sources.json
 
-# Runs whenever web/package-lock.json changes — either from a
-# dependabot PR or a manual npm install. Regenerates
-# flatpak/node-sources.json with flatpak-node-generator and commits
-# the result back to the same branch. Without this, bumping any web
-# dependency also requires a manual Linux step to keep the Flatpak
-# offline mirror in sync, which is easy to forget and causes the
-# Flatpak build to fail with ENOTCACHED.
+# Regenerates flatpak/node-sources.json and commits it, on the
+# branches that actually ship: main and the deploy branches. Without
+# it, bumping any web dependency also requires a manual Linux step to
+# keep the Flatpak offline mirror in sync, which is easy to forget and
+# causes the Flatpak build to fail with ENOTCACHED.
 #
-# The job is a no-op when node-sources.json doesn't change (e.g. a
-# lockfile bump that only touches non-npm-cached metadata). The
-# commit step is skipped when there's nothing new to record.
+# Deliberately NOT run on pull-request branches. It used to run on
+# every branch, and committing to a PR branch cost more than it was
+# worth: Dependabot refuses to rebase a PR that anything other than
+# itself has touched ("Looks like this PR has been edited by someone
+# other than Dependabot"), so every dependency PR became permanently
+# un-rebaseable and had to be recreated by hand once main moved. The
+# bot commit also re-tripped the workflow-approval gate, leaving the
+# corrected runs unstarted while `gh pr checks` reported "no checks".
+#
+# PRs still get an honest build: flatpak-build-check.yml regenerates
+# the manifest into its own working tree and builds from that, without
+# committing. deploy/** is included here so a release branch's
+# committed manifest matches the lockfiles merged into it - the
+# release build reads the committed file, not a regenerated one.
+#
+# The job is a no-op when node-sources.json doesn't change. The commit
+# step is skipped when there's nothing new to record.
+
 on:
   push:
     branches:
-      - "**"
+      - main
+      - "deploy/**"
     paths:
       - "web/package-lock.json"
       - ".github/workflows/update-flatpak-node-sources.yml"
+      - ".github/flatpak-node-generator-requirements.txt"
   workflow_dispatch:
 
 jobs:
@@ -40,24 +55,11 @@ jobs:
           python-version: "3.11"
 
       - name: Install flatpak-node-generator
-        # Installed from git, not PyPI. The only PyPI release (0.1.1)
-        # predates lockfile-v2 support for bundled dependencies: its
-        # _process_packages_v2 raises NotImplementedError for any entry
-        # with no "resolved" URL, and npm records bundleDependencies
-        # exactly that way - they ship inside the parent package's
-        # tarball, so there is no separate download to mirror. Tailwind's
-        # @tailwindcss/oxide-wasm32-wasi bundles six @emnapi / @napi-rs
-        # packages, which is why every lockfile bump since Tailwind 4
-        # landed has failed here. Upstream resolves those to a local
-        # source and emits no download entry, which is the right answer.
-        #
-        # Pinned to a commit rather than tracking master so that
-        # regenerating node-sources.json stays reproducible.
+        # Pin and rationale live in the shared requirements file so
+        # this job and flatpak-build-check.yml can never install
+        # different versions of the generator.
         run: |
-          pip install --quiet \
-            "aiohttp>=3.8" \
-            "aiofiles" \
-            "flatpak-node-generator @ git+https://github.com/flatpak/flatpak-builder-tools.git@737c0085912f9f7dabf9341d4608e2a77a51a73a#subdirectory=node"
+          pip install --quiet -r .github/flatpak-node-generator-requirements.txt
 
       - name: Regenerate node-sources.json
         # Linux-only. The generator builds the setup_sdk_node_headers.sh
