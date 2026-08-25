@@ -1,8 +1,10 @@
 # Dependabot keeps the project's dependencies fresh by opening
 # weekly PRs against `main` when a newer version is available. PRs
 # come in at the configured cadence rather than per-commit so the
-# review queue stays manageable. Major-version bumps land in their
-# own PRs (the `groups:` block batches patch + minor only).
+# review queue stays manageable. Major-version bumps land in their own
+# PRs so they get a proper review — except for packages that peer-
+# depend on each other, which have to move together or the PR cannot
+# install at all. See the `react` and `stylelint` groups below.
 
 version: 2
 updates:
@@ -20,7 +22,43 @@ updates:
       - frontend
     commit-message:
       prefix: "deps(web)"
+    ignore:
+      # React 19 is a migration, not a bump: breaking changes across a
+      # codebase with Radix throughout, ~115 existing hooks warnings,
+      # and an audio player full of timing-sensitive effects. Dependabot
+      # proposed it as "bump react and @types/react" (#368) while
+      # leaving react-dom on 18, which npm refused outright.
+      #
+      # Deferred rather than declined. Drop these four entries when the
+      # migration is actually being planned and the group below will
+      # produce one coherent PR moving all four together.
+      - dependency-name: "react"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "react-dom"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@types/react"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@types/react-dom"
+        update-types: ["version-update:semver-major"]
     groups:
+      # Peer-linked packages, listed before the catch-all because a
+      # dependency joins the first group it matches. No `update-types`
+      # filter, so majors group too — that is the whole point.
+      #
+      # These declare peer ranges on each other, so a PR that moves one
+      # without the others cannot be installed. Both failed exactly
+      # that way: #368 (react 19 without react-dom) and #370 (stylelint
+      # 17 against stylelint-config-standard@36, which peers on ^16).
+      react:
+        patterns:
+          - "react"
+          - "react-dom"
+          - "@types/react"
+          - "@types/react-dom"
+      stylelint:
+        patterns:
+          - "stylelint"
+          - "stylelint-config-*"
       # Group patch + minor bumps so a slow week doesn't spawn 12
       # near-identical PRs. Major bumps stay separate so they get a
       # proper review.
