@@ -281,6 +281,13 @@ class PCMPlayer:
         self._samples_emitted = 0
 
         self._paused = False
+        # Bumped by pause() every time the user actually asks for a
+        # pause. play_track() samples it either side of the load so a
+        # pause pressed while a track is still resolving isn't lost:
+        # both _load_locked and play() clear _paused as part of normal
+        # startup, so without a record of the request there is nothing
+        # left to tell "user paused mid-load" from "fresh load".
+        self._pause_requests = 0
         self._seeking = False
         # Set while _swap_pipeline_to() is rewriting the pipeline refs
         # from another thread. The audio callback is lock-free, so
@@ -956,10 +963,24 @@ class PCMPlayer:
         """Combined load + play. The pipeline lock keeps load +
         play atomic relative to other state changes, so a
         concurrent stop / seek can't land in between the two
-        phases."""
+        phases.
+
+        A pause arriving mid-load is honoured rather than discarded.
+        pause() accepts input in the "loading" state and takes only
+        `_lock`, so it runs freely while the resolve holds
+        `_pipeline_lock` — and a cold resolve is bounded at
+        `_RESOLVE_TIMEOUT_S`, which is a long time to be leaning on a
+        button. Both _load_locked and play() clear `_paused` on the
+        way up, so the request has to be carried across the load as a
+        counter. When it moved, we stop at "loaded but not playing" —
+        the same state a load()-without-play caller lands in — and the
+        next play() starts the stream."""
         with self._pipeline_lock:
+            pause_requests_before = self._pause_requests
             snap = self.load(track_id, quality=quality)
             if snap.state == "error":
+                return snap
+            if self._pause_requests != pause_requests_before:
                 return snap
             return self.play()
 
@@ -986,6 +1007,7 @@ class PCMPlayer:
         with self._lock:
             if self._state not in ("playing", "loading"):
                 return self.snapshot()
+            self._pause_requests += 1
             self._paused = True
             self._transition("paused")
         self._emit()
