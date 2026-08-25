@@ -217,3 +217,31 @@ reserved for noise that's only ever read off a captured log file.
 If you need a high-signal line (mint failure, takeover received,
 state change), use the print pattern. If you need debug detail
 (per-frame trace, periodic heartbeat), use the logger.
+
+## Cross-device pause
+
+Tideway pauses local playback when another device on the same Tidal
+account starts playing. Both halves are built and on by default.
+
+- **Receive**: `app/tidal_realtime.py` — a WebSocket client for
+  Tidal's realtime bus ("Pushkin"). Started from lifespan startup at
+  `server.py`, stopped on teardown. Its module docstring is the
+  protocol reference (token mint, frame types, reconnect/backoff,
+  self-event filtering); don't restate that here, and update it there
+  if the wire format shifts.
+- **Send**: `app/play_reporter.py` posts our own playback events, which
+  is what makes Tideway show up in Recently Played and pause other
+  devices.
+- **Setting**: `pause_on_other_device`, default on.
+- **Diagnostics**: `/api/realtime/status` returns phase, last error,
+  reconnect count and events received. Loopback-only. Ask for it first
+  when someone reports cross-device pause not firing — it says whether
+  the listener ever connected.
+
+Two things to know before touching it. The listener task lives in the
+FastAPI asyncio loop, so the pause callback fires from that loop rather
+than a worker thread — `PCMPlayer` methods take `_lock` internally, so
+calling in directly is correct and a thread hop would be wrong. And the
+protocol was reverse-engineered from Tidal's web client; it is not a
+published API and can break without notice, which is what the
+diagnostic endpoint is for.
