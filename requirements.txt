@@ -91,7 +91,7 @@ spotapi>=1.2.8
 # uses these PyObjC bindings. Skipped on non-darwin via the
 # environment marker so a Linux / Windows install doesn't pull
 # them.
-pyobjc-framework-MediaPlayer>=12.2.1; sys_platform == "darwin"
+pyobjc-framework-MediaPlayer>=12.2.2; sys_platform == "darwin"
 # MPRIS media-player service on the D-Bus session bus (app/mpris.py):
 # the Linux counterpart of the macOS Now Playing bridge, so GNOME and
 # KDE media widgets, the lock screen, and playerctl can see and drive
