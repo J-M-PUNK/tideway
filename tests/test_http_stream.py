@@ -859,6 +859,17 @@ class TestBoundedTrackServe:
             sock.close()
 
     def test_serves_real_content_length_without_range(self):
+        """A bare GET gets 200 with the real Content-Length - no
+        Content-Range, because the request never asked for one.
+
+        The Content-Length assertion is the point of the bounded path
+        (UAPP uses it as the track length, so a synthetic ~1TB made it
+        seek past the real end). The status is 200 rather than 206
+        because RFC 7233 forbids answering 206 to a request that
+        carried no Range, and Rygel's GStreamer souphttpsrc rejects
+        the unsolicited 206 with UPnP 716 (#332). Strict renderers
+        still get the length they need for SEEK_END either way.
+        """
         import os
 
         server, buffer, path, total = self._server(12345)
@@ -867,10 +878,36 @@ class TestBoundedTrackServe:
                 server,
                 b"GET /dlna/stream?ts=12345 HTTP/1.1\r\nHost: localhost\r\n\r\n",
             )
-            assert raw.startswith(b"HTTP/1.1 206"), raw[:60]
+            assert raw.startswith(b"HTTP/1.1 200"), raw[:60]
             assert f"Content-Length: {total}".encode() in raw, raw[:200]
-            assert b"Content-Range: bytes 0-" in raw
+            assert b"Content-Range:" not in raw, (
+                f"no Range was requested, so no Content-Range: {raw[:200]!r}"
+            )
             assert b"\xff\xf8FLAC" in raw
+        finally:
+            server.shutdown()
+            server.server_close()
+            buffer.close()
+            os.unlink(path)
+
+    def test_head_probe_without_range_is_200(self):
+        """Receivers and middleboxes probe with HEAD before GET, and
+        HEAD goes through the same handler. An unsolicited 206 on the
+        probe is enough for Rygel to give up before it ever issues the
+        GET, so the probe has to be compliant too (#332)."""
+        import os
+
+        server, buffer, path, total = self._server(12345)
+        try:
+            raw = self._get_full(
+                server,
+                b"HEAD /dlna/stream?ts=12345 HTTP/1.1\r\nHost: localhost\r\n\r\n",
+            )
+            assert raw.startswith(b"HTTP/1.1 200"), raw[:60]
+            assert f"Content-Length: {total}".encode() in raw, raw[:200]
+            assert b"Content-Range:" not in raw, raw[:200]
+            # HEAD carries no body.
+            assert raw.split(b"\r\n\r\n", 1)[1] == b"", raw[:200]
         finally:
             server.shutdown()
             server.server_close()
