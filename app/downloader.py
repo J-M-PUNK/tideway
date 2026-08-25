@@ -1142,6 +1142,54 @@ class Downloader:
                 raise _Cancelled()
             time.sleep(min(1.0, remaining))
 
+    def _album_with_details(self, album_obj):
+        """Return an album object carrying the fields tagging needs,
+        fetching the full one if what we have is the thin blob.
+
+        tidalapi populates `track.album` thinly: `release_date` and
+        `available_release_date` both come back None. An album download
+        resolves the real album once and passes it down, so its tracks
+        get a DATE tag; a single-track download had only the thin blob
+        and wrote no date at all, landing the file in the user's
+        library with a blank Year column while the same track pulled
+        as part of its album looked right (issue #357).
+
+        Guarded on the date being absent, so the album path — which
+        already has everything — pays nothing, and only a single-track
+        download spends the extra `session.album(id)` call.
+        """
+        if album_obj is None:
+            return None
+        for attr in ("release_date", "tidal_release_date"):
+            try:
+                if getattr(album_obj, attr, None):
+                    return album_obj
+            except Exception:
+                # tidalapi models raise from property getters when a
+                # field is absent from the payload rather than
+                # returning None; that means "not set", so keep looking.
+                continue
+        album_id = getattr(album_obj, "id", None)
+        if album_id is None:
+            return album_obj
+        try:
+            full = self.tidal.session.album(album_id)
+        except Exception as exc:
+            # Tag with the thin object rather than failing a download
+            # that already has its audio on disk — a missing DATE is
+            # worse than it was, not fatal. A 429 still has to reach
+            # the shared backoff or the sibling workers keep hammering
+            # a bucket that just told us to stop.
+            if _looks_like_rate_limit(exc):
+                self._note_rate_limit(exc, 0)
+            print(
+                f"[downloader] album detail fetch failed "
+                f"album_id={album_id}: {exc!r}",
+                flush=True,
+            )
+            return album_obj
+        return full or album_obj
+
     def _note_rate_limit(self, exc: Exception, attempt: int) -> None:
         """Record a 429 so every worker backs off.
 
@@ -1545,7 +1593,9 @@ class Downloader:
                 write_lrc_sidecar,
             )
             tag_error: Optional[str] = None
-            resolved_album = album_obj or getattr(track, "album", None)
+            resolved_album = self._album_with_details(
+                album_obj or getattr(track, "album", None)
+            )
             try:
                 cover = fetch_cover_art(
                     resolved_album,
