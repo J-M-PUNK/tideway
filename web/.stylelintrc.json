@@ -24,6 +24,8 @@
     ],
     "import-notation": "string",
     "media-query-no-invalid": null,
+    "no-invalid-position-declaration": null,
+    "nesting-selector-no-missing-scoping-root": null,
     "at-rule-empty-line-before": null,
     "custom-property-empty-line-before": null,
     "selector-pseudo-class-no-unknown": [
