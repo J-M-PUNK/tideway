@@ -30,7 +30,7 @@ orjson>=3.11.9
 curl-cffi>=0.15.0,<0.16
 pillow>=12.3.0
 fastapi>=0.141.1
-uvicorn[standard]>=0.52.0
+uvicorn[standard]>=0.52.4
 sse-starlette>=3.4.6
 # Packaged desktop app — pywebview wraps the web UI in a native window.
 # On Windows it requires WebView2 (preinstalled on Win11, auto-installs
