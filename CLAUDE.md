@@ -83,9 +83,10 @@ single deploy, the workflow is:
    GitHub release notes — the workflow extracts it via
    `git log -1 --format=%b`, so write user-facing notes there
    (not the engineer-facing "what files changed" kind).
-7. **Run the release pipeline.** GitHub Actions builds the three
-   platform installers and creates a **draft** release on GitHub
-   with the notes auto-populated from the tag commit body.
+7. **Run the release pipeline.** GitHub Actions builds the four
+   installers (macOS dmg, Windows x64 and arm64 exe, Linux flatpak)
+   and creates a **draft** release on GitHub with the notes
+   auto-populated from the tag commit body.
 8. **Sign the installers.** Run `scripts/sign-release.sh v<X.Y.Z>`.
    This downloads each installer from the draft release, signs each
    one with the maintainer's local minisign key (you'll be prompted
@@ -96,21 +97,33 @@ single deploy, the workflow is:
    instead of running the unsigned binary. See
    `docs/release-signing.md` for first-time key setup, key rotation,
    and recovery scenarios.
-9. **Publish the draft.** Open the Releases page, confirm both
-   installers AND `.minisig` sidecars are listed under Assets, skim
+9. **Catch main back up, BEFORE publishing.** Fast-forward `main` to
+   the deploy branch: `git checkout main && git merge --ff-only deploy/v<X.Y.Z> && git push`.
+
+   The ordering matters and it is not the obvious one. Publishing the
+   draft fires the `Publish Flatpak Repo` workflow via
+   `release: published`, and GitHub resolves workflows for `release`
+   events from the **default branch**, never from the tag. If `main`
+   is still on the previous version at that moment the workflow file
+   is not there, nothing runs, and the Flatpak channel silently stays
+   on the old release while every other platform moves. Moving `main`
+   first is what puts the file where GitHub will look for it.
+
+   This used to be the last step, back when the Flatpak repo was
+   published from a job inside `release.yml` that ran on the tag
+   push. That job is gone as of v1.30.0.
+10. **Publish the draft.** Open the Releases page, confirm all four
+   installers AND their `.minisig` sidecars are listed under Assets, skim
    the auto-populated notes, click Publish. Drafts are invisible to
    the auto-updater (`/releases/latest` excludes them), so a
    tagged-but-unpublished release ships nothing to users. If you
    tag and walk away, no one gets the update.
 
-   Publishing is also what releases the Linux side: the
-   `Publish Flatpak Repo` workflow fires on `release: published` and
-   pushes the OSTree repo to gh-pages, which is what `flatpak update`
-   reads. Up to and including v1.29.0 that step ran on the tag push
-   instead, so Flatpak users got every release at build time, before
-   signing and regardless of whether the draft was ever published.
-10. **Catch main back up.** Fast-forward `main` to the deploy
-   branch: `git checkout main && git merge --ff-only deploy/v<X.Y.Z> && git push`.
+   Publishing is also what releases the Linux side, per step 9. Watch
+   for a `Publish Flatpak Repo` run to appear afterwards and confirm
+   `https://j-m-punk.github.io/tideway/` advertises the new version.
+   If it never fires, dispatch that workflow by hand. It takes the
+   tag as an input, so there is no need to re-run the build.
 11. **Clean up.** Delete merged PR branches locally and on GitHub.
 
 The integration-branch step is what differentiates this from the
