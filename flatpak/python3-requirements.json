@@ -129,7 +129,7 @@
             "name": "python3-orjson",
             "buildsystem": "simple",
             "build-commands": [
-                "pip3 install --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"orjson>=3.11.9\" --no-build-isolation"
+                "pip3 install --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"orjson>=3.12.0\" --no-build-isolation"
             ],
             "sources": [
                 {
