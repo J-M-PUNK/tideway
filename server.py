@@ -1297,6 +1297,116 @@ app.add_middleware(
     allow_credentials=True,
 )
 
+# --- concurrency diagnostics ---------------------------------------
+#
+# Nearly every endpoint in this file is a sync `def`, which Starlette
+# runs on anyio's worker threadpool rather than the event loop. That
+# pool defaults to 40 threads and nothing here raises it, so a 41st
+# concurrent request waits for a thread instead of being served.
+#
+# Measured on a synthetic app with the same shape (sync endpoints,
+# default limiter): a latency-sensitive endpoint answers in 1-2 ms with
+# 39 slow requests in flight, 273 ms at 45, 951 ms at 60 and 1951 ms at
+# 100. It is a cliff, not a slope — nothing at all until the pool is
+# full, then queue-depth times however long the blocking calls take.
+#
+# What was never established is whether Tideway reaches 40 in normal
+# use. That matters because it is the leading explanation for four
+# separate reports — UI lag, "Fetch is aborted", covers not rendering,
+# and pause feeling unresponsive — and nobody has confirmed or killed
+# it. Rather than manufacture load to find out, this records what real
+# sessions actually do, so a user who hits the lag can read the answer
+# off /api/diagnostics/concurrency afterwards.
+#
+# Deliberately cheap: two integer updates under a lock held for a few
+# microseconds, on a path that is already doing network I/O. Nothing
+# here allocates per request beyond one dict entry that is removed in a
+# finally block.
+_conc_lock = threading.Lock()
+# Requests currently accepted but not yet returned, keyed by a counter.
+# Value is (path, started_monotonic). Bounded by concurrency, so tens
+# of entries at worst.
+_conc_active: dict = {}
+_conc_next_id = 0
+_conc_stats = {
+    "requests": 0,
+    "peak_in_flight": 0,
+    "peak_at": None,
+    "peak_paths": [],
+    # Requests that began while the pool was already full. Non-zero
+    # here is the whole question answered: it means real usage queues.
+    "started_while_saturated": 0,
+    "peak_threads_borrowed": 0,
+    # Sampled in the middleware, which runs on the event loop. anyio's
+    # limiter is loop-bound state and raises when read from a worker
+    # thread, so a sync endpoint cannot read it directly — and the
+    # diagnostic endpoint has to stay sync because the auth guard in
+    # front of it blocks (it waits on session-ready and can fall
+    # through to a network check_login).
+    "thread_pool_size": 0,
+    "threads_borrowed": 0,
+}
+
+
+def _thread_pool_size() -> int:
+    """Total tokens on anyio's default thread limiter — the number of
+    sync endpoints that can run at once. Read live rather than
+    hardcoded to 40 so raising it doesn't silently invalidate this."""
+    try:
+        import anyio.to_thread
+
+        return int(anyio.to_thread.current_default_thread_limiter().total_tokens)
+    except Exception:
+        # Only reachable if anyio changes this API; the diagnostic
+        # degrades to "unknown ceiling" rather than breaking requests.
+        return 0
+
+
+def _threads_borrowed() -> int:
+    try:
+        import anyio.to_thread
+
+        return int(anyio.to_thread.current_default_thread_limiter().borrowed_tokens)
+    except Exception:
+        return 0
+
+
+@app.middleware("http")
+async def _track_concurrency(request: Request, call_next):
+    global _conc_next_id
+    path = request.url.path
+    pool = _thread_pool_size()
+    with _conc_lock:
+        _conc_next_id += 1
+        rid = _conc_next_id
+        _conc_active[rid] = (path, time.monotonic())
+        in_flight = len(_conc_active)
+        _conc_stats["requests"] += 1
+        if pool and in_flight > pool:
+            _conc_stats["started_while_saturated"] += 1
+        if in_flight > _conc_stats["peak_in_flight"]:
+            _conc_stats["peak_in_flight"] = in_flight
+            _conc_stats["peak_at"] = datetime.now(timezone.utc).isoformat()
+            # Snapshot what was actually in flight at the high-water
+            # mark. Without it a peak of 60 says nothing about which
+            # part of the app produced it.
+            _conc_stats["peak_paths"] = sorted(
+                p for p, _ in _conc_active.values()
+            )
+    borrowed = _threads_borrowed()
+    # Plain assignments; a lost update here costs one sample and is not
+    # worth taking the lock again for.
+    _conc_stats["thread_pool_size"] = pool
+    _conc_stats["threads_borrowed"] = borrowed
+    if borrowed > _conc_stats["peak_threads_borrowed"]:
+        _conc_stats["peak_threads_borrowed"] = borrowed
+    try:
+        return await call_next(request)
+    finally:
+        with _conc_lock:
+            _conc_active.pop(rid, None)
+
+
 # Per-domain routers extracted from the all-in-one server.py — see
 # `app/routers/__init__.py` for the playbook + which domains have
 # moved. New extractions add their `include_router` call here.
@@ -7113,6 +7223,54 @@ def _autoeq_on_device_change(device_id: str) -> None:
     except Exception:
         log = logging.getLogger("autoeq.resolver")
         log.exception("autoeq device-change resolver failed")
+
+
+@app.get("/api/diagnostics/concurrency")
+def concurrency_diagnostics() -> dict:
+    """What this process has actually done to the request threadpool.
+
+    227 of this file's 230 endpoints are sync `def`, so each one holds
+    an anyio worker thread for its whole duration, blocking Tidal I/O
+    included. The pool defaults to 40. Past that, requests queue.
+
+    Read this after a session where the UI felt slow. The number that
+    answers the question is `started_while_saturated`: zero means real
+    usage never fills the pool and threadpool contention is not the
+    explanation for the lag reports, whatever else is. Non-zero means
+    it does, and `peak_paths` names what was in flight when it did.
+
+    `threads_borrowed` is anyio's own count of checked-out workers,
+    sampled as THIS request entered the middleware rather than read
+    now — the limiter is event-loop state and this handler runs on a
+    worker thread. `in_flight` counts accepted requests including any
+    waiting for a thread, so in_flight above threads_borrowed is the
+    queue.
+
+    Counters are process-lifetime and reset on restart.
+    """
+    _require_local_access()
+    with _conc_lock:
+        in_flight = len(_conc_active)
+        stats = dict(_conc_stats)
+        oldest = min(
+            (started for _, started in _conc_active.values()), default=None
+        )
+    pool = stats["thread_pool_size"]
+    return {
+        "thread_pool_size": pool,
+        "in_flight": in_flight,
+        "threads_borrowed": stats["threads_borrowed"],
+        "longest_in_flight_seconds": (
+            round(time.monotonic() - oldest, 3) if oldest is not None else 0.0
+        ),
+        "requests_total": stats["requests"],
+        "peak_in_flight": stats["peak_in_flight"],
+        "peak_at": stats["peak_at"],
+        "peak_paths": stats["peak_paths"],
+        "started_while_saturated": stats["started_while_saturated"],
+        "peak_threads_borrowed": stats["peak_threads_borrowed"],
+        "saturated": bool(pool and in_flight > pool),
+    }
 
 
 @app.get("/api/realtime/status")
