@@ -486,7 +486,7 @@
             "name": "python3-av",
             "buildsystem": "simple",
             "build-commands": [
-                "pip3 install --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"av>=18.0.0\" --no-build-isolation"
+                "pip3 install --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"av>=18.1.0\" --no-build-isolation"
             ],
             "sources": [
                 {
@@ -838,8 +838,8 @@
                 },
                 {
                     "type": "file",
-                    "url": "https://files.pythonhosted.org/packages/8c/9f/30d3e6073769b6137f8af517baec43dd9e900a655710b4bf192737802427/async_upnp_client-0.48.0-py3-none-any.whl",
-                    "sha256": "f7672a1f9f8af0792eded6ac490d2b51569c0d844f261372b257540bf3bf0783"
+                    "url": "https://files.pythonhosted.org/packages/88/a7/0c560368ac19986fb7606b8bc3f4870ea9ba38ee39d8c7319b561c3a2e86/async_upnp_client-0.48.1-py3-none-any.whl",
+                    "sha256": "726ce14ad93a91bdf72b6ddd04c0b85a9ee95e84c996929690aa6cc57569d759"
                 },
                 {
                     "type": "file",
