@@ -428,7 +428,7 @@
             "name": "python3-sse-starlette",
             "buildsystem": "simple",
             "build-commands": [
-                "pip3 install --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"sse-starlette>=3.4.6\" --no-build-isolation"
+                "pip3 install --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"sse-starlette>=3.4.8\" --no-build-isolation"
             ],
             "sources": [
                 {
