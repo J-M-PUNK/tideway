@@ -17,6 +17,7 @@ on:
       - "flatpak/**"
       - ".github/workflows/flatpak-build-check.yml"
       - ".github/flatpak-node-generator-requirements.txt"
+      - "scripts/regen-flatpak-python-sources.sh"
       - ".github/workflows/release.yml"
       - "requirements.txt"
       - "web/package-lock.json"
@@ -27,6 +28,7 @@ on:
       - "flatpak/**"
       - ".github/workflows/flatpak-build-check.yml"
       - ".github/flatpak-node-generator-requirements.txt"
+      - "scripts/regen-flatpak-python-sources.sh"
       - ".github/workflows/release.yml"
       - "requirements.txt"
       - "web/package-lock.json"
@@ -90,6 +92,18 @@ jobs:
             org.gnome.Platform//49 \
             org.gnome.Sdk//49 \
             org.freedesktop.Sdk.Extension.node20//25.08
+
+      - name: Regenerate python3-requirements.json for this build
+        # Regenerated into the working tree and never committed, the
+        # same split as node-sources.json above.
+        #
+        # A stale python manifest fails more quietly than a stale node
+        # one: the flatpak build installs from the manifest, not from
+        # requirements.txt, so a PR that bumps a Python dependency
+        # would build and PASS while shipping the previous version.
+        # Regenerating here makes the check test the requirements.txt
+        # actually under review.
+        run: bash scripts/regen-flatpak-python-sources.sh
 
       - name: Restore flatpak-builder cache
         # Same key as release.yml so a release rebuild after this
