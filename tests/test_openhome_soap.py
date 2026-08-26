@@ -346,6 +346,19 @@ class TestInvoke:
         assert exc.value.action == "Insert"
         assert "Playlist:1" in exc.value.service_type
 
+    def test_fault_error_carries_request_and_response(self, monkeypatch):
+        """On a fault, the error carries the SOAP request we sent and
+        the raw fault body, so a caller (the DLNA connect path) can log
+        exactly what the device refused instead of a bare UPnP code."""
+        _mock_post(monkeypatch, body=FAULT_RESPONSE_402, status_code=500)
+        svc = _service()
+        with pytest.raises(OpenHomeSOAPError) as exc:
+            invoke(svc, "Insert", {"AfterId": "abc"})
+        # The request envelope we POSTed (contains the action name).
+        assert "Insert" in exc.value.request_envelope
+        # The raw fault body the device returned.
+        assert "402" in exc.value.response_body
+
     def test_fault_response_with_200_status_still_raises(self, monkeypatch):
         """A few OpenHome firmwares answer with HTTP 200 even on
         UPnP faults. The body shape is what matters; status code

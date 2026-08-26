@@ -655,7 +655,7 @@ class PCMPlayer:
                                 prefetched=None,
                                 metadata=self._current_track_meta,
                             )
-                        except (ValueError, RuntimeError, OSError) as exc:
+                        except Exception as exc:  # noqa: BLE001 - passthrough is optional
                             print(
                                 f"[player] upnp start_passthrough failed "
                                 f"(Path 0): {exc!r}",
@@ -860,7 +860,7 @@ class PCMPlayer:
                             prefetched=prefetched_bytes,
                             metadata=self._current_track_meta,
                         )
-                except (ValueError, RuntimeError, OSError) as exc:
+                except Exception as exc:  # noqa: BLE001 - passthrough is optional
                     print(
                         f"[player] upnp start_passthrough failed "
                         f"(Path B): {exc!r}",
@@ -1397,7 +1397,7 @@ class PCMPlayer:
                         prefetched=prefetched_bytes,
                         metadata=self._current_track_meta,
                     )
-            except (ValueError, RuntimeError, OSError) as exc:
+            except Exception as exc:  # noqa: BLE001 - passthrough is optional
                 print(
                     f"[player] upnp start_passthrough failed: {exc!r}",
                     flush=True,
@@ -3311,7 +3311,7 @@ class PCMPlayer:
                     prefetched=None,
                     metadata=self._current_track_meta,
                 )
-            except (ValueError, RuntimeError, OSError) as exc:
+            except Exception as exc:  # noqa: BLE001 - passthrough is optional
                 print(
                     f"[player] upnp start_passthrough failed "
                     f"(adopt_preload): {exc!r}",
@@ -4043,7 +4043,7 @@ class PCMPlayer:
                             prefetched=None,
                             metadata=self._current_track_meta,
                         )
-                    except (ValueError, RuntimeError, OSError) as exc:
+                    except Exception as exc:  # noqa: BLE001 - passthrough is optional
                         print(
                             f"[player] upnp start_passthrough failed "
                             f"(bridge): {exc!r}",
