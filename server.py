@@ -12658,6 +12658,32 @@ def _rank_by_taste(rows: list, orbit: dict, played: set) -> list:
     return sorted(rows, key=_score, reverse=True)
 
 
+# Cold-path timings worth keeping after the fact. A bare print goes to
+# stdout, which a packaged launch discards — the same reason the player
+# mirrors its `[perf] load` line into audio.log. NullHandler if the data
+# dir isn't writable so logging never raises on a request thread.
+perf_log = logging.getLogger("tideway.perf")
+perf_log.setLevel(logging.INFO)
+perf_log.propagate = False
+if not perf_log.handlers:
+    try:
+        from logging.handlers import RotatingFileHandler
+
+        from app.paths import user_data_dir
+
+        _ph = RotatingFileHandler(
+            str(user_data_dir() / "perf.log"),
+            maxBytes=1_000_000,
+            backupCount=3,
+        )
+        _ph.setFormatter(
+            logging.Formatter("%(asctime)s %(message)s", "%Y-%m-%d %H:%M:%S")
+        )
+        perf_log.addHandler(_ph)
+    except Exception:
+        perf_log.addHandler(logging.NullHandler())
+
+
 def _taste_profile() -> dict:
     """Infer taste from Last.fm: recency-blended top artists, and their
     community tags aggregated into genres mapped to AOTY slugs (the full
@@ -12665,16 +12691,20 @@ def _taste_profile() -> dict:
     fine — sections that depend on it just don't render. This is the
     "listening history" half of the popularity-x-history ranking (#307).
     """
+    _t0 = time.monotonic()
     connected = bool(_rec_safe(lambda: lastfm.status().get("connected"), False))
+    _t_status = time.monotonic()
     if not connected:
         return {"connected": False, "artist_names": set(), "genres": []}
     top = _seed_artists()
+    _t_seed = time.monotonic()
     artist_names = {e["name"].strip().lower() for e in top if e.get("name")}
 
     # How widely each tag is applied across all of Last.fm. Broad tags
     # ("rock", "electronic") are enormous and say almost nothing about an
     # individual; the sub-genres worth acting on are far rarer.
     chart_tags = _rec_safe(lambda: lastfm.get_chart_top_tags(limit=250), [])
+    _t_chart_tags = time.monotonic()
     tag_reach = {
         (t.get("name") or "").strip().lower(): float(t.get("reach") or 0)
         for t in chart_tags
@@ -12728,7 +12758,9 @@ def _taste_profile() -> dict:
     # Anything AOTY doesn't recognise falls out here, which also discards
     # Last.fm descriptors that aren't genres at all ("japanese", "seen
     # live") without needing a blocklist.
+    _t_artist_tags = time.monotonic()
     name_to_slug = _aoty_genre_slug_map()
+    _t_slugs = time.monotonic()
     genres: list = []
     seen_slugs: set = set()
     for gname, _w in sorted(weights.items(), key=lambda kv: kv[1], reverse=True):
@@ -12748,12 +12780,32 @@ def _taste_profile() -> dict:
     # count for less and genre fit for more, or "Popular in Your Orbit"
     # just becomes the global chart. 0 = fully niche, 1 = fully mainstream.
     chart = _rec_safe(lambda: lastfm.get_chart_top_artists(limit=500), [])
+    _t_chart_artists = time.monotonic()
     chart_names = {
         (a.get("name") or "").strip().lower() for a in chart if a.get("name")
     }
     mainstream_ratio = (
         len(artist_names & chart_names) / len(artist_names) if artist_names else 0.5
     )
+    # Every For You row blocks on this build behind _taste_cache_lock, so
+    # a cold profile is the whole page's time-to-first-row. Measured at
+    # roughly 30 s on a real cold start without anything saying which of
+    # these six phases owned it — five are Last.fm round trips and one
+    # (_aoty_genre_slug_map) harvests a couple of years of AOTY pages.
+    # Same one-line-at-the-bottom shape as the player's `[perf] load`.
+    _ms = lambda a, b: (b - a) * 1000.0
+    _perf = (
+        f"[perf] taste_profile total={_ms(_t0, _t_chart_artists):.0f}ms "
+        f"status={_ms(_t0, _t_status):.0f}ms "
+        f"seed_artists={_ms(_t_status, _t_seed):.0f}ms "
+        f"chart_tags={_ms(_t_seed, _t_chart_tags):.0f}ms "
+        f"artist_tags={_ms(_t_chart_tags, _t_artist_tags):.0f}ms "
+        f"genre_slugs={_ms(_t_artist_tags, _t_slugs):.0f}ms "
+        f"chart_artists={_ms(_t_slugs, _t_chart_artists):.0f}ms "
+        f"artists={len(top)} genres={len(genres)}"
+    )
+    print(_perf, flush=True)
+    perf_log.info(_perf)
     return {
         "connected": True,
         "artist_names": artist_names,
