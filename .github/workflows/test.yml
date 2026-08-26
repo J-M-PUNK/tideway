@@ -15,9 +15,22 @@ on:
 # Cancel any older in-progress run on the same ref when a new commit
 # lands. Keeps the queue reasonable when someone pushes several quick
 # fixups during a code review.
+#
+# Pull requests only. On main, cancelling loses the one run that says
+# the default branch is good, and it does so in a way that reads as
+# success: runs are queued rather than started immediately, so they
+# do not begin in commit order, and whichever is in progress when a
+# newer one starts is the one that dies. Merging #341, #353 and #385
+# back to back left the runs for efcb2cac and ea813779 cancelled and
+# the run for 7a5d983f — by then two commits stale — green. main had
+# a passing Tests badge for a commit that was no longer main.
+#
+# A deploy branch merging several approved PRs in one sitting is the
+# normal case for this repo, not an edge case, so the queue saving is
+# not worth buying with an unverified default branch.
 concurrency:
   group: tests-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 # Single source of truth for runtime versions. Bumping either here
 # also has to be matched in .github/workflows/release.yml so the
