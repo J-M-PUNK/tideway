@@ -17,6 +17,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
+from unittest.mock import MagicMock, patch
 
 from app.audio.http_stream import (
     FlacPassthroughEncoder,
