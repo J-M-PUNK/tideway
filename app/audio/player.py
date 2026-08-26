@@ -1068,9 +1068,17 @@ class PCMPlayer:
             # over for the remainder of this track; passthrough
             # resumes automatically when the next track loads.
             # See issue #273 for context.
+            #
+            # BUT: while DLNA is serving a bounded per-track file the
+            # renderer is the playback clock. A desktop seek must NOT
+            # tear down the renderer's source — that drops it onto the
+            # ~1TB synthetic RingBuffer stream, which UAPP cannot parse
+            # (contentLength=1099511627776) and it stalls/fails. Here we
+            # just re-seek the local decoder; the renderer keeps playing
+            # this track and advances when it consumes it.
             if _upnp_manager is not None:
                 try:
-                    if _upnp_manager.is_active():
+                    if _upnp_manager.is_active() and not _upnp_manager.bounded_serving():
                         _upnp_manager.stop_passthrough()
                 except Exception as exc:
                     print(f"[player] upnp stop_passthrough on seek failed: {exc!r}", flush=True)
@@ -1321,6 +1329,24 @@ class PCMPlayer:
             )
             with self._lock:
                 self._preload = pre
+            # Pre-buffer the next track's DLNA passthrough while this one
+            # plays, so the renderer's track-change can promote it without
+            # a demux pause (gapless). No-ops for local files and when
+            # no UPnP session is active.
+            if pre.source_urls is not None:
+                if (
+                    _upnp_manager is not None
+                    and _upnp_manager.is_active()
+                ):
+                    try:
+                        _upnp_manager.prepare_next_passthrough(
+                            pre.source_urls, prefetched_bytes
+                        )
+                    except Exception as exc:
+                        print(
+                            f"[player] upnp prepare_next failed: {exc!r}",
+                            flush=True,
+                        )
             return {
                 "ok": True,
                 "cached": True,

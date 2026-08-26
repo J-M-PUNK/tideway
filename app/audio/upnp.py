@@ -68,6 +68,7 @@ from app.audio.http_stream import (
     FlacStreamEncoder,
     RingBuffer,
     StreamHTTPServer,
+    TrackFileSource,
     primary_lan_ip,
     start_stream_http_server,
 )
@@ -317,6 +318,11 @@ class _SessionState:
     passthrough_active: bool = False
     _passthrough_source_urls: Optional[tuple[str, ...]] = None
     _passthrough_done_event: Optional[threading.Event] = None
+    # Bounded per-track preload: the NEXT track's buffered file, demuxed
+    # during the current track so the renderer's SetAVTransportURI switch
+    # can promote it instantly instead of pausing for a full demux.
+    next_track_source: Optional[TrackFileSource] = None
+    next_source_urls: Optional[tuple[str, ...]] = None
     # Serializes every read-modify-write of the passthrough fields above.
     # Touched from three threads — player pipeline (start/stop), realtime
     # audio callback (push_pcm), and last-track EOF (signal_source_done).
@@ -439,6 +445,26 @@ class UpnpManager:
         read; false positives are caught when the encoder lock is
         actually taken."""
         return self._session is not None
+
+    def bounded_serving(self) -> bool:
+        """True while a bounded per-track DLNA file is being served to
+        the renderer (a `TrackFileSource`, not the live RingBuffer).
+
+        Used by the player's seek path: while DLNA is serving a bounded
+        file, the renderer is the playback clock, so a desktop seek must
+        NOT tear down the renderer's source (which would drop it onto
+        the ~1TB synthetic RingBuffer stream). Takes the session lock —
+        only called from non-realtime paths."""
+        with self._session_lock:
+            session = self._session
+        if session is None:
+            return False
+        http = getattr(session, "http_server", None)
+        return bool(
+            http is not None
+            and getattr(http, "dlna", False)
+            and getattr(http, "track_source", None) is not None
+        )
 
     # ---- listener bus ----------------------------------------------
 
@@ -603,6 +629,62 @@ class UpnpManager:
             session.passthrough_active = True
             session.buffer.flush()
             session.buffer.set_track_id(_track_ts)
+            session.passthrough_encoder = None
+
+        # Bounded per-track file: demux the whole track to a temp file so
+        # the DLNA response can advertise the REAL byte length. The live
+        # RingBuffer encoder (FlacPassthroughEncoder) plus a synthetic
+        # ~1TB Content-Length made strict renderers (UAPP) seek past the
+        # real track end -> 'unexpected end of stream' -> avcodec
+        # -1094995529 (a cut before the end). Buffering per track lets us
+        # serve the actual size instead.
+        http_server = getattr(session, "http_server", None)
+        track_source = None
+        if http_server is not None and getattr(http_server, "dlna", False):
+            prev = getattr(http_server, "track_source", None)
+            # Promote a preloaded next-track file if it matches this
+            # source (the renderer's track change then serves it
+            # immediately — gapless, no demux pause). Otherwise build a
+            # fresh bounded file (first track, or a skip to a track that
+            # wasn't preloaded).
+            with session.passthrough_lock:
+                pre_loaded = session.next_track_source
+                pre_urls = session.next_source_urls
+                session.next_track_source = None
+                session.next_source_urls = None
+            if pre_loaded is not None and pre_urls == _source_urls:
+                if prev is not None and prev is not pre_loaded:
+                    try:
+                        prev.close()
+                    except Exception:
+                        pass
+                pre_loaded.track_id = _track_ts
+                http_server.track_source = pre_loaded
+                track_source = pre_loaded
+            else:
+                if pre_loaded is not None:
+                    try:
+                        pre_loaded.close()
+                    except Exception:
+                        pass
+                if prev is not None:
+                    try:
+                        prev.close()
+                    except Exception:
+                        pass
+                # No done_event: the file is served to the renderer up to
+                # its real Content-Length, so the track change is driven
+                # by the player, not by a demux-complete signal (which
+                # for a bounded file happens seconds before the audio
+                # ends and would cut off the tail).
+                track_source = TrackFileSource(
+                    source=reader,
+                    track_id=_track_ts,
+                    done_event=None,
+                )
+                http_server.track_source = track_source
+                track_source.start()
+        else:
             session.passthrough_encoder = FlacPassthroughEncoder(
                 source=reader,
                 buffer=session.buffer,
@@ -625,6 +707,60 @@ class UpnpManager:
             "[upnp] passthrough ON -- bitperfect FLAC passthrough enabled",
             flush=True,
         )
+
+    def prepare_next_passthrough(
+        self, source_urls, prefetched=None
+    ) -> None:
+        """Demux the NEXT track's FLAC to a buffered temp file while the
+        current one plays, so the renderer's track change can promote it
+        instantly — gapless with no demux pause.
+
+        Called by the player when it preloads the following track (it
+        already knows that track's source URLs via the PCM preload). If a
+        different source was preloaded previously, it is replaced. A stale
+        preload that never gets promoted is closed on the next
+        start_passthrough / disconnect.
+        """
+        with self._session_lock:
+            session = self._session
+        if session is None:
+            return
+        http_server = getattr(session, "http_server", None)
+        if http_server is None or not getattr(http_server, "dlna", False):
+            return
+        if not session.passthrough_active:
+            return
+        if not isinstance(source_urls, (list, tuple)):
+            return
+        _src = tuple(source_urls)
+        with session.passthrough_lock:
+            if (
+                session.next_track_source is not None
+                and session.next_source_urls == _src
+            ):
+                return
+            old = session.next_track_source
+            session.next_track_source = None
+            session.next_source_urls = None
+        if old is not None:
+            try:
+                old.close()
+            except Exception:
+                pass
+        try:
+            from app.audio.segment_reader import SegmentReader
+            reader = SegmentReader(list(_src), prefetched=prefetched or {})
+            ts = TrackFileSource(source=reader)
+        except Exception as exc:
+            print(
+                f"[upnp] prepare_next_passthrough failed: {exc!r}",
+                flush=True,
+            )
+            return
+        with session.passthrough_lock:
+            session.next_track_source = ts
+            session.next_source_urls = _src
+        ts.start()
 
     # ---- track-change notification ----------------------------------
 
@@ -718,6 +854,17 @@ class UpnpManager:
         if encoder is not None:
             try:
                 encoder.close()
+            except Exception:
+                pass
+        # Clear any bounded per-track file so subsequent requests fall
+        # back to the live RingBuffer (PCM re-encode) path, and delete
+        # its temp file.
+        http_server = getattr(session, "http_server", None)
+        track_source = getattr(http_server, "track_source", None) if http_server else None
+        if track_source is not None:
+            http_server.track_source = None
+            try:
+                track_source.close()
             except Exception:
                 pass
         print("[upnp] passthrough OFF", flush=True)
@@ -852,6 +999,12 @@ class UpnpManager:
             except Exception:
                 pass
             try:
+                ts = getattr(session.http_server, "track_source", None)
+                if ts is not None:
+                    ts.close()
+            except Exception:
+                pass
+            try:
                 session.buffer.close()
             except Exception:
                 pass
@@ -930,6 +1083,12 @@ class UpnpManager:
                 session.http_server.server_close()
         except Exception as exc:
             log.debug("http server shutdown failed: %r", exc)
+        try:
+            ts = getattr(session.http_server, "track_source", None)
+            if ts is not None:
+                ts.close()
+        except Exception as exc:
+            log.debug("track-source close failed: %r", exc)
         # Tell the device to stop pulling. Best-effort: if the
         # device has already disconnected we'll get a transport
         # error and that's fine.
