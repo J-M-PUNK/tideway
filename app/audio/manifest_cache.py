@@ -43,7 +43,12 @@ _ENTRY_SWEEP_THRESHOLD = 128
 #   info:       Any (StreamInfo) — opaque, passed back to caller
 #   cached_at:  float — time.monotonic() at insertion
 #   bytes_map:  dict[int, bytes] — pre-fetched segment bytes by index
-_Entry = tuple[list[str], Optional[float], Any, float, dict[int, bytes]]
+#   track_meta: Optional[dict] — resolved track metadata (title/artist/
+#               album/cover_id). Stored alongside the manifest so a cache
+#               HIT carries the correct metadata too — without it, the
+#               UPnP renderer was told the previous track's metadata on
+#               every hit (the miss path set it, the hit path didn't).
+_Entry = tuple[list[str], Optional[float], Any, float, dict[int, bytes], Optional[dict]]
 
 
 class ManifestCache:
@@ -71,11 +76,15 @@ class ManifestCache:
 
     def lookup(
         self, key: tuple[str, Optional[str]]
-    ) -> Optional[tuple[list[str], Optional[float], Any, dict[int, bytes]]]:
+    ) -> Optional[
+        tuple[list[str], Optional[float], Any, dict[int, bytes], Optional[dict]]
+    ]:
         """Return a fresh copy of the entry, or None on miss / expiry.
 
         Returns copies of `urls` and `bytes_map` so the caller can
-        mutate freely without poisoning the cache.
+        mutate freely without poisoning the cache. The trailing
+        `track_meta` is the cached resolved metadata (may be None for
+        entries written before this field existed).
         """
         now = time.monotonic()
         with self._lock:
@@ -83,14 +92,14 @@ class ManifestCache:
             if entry is None:
                 self._misses += 1
                 return None
-            urls, duration, info, cached_at, bytes_map = entry
+            urls, duration, info, cached_at, bytes_map, track_meta = entry
             if now - cached_at > self._ttl:
                 self._bytes -= sum(len(v) for v in bytes_map.values())
                 self._entries.pop(key, None)
                 self._misses += 1
                 return None
             self._hits += 1
-            return list(urls), duration, info, dict(bytes_map)
+            return list(urls), duration, info, dict(bytes_map), track_meta
 
     def store(
         self,
@@ -98,19 +107,28 @@ class ManifestCache:
         urls: list[str],
         duration: Optional[float],
         info: Any,
+        track_meta: Optional[dict] = None,
     ) -> None:
         """Insert / refresh a manifest entry.
 
         Preserves any pre-fetched bytes from a prior prefetch for the
         same key — re-resolving the manifest doesn't wipe warmed
         segments, so a hover-prefetch followed by a real play stays
-        warm end-to-end.
+        warm end-to-end. `track_meta`, when supplied, replaces the
+        cached metadata; when omitted it is preserved from any existing
+        entry (so a bytes-only refresh keeps the existing metadata).
         """
         with self._lock:
             existing = self._entries.get(key)
             existing_bytes = existing[4] if existing is not None else {}
+            existing_meta = existing[5] if existing is not None else None
             self._entries[key] = (
-                urls, duration, info, time.monotonic(), existing_bytes,
+                urls,
+                duration,
+                info,
+                time.monotonic(),
+                existing_bytes,
+                track_meta if track_meta is not None else existing_meta,
             )
             # Sweep expired siblings opportunistically while we have
             # the lock — keeps memory bounded without a janitor
@@ -145,7 +163,7 @@ class ManifestCache:
             entry = self._entries.get(key)
             if entry is None:
                 return
-            urls, duration, info, cached_at, bytes_map = entry
+            urls, duration, info, cached_at, bytes_map, track_meta = entry
             merged = dict(bytes_map)
             added = 0
             for idx, data in new_bytes.items():
@@ -153,7 +171,7 @@ class ManifestCache:
                     continue
                 merged[idx] = data
                 added += len(data)
-            self._entries[key] = (urls, duration, info, cached_at, merged)
+            self._entries[key] = (urls, duration, info, cached_at, merged, track_meta)
             self._bytes += added
             self._evict_bytes_over_cap_locked()
 
@@ -174,7 +192,7 @@ class ManifestCache:
                     "prefetched_segments": len(bytes_map),
                     "prefetched_bytes": sum(len(v) for v in bytes_map.values()),
                 }
-                for (tid, q), (urls, _dur, _info, cached_at, bytes_map) in list(
+                for (tid, q), (urls, _dur, _info, cached_at, bytes_map, _meta) in list(
                     self._entries.items()
                 )
             ]
@@ -200,11 +218,11 @@ class ManifestCache:
         # Python 3.7+ dict preserves insertion order — pop in
         # insertion order until we're back under the cap.
         for key in list(self._entries.keys()):
-            urls, duration, info, cached_at, bytes_map = self._entries[key]
+            urls, duration, info, cached_at, bytes_map, track_meta = self._entries[key]
             if not bytes_map:
                 continue
             freed = sum(len(v) for v in bytes_map.values())
-            self._entries[key] = (urls, duration, info, cached_at, {})
+            self._entries[key] = (urls, duration, info, cached_at, {}, track_meta)
             self._bytes -= freed
             if self._bytes <= self._bytes_cap:
                 break

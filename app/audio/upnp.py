@@ -815,12 +815,21 @@ class UpnpManager:
                 _ts = track_ts
             _sep = "&" if "?" in session.stream_url else "?"
             _uri = f"{session.stream_url}{_sep}ts={_ts}"
+            # Point albumArtURI at the cover we proxy on THIS server
+            # (LAN-reachable 0.0.0.0 stream listener). The renderer
+            # can't reach Tidal's image CDN directly, so a remote
+            # cover_url never resolved to a picture before.
+            cover_url = ""
+            cover_id = metadata.get("cover_id")
+            if cover_id:
+                _base = session.stream_url.rsplit(_STREAM_PATH, 1)[0]
+                cover_url = f"{_base}/cover/{cover_id}"
             track_meta = TrackMetadata(
                 title=metadata.get("title", ""),
                 artist=metadata.get("artist", ""),
                 album=metadata.get("album", ""),
                 duration_s=metadata.get("duration_s", 0),
-                cover_url=metadata.get("cover_url", ""),
+                cover_url=cover_url,
                 track_uri=_uri,
                 mime_type="audio/flac",
             )

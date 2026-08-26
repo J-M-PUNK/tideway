@@ -35,6 +35,7 @@ from __future__ import annotations
 import http.server
 import logging
 import os
+import re
 import socket
 import socketserver
 import tempfile
@@ -44,6 +45,7 @@ import urllib.parse
 from typing import Optional
 
 import numpy as np
+import requests
 
 log = logging.getLogger(__name__)
 
@@ -66,6 +68,26 @@ DLNA_CONTENT_FEATURES = (
     "DLNA.ORG_OP=01;DLNA.ORG_CI=0;"
     "DLNA.ORG_FLAGS=05700000000000000000000000000000"
 )
+
+# --- Cover-art proxy for DLNA/UPnP renderers -------------------------
+# Renderers (e.g. UAPP) fetch the albumArtURI we hand them over the LAN.
+# Tidal's image CDN (resources.tidal.com / images.tidal.com) is often
+# unreachable or rejected by the renderer (CORS / signed-URL / auth
+# headers), so instead of handing the renderer Tidal's remote URL we
+# proxy the cover through THIS server — the same LAN-only, 0.0.0.0-
+# bound listener that already streams the FLAC. That keeps the blast
+# radius to this one listener; the FastAPI server stays on 127.0.0.1
+# and is never LAN-reachable (see StreamHTTPServer's docstring).
+#
+# SSRF surface is bounded two ways: the only host we ever fetch is a
+# Tidal image CDN from the allowlist below, and the cover id is
+# constrained to hex + dashes (dashes become path slashes, as Tidal
+# expects) so no `..` / `@` / `:` breakout is possible.
+_COVER_SESSION = requests.Session()
+_COVER_SESSION.headers.update({"User-Agent": "Tideway/1.0"})
+_COVER_ALLOWED_HOSTS = frozenset({"resources.tidal.com", "images.tidal.com"})
+_COVER_MAX_BYTES = 5 * 1024 * 1024
+_COVER_ID_RE = re.compile(r"^[0-9a-fA-F-]{32,40}$")
 
 # The stream is open-ended, but a strict renderer's Range probe wants a
 # finite total to seek against before its decoder-init proceeds. We
@@ -1159,6 +1181,10 @@ class StreamHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     # the UPnP session on start_passthrough, cleared when passthrough
     # stops (fallback PCM re-encode is served from the RingBuffer).
     track_source: Optional["TrackFileSource"] = None
+    # Cover-art cache (cover_id -> (bytes, content_type)). Populated
+    # lazily on first renderer fetch; covers are tiny and stable for
+    # the life of a session.
+    cover_cache: dict = {}
 
 
 class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
@@ -1386,6 +1412,10 @@ class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
         if not isinstance(server, StreamHTTPServer):
             self.send_error(503, "stream session not ready")
             return
+        _path = self._request_path()
+        if _path.startswith("/cover/"):
+            self._serve_cover(_path[len("/cover/"):], head=True)
+            return
         if self._request_path() != server.stream_path:
             self.send_error(404, "not found")
             return
@@ -1398,11 +1428,69 @@ class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
             return
         self._send_stream_headers(server, "HEAD")
 
+    def _serve_cover(self, cover_id: str, head: bool = False) -> None:
+        """Proxy a Tidal album cover for a LAN renderer.
+
+        `cover_id` is the raw Tidal cover UUID (hex + dashes). We build
+        the Tidal CDN URL and fetch it, caching the bytes on this server
+        so repeat requests (and the renderer's repeated probes) are
+        cheap. Only Tidal image-CDN hosts are ever contacted (see
+        _COVER_ALLOWED_HOSTS) and the id is regex-constrained, so this
+        is not a general outbound proxy.
+        """
+        if not _COVER_ID_RE.match(cover_id):
+            self.send_error(400, "invalid cover id")
+            return
+        cache = self.server.cover_cache
+        cached = cache.get(cover_id)
+        if cached is None:
+            tidal_url = (
+                "https://resources.tidal.com/images/"
+                f"{cover_id.replace('-', '/')}/640x640.jpg"
+            )
+            parsed = urllib.parse.urlparse(tidal_url)
+            if parsed.hostname not in _COVER_ALLOWED_HOSTS:
+                self.send_error(403, "host not allowed")
+                return
+            try:
+                resp = _COVER_SESSION.get(tidal_url, timeout=10)
+                resp.raise_for_status()
+                body = resp.content
+            except Exception as exc:
+                log.warning("cover fetch failed for %s: %s", cover_id, exc)
+                self.send_error(502, "cover fetch failed")
+                return
+            if len(body) > _COVER_MAX_BYTES:
+                self.send_error(413, "cover too large")
+                return
+            ctype = resp.headers.get("Content-Type") or "image/jpeg"
+            if len(cache) > 256:
+                cache.clear()
+            cache[cover_id] = (body, ctype)
+        else:
+            body, ctype = cached
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "public, max-age=3600")
+        self.send_header("Connection", "close")
+        self.end_headers()
+        if head:
+            return
+        try:
+            self.wfile.write(body)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+
     def do_GET(self) -> None:  # noqa: N802 - stdlib API
         self._log_connection("GET")
         server = self.server  # type: ignore[assignment]
         if not isinstance(server, StreamHTTPServer):
             self.send_error(503, "stream session not ready")
+            return
+        _path = self._request_path()
+        if _path.startswith("/cover/"):
+            self._serve_cover(_path[len("/cover/"):])
             return
         if self._request_path() != server.stream_path:
             self.send_error(404, "not found")

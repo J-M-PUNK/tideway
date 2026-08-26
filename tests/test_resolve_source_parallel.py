@@ -22,6 +22,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from app.audio.manifest_cache import ManifestCache
+
 
 def test_resolve_source_runs_metadata_and_playbackinfo_in_parallel():
     from app.audio.player import PCMPlayer
@@ -76,7 +78,7 @@ def test_resolve_source_runs_metadata_and_playbackinfo_in_parallel():
     player._session_getter = lambda: session
 
     with patch("app.audio.player.tidalapi.Track", return_value=holder):
-        urls, duration_s, info, bytes_map = player._resolve_source(
+        urls, duration_s, info, bytes_map, track_meta = player._resolve_source(
             "12345", quality=None
         )
 
@@ -90,7 +92,12 @@ def test_resolve_source_runs_metadata_and_playbackinfo_in_parallel():
     assert urls == ["http://seg/0", "http://seg/1"]
     assert duration_s == 180.0
     assert info.audio_quality == "LOSSLESS"
-    # Manifest cache write fires once for the resolved entry.
+    # Metadata is resolved alongside the manifest and returned as the
+    # 5th element (so the UPnP renderer gets correct artist/album/cover).
+    assert isinstance(track_meta, dict)
+    assert "title" in track_meta and "cover_id" in track_meta
+    # Manifest cache write fires once for the resolved entry, carrying
+    # the metadata.
     player._manifest_cache.store.assert_called_once()
 
 
@@ -187,3 +194,73 @@ def test_resolve_source_bounded_when_tidal_stalls():
         assert elapsed < 3.0, f"resolve hung for {elapsed:.1f}s"
     finally:
         release.set()
+
+
+def test_resolve_source_cache_hit_returns_stored_metadata():
+    """A cache HIT must carry the resolved track metadata (title /
+    artist / cover_id), not the previous track's. Previously the hit
+    path left `_current_track_meta` pointing at the prior track, so the
+    UPnP renderer was told the wrong artist/song at session start (and
+    on every replay, since cold-start prefetch makes the first play a
+    hit)."""
+    from app.audio.player import PCMPlayer
+
+    player = PCMPlayer.__new__(PCMPlayer)
+    player._manifest_cache = ManifestCache()
+    player._local_lookup = None
+    player._quality_clamp = None
+    player._current_track_meta = {"title": "STALE", "artist": "OLD"}
+    stored_meta = {
+        "title": "Real Title",
+        "artist": "Real Artist",
+        "album": "Real Album",
+        "duration_s": 200,
+        "cover_id": "abcd1234-1234-1234-1234-1234567890ab",
+        "cover_url": "https://resources.tidal.com/images/x/640x640.jpg",
+    }
+    player._manifest_cache.store(
+        ("555", None), ["http://seg/0"], 200.0, None, stored_meta
+    )
+    player._session_getter = lambda: MagicMock()
+
+    result = player._resolve_source("555", quality=None)
+
+    assert result[4] == stored_meta
+    assert player._current_track_meta == stored_meta
+
+
+def test_prefetch_does_not_pollute_current_track_meta():
+    """Speculative prefetch must NOT overwrite `_current_track_meta`.
+
+    The cold-start prefetch resolves the persisted track purely to warm
+    the manifest cache. It used to reach _resolve_source (cache-hit),
+    which set `_current_track_meta` to the prefetched track — so when
+    the renderer's session started, the first SetAVTransportURI carried
+    a track the user never played. Prefetch is speculative, so it must
+    leave the playing track's metadata alone."""
+    from app.audio.player import PCMPlayer
+
+    player = PCMPlayer.__new__(PCMPlayer)
+    player._manifest_cache = ManifestCache()
+    player._local_lookup = None
+    player._quality_clamp = None
+    player._current_track_meta = {"title": "PLAYING", "artist": "Now"}
+    stored_meta = {
+        "title": "Prefetched",
+        "artist": "Not Playing",
+        "album": "X",
+        "duration_s": 1,
+        "cover_id": "ab",
+        "cover_url": "",
+    }
+    player._manifest_cache.store(
+        ("777", None), ["http://seg/0"], 1.0, None, stored_meta
+    )
+    player._session_getter = lambda: MagicMock()
+
+    with patch("app.tidal_client.tidal_jitter_sleep", return_value=None):
+        ok = player.prefetch("777", quality=None, warm_bytes=False)
+
+    assert ok is True
+    # The playing track's metadata is untouched by a speculative prefetch.
+    assert player._current_track_meta == {"title": "PLAYING", "artist": "Now"}
