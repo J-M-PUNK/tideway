@@ -1294,8 +1294,15 @@ class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
         it. Here the Content-Length is the actual file size, so the
         renderer knows the exact end and stops cleanly.
 
-        Always answers 206 (DLNA convention) with a Content-Range over
-        the real total, and honours a byte Range for seek.
+        Status follows what the request actually asked for: a byte
+        Range gets 206 + Content-Range, a bare GET gets 200. RFC 7233
+        forbids answering 206 to a request that carried no Range, and
+        Rygel's GStreamer souphttpsrc (KEF LS50 II and other Rygel
+        renderers) enforces it — an unsolicited 206 made it reject the
+        resource with UPnP 716 "Resource not found", so DLNA connected
+        but never played (#332). Strict renderers that need a length
+        for SEEK_END during decoder-init still get one either way,
+        because this path always knows the real total.
         """
         src = server.track_source
         if src is None:
@@ -1322,10 +1329,13 @@ class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
                 start = 0
         if start > total:
             start = total
-        self.send_response(206)
-        self.send_header(
-            "Content-Range", f"bytes {start}-{max(total - 1, 0)}/{total}"
-        )
+        if range_hdr.startswith("bytes="):
+            self.send_response(206)
+            self.send_header(
+                "Content-Range", f"bytes {start}-{max(total - 1, 0)}/{total}"
+            )
+        else:
+            self.send_response(200)
         self.send_header("Content-Length", str(total - start))
         self.send_header("Accept-Ranges", "bytes")
         self.send_header("Content-Type", server.content_type)
