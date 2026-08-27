@@ -15,6 +15,8 @@ from unittest.mock import patch
 
 import pytest
 
+from tests.conftest import known_to_curl_cffi
+
 from app import aoty
 
 
@@ -122,10 +124,16 @@ def test_all_profiles_challenged_sets_blocked_flag():
 
 def test_fallback_profiles_are_known_to_curl_cffi():
     # A typo in a fallback profile would silently 403 every retry.
-    from curl_cffi.requests.impersonate import normalize_browser_type
-
     for profile in aoty._FALLBACK_IMPERSONATE:
-        assert normalize_browser_type(profile)
+        assert known_to_curl_cffi(profile), profile
+
+
+def test_an_unknown_profile_is_rejected():
+    """The guards above are only worth anything if the check can fail.
+    A misspelling has to be caught here rather than at request time,
+    where it degrades into a silent 403 on every retry."""
+    assert not known_to_curl_cffi("chorme")
+    assert not known_to_curl_cffi("")
 
 
 def test_impersonate_profile_is_current_and_known_to_curl_cffi():
@@ -137,10 +145,7 @@ def test_impersonate_profile_is_current_and_known_to_curl_cffi():
     the known-bad one and is a profile curl_cffi actually recognises
     (so a typo like "chorme" fails loudly instead of silently 403'ing
     every request)."""
-    from curl_cffi.requests.impersonate import normalize_browser_type
-
     assert aoty._CFFI_IMPERSONATE != "chrome120"
-    # normalize_browser_type resolves the "chrome" alias / a concrete
-    # version to curl_cffi's internal target; an unknown string raises.
-    resolved = normalize_browser_type(aoty._CFFI_IMPERSONATE)
-    assert resolved  # truthy target, not None/empty
+    # Resolves either as an alias or as a concrete target; an unknown
+    # string is neither.
+    assert known_to_curl_cffi(aoty._CFFI_IMPERSONATE)
