@@ -12665,7 +12665,13 @@ def _rank_by_taste(rows: list, orbit: dict, played: set) -> list:
 perf_log = logging.getLogger("tideway.perf")
 perf_log.setLevel(logging.INFO)
 perf_log.propagate = False
-if not perf_log.handlers:
+# TIDEWAY_NO_PERF_LOG is set by tests/conftest.py before this module is
+# imported. Without it a test run appends to the user's real perf.log:
+# the recs tests call _taste_profile() directly, so a suite run wrote
+# stub timings (artists=1, everything 0ms) into the same file a cold
+# start writes to, and reading it back you cannot tell which lines came
+# from the app. Diagnostics you cannot trust are worse than none.
+if not perf_log.handlers and not os.environ.get("TIDEWAY_NO_PERF_LOG"):
     try:
         from logging.handlers import RotatingFileHandler
 
@@ -12682,6 +12688,8 @@ if not perf_log.handlers:
         perf_log.addHandler(_ph)
     except Exception:
         perf_log.addHandler(logging.NullHandler())
+elif not perf_log.handlers:
+    perf_log.addHandler(logging.NullHandler())
 
 
 def _taste_profile() -> dict:
