@@ -40,6 +40,22 @@ updates:
         update-types: ["version-update:semver-major"]
       - dependency-name: "@types/react-dom"
         update-types: ["version-update:semver-major"]
+      # TypeScript 7 is blocked upstream, not by us. typescript-eslint
+      # refuses to load against it at all — "typescript-eslint does not
+      # support TS 7.0" — so adopting it turns eslint off entirely,
+      # and eslint is one of the four checks a PR has to pass. The
+      # latest release (8.68.0) still declares
+      # peerDependencies.typescript ">=4.8.4 <6.1.0"; support is
+      # tracked in typescript-eslint#10940 for TS >=7.1.
+      #
+      # The upgrade itself is otherwise ready: on TS 7.0.2 the only
+      # code change needed is dropping `baseUrl` (removed in 7) from
+      # tsconfig.json and tsconfig.app.json, since `paths` is already
+      # relative and Vite resolves the alias itself. tsc -b and all
+      # 172 vitest tests passed. Drop this entry once
+      # typescript-eslint ships TS 7 support.
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
     groups:
       # Peer-linked packages, listed before the catch-all because a
       # dependency joins the first group it matches. No `update-types`
