@@ -145,3 +145,22 @@ def test_swap_replaces_session_when_curl_cffi_available():
     assert type(s.request_session).__module__.startswith("curl_cffi"), (
         f"expected curl_cffi session, got {type(s.request_session)!r}"
     )
+
+
+def test_tidal_impersonate_profile_is_known_to_curl_cffi():
+    """The profile every Tidal call goes out under.
+
+    Only AOTY's profiles were guarded; this one was not, and it is the
+    more consequential of the two. curl_cffi does not raise on an
+    unknown profile at request time — the handshake just goes out
+    un-impersonated, which is precisely the fingerprint the whole
+    transport exists to avoid. A typo here would be invisible until
+    Tidal started refusing logins.
+    """
+    from tests.conftest import known_to_curl_cffi
+
+    from app import http as app_http
+
+    assert known_to_curl_cffi(app_http._IMPERSONATE_PROFILE), (
+        app_http._IMPERSONATE_PROFILE
+    )
