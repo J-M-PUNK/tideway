@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Album } from "@/api/types";
-import { sortAlbums } from "./ArtistSection";
+import { excludeCompilations, sortAlbums } from "./ArtistSection";
 
 function album(partial: Partial<Album>): Album {
   return {
@@ -98,5 +98,41 @@ describe("sortAlbums", () => {
     expect(sortAlbums([], "newest")).toEqual([]);
     expect(sortAlbums([], "oldest")).toEqual([]);
     expect(sortAlbums([], "alpha")).toEqual([]);
+  });
+});
+
+describe("excludeCompilations", () => {
+  it("drops albums the Compilations shelf already claimed", () => {
+    // Tidal reports a greatest-hits set as album_type "album", so these
+    // arrive in get_albums() alongside the studio records. Michael
+    // Jackson had 21 of them showing on both shelves at once.
+    const albums = [
+      album({ id: "1", name: "Thriller" }),
+      album({ id: "2", name: "Number Ones" }),
+      album({ id: "3", name: "Bad" }),
+    ];
+    const compilations = [album({ id: "2", name: "Number Ones" })];
+
+    const out = excludeCompilations(albums, compilations);
+
+    expect(out.map((a) => a.name)).toEqual(["Thriller", "Bad"]);
+  });
+
+  it("leaves albums alone before /extras lands", () => {
+    // The compilations list is empty until the deferred call returns;
+    // until then the shelf shows everything, as it does today.
+    const albums = [album({ id: "1", name: "Thriller" })];
+
+    expect(excludeCompilations(albums, [])).toBe(albums);
+  });
+
+  it("keeps an album whose id does not match", () => {
+    // Matching is by id. A compilation listed under a different edition
+    // id is not removed — the same outcome as before this existed, so a
+    // miss degrades instead of dropping a record the artist released.
+    const albums = [album({ id: "1", name: "Thriller" })];
+    const compilations = [album({ id: "99", name: "Thriller" })];
+
+    expect(excludeCompilations(albums, compilations)).toHaveLength(1);
   });
 });

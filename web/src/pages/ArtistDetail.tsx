@@ -10,6 +10,7 @@ import { useColumnCount } from "@/hooks/useColumnCount";
 import { useLikedByArtist } from "@/hooks/useLikedByArtist";
 import { useSpotifyTrackPlaycountBatch } from "@/hooks/useSpotifyEnrichment";
 import { useVideoPlayer } from "@/hooks/useVideoPlayer";
+import { excludeCompilations } from "./ArtistSection";
 import { ArtistHero } from "@/components/ArtistHero";
 import { ArtistTopCities } from "@/components/ArtistTopCities";
 import { Grid, SectionHeader, ViewMoreLink } from "@/components/Grid";
@@ -88,7 +89,12 @@ export function ArtistDetail({ onDownload }: { onDownload: OnDownload }) {
   // records). Compilations are kept here even though they get their own
   // shelf — they're still the artist's releases, so dropping them would
   // silently shrink the discography download.
-  const fullCatalog = [...artist.albums, ...artist.ep_singles, ...compilations];
+  // Drop anything the Compilations shelf claimed, or the same records
+  // render on both shelves — and fullCatalog below counts them twice,
+  // queueing every retrospective twice on "download full discography".
+  const albums = excludeCompilations(artist.albums, compilations);
+
+  const fullCatalog = [...albums, ...artist.ep_singles, ...compilations];
 
   return (
     <div>
@@ -150,7 +156,7 @@ export function ArtistDetail({ onDownload }: { onDownload: OnDownload }) {
       />
       <MediaRow
         title="Albums"
-        items={artist.albums}
+        items={albums}
         viewMoreTo={`/artist/${id}/all/albums`}
         onDownload={onDownload}
       />

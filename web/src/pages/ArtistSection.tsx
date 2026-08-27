@@ -71,6 +71,34 @@ function loadAlbumSort(): AlbumSort {
  * release_date / name. Pure so it can be unit-tested without
  * standing up the page.
  */
+/** Albums with anything the Compilations shelf has claimed removed.
+ *
+ * Tidal never flags a compilation: `album.type` is ALBUM/EP/SINGLE even
+ * for a greatest-hits set, so `get_albums()` hands back retrospectives
+ * mixed in with studio albums. The only place Tidal separates them is a
+ * "Compilations" module on its curated artist page, and fetching that
+ * costs 1.5-3s, so it was deferred to /api/artist/{id}/extras to keep
+ * first paint fast. The server-side precedence that drops a compilation
+ * from Albums runs on the primary payload, where that module is not yet
+ * available — so it never fires, and the records show up on both
+ * shelves. Michael Jackson had 21 of them in Albums and in Compilations
+ * at once.
+ *
+ * Matching on id: verified against the live API, all 21 compilations
+ * carried the same album id as their entry in Albums. An id that does
+ * not match simply is not removed, which is exactly the behaviour
+ * before this function existed — so a miss degrades rather than losing
+ * a record.
+ */
+export function excludeCompilations(
+  albums: Album[],
+  compilations: Album[],
+): Album[] {
+  if (!compilations.length) return albums;
+  const claimed = new Set(compilations.map((c) => c.id));
+  return albums.filter((a) => !claimed.has(a.id));
+}
+
 export function sortAlbums(albums: Album[], sort: AlbumSort): Album[] {
   // Build sortable keys once so the comparator doesn't repeatedly
   // parse the same release_date string. .slice() so we don't
