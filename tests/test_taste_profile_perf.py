@@ -84,3 +84,30 @@ def test_perf_line_also_reaches_the_durable_log(profile_env, caplog):
         profile_env._taste_profile()
 
     assert any("[perf] taste_profile" in r.message for r in caplog.records)
+
+
+def test_test_runs_do_not_write_to_the_users_perf_log():
+    """The file handler must be off under pytest.
+
+    The recs tests call `_taste_profile()` directly, so without this a
+    suite run appends stub timings — artists=1, every phase 0ms — to the
+    same perf.log a real cold start writes to. Reading it back, there is
+    no way to tell which lines came from the app. That happened: 40
+    lines of test output were mistaken for real measurements and nearly
+    reported as a recommendations bug.
+    """
+    import logging
+
+    import server
+
+    # pytest's caplog attaches its own handlers to whichever logger a
+    # test captures, so the assertion is about file handlers only.
+    # pytest attaches its own handlers to a captured logger, including a
+    # FileHandler aimed at the null device, so the assertion has to be
+    # about the destination rather than the handler type.
+    writers = [
+        h
+        for h in server.perf_log.handlers
+        if str(getattr(h, "baseFilename", "")).endswith("perf.log")
+    ]
+    assert not writers, f"perf.log would be written during tests: {writers!r}"
