@@ -112,7 +112,7 @@ except Exception as _exc:  # pragma: no cover - environment dependent
 #      the bind succeed by sharing the port, and the kernel then hands
 #      each inbound UNICAST reply to only ONE of the sharing sockets, so
 #      the other app swallowed our renderer's answers and the picker
-#      stayed empty (tide-8f5b).
+#      stayed empty.
 #
 #   2. Some renderers -- notably USB Audio Player PRO and other
 #      Android-based devices -- always reply to port 1900 of the
@@ -178,7 +178,7 @@ def _open_ssdp_search_socket(iface: str) -> socket.socket:
     to :1900 is what silently broke discovery when another SSDP app held
     the port: SO_REUSEPORT shares :1900, and the kernel then delivers
     each inbound unicast datagram to only ONE of the sharing sockets, so
-    the other app swallowed our renderer's replies (tide-8f5b). The
+    the other app swallowed our renderer's replies. The
     outgoing multicast interface is pinned so the M-SEARCH leaves the
     right NIC on multi-homed hosts (e.g. alongside a VPN utun).
     """
@@ -238,7 +238,7 @@ def _open_ssdp_notify_listener(iface: str) -> Optional[socket.socket]:
 def _collect_ssdp_locations(
     timeout: float, lan_ip: str
 ) -> Tuple[Set[str], bool]:
-    """Blocking SSDP search over two sockets (tide-8f5b). An ephemeral
+    """Blocking SSDP search over two sockets. An ephemeral
     SEARCH socket bursts an M-SEARCH for every target and receives the
     unicast replies of spec-compliant renderers -- immune to another app
     holding :1900 -- while a best-effort passive :1900 LISTENER picks up

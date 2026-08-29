@@ -1071,7 +1071,7 @@ def test_start_passthrough_restart_bypasses_same_source_guard(
 
 
 # ---------------------------------------------------------------------
-# SSDP discovery sockets (tide-8f5b): the active search must not share
+# SSDP discovery sockets: the active search must not share
 # :1900, or another SSDP app (Spotify, Sonos, ...) steals the unicast
 # M-SEARCH replies and the DLNA picker goes empty.
 # ---------------------------------------------------------------------
