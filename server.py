@@ -1252,8 +1252,31 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
 # under 1ms and stops blocking the audio callback during that window.
 # Routes that already return a `Response` subclass (StreamingResponse,
 # HTMLResponse for the Spotify callback, etc.) are unaffected — only
-# the dict-returning routes route through ORJSONResponse.
-from fastapi.responses import ORJSONResponse as _ORJSONResponse  # noqa: E402
+# the dict-returning routes route through it.
+#
+# Defined here rather than imported from fastapi.responses, which
+# deprecated its ORJSONResponse on the grounds that FastAPI's own
+# Pydantic-based serialization "is faster and doesn't need a custom
+# response class". Measured on a 161 KB artist-shaped payload, it is
+# not: orjson 0.09 ms, pydantic-core 0.58 ms, stdlib json 0.87 ms.
+# Taking the deprecation's advice would make the encode roughly six
+# times longer, which is the GIL hold this class exists to keep off the
+# audio callback.
+#
+# Only the import was deprecated, not orjson. The body below is what
+# FastAPI's class does, options included; keeping our own drops the
+# warning without giving up the measurement.
+import orjson  # noqa: E402
+from starlette.responses import JSONResponse as _JSONResponse  # noqa: E402
+
+
+class _ORJSONResponse(_JSONResponse):
+    def render(self, content: Any) -> bytes:
+        return orjson.dumps(
+            content,
+            option=orjson.OPT_NON_STR_KEYS | orjson.OPT_SERIALIZE_NUMPY,
+        )
+
 
 app = FastAPI(
     title="Tideway",
