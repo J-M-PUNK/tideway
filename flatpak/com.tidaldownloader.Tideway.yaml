@@ -57,12 +57,25 @@ cleanup:
 modules:
   # sounddevice needs libportaudio; the GNOME runtime does not ship
   # it. Built here; sha256 computed off the upstream tarball.
+  #
+  # Sourced from the GitHub release tag rather than
+  # files.portaudio.com, which stopped resolving entirely — the v1.32.2
+  # release build failed with "Could not resolve host:
+  # files.portaudio.com", and it does not resolve from a developer
+  # machine either, so this is the host being gone rather than a flaky
+  # runner. The project's own GitHub release for v19.7.0 carries no
+  # assets, so the tag archive is the source that remains.
+  #
+  # Same upstream code, different packaging: the tag archive ships a
+  # generated `configure`, so autotools still applies unchanged (this
+  # was checked rather than assumed — a repo snapshot without it would
+  # have needed an autoreconf step).
   - name: portaudio
     buildsystem: autotools
     sources:
       - type: archive
-        url: https://files.portaudio.com/archives/pa_stable_v190700_20210406.tgz
-        sha256: 47efbf42c77c19a05d22e627d42873e991ec0c1357219c0d74ce6a2948cb2def
+        url: https://github.com/PortAudio/portaudio/archive/refs/tags/v19.7.0.tar.gz
+        sha256: 5af29ba58bbdbb7bbcefaaecc77ec8fc413f0db6f4c4e286c40c3e1b83174fa0
 
   # Offline, hashed PyPI deps generated from requirements.txt with
   # flatpak-pip-generator. Regenerate by running the script in the
