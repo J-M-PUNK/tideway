@@ -12497,6 +12497,9 @@ def _dedupe_cap_albums(albums: list, limit: int, exclude: Optional[set] = None) 
 
 
 _GENRE_MAP_TTL_SEC = 24 * 3600.0
+# Disk key for the same map. User-independent, so one row serves every
+# account on the machine.
+_GENRE_MAP_DISK_KEY = "aoty|genre-slug-map"
 _genre_map_cache: dict = {"at": 0.0, "map": None}
 _genre_map_lock = threading.Lock()
 
@@ -12513,11 +12516,32 @@ def _aoty_genre_slug_map() -> dict:
     ("26-shoegaze"). Harvesting name->slug from a couple of years of
     top-rated albums builds the complete map, so "Best of Shoegaze"
     becomes a real row. Cached ~a day — the taxonomy barely moves."""
+    from app import lastfm_disk_cache
+
     now = time.monotonic()
     with _genre_map_lock:
         c = _genre_map_cache
         if c["map"] is not None and now - c["at"] < _GENRE_MAP_TTL_SEC:
             return c["map"]
+    # The day-long TTL above only ever applied within one run — the
+    # dict dies with the process, so every launch re-harvested the
+    # taxonomy. Measured at 1297 ms of a 4515 ms cold taste profile,
+    # paid again on every start. Nothing here is per-user and the
+    # taxonomy barely moves, which is what the disk layer is for.
+    # JSON has no tuples, so the (slug, display) pairs come back as
+    # lists and are restored.
+    _cached = lastfm_disk_cache.get(_GENRE_MAP_DISK_KEY, _GENRE_MAP_TTL_SEC)
+    if isinstance(_cached, dict) and _cached:
+        restored = {
+            k: (v[0], v[1])
+            for k, v in _cached.items()
+            if isinstance(v, (list, tuple)) and len(v) == 2
+        }
+        if restored:
+            with _genre_map_lock:
+                _genre_map_cache["map"] = restored
+                _genre_map_cache["at"] = time.monotonic()
+            return restored
     mapping: dict = {}
     # Curated index first so its canonical display names win.
     for g in _rec_safe(lambda: aoty_module.genre_index(), []) or []:
@@ -12536,6 +12560,10 @@ def _aoty_genre_slug_map() -> dict:
     with _genre_map_lock:
         _genre_map_cache["at"] = time.monotonic()
         _genre_map_cache["map"] = mapping
+    # Persist only a map we actually built. Writing an empty one would
+    # cache an AOTY outage for a day.
+    if mapping:
+        lastfm_disk_cache.set(_GENRE_MAP_DISK_KEY, mapping)
     return mapping
 
 
