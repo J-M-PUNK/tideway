@@ -66,7 +66,68 @@ interface ReqOptions {
   timeoutMs?: number;
 }
 
+// Chromium allows a host at most 6 concurrent HTTP/1.1 connections,
+// and the desktop shell is a Chromium webview talking to 127.0.0.1.
+// Route chunks, cover images and API calls all share that one pool.
+//
+// Measured: the app never exceeded 6 requests in flight, while driving
+// the same server from outside reached 7 — so the ceiling is the
+// client, not the backend. When several slow API calls hold those
+// connections, the lazily-loaded JS chunk for the page the user just
+// clicked has nowhere to go. The click registers and the route
+// changes, but Suspense sits on a skeleton until a connection frees
+// up, which reads as "the click did nothing".
+//
+// Capping ourselves below the browser's limit keeps headroom for
+// navigation and images. Four is chosen to leave two: enough for a
+// chunk plus the covers on the page being navigated to.
+const MAX_CONCURRENT_REQUESTS = 4;
+
+let inFlight = 0;
+const waiting: Array<() => void> = [];
+
+function acquireSlot(): Promise<void> {
+  if (inFlight < MAX_CONCURRENT_REQUESTS) {
+    inFlight++;
+    return Promise.resolve();
+  }
+  return new Promise<void>((resolve) => {
+    waiting.push(() => {
+      inFlight++;
+      resolve();
+    });
+  });
+}
+
+function releaseSlot(): void {
+  inFlight--;
+  waiting.shift()?.();
+}
+
+/** Requests currently occupying a connection slot, queued ones
+ *  excluded. The route prefetcher reads this so it only warms chunks
+ *  while the pool is quiet. */
+export function apiRequestsInFlight(): number {
+  return inFlight;
+}
+
 async function req<T>(
+  path: string,
+  init?: RequestInit,
+  opts?: ReqOptions,
+): Promise<T> {
+  // Wait for a connection slot before arming the timeout. Starting the
+  // clock while queued would make a request time out for waiting its
+  // turn rather than for anything the server did.
+  await acquireSlot();
+  try {
+    return await sendRequest<T>(path, init, opts);
+  } finally {
+    releaseSlot();
+  }
+}
+
+async function sendRequest<T>(
   path: string,
   init?: RequestInit,
   opts?: ReqOptions,

@@ -67,120 +67,143 @@ import type { OnDownload } from "@/api/download";
 // are named exports, so we wrap each import to rename the chosen
 // export into `default` for the lazy loader.
 import { lazy, Suspense } from "react";
+import type { ComponentType, LazyExoticComponent } from "react";
 import { HeroSkeleton } from "@/components/Skeletons";
+import {
+  registerRouteChunk,
+  startRoutePrefetch,
+} from "@/lib/routePrefetch";
+
+/**
+ * `lazy`, plus the import registered for prefetching.
+ *
+ * The generic is what keeps prop types intact — `T` flows straight
+ * through to `LazyExoticComponent<T>`, so `<Home onDownload={...} />`
+ * still typechecks. (Widening to `ComponentType<any>` is what breaks
+ * it; this does not.)
+ */
+// Constraint mirrors React's own `lazy`; narrowing it rejects valid
+// routes (a class component with never props fails to satisfy it).
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function lazyRoute<T extends ComponentType<any>>(
+  factory: () => Promise<{ default: T }>,
+): LazyExoticComponent<T> {
+  registerRouteChunk(factory);
+  return lazy(factory);
+}
 
 // Inline `lazy(() => import(...).then(m => ({ default: m.Name })))`
 // calls preserve each component's prop types through TypeScript's
 // inference. A generic wrapper around lazy would strip them to
 // ComponentType<any>, which breaks <Home onDownload={...} />.
-const Login = lazy(() =>
+const Login = lazyRoute(() =>
   import("@/pages/Login").then((m) => ({ default: m.Login })),
 );
-const Home = lazy(() =>
+const Home = lazyRoute(() =>
   import("@/pages/Home").then((m) => ({ default: m.Home })),
 );
-const Search = lazy(() =>
+const Search = lazyRoute(() =>
   import("@/pages/Search").then((m) => ({ default: m.Search })),
 );
-const Library = lazy(() =>
+const Library = lazyRoute(() =>
   import("@/pages/Library").then((m) => ({ default: m.Library })),
 );
-const LocalLibrary = lazy(() =>
+const LocalLibrary = lazyRoute(() =>
   import("@/pages/LocalLibrary").then((m) => ({ default: m.LocalLibrary })),
 );
-const FolderDetail = lazy(() =>
+const FolderDetail = lazyRoute(() =>
   import("@/pages/FolderDetail").then((m) => ({ default: m.FolderDetail })),
 );
-const Collections = lazy(() =>
+const Collections = lazyRoute(() =>
   import("@/pages/Collections").then((m) => ({ default: m.Collections })),
 );
-const CollectionDetail = lazy(() =>
+const CollectionDetail = lazyRoute(() =>
   import("@/pages/CollectionDetail").then((m) => ({
     default: m.CollectionDetail,
   })),
 );
-const FollowListPage = lazy(() =>
+const FollowListPage = lazyRoute(() =>
   import("@/pages/FollowListPage").then((m) => ({ default: m.FollowListPage })),
 );
-const GenresPage = lazy(() =>
+const GenresPage = lazyRoute(() =>
   import("@/pages/GenresPage").then((m) => ({ default: m.GenresPage })),
 );
-const MixesPage = lazy(() =>
+const MixesPage = lazyRoute(() =>
   import("@/pages/MixesPage").then((m) => ({ default: m.MixesPage })),
 );
-const MoodsPage = lazy(() =>
+const MoodsPage = lazyRoute(() =>
   import("@/pages/MoodsPage").then((m) => ({ default: m.MoodsPage })),
 );
-const ProfilePage = lazy(() =>
+const ProfilePage = lazyRoute(() =>
   import("@/pages/ProfilePage").then((m) => ({ default: m.ProfilePage })),
 );
-const BrowsePage = lazy(() =>
+const BrowsePage = lazyRoute(() =>
   import("@/pages/BrowsePage").then((m) => ({ default: m.BrowsePage })),
 );
-const ChartsPage = lazy(() =>
+const ChartsPage = lazyRoute(() =>
   import("@/pages/ChartsPage").then((m) => ({ default: m.ChartsPage })),
 );
-const AotyDrilldownPage = lazy(() =>
+const AotyDrilldownPage = lazyRoute(() =>
   import("@/pages/AotyDrilldownPage").then((m) => ({
     default: m.AotyDrilldownPage,
   })),
 );
-const FeedPage = lazy(() =>
+const FeedPage = lazyRoute(() =>
   import("@/pages/FeedPage").then((m) => ({ default: m.FeedPage })),
 );
-const ForYouPage = lazy(() =>
+const ForYouPage = lazyRoute(() =>
   import("@/pages/ForYouPage").then((m) => ({ default: m.ForYouPage })),
 );
-const ForYouGenresPage = lazy(() =>
+const ForYouGenresPage = lazyRoute(() =>
   import("@/pages/ForYouHubPage").then((m) => ({
     default: m.ForYouGenresPage,
   })),
 );
-const ForYouSectionPage = lazy(() =>
+const ForYouSectionPage = lazyRoute(() =>
   import("@/pages/ForYouSectionPage").then((m) => ({
     default: m.ForYouSectionPage,
   })),
 );
-const HistoryPage = lazy(() =>
+const HistoryPage = lazyRoute(() =>
   import("@/pages/HistoryPage").then((m) => ({ default: m.HistoryPage })),
 );
-const PopularPage = lazy(() =>
+const PopularPage = lazyRoute(() =>
   import("@/pages/PopularPage").then((m) => ({ default: m.PopularPage })),
 );
-const StatsPage = lazy(() =>
+const StatsPage = lazyRoute(() =>
   import("@/pages/StatsPage").then((m) => ({ default: m.StatsPage })),
 );
-const StatsDetail = lazy(() =>
+const StatsDetail = lazyRoute(() =>
   import("@/pages/StatsDetail").then((m) => ({ default: m.StatsDetail })),
 );
-const AlbumDetail = lazy(() =>
+const AlbumDetail = lazyRoute(() =>
   import("@/pages/AlbumDetail").then((m) => ({ default: m.AlbumDetail })),
 );
-const ArtistDetail = lazy(() =>
+const ArtistDetail = lazyRoute(() =>
   import("@/pages/ArtistDetail").then((m) => ({ default: m.ArtistDetail })),
 );
-const ArtistSection = lazy(() =>
+const ArtistSection = lazyRoute(() =>
   import("@/pages/ArtistSection").then((m) => ({ default: m.ArtistSection })),
 );
-const MixDetail = lazy(() =>
+const MixDetail = lazyRoute(() =>
   import("@/pages/MixDetail").then((m) => ({ default: m.MixDetail })),
 );
-const RadioPage = lazy(() =>
+const RadioPage = lazyRoute(() =>
   import("@/pages/RadioPage").then((m) => ({ default: m.RadioPage })),
 );
-const ImportPage = lazy(() =>
+const ImportPage = lazyRoute(() =>
   import("@/pages/ImportPage").then((m) => ({ default: m.ImportPage })),
 );
-const PlaylistDetail = lazy(() =>
+const PlaylistDetail = lazyRoute(() =>
   import("@/pages/PlaylistDetail").then((m) => ({ default: m.PlaylistDetail })),
 );
-const Downloads = lazy(() =>
+const Downloads = lazyRoute(() =>
   import("@/pages/Downloads").then((m) => ({ default: m.Downloads })),
 );
-const MiniPlayerPage = lazy(() =>
+const MiniPlayerPage = lazyRoute(() =>
   import("@/pages/MiniPlayerPage").then((m) => ({ default: m.MiniPlayerPage })),
 );
-const SettingsPage = lazy(() =>
+const SettingsPage = lazyRoute(() =>
   import("@/pages/SettingsPage").then((m) => ({ default: m.SettingsPage })),
 );
 
@@ -256,6 +279,14 @@ function AppInner() {
       refreshMyPlaylists().catch(() => {});
     }
   }, [auth.logged_in, offline, refreshMyPlaylists]);
+
+  // Warm the route chunks too. `prefetch.pageHome` above fills the data
+  // cache; this fills the code cache, which is the half that makes a
+  // click feel dead — the route changes and Suspense holds a skeleton
+  // while the chunk waits its turn for one of the browser's six
+  // connections. The prefetcher only runs while the pool is idle, so
+  // starting it here cannot slow the first screen down.
+  useEffect(() => startRoutePrefetch(), []);
 
   // Hold the spinner until both probes resolve — rendering Login
   // prematurely would flash the sign-in screen for users who'd land
