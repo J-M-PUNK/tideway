@@ -69,10 +69,7 @@ import type { OnDownload } from "@/api/download";
 import { lazy, Suspense } from "react";
 import type { ComponentType, LazyExoticComponent } from "react";
 import { HeroSkeleton } from "@/components/Skeletons";
-import {
-  registerRouteChunk,
-  startRoutePrefetch,
-} from "@/lib/routePrefetch";
+import { registerRouteChunk, startRoutePrefetch } from "@/lib/routePrefetch";
 
 /**
  * `lazy`, plus the import registered for prefetching.
