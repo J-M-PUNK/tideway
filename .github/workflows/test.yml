@@ -73,9 +73,11 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          # pytest + httpx are dev-time only; not in requirements.txt
+          # pytest + httpx2 are dev-time only; not in requirements.txt.
+          # httpx2 rather than httpx: starlette.testclient deprecated the
+          # httpx 0.x backend and warns on every TestClient construction.
           # because the packaged app doesn't need them at runtime.
-          pip install pytest httpx
+          pip install pytest httpx2
 
       - name: Run pytest
         run: pytest tests/ --tb=short -v
