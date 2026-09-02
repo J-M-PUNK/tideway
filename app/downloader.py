@@ -225,6 +225,12 @@ class _Cancelled(Exception):
     _download's own handler, which cleans up the partial file and exits."""
 
 
+class _PausedMidTransfer(Exception):
+    """Internal signal: the user pressed Pause while this item was
+    already transferring. Caught by _download, which drops the partial
+    and re-queues the item so it restarts when the queue resumes."""
+
+
 @dataclass
 class DownloadItem:
     item_id: str
@@ -874,6 +880,30 @@ class Downloader:
         if self._is_cancelled(item_id):
             raise _Cancelled()
 
+    def _check_paused(self) -> None:
+        """Abort the current transfer if the queue was paused.
+
+        `_run_event` was only consulted before the gate, so Pause
+        stopped the queue advancing but let an already-running transfer
+        run to completion (#398). The button said paused while the
+        bytes kept coming, which on Linux is worse than a UI mismatch:
+        a Hi-Res transfer competing with PipeWire produced audio
+        callback underflows, and pausing is the obvious thing to reach
+        for.
+
+        Aborts rather than blocking here. Holding the socket open while
+        idle would trip the 30 s inactivity read timeout, so a pause
+        longer than that would fail the item instead of pausing it.
+        Tidal's streams have no Range support, so a stopped transfer
+        cannot resume from its partial file anyway — the caller
+        re-queues the item and it restarts on resume, the same way any
+        interrupted download already behaves.
+
+        One `Event.is_set()` per 64 KB chunk: no lock, no syscall.
+        """
+        if not self._run_event.is_set():
+            raise _PausedMidTransfer()
+
     def _sweep_orphan_parts(self) -> None:
         """Remove stale `.part` files from the output directory.
 
@@ -1477,6 +1507,7 @@ class Downloader:
                             if not chunk:
                                 continue
                             self._check_cancel(item.item_id)
+                            self._check_paused()
                             f.write(chunk)
                             got += len(chunk)
                             bytes_total += len(chunk)
@@ -1517,6 +1548,7 @@ class Downloader:
                                     if not chunk:
                                         continue
                                     self._check_cancel(item.item_id)
+                                    self._check_paused()
                                     f.write(chunk)
                                     seg_got += len(chunk)
                                     bytes_total += len(chunk)
@@ -1694,6 +1726,25 @@ class Downloader:
             if tid is not None:
                 self.on_file_ready(str(tid), out_path)
 
+        except _PausedMidTransfer:
+            # Paused mid-transfer. Drop the partial and put the item back
+            # on the queue as PENDING; the worker loop already waits on
+            # _run_event before taking anything, so it sits there until
+            # the user resumes and then restarts from zero. Not a
+            # failure — the row must not go red for something the user
+            # asked for.
+            if tmp_path is not None:
+                try:
+                    tmp_path.unlink(missing_ok=True)
+                except Exception:
+                    pass
+            print(
+                f"[downloader] paused mid-transfer, re-queued "
+                f"id={item.item_id[:8]}",
+                flush=True,
+            )
+            self.retry(item)
+            return
         except _Cancelled:
             # User cancelled — already removed from the broker's snapshot
             # in cancel(). Just drop the partial and bail silently.
