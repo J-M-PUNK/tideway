@@ -12921,7 +12921,21 @@ def _aoty_section(key, title, subtitle, listing, profile, taste_rank, deep=False
     # underlying chart barely moves week to week, so without this the row
     # shows the same albums until the year turns over.
     items = _rotate(items, _SECTION_RESOLVE_POOL) if rotate else items[:_SECTION_RESOLVE_POOL]
+    # Resolution is one Tidal search per album on a cold cache, and it
+    # is the last unmeasured stretch of the For You cold load. The taste
+    # profile accounts for 4.5 s of roughly thirty; the AOTY listing
+    # above is cached for a day. If the rest is here, this line says so.
+    _t_resolve = time.monotonic()
     resolved = _rec_safe(lambda: aoty_resolver.resolve_listing(items), []) or []
+    _resolve_ms = (time.monotonic() - _t_resolve) * 1000.0
+    if _resolve_ms >= 250.0:
+        _perf = (
+            f"[perf] rec_resolve key={key} "
+            f"resolve={_resolve_ms:.0f}ms "
+            f"listing_items={len(items)} resolved={len(resolved)}"
+        )
+        print(_perf, flush=True)
+        perf_log.info(_perf)
     albums = [
         it["tidal_album"]
         for it in resolved
@@ -13374,9 +13388,30 @@ def recommendations_section(key: str, limit: int = _SECTION_SIZE) -> dict:
     size = max(1, min(int(limit), _SECTION_RESOLVE_POOL))
 
     def _build() -> dict:
+        # Timed because the For You page's cold load is the app's worst
+        # latency and nobody could say where it went. The taste profile
+        # turned out to be 4.5 s of it (measured, see _taste_profile),
+        # which leaves most of the wait somewhere in here — resolving
+        # each album against Tidal and fetching AOTY pages. Same
+        # one-line-per-build shape, so a cold start reports every row.
+        _t0 = time.monotonic()
         profile = _taste_profile_cached()
+        _t_profile = time.monotonic()
         owned = _owned_album_ids()
+        _t_owned = time.monotonic()
         section = _build_one_rec_section(key, profile, owned, size=size)
+        _t_section = time.monotonic()
+        _ms = lambda a, b: (b - a) * 1000.0
+        _perf = (
+            f"[perf] rec_section key={key} size={size} "
+            f"total={_ms(_t0, _t_section):.0f}ms "
+            f"taste_profile={_ms(_t0, _t_profile):.0f}ms "
+            f"owned_albums={_ms(_t_profile, _t_owned):.0f}ms "
+            f"build_section={_ms(_t_owned, _t_section):.0f}ms "
+            f"albums={len((section or {}).get('albums') or [])}"
+        )
+        print(_perf, flush=True)
+        perf_log.info(_perf)
         if section and section.get("albums"):
             _rec_safe(
                 lambda: rec_analytics.record_impressions([section]), None
