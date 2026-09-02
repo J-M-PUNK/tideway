@@ -39,7 +39,9 @@ describe("API request concurrency", () => {
     let i = 0;
     fetchMock.mockImplementation(() => pending[i++].promise);
 
-    const calls = Array.from({ length: 8 }, () => api.version().catch(() => {}));
+    const calls = Array.from({ length: 8 }, () =>
+      api.version().catch(() => {}),
+    );
     await Promise.resolve();
     await Promise.resolve();
 
@@ -55,7 +57,9 @@ describe("API request concurrency", () => {
     let i = 0;
     fetchMock.mockImplementation(() => pending[i++].promise);
 
-    const calls = Array.from({ length: 5 }, () => api.version().catch(() => {}));
+    const calls = Array.from({ length: 5 }, () =>
+      api.version().catch(() => {}),
+    );
     await Promise.resolve();
     await Promise.resolve();
     expect(fetchMock).toHaveBeenCalledTimes(4);
