@@ -157,9 +157,13 @@ def test_exact_artist_title_match_wins_over_top_hit(stub_server):
     assert out[0]["tidal_album"]["id"] == "EXACT"
 
 
-def test_falls_back_to_top_hit_when_no_exact_match(stub_server):
-    """If no result exact-matches the requested artist+title, the
-    first (top-hit) result is used."""
+def test_unrelated_top_hit_is_not_used(stub_server):
+    """Previously the top hit was taken whenever nothing matched
+    exactly. Tidal returns something for almost any query, so that put
+    Vince Staples' "Big Fish Theory" at the top of Top Albums of the
+    Year in place of an album by Denzel Curry. An entry with no
+    plausible match now resolves to None and callers drop it — a
+    shorter row beats a wrong one."""
     stub_server.search_results = {
         "albums": [
             _FakeAlbum("Something Else", "Different", id_="TOP"),
@@ -169,7 +173,21 @@ def test_falls_back_to_top_hit_when_no_exact_match(stub_server):
     out = aoty_resolver.resolve_listing(
         [{"artist": "Wanted", "title": "Title"}]
     )
-    assert out[0]["tidal_album"]["id"] == "TOP"
+    assert out[0]["tidal_album"] is None
+
+
+def test_a_close_but_inexact_match_is_still_used(stub_server):
+    """Rejecting everything inexact would empty the rows: Tidal carries
+    edition suffixes and different capitalisation constantly."""
+    stub_server.search_results = {
+        "albums": [
+            _FakeAlbum("Wanted Title (Deluxe Edition)", "Wanted", id_="CLOSE"),
+        ]
+    }
+    out = aoty_resolver.resolve_listing(
+        [{"artist": "Wanted", "title": "Wanted Title"}]
+    )
+    assert out[0]["tidal_album"]["id"] == "CLOSE"
 
 
 def test_match_is_case_insensitive(stub_server):
@@ -202,7 +220,12 @@ def test_empty_search_results_yields_none(stub_server):
 
 def test_cache_hit_short_circuits_search(stub_server):
     """A pre-populated cache entry means no Tidal search call and no
-    rate-limit sleep on the second pass."""
+    rate-limit sleep on the second pass.
+
+    Needs a hit the resolver will actually accept: only successful
+    resolves are cached, and the fixture's default result is
+    deliberately an unrelated album, which now resolves to None."""
+    stub_server.search_results = {"albums": [_FakeAlbum("Y", "X", id_="HIT")]}
     listing = [{"artist": "X", "title": "Y"}]
     aoty_resolver.resolve_listing(listing)
     first_search_count = len(stub_server.searches)
