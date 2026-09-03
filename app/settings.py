@@ -112,11 +112,20 @@ class Settings:
     # Downconvert hi-res (24-bit and/or >48 kHz) downloads to
     # 16-bit / 44.1 kHz FLAC so they play on hardware that can't
     # decode hi-res in real time (old iPods running Rockbox, most
-    # legacy DAPs). Off by default — downloads stay bit-exact unless
-    # you opt in. CD-quality and lossy sources are never touched;
+    # legacy DAPs). CD-quality and lossy sources are never touched;
     # the resample is high quality and the bit-depth reduction uses
     # TPDF dither.
-    downconvert_hires_downloads: bool = False
+    #
+    # On by default: a file that plays everywhere is the better
+    # starting point than one that is bit-exact and silent on the
+    # device it was downloaded for. Anyone who wants the hi-res
+    # master turns it off, which is the more deliberate choice of the
+    # two.
+    #
+    # Only affects installs with no stored value — save_settings
+    # writes every field, so an existing settings.json already pins
+    # this either way and keeps whatever the user has.
+    downconvert_hires_downloads: bool = True
     # Resolution of the album cover art embedded in downloads and
     # written as cover.jpg. One of "640", "1280", or "origin" (the
     # 3000x3000 master). Default "1280" — a 4x-area upgrade over the
