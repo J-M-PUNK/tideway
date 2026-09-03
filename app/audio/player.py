@@ -3108,6 +3108,16 @@ class PCMPlayer:
             written = frames
 
         while written < frames:
+            # Re-check per iteration, not just at the top of the
+            # callback. `seek()` sets `_seeking` and then clears
+            # `_callback_carry` from the HTTP thread; a callback that
+            # already passed the guard above is inside this loop by
+            # then and would keep feeding the pre-seek buffer. Yielding
+            # here is what the guard intends — the next callback starts
+            # clean on the new decoder.
+            if self._seeking or self._swapping:
+                outdata[written:] = 0
+                return
             if self._callback_carry is None:
                 try:
                     chunk = self._pcm_queue.get_nowait()
@@ -3141,8 +3151,22 @@ class PCMPlayer:
                     return
                 self._callback_carry = chunk
 
-            take = min(frames - written, self._callback_carry.shape[0])
-            src = self._callback_carry[:take]
+            # Read once into a local and use it for the whole iteration.
+            # This callback is lock-free, so `seek()` clearing
+            # `_callback_carry` between the assignment above and the
+            # reads below turned it into None mid-expression and raised
+            # "'NoneType' object has no attribute 'shape'", killing the
+            # callback and stalling audio until the stream was torn
+            # down (#405). A local can't be nulled underneath us.
+            carry = self._callback_carry
+            if carry is None:
+                # Cleared between the check and here — treat it as a
+                # seek in flight rather than reaching for .shape.
+                outdata[written:] = 0
+                return
+
+            take = min(frames - written, carry.shape[0])
+            src = carry[:take]
             if src.shape[1] == channels:
                 outdata[written : written + take] = src
             elif src.shape[1] == 2 and channels == 1:
@@ -3150,10 +3174,10 @@ class PCMPlayer:
             else:
                 outdata[written : written + take] = 0
             written += take
-            if take >= self._callback_carry.shape[0]:
+            if take >= carry.shape[0]:
                 self._callback_carry = None
             else:
-                self._callback_carry = self._callback_carry[take:]
+                self._callback_carry = carry[take:]
 
         # Cast tap. Runs before EQ / volume / mute so the device
         # gets the raw decoded PCM; the Cast device has its own
