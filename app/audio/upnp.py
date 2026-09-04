@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import select
 import socket
 import threading
 import time
@@ -96,21 +97,30 @@ except Exception as _exc:  # pragma: no cover - environment dependent
     _UPNP_AVAILABLE = False
 
 
-# SSDP discovery is done with our own socket rather than
-# async-upnp-client's async_search(). The reason is a real-world
-# interop bug: async_search sends its M-SEARCH from a socket that, on
-# Linux, is never bound to the SSDP port (it binds only on win32), so
-# the OS gives it an ephemeral source port. Spec-compliant renderers
-# reply via unicast to that source port and are heard. But some
-# renderers — notably USB Audio Player PRO and other Android-based
-# devices — always reply to port 1900 of the requester regardless of
-# the M-SEARCH source port. Nothing is listening there, so their reply
-# is dropped and they never appear in the picker. gssdp-discover (the C
-# reference that works against these devices) binds a single socket to
-# 1900 for both send and receive; we mirror that. See GitHub #234 and
-# #220. The v1.18.1 attempt (a second async_search for the AVTransport
-# service type) didn't help because the lost-reply problem is in the
-# socket, not the search target.
+# SSDP discovery uses our own sockets rather than async-upnp-client's
+# async_search(). Two real-world interop constraints shape the design,
+# and they pull in opposite directions -- which is why we use TWO
+# sockets (see _collect_ssdp_locations):
+#
+#   1. Spec-compliant renderers reply via unicast to the M-SEARCH
+#      SOURCE port, so the active search must own a port nothing else
+#      contends for: we bind it to an EPHEMERAL port. Binding the search
+#      to :1900 (which we used to do, mirroring gssdp-discover) silently
+#      broke discovery whenever another SSDP app -- Spotify, the Sonos
+#      app, any DLNA controller -- already held :1900. SO_REUSEPORT lets
+#      the bind succeed by sharing the port, and the kernel then hands
+#      each inbound UNICAST reply to only ONE of the sharing sockets, so
+#      the other app swallowed our renderer's answers and the picker
+#      stayed empty (tide-8f5b).
+#
+#   2. Some renderers -- notably USB Audio Player PRO and other
+#      Android-based devices -- always reply to port 1900 of the
+#      requester regardless of the M-SEARCH source port, and others only
+#      announce via unsolicited multicast NOTIFY. So we ALSO keep a
+#      best-effort passive :1900 listener. Both of those are multicast
+#      or reply-to-1900 traffic, which a shared :1900 tolerates fine
+#      (multicast is delivered to every joined socket), so it is kept
+#      off the fragile unicast search path. See GitHub #234 and #220.
 _SSDP_MCAST_ADDR = "239.255.255.250"
 _SSDP_PORT = 1900
 
@@ -158,62 +168,92 @@ def _parse_ssdp_location(data: bytes) -> Optional[str]:
     return None
 
 
-def _collect_ssdp_locations(
-    timeout: float, lan_ip: str
-) -> Tuple[Set[str], bool]:
-    """Blocking single-socket SSDP search. Binds one UDP socket to
-    port 1900, joins the SSDP multicast group, bursts an M-SEARCH for
-    every target, and collects LOCATION URLs from every reply (unicast
-    or multicast) until the timeout elapses.
+def _open_ssdp_search_socket(iface: str) -> socket.socket:
+    """UDP socket for the ACTIVE M-SEARCH, bound to an EPHEMERAL port.
 
-    Returns the set of discovered descriptor URLs and whether we
-    actually got port 1900. If 1900 is already held (another SSDP
-    listener on the box), we fall back to an ephemeral port: we lose
-    the port-1900-only repliers like UAPP but still find every
-    spec-compliant device via the unicast-to-source-port path, which is
-    strictly better than failing the whole scan.
+    Spec-compliant renderers send their unicast reply back to the
+    M-SEARCH *source* port, so an ephemeral port guarantees those
+    replies land somewhere nothing else contends for. Binding the search
+    to :1900 is what silently broke discovery when another SSDP app held
+    the port: SO_REUSEPORT shares :1900, and the kernel then delivers
+    each inbound unicast datagram to only ONE of the sharing sockets, so
+    the other app swallowed our renderer's replies (tide-8f5b). The
+    outgoing multicast interface is pinned so the M-SEARCH leaves the
+    right NIC on multi-homed hosts (e.g. alongside a VPN utun).
     """
-    deadline = time.monotonic() + timeout
-    locations: Set[str] = set()
-
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
     sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    try:
-        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
-    except (AttributeError, OSError):
-        # SO_REUSEPORT is absent on some platforms; without it a second
-        # listener on 1900 just means we take the fallback path.
-        pass
-
-    bound_1900 = True
-    try:
-        sock.bind(("", _SSDP_PORT))
-    except OSError as exc:
-        log.debug("upnp: port %d busy (%s); falling back to ephemeral",
-                  _SSDP_PORT, exc)
-        bound_1900 = False
+    if iface != "0.0.0.0":
         try:
-            sock.bind(("", 0))
-        except OSError as exc2:
-            log.warning("upnp: could not bind any SSDP socket: %s", exc2)
-            sock.close()
-            return locations, False
-
-    # Join the multicast group and pin the outgoing interface to the LAN
-    # IP so the M-SEARCH leaves the right NIC on multi-homed machines.
-    iface = lan_ip if lan_ip and lan_ip != "127.0.0.1" else "0.0.0.0"
-    try:
-        mreq = socket.inet_aton(_SSDP_MCAST_ADDR) + socket.inet_aton(iface)
-        sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
-        if iface != "0.0.0.0":
             sock.setsockopt(
                 socket.IPPROTO_IP,
                 socket.IP_MULTICAST_IF,
                 socket.inet_aton(iface),
             )
-        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
+        except OSError as exc:
+            log.debug("upnp: IP_MULTICAST_IF %s failed: %s", iface, exc)
+    sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 2)
+    # Ephemeral port on the LAN interface (or any interface when unknown).
+    sock.bind((iface if iface != "0.0.0.0" else "", 0))
+    return sock
+
+
+def _open_ssdp_notify_listener(iface: str) -> Optional[socket.socket]:
+    """Best-effort passive :1900 listener, or None if the port can't be had.
+
+    Only two kinds of traffic are collected here, and both tolerate a
+    shared port: unsolicited multicast NOTIFY announcements, and the
+    unicast replies from renderers that answer to port 1900 of the
+    requester regardless of the M-SEARCH source port (USB Audio Player
+    PRO and other Android stacks -- see #234). Multicast is delivered to
+    EVERY socket joined to the group, so sharing :1900 via SO_REUSEPORT
+    is harmless here, unlike the unicast search path (which is why that
+    lives on its own ephemeral socket). If :1900 is genuinely
+    unavailable we return None and rely on the search socket alone;
+    spec-compliant devices are still found.
+    """
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+    except (AttributeError, OSError):
+        pass
+    try:
+        sock.bind(("", _SSDP_PORT))
     except OSError as exc:
-        log.debug("upnp: multicast setup partial: %s", exc)
+        log.debug("upnp: no passive :%d listener (%s)", _SSDP_PORT, exc)
+        sock.close()
+        return None
+    try:
+        mreq = socket.inet_aton(_SSDP_MCAST_ADDR) + socket.inet_aton(iface)
+        sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+    except OSError as exc:
+        # Still useful for reply-to-1900 renderers even without the join.
+        log.debug("upnp: multicast join on :%d listener failed: %s",
+                  _SSDP_PORT, exc)
+    return sock
+
+
+def _collect_ssdp_locations(
+    timeout: float, lan_ip: str
+) -> Tuple[Set[str], bool]:
+    """Blocking SSDP search over two sockets (tide-8f5b). An ephemeral
+    SEARCH socket bursts an M-SEARCH for every target and receives the
+    unicast replies of spec-compliant renderers -- immune to another app
+    holding :1900 -- while a best-effort passive :1900 LISTENER picks up
+    multicast NOTIFY and the reply-to-1900 renderers (UAPP). LOCATION
+    URLs from either are collected until the timeout elapses.
+
+    Returns the set of discovered descriptor URLs and whether the
+    passive :1900 listener was obtained (diagnostic only).
+    """
+    deadline = time.monotonic() + timeout
+    locations: Set[str] = set()
+    iface = lan_ip if lan_ip and lan_ip != "127.0.0.1" else "0.0.0.0"
+
+    search = _open_ssdp_search_socket(iface)
+    listener = _open_ssdp_notify_listener(iface)
+    bound_1900 = listener is not None
 
     # MX must be < the receive window. Cap at 5 (the SSDP-recommended
     # ceiling) and keep at least 1.
@@ -222,7 +262,7 @@ def _collect_ssdp_locations(
     def _burst() -> None:
         for st in _SSDP_SEARCH_TARGETS:
             try:
-                sock.sendto(
+                search.sendto(
                     _build_msearch(st, mx),
                     (_SSDP_MCAST_ADDR, _SSDP_PORT),
                 )
@@ -240,23 +280,28 @@ def _collect_ssdp_locations(
     second_burst_at = time.monotonic() + max(1.0, timeout / 2.0)
     did_second = False
 
-    sock.settimeout(0.5)
+    socks = [search] + ([listener] if listener is not None else [])
     try:
         while time.monotonic() < deadline:
             if not did_second and time.monotonic() >= second_burst_at:
                 _burst()
                 did_second = True
             try:
-                data, _addr = sock.recvfrom(65535)
-            except socket.timeout:
-                continue
+                rlist, _, _ = select.select(socks, [], [], 0.5)
             except OSError:
                 break
-            loc = _parse_ssdp_location(data)
-            if loc:
-                locations.add(loc)
+            for s in rlist:
+                try:
+                    data, _addr = s.recvfrom(65535)
+                except OSError:
+                    continue
+                loc = _parse_ssdp_location(data)
+                if loc:
+                    locations.add(loc)
     finally:
-        sock.close()
+        search.close()
+        if listener is not None:
+            listener.close()
     return locations, bound_1900
 
 # Path the embedded HTTP server exposes for the live FLAC stream.
@@ -1320,14 +1365,15 @@ class UpnpManager:
         self._loop_thread = t
 
     async def _discover_async(self, timeout: float) -> List[UpnpDevice]:
-        """Single-socket SSDP search + per-device descriptor parse.
+        """Two-socket SSDP search + per-device descriptor parse.
         Returns only AVTransport-capable devices. Pure OpenHome devices
         get filtered here so they don't pollute the DLNA picker.
 
-        The M-SEARCH/listen step runs on a worker thread (blocking
-        socket bound to port 1900 — see _collect_ssdp_locations for
-        why); the descriptor fetch + parse stays on the asyncio loop so
-        it can reuse async-upnp-client's UpnpFactory.
+        The M-SEARCH/listen step runs on a worker thread (an ephemeral
+        search socket plus a best-effort :1900 listener — see
+        _collect_ssdp_locations for why); the descriptor fetch + parse
+        stays on the asyncio loop so it can reuse async-upnp-client's
+        UpnpFactory.
         """
         devices: dict[str, UpnpDevice] = {}
         requester = AiohttpRequester()

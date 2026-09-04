@@ -17,6 +17,9 @@ Network is mocked out at two layers:
 """
 from __future__ import annotations
 
+import socket
+import threading
+import time
 from typing import Optional
 from unittest.mock import MagicMock
 
@@ -29,10 +32,12 @@ from app.audio.openhome import (
     OpenHomeService,
     OpenHomeSOAPError,
 )
+from app.audio import upnp
 from app.audio.upnp import (
     UpnpDevice,
     UpnpManager,
     _SessionState,
+    _SSDP_PORT,
     _build_msearch,
     _filter_dlna_renderer,
     _parse_ssdp_location,
@@ -807,3 +812,127 @@ class TestRefreshEndpointNaNGuard:
         )
         assert r.status_code == 400, r.text
         assert "finite" in r.json()["detail"].lower()
+
+
+# ---------------------------------------------------------------------
+# SSDP discovery sockets (tide-8f5b): the active search must not share
+# :1900, or another SSDP app (Spotify, Sonos, ...) steals the unicast
+# M-SEARCH replies and the DLNA picker goes empty.
+# ---------------------------------------------------------------------
+
+
+def _squatter_on_1900():
+    """A socket holding :1900 with SO_REUSEPORT, like another SSDP app."""
+    sq = socket.socket(socket.AF_INET, socket.SOCK_DGRAM, socket.IPPROTO_UDP)
+    sq.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        sq.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
+    except (AttributeError, OSError):
+        sq.close()
+        pytest.skip("SO_REUSEPORT unavailable on this platform")
+    sq.bind(("", _SSDP_PORT))
+    return sq
+
+
+class TestSsdpSearchSocket:
+    def test_search_socket_binds_ephemeral(self):
+        s = upnp._open_ssdp_search_socket("127.0.0.1")
+        try:
+            port = s.getsockname()[1]
+            assert port not in (0, _SSDP_PORT), (
+                f"search socket must use an ephemeral port, got {port}"
+            )
+        finally:
+            s.close()
+
+    def test_search_socket_ephemeral_even_when_1900_squatted(self):
+        sq = _squatter_on_1900()
+        try:
+            s = upnp._open_ssdp_search_socket("127.0.0.1")
+            try:
+                assert s.getsockname()[1] not in (0, _SSDP_PORT)
+            finally:
+                s.close()
+        finally:
+            sq.close()
+
+    def test_search_socket_receives_unicast_reply(self):
+        # A spec-compliant renderer replies unicast to the M-SEARCH source
+        # port; the ephemeral search socket must receive it.
+        s = upnp._open_ssdp_search_socket("127.0.0.1")
+        try:
+            port = s.getsockname()[1]
+            snd = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            snd.sendto(
+                b"HTTP/1.1 200 OK\r\n"
+                b"LOCATION: http://192.168.0.205:16500/desc.xml\r\n\r\n",
+                ("127.0.0.1", port),
+            )
+            snd.close()
+            s.settimeout(2.0)
+            data, _ = s.recvfrom(65535)
+            assert (
+                _parse_ssdp_location(data)
+                == "http://192.168.0.205:16500/desc.xml"
+            )
+        finally:
+            s.close()
+
+    def test_reply_survives_a_1900_squatter(self):
+        # The exact regression: with :1900 held by another app, a unicast
+        # reply to our ephemeral search port still reaches us (it would be
+        # stolen if the search shared :1900).
+        sq = _squatter_on_1900()
+        try:
+            s = upnp._open_ssdp_search_socket("127.0.0.1")
+            try:
+                port = s.getsockname()[1]
+                snd = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                snd.sendto(
+                    b"HTTP/1.1 200 OK\r\nLOCATION: http://x/desc.xml\r\n\r\n",
+                    ("127.0.0.1", port),
+                )
+                snd.close()
+                s.settimeout(2.0)
+                data, _ = s.recvfrom(65535)
+                assert _parse_ssdp_location(data) == "http://x/desc.xml"
+            finally:
+                s.close()
+        finally:
+            sq.close()
+
+    def test_notify_listener_is_best_effort(self):
+        # Must not raise whether or not :1900 is available.
+        listener = upnp._open_ssdp_notify_listener("127.0.0.1")
+        if listener is not None:
+            listener.close()
+
+    def test_collect_gathers_unicast_reply(self, monkeypatch):
+        # End-to-end: the collect loop harvests a LOCATION from a unicast
+        # reply delivered to the (real, loopback) search socket, with no
+        # :1900 listener needed.
+        search = upnp._open_ssdp_search_socket("127.0.0.1")
+        port = search.getsockname()[1]
+        monkeypatch.setattr(
+            upnp, "_open_ssdp_search_socket", lambda iface: search
+        )
+        monkeypatch.setattr(
+            upnp, "_open_ssdp_notify_listener", lambda iface: None
+        )
+
+        def _reply():
+            time.sleep(0.2)
+            snd = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            snd.sendto(
+                b"HTTP/1.1 200 OK\r\n"
+                b"LOCATION: http://192.168.0.205:16500/desc.xml\r\n\r\n",
+                ("127.0.0.1", port),
+            )
+            snd.close()
+
+        t = threading.Thread(target=_reply)
+        t.start()
+        locs, bound = upnp._collect_ssdp_locations(1.0, "127.0.0.1")
+        t.join()
+        assert "http://192.168.0.205:16500/desc.xml" in locs
+        assert bound is False
