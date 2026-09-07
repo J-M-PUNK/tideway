@@ -31,7 +31,7 @@ orjson>=3.12.0
 # targets — and the guards moved with the pin. Every profile the app
 # ships (chrome131_android for Tidal, chrome/safari/firefox for AOTY)
 # was checked against 0.16 before bumping.
-curl-cffi>=0.16.1,<0.17
+curl-cffi>=0.16.3,<0.17
 pillow>=12.3.0
 fastapi>=0.141.1
 uvicorn[standard]>=0.52.4
