@@ -75,7 +75,7 @@
     "lint-staged": "^17.4.1",
     "postcss": "^8.5.26",
     "prettier": "^3.9.6",
-    "stylelint": "^17.14.1",
+    "stylelint": "^17.15.0",
     "stylelint-config-standard": "^40.0.0",
     "tailwindcss": "^4.3.3",
     "typescript": "~5.9.3",
