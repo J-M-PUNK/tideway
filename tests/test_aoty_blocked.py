@@ -18,6 +18,7 @@ import pytest
 from tests.conftest import known_to_curl_cffi
 
 from app import aoty
+from app import aoty_clearance
 
 
 class _FakeResponse:
@@ -30,11 +31,15 @@ class _FakeResponse:
 
 @pytest.fixture(autouse=True)
 def _reset_block_state():
-    # Each test starts from a clean slate; the module is a singleton
-    # so leaked state would silently turn the second test green.
+    # Each test starts from a clean slate; both modules are singletons
+    # so leaked state would silently turn the second test green. The
+    # clearance cache especially: a cleared fetch in one test would let
+    # the next one skip the challenge path entirely.
     aoty._blocked_at = None
+    aoty_clearance.reset_for_tests()
     yield
     aoty._blocked_at = None
+    aoty_clearance.reset_for_tests()
 
 
 def test_cf_challenge_sets_blocked_flag():
@@ -89,43 +94,95 @@ def test_successful_fetch_keeps_flag_clear():
     assert aoty.is_scraper_blocked() is False
 
 
-def test_fallback_profile_recovers_from_challenge():
-    # Chrome draws a challenge but a fallback fingerprint gets through.
-    # The fetch should succeed and the blocked flag must stay clear —
-    # that's the whole point of the fallback (#275).
-    challenge = _FakeResponse(403, {"cf-mitigated": "challenge"})
-    ok = _FakeResponse(200)
-    ok.text = "<html>recovered</html>"
+def test_challenge_without_a_solver_blocks_after_one_request():
+    # Outside the desktop shell there is no webview to clear the
+    # challenge with, so there is nothing to retry. Exactly one request
+    # goes out — the old fingerprint rotation would have sent three to
+    # learn the same thing, which against a *managed* challenge is
+    # three identical answers.
     with patch("app.aoty.cffi_requests.get") as get:
-        get.side_effect = [challenge, ok]
-        result = aoty._fetch(
-            "https://www.albumoftheyear.org/releases/this-week/"
-        )
-    assert result == "<html>recovered</html>"
-    assert aoty.is_scraper_blocked() is False
-
-
-def test_all_profiles_challenged_sets_blocked_flag():
-    # When every fingerprint is challenged the block is real; only then
-    # does the flag flip. One challenge per configured profile.
-    n_profiles = 1 + len(aoty._FALLBACK_IMPERSONATE)
-    with patch("app.aoty.cffi_requests.get") as get:
-        get.side_effect = [
-            _FakeResponse(403, {"cf-mitigated": "challenge"})
-            for _ in range(n_profiles)
-        ]
+        get.return_value = _FakeResponse(403, {"cf-mitigated": "challenge"})
         result = aoty._fetch(
             "https://www.albumoftheyear.org/releases/this-week/"
         )
     assert result is None
     assert aoty.is_scraper_blocked() is True
-    assert get.call_count == n_profiles
+    assert get.call_count == 1
 
 
-def test_fallback_profiles_are_known_to_curl_cffi():
-    # A typo in a fallback profile would silently 403 every retry.
-    for profile in aoty._FALLBACK_IMPERSONATE:
-        assert known_to_curl_cffi(profile), profile
+def test_clearance_recovers_from_challenge():
+    # The real recovery path: the bare request is challenged, the
+    # webview solves it, and the retry carrying `cf_clearance` gets
+    # through. The blocked flag must stay clear.
+    ok = _FakeResponse(200)
+    ok.text = "<html>cleared</html>"
+    aoty_clearance.register_solver(
+        lambda url, rejected=None: ({"cf_clearance": "tok"}, "TestUA/1.0")
+    )
+    with patch("app.aoty.cffi_requests.get") as get:
+        get.side_effect = [_FakeResponse(403, {"cf-mitigated": "challenge"}), ok]
+        result = aoty._fetch(
+            "https://www.albumoftheyear.org/releases/this-week/"
+        )
+    assert result == "<html>cleared</html>"
+    assert aoty.is_scraper_blocked() is False
+    assert get.call_count == 2
+
+
+def test_cleared_request_sends_cookie_and_matching_user_agent():
+    # `cf_clearance` is bound to the User-Agent that earned it, so the
+    # retry has to replay both. Sending the cookie under curl_cffi's own
+    # impersonated UA gets it rejected — this is the one place the
+    # module's "never send custom headers" rule is deliberately broken.
+    ok = _FakeResponse(200)
+    ok.text = "<html>cleared</html>"
+    aoty_clearance.register_solver(
+        lambda url, rejected=None: ({"cf_clearance": "tok"}, "TestUA/1.0")
+    )
+    with patch("app.aoty.cffi_requests.get") as get:
+        get.side_effect = [_FakeResponse(403, {"cf-mitigated": "challenge"}), ok]
+        aoty._fetch("https://www.albumoftheyear.org/releases/this-week/")
+    first, retry = get.call_args_list
+    # The uncleared request carries no overrides at all.
+    assert "headers" not in first.kwargs
+    assert "cookies" not in first.kwargs
+    assert retry.kwargs["cookies"] == {"cf_clearance": "tok"}
+    assert retry.kwargs["headers"] == {"User-Agent": "TestUA/1.0"}
+
+
+def test_solver_that_cannot_clear_sets_blocked_flag():
+    # A webview that never gets past the interstitial is a real block —
+    # an IP-level ban, or a challenge the engine can't satisfy. Flip the
+    # flag so the Home page says so.
+    aoty_clearance.register_solver(lambda url, rejected=None: None)
+    with patch("app.aoty.cffi_requests.get") as get:
+        get.return_value = _FakeResponse(403, {"cf-mitigated": "challenge"})
+        result = aoty._fetch(
+            "https://www.albumoftheyear.org/releases/this-week/"
+        )
+    assert result is None
+    assert aoty.is_scraper_blocked() is True
+    # One request, then the failed solve. No retry without a clearance.
+    assert get.call_count == 1
+
+
+def test_a_rejected_clearance_is_resolved_exactly_once():
+    # An expired clearance earns a challenge on a request we thought was
+    # cleared. Solve again and retry — but only once. If the fresh
+    # clearance is also refused the problem isn't staleness, and looping
+    # would open a webview window per attempt.
+    aoty_clearance.register_solver(
+        lambda url, rejected=None: ({"cf_clearance": "tok"}, "TestUA/1.0")
+    )
+    challenge = _FakeResponse(403, {"cf-mitigated": "challenge"})
+    with patch("app.aoty.cffi_requests.get") as get:
+        get.return_value = challenge
+        result = aoty._fetch(
+            "https://www.albumoftheyear.org/releases/this-week/"
+        )
+    assert result is None
+    assert aoty.is_scraper_blocked() is True
+    assert get.call_count == 2
 
 
 def test_an_unknown_profile_is_rejected():

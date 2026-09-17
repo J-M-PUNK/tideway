@@ -45,6 +45,7 @@ from sse_starlette.sse import EventSourceResponse
 
 from app import album_collections
 from app import aoty as aoty_module
+from app import aoty_clearance
 from app import aoty_resolver
 from app import deezer_import
 from app import rec_analytics
@@ -1094,6 +1095,15 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # the cost they pay today; we never cache a poisoned listing.
     def _prewarm_aoty() -> None:
         try:
+            # AOTY is behind a Cloudflare managed challenge, cleared by
+            # the desktop shell's webview (app/aoty_clearance.py). That
+            # solver registers from `desktop.py` once pywebview is up,
+            # which is a few seconds after this lifespan startup runs.
+            # Warming before then would burn the prewarm on a fetch that
+            # cannot succeed, so wait for the shell to be ready. Times
+            # out silently under `run.sh` / `--browser`, where no solver
+            # ever registers and the rows stay empty by design.
+            aoty_clearance.wait_for_solver(60.0)
             year = datetime.now().year
             listing_top = aoty_module.top_albums_of_year(year, limit=30)
             aoty_resolver.resolve_listing(listing_top)
@@ -4691,15 +4701,23 @@ def aoty_genre_releases(genre: str, offset: int = 0, limit: int = 18) -> dict:
 def aoty_status() -> dict:
     """Scraper health for the AOTY Home rows.
 
-    `blocked` flips to True when the scraper sees a Cloudflare
-    challenge response, and stays True for ten minutes. The Home
-    page reads this to render a "report on GitHub" notice instead
-    of letting the AOTY rows silently disappear when our
-    impersonation profile ages out of Cloudflare's good graces.
+    `blocked` flips to True when the scraper hits a Cloudflare
+    challenge it could not clear, and stays True for ten minutes. The
+    Home page reads this so the AOTY rows explain themselves instead
+    of silently disappearing.
+
+    `can_solve` says whether a browser engine is available to clear
+    the challenge at all. It separates the two very different reasons
+    the rows can be empty: running outside the desktop shell (dev
+    server or `--browser` mode), where there is no webview and this is
+    simply expected, versus a real block worth reporting. The frontend
+    picks its wording from this — telling a user to file an issue
+    about a dev-mode limitation would just generate noise.
     """
     _require_auth()
     return {
         "blocked": aoty_module.is_scraper_blocked(),
+        "can_solve": aoty_clearance.solver_available(),
         "issues_url": aoty_module.ISSUE_TRACKER_URL,
     }
 
