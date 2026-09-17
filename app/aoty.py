@@ -202,6 +202,7 @@ def top_albums_of_year(year: int, limit: int = 50) -> list[dict]:
 
     out: list[AotyAlbum] = []
     page = 1
+    fetch_failed = False
     # AOTY's pagination: /ratings/user-highest-rated/{year}/{page}/.
     # `6-highest-rated` was tried first based on the assumption that
     # the all-time aggregated list ID extended to year-scoped URLs
@@ -213,6 +214,7 @@ def top_albums_of_year(year: int, limit: int = 50) -> list[dict]:
         path = f"/ratings/user-highest-rated/{year}/{page}/"
         html = _fetch(urljoin(_BASE_URL, path))
         if html is None:
+            fetch_failed = True
             break
         rows = _parse_album_list_rows(html)
         if not rows:
@@ -222,7 +224,7 @@ def top_albums_of_year(year: int, limit: int = 50) -> list[dict]:
 
     out = out[:limit]
     payload = [a.to_dict() for a in out]
-    _cache_set(cache_key, payload)
+    _cache_set_result(cache_key, payload, fetch_failed=fetch_failed)
     return payload
 
 
@@ -249,11 +251,13 @@ def top_albums_of_year_by_genre(
 
     out: list[AotyAlbum] = []
     page = 1
+    fetch_failed = False
     while len(out) < limit and page <= 6:
         suffix = "" if page == 1 else f"{page}/"
         path = f"/genre/{genre_slug}/{year}/{suffix}"
         html = _fetch(urljoin(_BASE_URL, path))
         if html is None:
+            fetch_failed = True
             break
         rows = _parse_album_list_rows(html)
         if not rows:
@@ -263,7 +267,7 @@ def top_albums_of_year_by_genre(
 
     out = out[:limit]
     payload = [a.to_dict() for a in out]
-    _cache_set(cache_key, payload)
+    _cache_set_result(cache_key, payload, fetch_failed=fetch_failed)
     return payload
 
 
@@ -285,7 +289,7 @@ def recent_releases(limit: int = 30) -> list[dict]:
     # cards and is NOT what we want for the New Releases Home row.
     html = _fetch(urljoin(_BASE_URL, "/releases/this-week/"))
     if html is None:
-        _cache_set(cache_key, [])
+        # Don't cache the miss — see `_cache_set_result`.
         return []
     rows = _parse_album_block_cards(html)[:limit]
     payload = [a.to_dict() for a in rows]
@@ -307,7 +311,8 @@ def genre_index() -> list[dict]:
 
     html = _fetch(urljoin(_BASE_URL, "/genre.php"))
     if html is None:
-        _cache_set("genre-index", [])
+        # Don't cache the miss — see `_cache_set_result`. Matters more
+        # here than elsewhere: this key has a 24-hour TTL.
         return []
     soup = BeautifulSoup(html, "html.parser")
     out: list[dict] = []
@@ -353,7 +358,7 @@ def recent_releases_by_genre(genre_slug: str, limit: int = 60) -> list[dict]:
 
     html = _fetch(urljoin(_BASE_URL, f"/genre/{genre_slug}/"))
     if html is None:
-        _cache_set(cache_key, [])
+        # Don't cache the miss — see `_cache_set_result`.
         return []
     soup = BeautifulSoup(html, "html.parser")
     section = None
@@ -407,6 +412,7 @@ def top_albums_by_genre(genre_slug: str, limit: int = 60) -> list[dict]:
 
     out: list[AotyAlbum] = []
     page = 1
+    fetch_failed = False
     # Same bound as the year chart: stop at the limit, at an empty page,
     # or after a fixed number of pages so a layout change can't spin.
     while len(out) < limit and page <= 8:
@@ -414,6 +420,7 @@ def top_albums_by_genre(genre_slug: str, limit: int = 60) -> list[dict]:
             urljoin(_BASE_URL, f"/ratings/user-highest-rated/all/{name}/{page}/")
         )
         if html is None:
+            fetch_failed = True
             break
         rows = _parse_album_list_rows(html)
         if not rows:
@@ -421,7 +428,7 @@ def top_albums_by_genre(genre_slug: str, limit: int = 60) -> list[dict]:
         out.extend(rows)
         page += 1
     payload = [a.to_dict() for a in out[:limit]]
-    _cache_set(cache_key, payload)
+    _cache_set_result(cache_key, payload, fetch_failed=fetch_failed)
     return payload
 
 
@@ -446,6 +453,21 @@ def _cache_get(key: str, ttl_sec: float) -> Optional[list[dict]]:
 def _cache_set(key: str, payload: list[dict]) -> None:
     with _cache_lock:
         _cache[key] = (time.monotonic(), payload)
+
+
+def _cache_set_result(key: str, payload: list[dict], *, fetch_failed: bool) -> None:
+    """Cache `payload` unless it's the product of a failed fetch.
+
+    A successful fetch that yields zero rows is real data — AOTY has
+    quiet release weeks — and caching it is correct. A fetch that never
+    returned HTML is not data, and caching it as an empty list pins the
+    surface empty for the whole TTL: an hour for the year charts, a day
+    for the genre index. Leaving the key unset means the next caller
+    retries instead of being served a failure promoted to a fact.
+    """
+    if fetch_failed:
+        return
+    _cache_set(key, payload)
 
 
 def is_scraper_blocked() -> bool:
