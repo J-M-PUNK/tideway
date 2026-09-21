@@ -31,13 +31,19 @@ import { cn, imageProxy } from "@/lib/utils";
  */
 export function AotyHomeSection() {
   const year = useMemo(() => new Date().getFullYear(), []);
-  // Scraper status. When AOTY's Cloudflare layer is blocking us
-  // the rows render nothing (silent-by-design); the notice below
-  // tells the user that's why, with a link to file an issue.
+  // Scraper status. When AOTY's Cloudflare challenge can't be cleared
+  // the rows render nothing (silent-by-design); the notice below tells
+  // the user that's why, and `can_solve` picks which of the two
+  // reasons it explains.
   const { data: status } = useApi(() => api.aoty.status(), []);
   return (
     <div>
-      {status?.blocked && <AotyBlockedNotice issuesUrl={status.issues_url} />}
+      {status?.blocked && (
+        <AotyBlockedNotice
+          issuesUrl={status.issues_url}
+          canSolve={status.can_solve}
+        />
+      )}
       <AotyRow
         title="New album releases"
         fetch={() =>
@@ -55,31 +61,52 @@ export function AotyHomeSection() {
 }
 
 /**
- * Shown above the AOTY rows when albumoftheyear.org is actively
- * serving us a Cloudflare challenge instead of HTML. Without this
- * the rows just disappear, which is what made the original outage
- * confusing to triage — same visible symptom whether the scraper
- * is broken or AOTY happens to have nothing for the week.
+ * Shown above the AOTY rows when albumoftheyear.org is serving a
+ * Cloudflare challenge we couldn't clear. Without this the rows just
+ * disappear, which is what made the original outage confusing to
+ * triage — same visible symptom whether the scraper is broken or AOTY
+ * happens to have nothing for the week.
+ *
+ * Two wordings, because there are two causes and only one of them is
+ * worth a bug report. `canSolve` false means there's no webview to run
+ * Cloudflare's challenge in — a dev server or `--browser` mode, where
+ * empty rows are expected and an issue would be noise. `canSolve` true
+ * means we had an engine and still couldn't get through, which is the
+ * case a maintainer wants to hear about.
  */
-function AotyBlockedNotice({ issuesUrl }: { issuesUrl: string }) {
+function AotyBlockedNotice({
+  issuesUrl,
+  canSolve,
+}: {
+  issuesUrl: string;
+  canSolve: boolean;
+}) {
   return (
     <div className="mt-8 flex items-start gap-3 rounded-md border border-amber-500/40 bg-amber-500/5 p-4 text-sm">
       <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
       <div className="min-w-0">
         <p className="font-semibold">Album of the Year rows unavailable</p>
-        <p className="mt-1 text-muted-foreground">
-          AlbumOfTheYear.org is blocking our scraper, likely because their
-          anti-bot layer changed. Please{" "}
-          <a
-            href={issuesUrl}
-            target="_blank"
-            rel="noreferrer"
-            className="underline underline-offset-2 hover:text-foreground"
-          >
-            open a GitHub issue
-          </a>{" "}
-          so we can push a fix.
-        </p>
+        {canSolve ? (
+          <p className="mt-1 text-muted-foreground">
+            AlbumOfTheYear.org is serving an anti-bot challenge we couldn't get
+            past. This sometimes clears on its own — if it doesn't, please{" "}
+            <a
+              href={issuesUrl}
+              target="_blank"
+              rel="noreferrer"
+              className="underline underline-offset-2 hover:text-foreground"
+            >
+              open a GitHub issue
+            </a>
+            .
+          </p>
+        ) : (
+          <p className="mt-1 text-muted-foreground">
+            AlbumOfTheYear.org requires a browser to clear its anti-bot
+            challenge, and this build has no window to do that in. The rows work
+            in the packaged desktop app.
+          </p>
+        )}
       </div>
     </div>
   );

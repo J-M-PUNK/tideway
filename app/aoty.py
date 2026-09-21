@@ -49,14 +49,27 @@ confirmed every newer curl_cffi profile passes, so the impersonate
 target is now the version-tracking `"chrome"` alias — see the
 comment on `_CFFI_IMPERSONATE`.
 
-Block detection: when `_fetch` sees a Cloudflare challenge
-response it sets a module-level `_blocked_at` timestamp and
-emits a high-signal `print(...)` line. `is_scraper_blocked()`
-exposes that state, and `server.py`'s `/api/aoty/status`
-endpoint surfaces it to the frontend so the Home page can show
-a "report this on GitHub" notice instead of silently dropping
-the AOTY rows. The Chrome-120 impersonation profile will go
-stale eventually; this is the early-warning system.
+Managed-challenge note (2026-09-17): AOTY escalated again, and this
+time not in a way a fingerprint can answer. The whole site now serves
+a Cloudflare **managed** challenge (`cType: 'managed'`), which is
+solved by running Cloudflare's JavaScript rather than by looking like
+a browser at the TLS layer. A live sweep confirmed the difference:
+all 21 impersonation profiles in curl_cffi 0.16.2 were challenged,
+every attempt. The fix is `app/aoty_clearance.py` — the desktop
+shell's own webview loads an AOTY page, clears the interstitial, and
+hands back a `cf_clearance` cookie that `_fetch` attaches to ordinary
+curl_cffi requests. Read that module before touching `_fetch`; it
+documents why the clearance path must send a User-Agent header while
+the bare path must not.
+
+Block detection: when `_fetch` sees a challenge it cannot clear it
+sets a module-level `_blocked_at` timestamp and emits a high-signal
+`print(...)` line. `is_scraper_blocked()` exposes that state, and
+`server.py`'s `/api/aoty/status` endpoint surfaces it to the frontend
+so the Home page can say why the rows are missing instead of silently
+dropping them. This stays the early-warning system: the clearance
+path can fail too (no webview in a dev run, an IP-level block, or a
+challenge that outgrows the webview).
 """
 from __future__ import annotations
 
@@ -71,6 +84,8 @@ from urllib.parse import urljoin
 from bs4 import BeautifulSoup
 from curl_cffi import requests as cffi_requests
 
+from app import aoty_clearance
+
 log = logging.getLogger(__name__)
 
 _BASE_URL = "https://www.albumoftheyear.org"
@@ -82,8 +97,14 @@ _BASE_URL = "https://www.albumoftheyear.org"
 # `User-Agent` override (or any other header curl_cffi already sets)
 # breaks Cloudflare's consistency check: a Chrome TLS hello paired
 # with an inconsistent set of HTTP headers reads as bot automation.
-# So _fetch() below deliberately sends NO custom headers — the
+# So an uncleared request deliberately sends NO custom headers — the
 # impersonate profile is the whole story.
+#
+# The clearance path is the deliberate exception. A request carrying a
+# `cf_clearance` cookie must send the User-Agent that cookie was
+# issued to, because Cloudflare binds the two; sending curl_cffi's own
+# UA instead gets the cookie rejected. `_get()` handles both cases and
+# `app/aoty_clearance.py` explains the asymmetry.
 #
 # Use the `"chrome"` alias (curl_cffi resolves it to its newest
 # Chrome profile — chrome146 as of curl_cffi 0.15.0) rather than a
@@ -97,17 +118,14 @@ _BASE_URL = "https://www.albumoftheyear.org"
 # challenged, signalling it's time to upgrade curl_cffi itself.
 _CFFI_IMPERSONATE = "chrome"
 
-# Fallback fingerprints, tried in order only after the primary profile
-# is challenged. Cloudflare's anti-bot layer decides per fingerprint
-# AND per client (IP, ASN, prior reputation), so a profile that draws a
-# challenge for one user routinely passes for another (#275: the rows
-# went dark for a Flatpak user while the Chrome profile kept working
-# everywhere else). These are distinct TLS/HTTP-2 stacks from Chrome,
-# so when Chrome specifically is being singled out one of them tends to
-# get through. The happy path still sends exactly one request; these
-# only fire on a challenge, and if every profile is challenged the
-# block is treated as real (IP-level, or curl_cffi needs upgrading).
-_FALLBACK_IMPERSONATE: tuple[str, ...] = ("safari", "firefox")
+# There is deliberately no fallback-fingerprint rotation any more. It
+# used to try safari and firefox after chrome drew a challenge, on the
+# theory that Cloudflare singles out fingerprints per client (#275).
+# That theory no longer applies: against a *managed* challenge the
+# answer is the same for every fingerprint, which a live sweep of all
+# 21 profiles in curl_cffi 0.16.2 confirmed. Rotating would spend
+# three requests to learn what one request already told us, and would
+# delay the clearance solve that actually fixes it.
 
 _HTTP_TIMEOUT_SEC = 15.0
 
@@ -202,6 +220,7 @@ def top_albums_of_year(year: int, limit: int = 50) -> list[dict]:
 
     out: list[AotyAlbum] = []
     page = 1
+    fetch_failed = False
     # AOTY's pagination: /ratings/user-highest-rated/{year}/{page}/.
     # `6-highest-rated` was tried first based on the assumption that
     # the all-time aggregated list ID extended to year-scoped URLs
@@ -213,6 +232,7 @@ def top_albums_of_year(year: int, limit: int = 50) -> list[dict]:
         path = f"/ratings/user-highest-rated/{year}/{page}/"
         html = _fetch(urljoin(_BASE_URL, path))
         if html is None:
+            fetch_failed = True
             break
         rows = _parse_album_list_rows(html)
         if not rows:
@@ -222,7 +242,7 @@ def top_albums_of_year(year: int, limit: int = 50) -> list[dict]:
 
     out = out[:limit]
     payload = [a.to_dict() for a in out]
-    _cache_set(cache_key, payload)
+    _cache_set_result(cache_key, payload, fetch_failed=fetch_failed)
     return payload
 
 
@@ -249,11 +269,13 @@ def top_albums_of_year_by_genre(
 
     out: list[AotyAlbum] = []
     page = 1
+    fetch_failed = False
     while len(out) < limit and page <= 6:
         suffix = "" if page == 1 else f"{page}/"
         path = f"/genre/{genre_slug}/{year}/{suffix}"
         html = _fetch(urljoin(_BASE_URL, path))
         if html is None:
+            fetch_failed = True
             break
         rows = _parse_album_list_rows(html)
         if not rows:
@@ -263,7 +285,7 @@ def top_albums_of_year_by_genre(
 
     out = out[:limit]
     payload = [a.to_dict() for a in out]
-    _cache_set(cache_key, payload)
+    _cache_set_result(cache_key, payload, fetch_failed=fetch_failed)
     return payload
 
 
@@ -285,7 +307,7 @@ def recent_releases(limit: int = 30) -> list[dict]:
     # cards and is NOT what we want for the New Releases Home row.
     html = _fetch(urljoin(_BASE_URL, "/releases/this-week/"))
     if html is None:
-        _cache_set(cache_key, [])
+        # Don't cache the miss — see `_cache_set_result`.
         return []
     rows = _parse_album_block_cards(html)[:limit]
     payload = [a.to_dict() for a in rows]
@@ -307,7 +329,8 @@ def genre_index() -> list[dict]:
 
     html = _fetch(urljoin(_BASE_URL, "/genre.php"))
     if html is None:
-        _cache_set("genre-index", [])
+        # Don't cache the miss — see `_cache_set_result`. Matters more
+        # here than elsewhere: this key has a 24-hour TTL.
         return []
     soup = BeautifulSoup(html, "html.parser")
     out: list[dict] = []
@@ -353,7 +376,7 @@ def recent_releases_by_genre(genre_slug: str, limit: int = 60) -> list[dict]:
 
     html = _fetch(urljoin(_BASE_URL, f"/genre/{genre_slug}/"))
     if html is None:
-        _cache_set(cache_key, [])
+        # Don't cache the miss — see `_cache_set_result`.
         return []
     soup = BeautifulSoup(html, "html.parser")
     section = None
@@ -407,6 +430,7 @@ def top_albums_by_genre(genre_slug: str, limit: int = 60) -> list[dict]:
 
     out: list[AotyAlbum] = []
     page = 1
+    fetch_failed = False
     # Same bound as the year chart: stop at the limit, at an empty page,
     # or after a fixed number of pages so a layout change can't spin.
     while len(out) < limit and page <= 8:
@@ -414,6 +438,7 @@ def top_albums_by_genre(genre_slug: str, limit: int = 60) -> list[dict]:
             urljoin(_BASE_URL, f"/ratings/user-highest-rated/all/{name}/{page}/")
         )
         if html is None:
+            fetch_failed = True
             break
         rows = _parse_album_list_rows(html)
         if not rows:
@@ -421,7 +446,7 @@ def top_albums_by_genre(genre_slug: str, limit: int = 60) -> list[dict]:
         out.extend(rows)
         page += 1
     payload = [a.to_dict() for a in out[:limit]]
-    _cache_set(cache_key, payload)
+    _cache_set_result(cache_key, payload, fetch_failed=fetch_failed)
     return payload
 
 
@@ -446,6 +471,23 @@ def _cache_get(key: str, ttl_sec: float) -> Optional[list[dict]]:
 def _cache_set(key: str, payload: list[dict]) -> None:
     with _cache_lock:
         _cache[key] = (time.monotonic(), payload)
+
+
+def _cache_set_result(key: str, payload: list[dict], *, fetch_failed: bool) -> None:
+    """Cache `payload` unless it's the product of a failed fetch.
+
+    A successful fetch that yields zero rows is real data — AOTY has
+    quiet release weeks — and caching it is correct. A fetch that never
+    returned HTML is not data, and caching it as an empty list pins the
+    surface empty for the whole TTL: an hour for the year charts. That
+    bites hardest at startup, where the prewarm thread can run before
+    the webview is up to clear Cloudflare, poisoning every AOTY row for
+    an hour over a few seconds of bad timing. Leaving the key unset
+    means the next caller retries.
+    """
+    if fetch_failed:
+        return
+    _cache_set(key, payload)
 
 
 def is_scraper_blocked() -> bool:
@@ -488,62 +530,106 @@ def _looks_like_cf_challenge(status_code: int, headers) -> bool:
     return mitigated == "challenge"
 
 
-def _fetch(url: str) -> Optional[str]:
-    # Primary Chrome profile first, then the fallback fingerprints —
-    # but only if Chrome draws a Cloudflare challenge. A clean 200 on
-    # the first try sends exactly one request.
-    profiles = (_CFFI_IMPERSONATE, *_FALLBACK_IMPERSONATE)
-    for profile in profiles:
-        try:
-            # No `headers=` kwarg. curl_cffi's impersonate profile sets
-            # the entire header set (UA, every sec-ch-ua-*, Accept,
-            # Accept-Language, header order) consistent with the TLS
-            # hello it sends. Overriding any of those — even a nominally
-            # identical User-Agent — breaks Cloudflare's cross-check and
-            # earns a 403.
-            r = cffi_requests.get(
-                url,
-                impersonate=profile,
-                timeout=_HTTP_TIMEOUT_SEC,
-            )
-        except Exception as exc:
-            log.warning("aoty fetch %s (%s) failed: %s", url, profile, exc)
-            return None
-        if r.status_code == 200:
-            # AOTY serves UTF-8 but doesn't always declare a charset in
-            # Content-Type, which makes requests fall back to
-            # ISO-8859-1 for the .text attribute and mangle multi-byte
-            # characters (the middle-dot in "Apr 30 · LP" comes back as
-            # the U+FFFD replacement character). Force UTF-8 — the
-            # apparent_encoding check would also catch this, but it's an
-            # O(n) scan and we already know the right answer.
-            r.encoding = "utf-8"
-            return r.text
-        if _looks_like_cf_challenge(r.status_code, r.headers):
-            # This fingerprint got challenged. Try the next one before
-            # concluding the block is real.
-            continue
-        # A non-challenge error (404, 500, AOTY's own auth wall): a
-        # fingerprint swap won't change the answer, so don't burn the
-        # extra requests on it.
-        log.warning("aoty fetch %s returned %d", url, r.status_code)
+def _get(url: str, clearance) -> Optional[object]:
+    """One GET, carrying `clearance` when we hold one.
+
+    With a clearance the request MUST send the User-Agent the cookie
+    was issued to — see the header discussion in `aoty_clearance`. That
+    is the exact opposite of the bare request below, which must send no
+    custom headers at all so the impersonate profile stays internally
+    consistent. Returns the response, or None if the request itself
+    blew up.
+    """
+    kwargs: dict = {"impersonate": _CFFI_IMPERSONATE, "timeout": _HTTP_TIMEOUT_SEC}
+    if clearance is not None:
+        kwargs["cookies"] = clearance.cookies
+        kwargs["headers"] = {"User-Agent": clearance.user_agent}
+    try:
+        return cffi_requests.get(url, **kwargs)
+    except Exception as exc:
+        log.warning("aoty fetch %s failed: %s", url, exc)
         return None
-    # Every fingerprint drew a challenge — the block isn't
-    # profile-specific (IP-level, or the whole curl_cffi build has aged
-    # out). Flag it so the Home page can explain the empty rows.
-    _mark_blocked()
-    # High-signal: the "scraper needs updating / user is IP-blocked"
-    # message future-you wants in the dev console without grepping a
-    # logfile. Uses the print pattern the rest of the app uses for
-    # user/dev-visible state changes (see CLAUDE.md Logging section).
-    print(
-        f"[aoty] Cloudflare challenged every impersonation profile "
-        f"({', '.join(profiles)}) on {url} — likely an IP-level block "
-        f"or a curl_cffi build that needs upgrading. File: "
-        f"{ISSUE_TRACKER_URL}",
-        flush=True,
-    )
+
+
+def _fetch(url: str) -> Optional[str]:
+    """Fetch an AOTY page, solving Cloudflare's challenge if needed.
+
+    AOTY sits behind a site-wide managed challenge, so the ordinary
+    request below is expected to draw a 403 until we hold a
+    `cf_clearance` cookie. The cookie comes from the app's own webview
+    (`app.aoty_clearance`); once we have one, requests are plain fast
+    HTTP again and the window is not touched.
+
+    Order of operations: use the clearance we already hold, solve if we
+    hold none, and re-solve exactly once if the one we held has been
+    rejected. One re-solve, not a retry loop — if a freshly-minted
+    clearance is also refused, the problem is not staleness and
+    retrying would just open more windows.
+    """
+    clearance = aoty_clearance.get()
+    r = _get(url, clearance)
+    if r is None:
+        return None
+
+    if _looks_like_cf_challenge(r.status_code, r.headers):
+        # Either we had no clearance, or the one we had has expired or
+        # been revoked. Solve once and retry with the new cookie.
+        refreshed = aoty_clearance.refresh(stale=clearance, probe_url=url)
+        if refreshed is None:
+            _note_challenge(url)
+            return None
+        r = _get(url, refreshed)
+        if r is None:
+            return None
+        if _looks_like_cf_challenge(r.status_code, r.headers):
+            _note_challenge(url)
+            return None
+
+    if r.status_code == 200:
+        # AOTY serves UTF-8 but doesn't always declare a charset in
+        # Content-Type, which makes requests fall back to
+        # ISO-8859-1 for the .text attribute and mangle multi-byte
+        # characters (the middle-dot in "Apr 30 · LP" comes back as
+        # the U+FFFD replacement character). Force UTF-8 — the
+        # apparent_encoding check would also catch this, but it's an
+        # O(n) scan and we already know the right answer.
+        r.encoding = "utf-8"
+        return r.text
+
+    # A non-challenge error (404, 500, AOTY's own auth wall). A
+    # clearance swap wouldn't change the answer.
+    log.warning("aoty fetch %s returned %d", url, r.status_code)
     return None
+
+
+def _note_challenge(url: str) -> None:
+    """Record a challenge we could not clear, and say why.
+
+    Two distinct causes, and the distinction is the whole point of the
+    message: either there is no browser engine to drive (a dev run or
+    the `--browser` fallback, where this is expected), or there is one
+    and the challenge still didn't clear (which is the case that wants
+    a human).
+    """
+    _mark_blocked()
+    # High-signal: the "AOTY rows are empty and here's why" message
+    # future-you wants in the dev console without grepping a logfile.
+    # Uses the print pattern the rest of the app uses for user/dev
+    # visible state changes (see CLAUDE.md Logging section).
+    if not aoty_clearance.solver_available():
+        print(
+            f"[aoty] Cloudflare challenged {url} and no webview is available "
+            f"to solve it (dev run, or --browser mode). AOTY rows stay empty; "
+            f"this is expected outside the packaged desktop app.",
+            flush=True,
+        )
+    else:
+        print(
+            f"[aoty] Cloudflare challenged {url} and the webview could not "
+            f"clear it. Either the challenge got harder or this IP is blocked "
+            f"outright. File: {ISSUE_TRACKER_URL}",
+            flush=True,
+        )
 
 
 def _parse_album_list_rows(html: str) -> list[AotyAlbum]:

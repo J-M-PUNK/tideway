@@ -516,7 +516,9 @@ export const api = {
      *  Home page reads this to render a "report on GitHub" notice
      *  rather than silently hiding the AOTY rows. */
     status: () =>
-      req<{ blocked: boolean; issues_url: string }>(`/api/aoty/status`),
+      req<{ blocked: boolean; can_solve: boolean; issues_url: string }>(
+        `/api/aoty/status`,
+      ),
   },
   spotify: {
     /** Spotify's global play count for a recording identified by

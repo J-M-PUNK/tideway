@@ -1579,6 +1579,183 @@ def main(argv: Optional[list[str]] = None) -> int:
             pass
         login_state["window"] = lw
 
+    # --- AOTY Cloudflare clearance ------------------------------------
+    # A solve is done when BOTH a `cf_clearance` cookie exists and the
+    # window is showing a real AOTY page. Requiring both matters,
+    # because either one alone is wrong:
+    #
+    #   - The cookie alone is not evidence of anything. pywebview keeps
+    #     a persistent profile, so an *expired* clearance from a
+    #     previous run is sitting in the jar the moment the window
+    #     opens. Returning it hands the caller a dud that only fails
+    #     later, at the fetch, having already spent the one re-solve
+    #     `_fetch` allows. Waiting for the page proves the cookie:
+    #     either it was valid and the page loads, or Cloudflare
+    #     challenges, mints a fresh one, and we return that instead.
+    #
+    #   - The page alone can't be read from the DOM generically.
+    #     `_cf_chl_opt` stays defined on the cleared page, so testing
+    #     for it never recognises success at all.
+    #
+    # The page test is AOTY's own content wrapper. `#centerContent` was
+    # picked by checking candidates against every page this scraper
+    # actually loads — the releases grid, the year charts, /genre.php,
+    # a genre landing page, a genre year chart and the all-time genre
+    # listing — and it is the element present on all six. The obvious
+    # alternatives are not: the document title carries the site name on
+    # the ratings and genre pages but not on `/releases/this-week/`
+    # ("This Week's New Album Releases"), and `og:site_name` is on only
+    # two of the six. Cloudflare's interstitial is a ~6KB document with
+    # none of AOTY's markup, so it cannot match.
+    #
+    # If AOTY restructures its layout this stops matching, the solver
+    # times out, and the rows fall back to the blocked notice: a safe
+    # failure rather than a wrong one.
+    _AOTY_PAGE_SELECTOR = "#centerContent"
+    _CF_CHALLENGE_TIMEOUT_SEC = 90.0
+    _CF_CHALLENGE_POLL_SEC = 1.5
+
+    # `create_window` needs a running GUI loop, and the solver's first
+    # caller is the AOTY prewarm thread, which starts during FastAPI
+    # lifespan — several seconds before `webview.start()` down below.
+    # Registering the solver is not the same as being able to use it,
+    # so the solver waits on this rather than racing the loop. Set from
+    # the main window's `shown` event, which only fires once pywebview
+    # is actually running.
+    _gui_ready = threading.Event()
+
+    def _mark_gui_ready() -> None:
+        _gui_ready.set()
+
+    try:
+        window.events.shown += _mark_gui_ready
+    except Exception:
+        # No `shown` event on this backend. The solver's wait below then
+        # times out and AOTY degrades to its blocked notice, which is
+        # the honest outcome — better than opening a window into a loop
+        # that may not exist.
+        pass
+
+    def _harvest_cookies(win) -> dict:
+        """Flatten pywebview's cookie jar into {name: value}.
+
+        `get_cookies()` returns a list of SimpleCookie objects, one per
+        cookie, so the values live one level down in the Morsels.
+        """
+        jar: dict = {}
+        for cookie in win.get_cookies() or []:
+            try:
+                items = cookie.items()
+            except AttributeError:
+                # Backend returned something that isn't a SimpleCookie.
+                # Skip it rather than guessing at its shape.
+                continue
+            for name, morsel in items:
+                value = getattr(morsel, "value", None)
+                if value is not None:
+                    jar[name] = value
+        return jar
+
+    def _solve_aoty_challenge(probe_url: str, rejected_token=None):
+        """Clear AOTY's Cloudflare challenge in a hidden webview.
+
+        Opens an off-screen child window at `probe_url`, lets the
+        engine run Cloudflare's JavaScript the way it would for any
+        page, and returns the resulting cookie jar plus the User-Agent
+        that earned it — `cf_clearance` is bound to that UA, so the
+        caller has to replay both together.
+
+        `rejected_token` is the clearance value the caller just had
+        refused, if any. Because pywebview keeps a persistent profile,
+        the jar usually already holds a working cookie and this returns
+        almost immediately; when that cookie is the one that just
+        failed, we keep waiting for Cloudflare to mint a different one
+        instead of handing back the same dud.
+
+        The window is hidden and unfocused: this fires from the AOTY
+        prewarm thread at startup and from drill-down requests, and
+        neither should steal focus or flash a window at the user.
+
+        Cost is one round trip, typically a few seconds once WebView2
+        is warm (up to ~40s on a cold start), and often near-instant on
+        later launches since the profile carries the cookie over.
+
+        Returns None if the challenge never cleared, which the caller
+        treats as "blocked" and surfaces in the UI.
+        """
+        try:
+            import webview as _webview
+        except Exception:
+            return None
+
+        # Don't touch `create_window` until the GUI loop is up.
+        if not _gui_ready.wait(_CF_CHALLENGE_TIMEOUT_SEC):
+            print("[aoty] webview never signalled ready; skipping clearance",
+                  file=sys.stderr, flush=True)
+            return None
+
+        print(f"[aoty] solving Cloudflare challenge via webview: {probe_url}",
+              file=sys.stderr, flush=True)
+        try:
+            cw = _webview.create_window(
+                "aoty-clearance",
+                probe_url,
+                hidden=True,
+                focus=False,
+                width=1280,
+                height=900,
+            )
+        except Exception as exc:
+            print(f"[aoty] clearance window failed to open: {exc!r}",
+                  file=sys.stderr, flush=True)
+            return None
+
+        try:
+            deadline = time.time() + _CF_CHALLENGE_TIMEOUT_SEC
+            while time.time() < deadline:
+                time.sleep(_CF_CHALLENGE_POLL_SEC)
+                try:
+                    cookies = _harvest_cookies(cw)
+                    on_real_page = cw.evaluate_js(
+                        f"!!document.querySelector('{_AOTY_PAGE_SELECTOR}')"
+                    )
+                except Exception:
+                    # The window is mid-navigation and has no usable JS
+                    # context yet. Expected during the challenge's own
+                    # reloads; keep waiting.
+                    continue
+                token = cookies.get("cf_clearance")
+                if not token or token == rejected_token:
+                    # Either the challenge is still running, or the only
+                    # cookie on hand is the one that just got refused.
+                    continue
+                if not on_real_page:
+                    # Cookie present but AOTY's own markup is not, so
+                    # we're still on the interstitial and that cookie is
+                    # stale. Keep waiting for Cloudflare to replace it.
+                    continue
+                try:
+                    user_agent = cw.evaluate_js("navigator.userAgent")
+                except Exception:
+                    continue
+                if not user_agent:
+                    continue
+                return cookies, str(user_agent)
+            print(
+                f"[aoty] challenge did not clear within "
+                f"{_CF_CHALLENGE_TIMEOUT_SEC:.0f}s",
+                file=sys.stderr,
+                flush=True,
+            )
+            return None
+        finally:
+            try:
+                cw.destroy()
+            except Exception:
+                # Window already gone (app quitting mid-solve). Nothing
+                # to clean up.
+                pass
+
     # Register the focus callback so a second launch can raise us. The
     # callable runs on whatever thread the FastAPI handler lives on, so
     # schedule the actual restore onto the pywebview thread via its
@@ -1653,6 +1830,15 @@ def main(argv: Optional[list[str]] = None) -> int:
     # Windows / Linux keep the inline pywebview child window.
     if sys.platform != "darwin":
         _server.register_inapp_login_callback(_open_login_window)
+
+    # Cloudflare clearance for the AOTY scraper. albumoftheyear.org
+    # serves a site-wide *managed* challenge, which is cleared by
+    # executing Cloudflare's JavaScript — something no TLS-impersonating
+    # HTTP client can do, but the webview we already ship does natively.
+    # See app/aoty_clearance.py for the full rationale; this half is
+    # just "open a hidden window and read the result back".
+    from app import aoty_clearance as _aoty_clearance
+    _aoty_clearance.register_solver(_solve_aoty_challenge)
 
     # macOS: re-apply chrome on multiple events because pywebview's
     # cocoa backend installs the WebView as the NSWindow's
