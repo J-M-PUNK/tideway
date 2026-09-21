@@ -1580,15 +1580,38 @@ def main(argv: Optional[list[str]] = None) -> int:
         login_state["window"] = lw
 
     # --- AOTY Cloudflare clearance ------------------------------------
-    # Success is defined by the `cf_clearance` cookie appearing, not by
-    # anything in the DOM. Cloudflare only issues that cookie once the
-    # challenge has actually been passed, so its presence is the direct
-    # signal; every DOM-shaped proxy for "am I still on the
-    # interstitial" turned out to be wrong or brittle. `_cf_chl_opt` in
-    # particular is still defined on the *cleared* page, so testing for
-    # it never recognises success. Page title is localised. Content
-    # checks are per-URL. The cookie is the thing we actually need, and
-    # whether it works is settled by the request that follows.
+    # A solve is done when BOTH a `cf_clearance` cookie exists and the
+    # window is showing a real AOTY page. Requiring both matters,
+    # because either one alone is wrong:
+    #
+    #   - The cookie alone is not evidence of anything. pywebview keeps
+    #     a persistent profile, so an *expired* clearance from a
+    #     previous run is sitting in the jar the moment the window
+    #     opens. Returning it hands the caller a dud that only fails
+    #     later, at the fetch, having already spent the one re-solve
+    #     `_fetch` allows. Waiting for the page proves the cookie:
+    #     either it was valid and the page loads, or Cloudflare
+    #     challenges, mints a fresh one, and we return that instead.
+    #
+    #   - The page alone can't be read from the DOM generically.
+    #     `_cf_chl_opt` stays defined on the cleared page, so testing
+    #     for it never recognises success at all.
+    #
+    # The page test is AOTY's own content wrapper. `#centerContent` was
+    # picked by checking candidates against every page this scraper
+    # actually loads — the releases grid, the year charts, /genre.php,
+    # a genre landing page, a genre year chart and the all-time genre
+    # listing — and it is the element present on all six. The obvious
+    # alternatives are not: the document title carries the site name on
+    # the ratings and genre pages but not on `/releases/this-week/`
+    # ("This Week's New Album Releases"), and `og:site_name` is on only
+    # two of the six. Cloudflare's interstitial is a ~6KB document with
+    # none of AOTY's markup, so it cannot match.
+    #
+    # If AOTY restructures its layout this stops matching, the solver
+    # times out, and the rows fall back to the blocked notice: a safe
+    # failure rather than a wrong one.
+    _AOTY_PAGE_SELECTOR = "#centerContent"
     _CF_CHALLENGE_TIMEOUT_SEC = 90.0
     _CF_CHALLENGE_POLL_SEC = 1.5
 
@@ -1693,6 +1716,9 @@ def main(argv: Optional[list[str]] = None) -> int:
                 time.sleep(_CF_CHALLENGE_POLL_SEC)
                 try:
                     cookies = _harvest_cookies(cw)
+                    on_real_page = cw.evaluate_js(
+                        f"!!document.querySelector('{_AOTY_PAGE_SELECTOR}')"
+                    )
                 except Exception:
                     # The window is mid-navigation and has no usable JS
                     # context yet. Expected during the challenge's own
@@ -1702,6 +1728,11 @@ def main(argv: Optional[list[str]] = None) -> int:
                 if not token or token == rejected_token:
                     # Either the challenge is still running, or the only
                     # cookie on hand is the one that just got refused.
+                    continue
+                if not on_real_page:
+                    # Cookie present but AOTY's own markup is not, so
+                    # we're still on the interstitial and that cookie is
+                    # stale. Keep waiting for Cloudflare to replace it.
                     continue
                 try:
                     user_agent = cw.evaluate_js("navigator.userAgent")

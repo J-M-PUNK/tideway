@@ -166,6 +166,40 @@ def test_solver_that_cannot_clear_sets_blocked_flag():
     assert get.call_count == 1
 
 
+def test_rejected_clearance_token_is_handed_to_the_solver():
+    # The solver can only recover from a stale clearance if it is told
+    # which value failed. pywebview keeps a persistent profile, so an
+    # expired `cf_clearance` from an earlier run is already in the jar
+    # when the window opens; without the rejected token the solver hands
+    # that same dud straight back and the retry fails for the same
+    # reason. This is the contract that lets it wait for a new one.
+    seen = []
+
+    def solver(url, rejected=None):
+        seen.append(rejected)
+        return ({"cf_clearance": "first" if rejected is None else "second"},
+                "TestUA/1.0")
+
+    aoty_clearance.register_solver(solver)
+    ok = _FakeResponse(200)
+    ok.text = "<html>cleared</html>"
+    challenge = _FakeResponse(403, {"cf-mitigated": "challenge"})
+
+    with patch("app.aoty.cffi_requests.get") as get:
+        # First fetch: no clearance, solve, succeed. Caches "first".
+        get.side_effect = [challenge, ok]
+        assert aoty._fetch("https://www.albumoftheyear.org/genre.php") is not None
+
+    with patch("app.aoty.cffi_requests.get") as get:
+        # Second fetch reuses the cached clearance, which has since
+        # expired. The re-solve must name it so the solver knows not to
+        # hand the same value back.
+        get.side_effect = [challenge, ok]
+        assert aoty._fetch("https://www.albumoftheyear.org/genre.php") is not None
+
+    assert seen == [None, "first"], seen
+
+
 def test_a_rejected_clearance_is_resolved_exactly_once():
     # An expired clearance earns a challenge on a request we thought was
     # cleared. Solve again and retry — but only once. If the fresh
