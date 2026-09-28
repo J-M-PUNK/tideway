@@ -42,15 +42,29 @@ import type {
 // dropped.
 //
 // Combined with the always-rendered AotyHomeSection (Top albums +
-// New releases), these three give the five home categories we want:
-// Top albums, New releases, Recently played, Custom mixes, Personal
-// radio stations. Matched on exact normalised title — the same
-// equality the compact / hoist / priority buckets below already
-// rely on, so Tidal's real titles are known to normalise to these.
+// New releases), these give the home categories we want. Matched on
+// exact normalised title — the same equality the compact / hoist /
+// priority buckets below already rely on, so Tidal's real titles are
+// known to normalise to these.
+//
+// Tidal's own recommendation rows are back after a spell hidden: they
+// were dropped on the reasoning that the AOTY-backed rows cover the
+// same discovery surface with better editorial signal. They do cover
+// it, but not identically — AOTY ranks what a community rated highly,
+// which is a different question from what this account's listening
+// suggests, and only the latter reflects the user's own taste. The two
+// answer to different things, so the page carries both.
 const ALLOWED_HOME_ROW_TITLES = new Set([
   "recently played",
   "custom mixes",
   "personal radio stations",
+  // Hoisted out as a card row; see HOISTED_ALBUMS_TITLE.
+  "suggested new albums for you",
+  // Merge sources folded into one pill row; see MERGE_SOURCE_TITLES.
+  // Both have to be allowlisted or the merge runs with whichever
+  // survives, which silently changes what the row contains.
+  "recommended new tracks",
+  "uploads for you",
 ]);
 
 // "Recommended new tracks" and "Uploads for you" both surface
@@ -90,7 +104,10 @@ function normalizeTitle(s: string): string {
     .replace(/[“”‟″]/g, '"'); // curly / prime double quotes
 }
 
-function filterHomeRows(page: TidalPage): {
+// Exported for Home.test.ts — the allowlist / merge / hoist passes are
+// where a wrong row title silently costs a whole section, and that is
+// worth pinning without standing up the page.
+export function filterHomeRows(page: TidalPage): {
   compactRows: PageCategory[];
   hoistedAlbums: PageCategory | null;
   page: TidalPage;
