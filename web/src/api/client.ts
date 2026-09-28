@@ -58,6 +58,28 @@ import type {
 // pass an opts.timeoutMs override; see `chartTopTracksResolved`.
 const DEFAULT_TIMEOUT_MS = 15_000;
 
+// AOTY's endpoints can block on a Cloudflare clearance solve. When the
+// app's webview profile has no usable `cf_clearance` — a fresh install,
+// or a cookie that expired between launches — the first AOTY request
+// waits for the hidden window to work through the challenge. Measured
+// on Windows: 5s when the profile is warm, but 33s, 67s and 91s on cold
+// solves.
+//
+// Against the 15s default that meant the request aborted, `useApi` set
+// an error, and `AotyHomeSection` returned null for the row. `useApi`
+// only re-fetches when its deps change and the AOTY rows pass `[]`, so
+// the rows did not come back for the rest of the session. A fresh
+// install is the slowest path and also the first impression, so the
+// rows were most likely to be missing exactly when someone had just
+// installed the release that restored them.
+//
+// 120s covers the worst case with margin: the solve itself is bounded
+// by `_CF_CHALLENGE_TIMEOUT_SEC = 90` in desktop.py, and the page fetch
+// and Tidal resolve run after it. The wait is bounded and visible —
+// the row holds its loading skeleton — which is a far better failure
+// mode than a row that silently disappears and never returns.
+const AOTY_TIMEOUT_MS = 120_000;
+
 /** Optional per-call overrides for `req()`. */
 interface ReqOptions {
   /** Override the default 15-second request timeout. Use for
@@ -486,7 +508,11 @@ export const api = {
       if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
       if (opts?.genre) params.set("genre", opts.genre);
       const qs = params.toString();
-      return req<AotyPage>(`/api/aoty/top-of-year${qs ? `?${qs}` : ""}`);
+      return req<AotyPage>(
+        `/api/aoty/top-of-year${qs ? `?${qs}` : ""}`,
+        undefined,
+        { timeoutMs: AOTY_TIMEOUT_MS },
+      );
     },
     /** One page of AOTY's recent releases, each decorated with a Tidal
      *  album dict when one exists. */
@@ -495,11 +521,18 @@ export const api = {
       if (opts?.offset !== undefined) params.set("offset", String(opts.offset));
       if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
       const qs = params.toString();
-      return req<AotyPage>(`/api/aoty/recent-releases${qs ? `?${qs}` : ""}`);
+      return req<AotyPage>(
+        `/api/aoty/recent-releases${qs ? `?${qs}` : ""}`,
+        undefined,
+        { timeoutMs: AOTY_TIMEOUT_MS },
+      );
     },
     /** AOTY's genre list ({slug, name}) for the New-releases genre
      *  picker. */
-    genres: () => req<AotyGenre[]>(`/api/aoty/genres`),
+    genres: () =>
+      req<AotyGenre[]>(`/api/aoty/genres`, undefined, {
+        timeoutMs: AOTY_TIMEOUT_MS,
+      }),
     /** One page of recent albums for one AOTY genre, each decorated with
      *  a Tidal album dict when one exists. */
     genreReleases: (
@@ -509,7 +542,11 @@ export const api = {
       const params = new URLSearchParams({ genre: slug });
       if (opts?.offset !== undefined) params.set("offset", String(opts.offset));
       if (opts?.limit !== undefined) params.set("limit", String(opts.limit));
-      return req<AotyPage>(`/api/aoty/genre-releases?${params.toString()}`);
+      return req<AotyPage>(
+        `/api/aoty/genre-releases?${params.toString()}`,
+        undefined,
+        { timeoutMs: AOTY_TIMEOUT_MS },
+      );
     },
     /** Scraper health. `blocked` is true when AOTY has recently
      *  served us a Cloudflare challenge instead of HTML — the
