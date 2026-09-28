@@ -1954,19 +1954,48 @@ def main(argv: Optional[list[str]] = None) -> int:
                 file=sys.stderr,
                 flush=True,
             )
+            # Tailor the advice to how Tideway was actually started. The
+            # host-package instructions are right for a source run and
+            # actively wrong under Flatpak, where the sandbox cannot see
+            # host site-packages at all — telling a Flatpak user to run
+            # pacman sends them after a fix that cannot work (#424).
+            # Reuse server.py's detector rather than re-checking
+            # $FLATPAK_ID here: it also looks for /.flatpak-info, and
+            # some hosts mount one without setting the other. `_server`
+            # is already imported above, unconditionally.
+            if _server._running_in_flatpak():
+                print(
+                    "[desktop] No pywebview backend inside the Flatpak "
+                    "sandbox, so Tideway runs in your browser instead. The "
+                    "GTK/WebKit backend is meant to be provided by the "
+                    "runtime this build ships against, so this is a bug in "
+                    "the Flatpak rather than something to fix on your "
+                    "system — installing host packages will not help, "
+                    "because the sandbox cannot see them. Please report it "
+                    "with this output: "
+                    "https://github.com/J-M-PUNK/tideway/issues",
+                    file=sys.stderr,
+                    flush=True,
+                )
+            else:
+                print(
+                    "[desktop] No pywebview backend in this build, so "
+                    "Tideway runs in your browser instead. This is the "
+                    "supported mode for the Linux AppImage; the native "
+                    "window needs PyGObject or Qt, which the AppImage "
+                    "can't bundle portably across distros. The packages "
+                    "below only help if you run Tideway from source, not "
+                    "from the AppImage:\n"
+                    "  Debian/Ubuntu:  sudo apt install python3-gi "
+                    "gir1.2-webkit2-4.1\n"
+                    "  Fedora:         sudo dnf install python3-gobject "
+                    "webkit2gtk4.1\n"
+                    "  Arch/Omarchy:   sudo pacman -S python-gobject "
+                    "webkit2gtk-4.1",
+                    file=sys.stderr,
+                    flush=True,
+                )
             print(
-                "[desktop] No pywebview backend in this build, so Tideway "
-                "runs in your browser instead. This is the supported mode "
-                "for the Linux AppImage; the native window needs PyGObject "
-                "or Qt, which the AppImage can't bundle portably across "
-                "distros. The packages below only help if you run Tideway "
-                "from source, not from the AppImage:\n"
-                "  Debian/Ubuntu:  sudo apt install python3-gi "
-                "gir1.2-webkit2-4.1\n"
-                "  Fedora:         sudo dnf install python3-gobject "
-                "webkit2gtk4.1\n"
-                "  Arch/Omarchy:   sudo pacman -S python-gobject "
-                "webkit2gtk-4.1\n"
                 f"[desktop] Opening http://{HOST}:{PORT}/ in your browser. "
                 "Quit with Ctrl-C in this terminal.",
                 file=sys.stderr,
