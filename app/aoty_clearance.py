@@ -80,14 +80,22 @@ from typing import Callable, Optional
 SolverResult = Optional[tuple[dict, str]]
 Solver = Callable[[str, Optional[str]], SolverResult]
 
-# How long we trust a clearance before re-solving on the next miss.
-# Cloudflare issues `cf_clearance` with a ~30 minute lifetime by
-# default but the exact TTL is theirs to change, so this is a ceiling
-# rather than the primary expiry mechanism: the real signal is a 403
-# coming back from a request we thought was cleared, which drives
-# `refresh()` directly. This just stops a long-idle process from
-# holding a definitely-dead cookie.
-_CLEARANCE_MAX_AGE_SEC = 1500.0  # 25 min
+# There is deliberately no expiry clock on a clearance. Only Cloudflare
+# knows when a `cf_clearance` stops working, and the cheapest way to ask
+# is to use it — a 403 on a request we thought was cleared is the one
+# authoritative signal, and `_fetch` already turns that into a refresh.
+#
+# There used to be a 25 minute ceiling here, and it was a real bug
+# rather than a safety net. `get()` returned None once a clearance
+# passed that age, so a cookie that was still perfectly good went
+# unused: the next request went out bare, drew the managed challenge,
+# and paid a full solve — 30 to 90 seconds with a hidden window — every
+# 25 minutes of normal use. From the outside the AOTY rows simply hung
+# and timed out at random intervals.
+#
+# The asymmetry is the whole argument. Trying a dead cookie costs one
+# cheap 403 and the refresh we would have done anyway; declining to try
+# a live one costs a minute of solving.
 
 
 @dataclass(frozen=True)
@@ -98,8 +106,9 @@ class Clearance:
     user_agent: str
     obtained_at: float
 
-    def is_fresh(self) -> bool:
-        return (time.time() - self.obtained_at) < _CLEARANCE_MAX_AGE_SEC
+    # `obtained_at` is provenance for logs and debugging only. Nothing
+    # branches on it: see the note above on why age is not an expiry
+    # signal here.
 
 
 _solver: Optional[Solver] = None
@@ -152,13 +161,19 @@ def wait_for_solver(timeout_sec: float) -> bool:
 
 
 def get() -> Optional[Clearance]:
-    """The current clearance if we hold a fresh one, else None. Never
-    solves — callers that want a solve ask for `refresh()`."""
+    """Whatever clearance we hold, or None if we hold none.
+
+    Deliberately does not screen on age. Only Cloudflare knows when a
+    `cf_clearance` stops working, and the cheapest way to ask is to use
+    it: a cookie that still works saves a solve, and one that doesn't
+    costs a single 403 that `_fetch` turns straight into a `refresh()`.
+    Screening here instead threw away working cookies and paid a
+    minute-long solve for each one.
+
+    Never solves — callers that want a solve ask for `refresh()`.
+    """
     with _state_lock:
-        current = _clearance
-    if current is not None and current.is_fresh():
-        return current
-    return None
+        return _clearance
 
 
 def refresh(stale: Optional[Clearance] = None, *, probe_url: str) -> Optional[Clearance]:
@@ -181,7 +196,11 @@ def refresh(stale: Optional[Clearance] = None, *, probe_url: str) -> Optional[Cl
         # already done the work this caller is waiting for.
         with _state_lock:
             current = _clearance
-        if current is not None and current.is_fresh() and current is not stale:
+        # Identity, not age: the only thing that disqualifies what we
+        # hold is that it is the exact value the caller just had
+        # refused. Anything else means another thread solved while this
+        # one waited, and that result is what this caller wanted.
+        if current is not None and current is not stale:
             return current
 
         rejected = stale.cookies.get("cf_clearance") if stale else None
