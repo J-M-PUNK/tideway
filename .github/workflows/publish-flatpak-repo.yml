@@ -47,6 +47,27 @@ jobs:
   # outputs, and so a lookup failure is legible in the job list.
   resolve:
     runs-on: ubuntu-latest
+    # `gh run list --workflow=release.yml` reads another workflow's runs,
+    # which needs the `actions` scope. The download job below already
+    # asks for it to fetch that run's artifact; this job needs it to
+    # find the run in the first place, and never asked.
+    #
+    # Relying on the repository default is what broke v1.34.0. With no
+    # block here the token gets whatever the repo hands out, that lookup
+    # came back empty, and the job reported "No successful Release run
+    # found" for a run that had finished twenty minutes earlier and
+    # whose artifact was sitting right there. The failure mode is the
+    # worst kind: it reads as "the build is missing" rather than "I was
+    # not allowed to look", and the documented recovery — dispatch this
+    # workflow by hand — failed identically, because it runs the same
+    # job. macOS and Windows shipped while Flatpak silently did not.
+    #
+    # Naming the scopes explicitly also pins them against a default
+    # being tightened later, which is the likeliest explanation for why
+    # v1.30.0 through v1.33.0 resolved fine on this same code.
+    permissions:
+      contents: read
+      actions: read
     # Prereleases (any tag with a hyphen — see release.yml) must not go
     # to the stable Flatpak channel. The old in-Release job had no such
     # guard, so a `v1.30.0-rc1` tag would have pushed a release
@@ -76,6 +97,22 @@ jobs:
             --jq '[.[] | select(.conclusion=="success")][0].databaseId')
 
           if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
+            # Say what was actually seen before asserting nothing was
+            # built. `gh` exits 0 and returns an empty list both when no
+            # run matches and when the token may not read this repo's
+            # runs, and v1.34.0 showed how badly those two read the
+            # same: the error claimed the build was missing while it sat
+            # there complete, and the suggested fix (re-run Release) was
+            # the one thing guaranteed not to help. Dumping the raw
+            # listing makes an empty result distinguishable from a
+            # result that was filtered away.
+            echo "Release runs visible for branch $TAG:"
+            gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow=release.yml \
+              --branch "$TAG" \
+              --json databaseId,conclusion,status \
+              || echo "  (the listing itself failed)"
             echo "::error::No successful Release run found for $TAG. \
           The Flatpak repo cannot be published without the OSTree artifact \
           that run produced. Re-run the Release workflow for this tag, then \
