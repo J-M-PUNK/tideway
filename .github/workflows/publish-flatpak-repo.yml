@@ -89,23 +89,53 @@ jobs:
 
           # A tag-triggered Release run records the tag as its
           # headBranch, so that is how we find the build.
-          RUN_ID=$(gh run list \
-            --repo "$GITHUB_REPOSITORY" \
-            --workflow=release.yml \
-            --branch "$TAG" \
-            --json databaseId,conclusion \
-            --jq '[.[] | select(.conclusion=="success")][0].databaseId')
+          #
+          # Polled, because this listing is eventually consistent and
+          # the `release: published` event routinely arrives inside the
+          # window where it has not caught up. On v1.34.1 the query
+          # returned an empty array and the identical query two seconds
+          # later returned the run — a run that had completed fourteen
+          # minutes earlier. On v1.34.0 the same thing cost the Linux
+          # channel a release: every other platform shipped while this
+          # job insisted the build did not exist.
+          #
+          # The retry is for staleness, not for flakiness in general.
+          # A genuinely missing run stays missing for all six attempts
+          # and still fails the job; what this buys is that a run which
+          # exists is not mistaken for one that does not because we
+          # asked too early.
+          RUN_ID=""
+          for attempt in 1 2 3 4 5 6; do
+            RUN_ID=$(gh run list \
+              --repo "$GITHUB_REPOSITORY" \
+              --workflow=release.yml \
+              --branch "$TAG" \
+              --json databaseId,conclusion \
+              --jq '[.[] | select(.conclusion=="success")][0].databaseId')
+            if [ -n "$RUN_ID" ] && [ "$RUN_ID" != "null" ]; then
+              if [ "$attempt" -gt 1 ]; then
+                echo "Found the Release run on attempt $attempt."
+              fi
+              break
+            fi
+            if [ "$attempt" -lt 6 ]; then
+              echo "No successful Release run visible for $TAG yet \
+          (attempt $attempt); the runs listing may not have caught up. \
+          Retrying in 10s."
+              sleep 10
+            fi
+          done
 
           if [ -z "$RUN_ID" ] || [ "$RUN_ID" = "null" ]; then
             # Say what was actually seen before asserting nothing was
-            # built. `gh` exits 0 and returns an empty list both when no
-            # run matches and when the token may not read this repo's
-            # runs, and v1.34.0 showed how badly those two read the
-            # same: the error claimed the build was missing while it sat
-            # there complete, and the suggested fix (re-run Release) was
-            # the one thing guaranteed not to help. Dumping the raw
-            # listing makes an empty result distinguishable from a
-            # result that was filtered away.
+            # built. `gh` exits 0 and returns an empty list whether no
+            # run matches, the token cannot read this repo's runs, or
+            # the listing is merely stale — and v1.34.0 showed how badly
+            # those read the same: the error claimed the build was
+            # missing while it sat there complete, and the suggested fix
+            # (re-run Release) was the one thing guaranteed not to help.
+            # After six attempts a still-empty listing here means the
+            # run is genuinely absent rather than late.
             echo "Release runs visible for branch $TAG:"
             gh run list \
               --repo "$GITHUB_REPOSITORY" \
@@ -113,10 +143,12 @@ jobs:
               --branch "$TAG" \
               --json databaseId,conclusion,status \
               || echo "  (the listing itself failed)"
-            echo "::error::No successful Release run found for $TAG. \
-          The Flatpak repo cannot be published without the OSTree artifact \
-          that run produced. Re-run the Release workflow for this tag, then \
-          dispatch this workflow manually."
+            echo "::error::No successful Release run found for $TAG after \
+          six attempts over a minute. The Flatpak repo cannot be published \
+          without the OSTree artifact that run produced. If the listing above \
+          shows a successful run, this job read it too early and a manual \
+          dispatch will now succeed; if it is empty, re-run the Release \
+          workflow for this tag first."
             exit 1
           fi
           echo "run_id=$RUN_ID" >> "$GITHUB_OUTPUT"
