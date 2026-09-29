@@ -1580,40 +1580,36 @@ def main(argv: Optional[list[str]] = None) -> int:
         login_state["window"] = lw
 
     # --- AOTY Cloudflare clearance ------------------------------------
-    # A solve is done when BOTH a `cf_clearance` cookie exists and the
-    # window is showing a real AOTY page. Requiring both matters,
-    # because either one alone is wrong:
+    # A solve is done when the harvested cookie actually fetches the
+    # page. Not when a cookie exists, and not when the DOM looks right
+    # — both were tried and both were guesses about a state only
+    # Cloudflare knows.
     #
-    #   - The cookie alone is not evidence of anything. pywebview keeps
-    #     a persistent profile, so an *expired* clearance from a
-    #     previous run is sitting in the jar the moment the window
-    #     opens. Returning it hands the caller a dud that only fails
-    #     later, at the fetch, having already spent the one re-solve
-    #     `_fetch` allows. Waiting for the page proves the cookie:
-    #     either it was valid and the page loads, or Cloudflare
-    #     challenges, mints a fresh one, and we return that instead.
+    # The cookie alone proves nothing: pywebview keeps a persistent
+    # profile, so an expired clearance from a previous run is in the jar
+    # the moment the window opens. The DOM was the second attempt, and
+    # measurement killed it. `_cf_chl_opt` stays defined on the cleared
+    # page, so testing for it never recognises success. AOTY's own
+    # `#centerContent` wrapper does distinguish the pages — but after
+    # the challenge navigates, `evaluate_js` on the hidden child window
+    # starts returning None rather than a boolean, so the check becomes
+    # unreadable rather than merely wrong, and whether it happened to
+    # answer turned on timing.
     #
-    #   - The page alone can't be read from the DOM generically.
-    #     `_cf_chl_opt` stays defined on the cleared page, so testing
-    #     for it never recognises success at all.
+    # What that cost: a solve returned a clearance harvested at 19
+    # cookies where a settled one carries 33, the next request was
+    # challenged, `_fetch` spent its single re-solve on it, and the row
+    # went empty with the scraper marked blocked — while the identical
+    # request seconds later took 361ms. That is the "rows hang, then
+    # eventually load" report.
     #
-    # The page test is AOTY's own content wrapper. `#centerContent` was
-    # picked by checking candidates against every page this scraper
-    # actually loads — the releases grid, the year charts, /genre.php,
-    # a genre landing page, a genre year chart and the all-time genre
-    # listing — and it is the element present on all six. The obvious
-    # alternatives are not: the document title carries the site name on
-    # the ratings and genre pages but not on `/releases/this-week/`
-    # ("This Week's New Album Releases"), and `og:site_name` is on only
-    # two of the six. Cloudflare's interstitial is a ~6KB document with
-    # none of AOTY's markup, so it cannot match.
-    #
-    # If AOTY restructures its layout this stops matching, the solver
-    # times out, and the rows fall back to the blocked notice: a safe
-    # failure rather than a wrong one.
-    _AOTY_PAGE_SELECTOR = "#centerContent"
+    # One HTTP request with the cookie settles it, and costs nothing
+    # against a solve that routinely runs 30 to 90 seconds.
     _CF_CHALLENGE_TIMEOUT_SEC = 90.0
     _CF_CHALLENGE_POLL_SEC = 1.5
+    # Short: this runs inside the poll loop, and a slow answer
+    # should cost another poll rather than stall the solve.
+    _CF_VALIDATE_TIMEOUT_SEC = 15.0
 
     # `create_window` needs a running GUI loop, and the solver's first
     # caller is the AOTY prewarm thread, which starts during FastAPI
@@ -1655,6 +1651,61 @@ def main(argv: Optional[list[str]] = None) -> int:
                 if value is not None:
                     jar[name] = value
         return jar
+
+    def _read_user_agent(win) -> str:
+        """`navigator.userAgent` from the window, or "" if it won't say.
+
+        Read once, up front. `evaluate_js` on the hidden child window is
+        dependable while the interstitial is up and stops returning
+        values once the challenge navigates away, so the moment to ask
+        is before that — and the answer cannot change mid-solve anyway.
+        """
+        try:
+            value = win.evaluate_js("navigator.userAgent")
+        except Exception:
+            return ""
+        return str(value) if value else ""
+
+    def _clearance_works(url: str, cookies: dict, user_agent: str) -> bool:
+        """Does this cookie actually get us the page?
+
+        The solver used to infer readiness from the DOM — first from
+        `window._cf_chl_opt`, then from AOTY's own `#centerContent`
+        wrapper. Both were guesses about a state only Cloudflare knows,
+        and measurement killed the second one: after the challenge
+        redirects, `evaluate_js` on the hidden child window starts
+        returning None rather than a boolean, so the check is not merely
+        wrong, it is unreadable. Whether it happened to return True
+        turned on timing.
+
+        The cost of guessing was real. A solve handed back a clearance
+        harvested at 19 cookies where a settled one carries 33; the very
+        next request was challenged, `_fetch` spent its single re-solve
+        on it, and the row went empty with the scraper marked blocked —
+        while the same request seconds later took 361ms.
+
+        So stop inferring and ask. One HTTP request with the cookie
+        settles it definitively, and it is nothing against a solve that
+        routinely runs 30 to 90 seconds.
+        """
+        # Imported here rather than at module scope: desktop.py's import
+        # chain runs before the app window exists and this is only ever
+        # needed once a solve is already under way.
+        from curl_cffi import requests as cffi_requests
+
+        try:
+            resp = cffi_requests.get(
+                url,
+                cookies=cookies,
+                impersonate="chrome",
+                headers={"User-Agent": user_agent},
+                timeout=_CF_VALIDATE_TIMEOUT_SEC,
+            )
+        except Exception:
+            # Network hiccup rather than a verdict on the cookie; the
+            # caller keeps polling and will try again.
+            return False
+        return resp.status_code == 200
 
     def _solve_aoty_challenge(probe_url: str, rejected_token=None):
         """Clear AOTY's Cloudflare challenge in a hidden webview.
@@ -1711,36 +1762,37 @@ def main(argv: Optional[list[str]] = None) -> int:
             return None
 
         try:
+            user_agent = ""
             deadline = time.time() + _CF_CHALLENGE_TIMEOUT_SEC
             while time.time() < deadline:
                 time.sleep(_CF_CHALLENGE_POLL_SEC)
+                if not user_agent:
+                    user_agent = _read_user_agent(cw)
                 try:
                     cookies = _harvest_cookies(cw)
-                    on_real_page = cw.evaluate_js(
-                        f"!!document.querySelector('{_AOTY_PAGE_SELECTOR}')"
-                    )
                 except Exception:
-                    # The window is mid-navigation and has no usable JS
-                    # context yet. Expected during the challenge's own
-                    # reloads; keep waiting.
+                    # The window is mid-navigation. Expected during the
+                    # challenge's own reloads; keep waiting.
                     continue
                 token = cookies.get("cf_clearance")
                 if not token or token == rejected_token:
                     # Either the challenge is still running, or the only
                     # cookie on hand is the one that just got refused.
                     continue
-                if not on_real_page:
-                    # Cookie present but AOTY's own markup is not, so
-                    # we're still on the interstitial and that cookie is
-                    # stale. Keep waiting for Cloudflare to replace it.
-                    continue
-                try:
-                    user_agent = cw.evaluate_js("navigator.userAgent")
-                except Exception:
-                    continue
+                # The UA was captured up front, while the interstitial
+                # still had a working JS context. It cannot change
+                # mid-solve, and reading it here instead would mean
+                # asking exactly when evaluate_js stops answering.
                 if not user_agent:
+                    user_agent = _read_user_agent(cw)
+                    if not user_agent:
+                        continue
+                if not _clearance_works(probe_url, cookies, user_agent):
+                    # Cookie exists but Cloudflare is not honouring it
+                    # yet. Keep waiting rather than handing back
+                    # something that will fail on first use.
                     continue
-                return cookies, str(user_agent)
+                return cookies, user_agent
             print(
                 f"[aoty] challenge did not clear within "
                 f"{_CF_CHALLENGE_TIMEOUT_SEC:.0f}s",
