@@ -514,6 +514,21 @@ def _mark_blocked() -> None:
         _blocked_at = time.time()
 
 
+def _clear_blocked() -> None:
+    """Drop the block flag after a fetch that actually worked.
+
+    Without this the flag is purely a ten-minute timer, so one transient
+    challenge kept the Home page showing "Album of the Year rows
+    unavailable" long after the rows had come back — observed with
+    `top-of-year` returning thirty albums in 361ms while the notice was
+    still up. A successful fetch is proof we are not blocked, and it is
+    better evidence than the clock.
+    """
+    global _blocked_at
+    with _block_lock:
+        _blocked_at = None
+
+
 def _looks_like_cf_challenge(status_code: int, headers) -> bool:
     """Cloudflare's anti-bot challenge stamps the response with a
     `cf-mitigated: challenge` header and a 403/503 status. Header
@@ -594,6 +609,10 @@ def _fetch(url: str) -> Optional[str]:
         # apparent_encoding check would also catch this, but it's an
         # O(n) scan and we already know the right answer.
         r.encoding = "utf-8"
+        # We just fetched a page, so whatever block we recorded earlier
+        # is over. Clearing it here keeps the Home notice describing the
+        # present rather than the last ten minutes.
+        _clear_blocked()
         return r.text
 
     # A non-challenge error (404, 500, AOTY's own auth wall). A

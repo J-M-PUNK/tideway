@@ -240,3 +240,29 @@ def test_impersonate_profile_is_current_and_known_to_curl_cffi():
     # Resolves either as an alias or as a concrete target; an unknown
     # string is neither.
     assert known_to_curl_cffi(aoty._CFFI_IMPERSONATE)
+
+
+def test_a_successful_fetch_clears_a_stale_block_flag():
+    """The notice should describe now, not the last ten minutes.
+
+    `blocked` was a pure timer: one transient challenge kept the Home
+    page showing "Album of the Year rows unavailable" for ten minutes
+    even once the rows were loading again. Observed for real —
+    `top-of-year` returned thirty albums in 361ms while the notice was
+    still up. A fetch that worked is better evidence than the clock.
+    """
+    # Trip the flag the way a real challenge would.
+    with patch("app.aoty.cffi_requests.get") as get:
+        get.return_value = _FakeResponse(403, {"cf-mitigated": "challenge"})
+        aoty._fetch("https://www.albumoftheyear.org/releases/this-week/")
+    assert aoty.is_scraper_blocked() is True
+
+    ok = _FakeResponse(200)
+    ok.text = "<html>back</html>"
+    with patch("app.aoty.cffi_requests.get") as get:
+        get.return_value = ok
+        assert aoty._fetch("https://www.albumoftheyear.org/genre.php") is not None
+
+    assert aoty.is_scraper_blocked() is False, (
+        "a fetch that succeeded proves we are not blocked"
+    )
