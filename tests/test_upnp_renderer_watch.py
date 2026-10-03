@@ -405,6 +405,27 @@ def test_fire_renderer_ended_records_sticky_consumed_track_id():
     assert session.renderer_consumed_track_id == "tid-n1"
 
 
+def test_position_end_with_staged_uri_records_consumption_evidence():
+    """Position reaching the track's real end while a next URI is staged
+    means the renderer is at/into the boundary and advances. The
+    CurrentURI probe can lose that race, so Signal 2 must record the
+    consumption evidence too (the deadline, by contrast, does not)."""
+    staged = "http://x/dlna/stream?ts=9"
+    av = _FakeAV(positions=[(100.0, 100.0)])
+    session = _session(av)
+    session.renderer_next_uri = staged
+    session.renderer_next_track_id = "tid-n1"
+    mgr = _manager(session)
+    fired = threading.Event()
+    mgr._renderer_ended_callback = lambda: fired.set()
+
+    _run_watch(mgr, session)
+
+    assert fired.wait(timeout=2.0)
+    assert session.renderer_consumed_next is True
+    assert session.renderer_consumed_track_id == "tid-n1"
+
+
 def test_deadline_fires_with_staged_uri_but_records_no_evidence(monkeypatch):
     """A renderer that ignores the staged NextURI must not stall forever:
     the deadline fires even while a URI is staged, and records no

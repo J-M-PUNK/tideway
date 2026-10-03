@@ -1353,10 +1353,19 @@ class UpnpManager:
                             time.monotonic() - armed_at
                             >= duration_s - _RENDERER_EOS_WALL_TOLERANCE_S
                         ):
+                            # Position reached the frame's real end. With a
+                            # next URI staged the renderer is at/into the
+                            # boundary and advances (UAPP does), but the
+                            # CurrentURI probe can lose the race to the
+                            # position read at the boundary — so treat this
+                            # as consumption when staged (the deadline, by
+                            # contrast, fires when position never advanced
+                            # and stays evidence-free).
                             self._fire_renderer_ended(
                                 session,
                                 gen,
                                 f"position {position_s:.1f}/{duration_s:.1f}",
+                                consumed=True,
                             )
                             return
             else:
@@ -1409,10 +1418,11 @@ class UpnpManager:
         and would otherwise no-op, and by the time we fire we know the
         renderer's clock is the one that matters.
 
-        ``consumed`` is True only when the renderer proved it advanced into
-        the staged next URI (CurrentURI matched). Position-reached and
-        deadline fires carry no such proof, so they record no evidence and
-        the player falls back to announcing."""
+        ``consumed`` is True when the renderer demonstrably advanced into
+        the staged next URI: Signal 1 (CurrentURI matched) or Signal 2
+        (position reached the track's real end while a next was staged —
+        the probe can lose that race). The deadline fires when position
+        never advanced, so it stays evidence-free and the player announces."""
         with session.passthrough_lock:
             if session.renderer_watch_gen != gen or session.renderer_ended_fired:
                 return
