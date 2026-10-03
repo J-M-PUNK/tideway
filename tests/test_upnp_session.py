@@ -597,6 +597,62 @@ class TestConnect:
         assert mgr._session is not None
         assert mgr._session.gapless is True
         assert created == [], "live ring-buffer encoder must not be built"
+        # The already-preloaded next must be staged on the renderer at
+        # connect, or the first boundary after a mid-track connect has no
+        # `next` and the renderer stops (issue #354).
+        assert len(staged) == 1
+        assert staged[0][0] == ["http://192.168.1.9/next"]
+
+    def test_connect_non_gapless_does_not_stage_next(
+        self, mock_soap, mock_http_server, monkeypatch,
+    ):
+        """Without the gapless opt-in there is no SetNext pre-stage at
+        connect: the boundary advances with a plain SetAVTransportURI."""
+        mgr = UpnpManager()
+        device = _device_record()
+        mgr._devices = {device.id: device}
+        monkeypatch.setattr(
+            "app.audio.upnp.fetch_device",
+            lambda location, **_kw: _openhome_device(),
+        )
+
+        class _StubTrackSource:
+            def __init__(self, *a, **k):
+                self.ready = threading.Event()
+                self.ready.set()
+                self.failed = False
+                self.path = "/tmp/stub.flac"
+                self.track_id = k.get("track_id", 0)
+                self.source_released = threading.Event()
+                self.source_released.set()
+
+            def start(self):
+                pass
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(
+            "app.audio.upnp.TrackFileSource", _StubTrackSource
+        )
+        monkeypatch.setattr(
+            mgr, "_arm_renderer_watch", lambda *a, **k: None
+        )
+        monkeypatch.setattr(
+            "app.audio.segment_reader.SegmentReader", lambda *a, **k: object()
+        )
+        mgr.set_source_provider(lambda: ["http://192.168.1.9/seg0"])
+        mgr.set_metadata_provider(lambda: {"title": "T", "artist": "A"})
+        mgr.set_next_source_provider(
+            lambda: (["http://192.168.1.9/next"], {"title": "N"})
+        )
+        staged = []
+        monkeypatch.setattr(
+            mgr, "set_next_track", lambda *a, **k: staged.append(a)
+        )
+
+        mgr.connect(device.id, gapless=False)
+
         assert staged == []
 
 

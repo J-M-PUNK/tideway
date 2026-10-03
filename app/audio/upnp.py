@@ -2379,12 +2379,14 @@ class UpnpManager:
             ) from exc
 
         # The user may have switched output mid-track, in which case the
-        # next track was already preloaded before this session existed.
-        # Stage it on the renderer now (SetNextAVTransportURI): without a
-        # `next`, the renderer finishes the current track and stops.
+        # next track was already preloaded before this session existed
+        # (and the frontend's preload memo will not re-fire for it). Stage
+        # it on the renderer now (SetNextAVTransportURI) when gapless is
+        # on: without a `next`, the renderer finishes the current track
+        # and stops (the first boundary after a mid-track connect).
         if (
             urls is not None
-            and not gapless
+            and gapless
             and self._next_source_provider is not None
         ):
             try:
