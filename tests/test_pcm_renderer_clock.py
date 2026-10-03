@@ -1,0 +1,164 @@
+"""Phase 2 of issue #354: the player defers track advance to the
+renderer's clock while a bounded DLNA file is being served.
+
+``PCMPlayer._renderer_clock_active`` is the gate: when the UpnpManager
+watchdog has confirmed the renderer reports its own position, the muted
+desktop decoder must not advance the queue on its earlier EOF. Instead
+``on_renderer_track_ended`` (called by the watchdog at the renderer's
+real boundary) emits `ended` so the frontend advances, keeping the
+preload and 'playing' state so the follow-up play_track(next) adopts it.
+
+These pin the gate, the EOF handling in renderer-clock mode, and the
+ended/playing emit contract.
+"""
+from __future__ import annotations
+
+import queue
+import threading
+from unittest.mock import MagicMock
+
+from app.audio import player as player_mod
+from app.audio.player import PCMPlayer
+
+
+class _FakeUpnp:
+    def __init__(self, active: bool = True, clock: bool = True) -> None:
+        self._active = active
+        self._clock = clock
+
+    def is_active(self) -> bool:
+        return self._active
+
+    def renderer_clock_active(self) -> bool:
+        return self._clock
+
+
+class _FakeStream:
+    def __init__(self) -> None:
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _player() -> PCMPlayer:
+    return PCMPlayer(lambda: None)
+
+
+# ---------------------------------------------------------------------
+# Gate
+# ---------------------------------------------------------------------
+
+
+def test_renderer_clock_active_requires_bounded_session(monkeypatch):
+    p = _player()
+    monkeypatch.setattr(player_mod, "_upnp_manager", None)
+    assert p._renderer_clock_active() is False
+
+    monkeypatch.setattr(player_mod, "_upnp_manager", _FakeUpnp(active=False, clock=True))
+    assert p._renderer_clock_active() is False
+
+    monkeypatch.setattr(player_mod, "_upnp_manager", _FakeUpnp(active=True, clock=False))
+    assert p._renderer_clock_active() is False
+
+    monkeypatch.setattr(player_mod, "_upnp_manager", _FakeUpnp(active=True, clock=True))
+    assert p._renderer_clock_active() is True
+
+
+def test_try_gapless_swap_bails_on_renderer_clock(monkeypatch):
+    p = _player()
+    monkeypatch.setattr(player_mod, "_upnp_manager", _FakeUpnp(True, True))
+    p._preload = MagicMock()
+
+    assert p._try_gapless_swap() is False
+    # The bail must not consume the preload — the renderer-driven adopt
+    # still needs it.
+    assert p._preload is not None
+
+
+# ---------------------------------------------------------------------
+# EOF in renderer-clock mode
+# ---------------------------------------------------------------------
+
+
+def _prime_eof(p: PCMPlayer, stream, preload) -> None:
+    p._stream = stream
+    p._preload = preload
+    p._state = "playing"
+    p._replacing_stream = False
+    p._pcm_queue = queue.Queue()
+    p._decoder_done = threading.Event()
+    p._decoder_done.set()
+
+
+def test_eof_keeps_preload_and_streamless_in_renderer_clock(monkeypatch):
+    p = _player()
+    monkeypatch.setattr(player_mod, "_upnp_manager", _FakeUpnp(True, True))
+    stream = _FakeStream()
+    pre = MagicMock()
+    _prime_eof(p, stream, pre)
+
+    p._on_stream_finished()
+
+    assert p._stream is None, "dead local stream must be dropped"
+    assert stream.closed is True
+    assert p._preload is pre, (
+        "preload must survive for the frontend's play_track(next) adopt"
+    )
+    assert p._state == "playing", (
+        "state stays playing; the watchdog drives the real `ended`"
+    )
+
+
+def test_eof_clears_preload_without_renderer_clock():
+    p = _player()
+    p._upnp_manager = None  # explicit: local clock drives
+    stream = _FakeStream()
+    _prime_eof(p, stream, None)
+
+    p._on_stream_finished()
+
+    assert p._state == "ended"
+    assert p._stream is None
+
+
+# ---------------------------------------------------------------------
+# on_renderer_track_ended contract
+# ---------------------------------------------------------------------
+
+
+def test_on_renderer_track_ended_emits_ended_then_stays_playing(monkeypatch):
+    p = _player()
+    monkeypatch.setattr(player_mod, "_upnp_manager", _FakeUpnp(True, True))
+    p._state = "playing"
+    seen = []
+    p.subscribe(lambda snap: seen.append(snap.state))
+
+    p.on_renderer_track_ended()
+
+    assert seen == ["ended"]
+    assert p._state == "playing"
+
+
+def test_on_renderer_track_ended_noop_without_clock(monkeypatch):
+    p = _player()
+    monkeypatch.setattr(player_mod, "_upnp_manager", _FakeUpnp(True, False))
+    p._state = "playing"
+    seen = []
+    p.subscribe(lambda snap: seen.append(snap.state))
+
+    p.on_renderer_track_ended()
+
+    assert seen == []
+
+
+def test_on_renderer_track_ended_ignores_non_playing_states(monkeypatch):
+    p = _player()
+    monkeypatch.setattr(player_mod, "_upnp_manager", _FakeUpnp(True, True))
+    p._state = "idle"
+    seen = []
+    p.subscribe(lambda snap: seen.append(snap.state))
+
+    p.on_renderer_track_ended()
+
+    assert seen == []

@@ -153,6 +153,13 @@ _XFADE_MIN_PREBUFFER_CHUNKS = 4
 # forever and every playback control hung until an app restart.
 _RESOLVE_TIMEOUT_S = 45.0
 
+# While DLNA is casting a bounded per-track file, the local decoder waits
+# this long for that file's whole-track demux to land on disk before it
+# opens it. Bounded by the same transport budget as a resolve; the file
+# only has to cross the LAN, and the alternative (a second TIDAL
+# connection for the same track) trips TIDAL's one-track-at-a-time limit.
+_CAST_FILE_READY_S = 60.0
+
 
 @dataclass
 class StreamInfo:
@@ -659,6 +666,7 @@ class PCMPlayer:
                                 self._source_urls,
                                 prefetched=None,
                                 metadata=self._current_track_meta,
+                                track_id=self._current_track_id,
                             )
                         except Exception as exc:  # noqa: BLE001 - passthrough is optional
                             print(
@@ -853,10 +861,13 @@ class PCMPlayer:
                 self._resolve_source(track_id, quality)
             )
             t_resolved = time.monotonic()
-            initial_source = _build_source(source_spec, prefetched=prefetched_bytes)
 
-            # Start DLNA passthrough if a session is active. Same
-            # condition as the _build_load_pipeline path above.
+            # Start DLNA passthrough BEFORE opening the local decoder:
+            # when a renderer is casting, the decoder reads the same
+            # bounded file the renderer streams (so we never hold a
+            # second TIDAL connection), and that file only exists once
+            # start_passthrough has created it. Same condition as the
+            # _build_load_pipeline path above.
             if _upnp_manager is not None and isinstance(source_spec, list):
                 try:
                     if _upnp_manager.is_active():
@@ -864,6 +875,7 @@ class PCMPlayer:
                             source_spec,
                             prefetched=prefetched_bytes,
                             metadata=track_meta,
+                            track_id=track_id,
                         )
                 except Exception as exc:  # noqa: BLE001 - passthrough is optional
                     print(
@@ -872,6 +884,9 @@ class PCMPlayer:
                         flush=True,
                     )
 
+            initial_source = self._open_stream_source(
+                source_spec, prefetched_bytes
+            )
             decoder = Decoder(initial_source)
             t_decoder = time.monotonic()
         except Exception as exc:
@@ -1022,6 +1037,17 @@ class PCMPlayer:
         return self.play()
 
     def stop(self) -> PlayerSnapshot:
+        # Explicit stop: drop any next track pre-staged on the renderer
+        # so it can't auto-advance after the user stopped playback.
+        if _upnp_manager is not None:
+            try:
+                _upnp_manager.invalidate_next_track()
+            except Exception as exc:
+                print(
+                    f"[player] upnp invalidate_next_track on stop failed: "
+                    f"{exc!r}",
+                    flush=True,
+                )
         with self._pipeline_lock:
             self._teardown()
             with self._lock:
@@ -1083,10 +1109,15 @@ class PCMPlayer:
             # this track and advances when it consumes it.
             if _upnp_manager is not None:
                 try:
-                    if _upnp_manager.is_active() and not _upnp_manager.bounded_serving():
-                        _upnp_manager.stop_passthrough()
+                    if _upnp_manager.is_active():
+                        if not _upnp_manager.bounded_serving():
+                            _upnp_manager.stop_passthrough()
+                        # A seek makes any pre-staged next track wrong:
+                        # drop the renderer's NextURI and delete its
+                        # bounded file so it can't be promoted.
+                        _upnp_manager.invalidate_next_track()
                 except Exception as exc:
-                    print(f"[player] upnp stop_passthrough on seek failed: {exc!r}", flush=True)
+                    print(f"[player] upnp seek cleanup failed: {exc!r}", flush=True)
             effective_s = target_s
             try:
                 effective_s = self._restart_decoder_at(target_s)
@@ -1212,6 +1243,46 @@ class PCMPlayer:
         audio_log.info(_perf)
         return effective_s
 
+    def _open_stream_source(
+        self,
+        source_spec: Union[str, list[str]],
+        prefetched: Optional[dict[int, bytes]],
+    ) -> Union[str, SegmentReader]:
+        """Source for the local decoder.
+
+        While a DLNA renderer is casting a bounded per-track file, the
+        decoder reads that same local file instead of opening a second
+        TIDAL connection for the track. TIDAL drops the session when two
+        different tracks are open (issue #354), and the next track's
+        pre-stage only starts once this file's TIDAL reader is released,
+        so the local decoder must not hold a TIDAL reader of its own.
+        Falls back to the URL-backed source (local playback, no cast, or
+        a pre-stage that never materialised).
+        """
+        if (
+            _upnp_manager is not None
+            and isinstance(source_spec, list)
+            and _upnp_manager.is_active()
+        ):
+            try:
+                path = _upnp_manager.current_bounded_file(
+                    source_spec, timeout=_CAST_FILE_READY_S
+                )
+            except Exception as exc:  # noqa: BLE001 - cast is optional
+                path = None
+                log.debug("bounded file lookup failed: %r", exc)
+            if path:
+                print(
+                    f"[pcm] cast: decoding from bounded file {path}",
+                    flush=True,
+                )
+                return path
+            print(
+                "[pcm] cast: no bounded file for this source; using URL source",
+                flush=True,
+            )
+        return _build_source(source_spec, prefetched=prefetched)
+
     def _build_source_at(
         self, target_s: float
     ) -> tuple[Union[str, SegmentReader], Optional[float]]:
@@ -1257,6 +1328,12 @@ class PCMPlayer:
         load/stop/seek.
         """
         self._dbg(f"preload ENTER track={track_id} quality={quality}")
+        # Permanent, low-noise: one line per preload request. The DLNA
+        # chain (upnp set_next_track -> SetNextAVTransportURI) starts
+        # here, so seeing this during the current track — or not — is
+        # what tells a late pre-stage apart from a preload that never
+        # fired.
+        print(f"[pcm] preload request track={track_id}", flush=True)
         with self._pipeline_lock:
             with self._lock:
                 existing = self._preload
@@ -1277,6 +1354,40 @@ class PCMPlayer:
                         track_id, quality, set_current_meta=False
                     )
                 )
+            except Exception as exc:
+                log.exception("preload resolve failed for %s", track_id)
+                return {"ok": False, "error": str(exc)}
+
+            # While casting, do NOT open a second TIDAL reader for the
+            # next track. TIDAL closes the session when two tracks are
+            # open, so the next bounded file is pre-downloaded (serialized
+            # after the current track's TIDAL reader is released) and then
+            # pre-staged on the renderer via SetNextAVTransportURI so it
+            # advances on its own at the boundary. This is the path being
+            # re-tested against UAPP 7.1.2.8 (7.1.1.4 crashed in
+            # HTTPStreamProvider::cleanUp on the SetNext action).
+            if (
+                _upnp_manager is not None
+                and isinstance(source_spec, list)
+                and _upnp_manager.is_active()
+                and _upnp_manager.is_gapless()
+            ):
+                try:
+                    _upnp_manager.set_next_track(
+                        source_spec,
+                        prefetched_bytes,
+                        metadata=track_meta,
+                        track_id=track_id,
+                    )
+                except Exception as exc:  # noqa: BLE001 - cast is optional
+                    print(
+                        f"[player] upnp set_next_track failed "
+                        f"(cast preload): {exc!r}",
+                        flush=True,
+                    )
+                return {"ok": True, "cached": False, "cast": True}
+
+            try:
                 source = _build_source(source_spec, prefetched=prefetched_bytes)
                 decoder = Decoder(source)
             except Exception as exc:
@@ -1347,12 +1458,20 @@ class PCMPlayer:
                     and _upnp_manager.is_active()
                 ):
                     try:
-                        _upnp_manager.prepare_next_passthrough(
-                            pre.source_urls, prefetched_bytes
+                        # Stages the next track on the renderer via
+                        # SetNextAVTransportURI (DLNA-native gapless) and
+                        # builds its bounded file, which the gapped path
+                        # promotes too. Returns False and leaves the
+                        # gapped advance in place when the renderer
+                        # doesn't support it.
+                        _upnp_manager.set_next_track(
+                            pre.source_urls,
+                            prefetched_bytes,
+                            metadata=pre.track_meta,
                         )
                     except Exception as exc:
                         print(
-                            f"[player] upnp prepare_next failed: {exc!r}",
+                            f"[player] upnp set_next_track failed: {exc!r}",
                             flush=True,
                         )
             return {
@@ -1388,13 +1507,10 @@ class PCMPlayer:
         source_spec, duration_s, stream_info, prefetched_bytes, track_meta = (
             self._resolve_source(track_id, quality)
         )
-        source = _build_source(source_spec, prefetched=prefetched_bytes)
-
         # Start bit-perfect FLAC passthrough when a DLNA session is
-        # active. The passthrough encoder demuxes raw FLAC frames
-        # from the fMP4 source and writes them directly to the
-        # ring buffer, bypassing PCM decode + re-encode so the
-        # original STREAMINFO (with real total_samples) is preserved.
+        # active. The passthrough creates the bounded per-track file the
+        # renderer streams; the local decoder then reads that same file
+        # (see _open_stream_source) so only one TIDAL track is ever open.
         # Only when the source is a URL list (Tidal stream), not a
         # local file.
         if _upnp_manager is not None and isinstance(source_spec, list):
@@ -1404,6 +1520,7 @@ class PCMPlayer:
                         source_spec,
                         prefetched=prefetched_bytes,
                         metadata=track_meta,
+                        track_id=track_id,
                     )
             except Exception as exc:  # noqa: BLE001 - passthrough is optional
                 print(
@@ -1411,6 +1528,7 @@ class PCMPlayer:
                     flush=True,
                 )
 
+        source = self._open_stream_source(source_spec, prefetched_bytes)
         decoder = Decoder(source)
 
         # Match the active stream's rate so the adopt path can take
@@ -1467,6 +1585,7 @@ class PCMPlayer:
                 self._preload = None
             if pre is None:
                 return
+            print(f"[pcm] drop preload track={pre.track_id}", flush=True)
             pre.stop_flag.set()
             # Abort any in-flight HTTP fetch on the preload's decoder
             # so its thread exits promptly instead of waiting out the
@@ -1525,6 +1644,37 @@ class PCMPlayer:
         """Return the active track's metadata dict, or None."""
         with self._lock:
             return self._current_track_meta
+
+    def get_preloaded_source(
+        self,
+    ) -> Optional[tuple[list[str], Optional[dict]]]:
+        """Return the preloaded NEXT track's segment URLs and metadata,
+        or None when no URL-backed preload is buffering.
+
+        Used by the DLNA manager when a session connects: switching
+        output to a renderer mid-track can land after the next track was
+        already preloaded. Without staging that preload on the renderer,
+        it reaches the end of the current track with no `next` and
+        stops (issue #354)."""
+        with self._lock:
+            pre = self._preload
+            if pre is None or pre.source_urls is None:
+                return None
+            return list(pre.source_urls), getattr(pre, "track_meta", None)
+
+    def get_current_position_s(self) -> Optional[float]:
+        """Current playback position in seconds, or None when unknown.
+
+        Used by the DLNA manager to trim the bounded file served to the
+        renderer so it begins where the desktop decoder already is. In
+        DLNA the renderer is the playback clock; if the two start at
+        different offsets (a resume-from-position), the decoder's EOF
+        fires early and the next track's SetAVTransportURI cuts the
+        tail (issue #354)."""
+        with self._lock:
+            if not self._stream_sample_rate or self._samples_emitted <= 0:
+                return None
+            return self._samples_emitted / self._stream_sample_rate
 
     def set_external_output_active(self, active: bool) -> None:
         """Toggle local-output silencing.
@@ -1946,15 +2096,29 @@ class PCMPlayer:
     def snapshot(self) -> PlayerSnapshot:
         with self._lock:
             pos_ms = 0
-            if self._stream_sample_rate and self._samples_emitted > 0:
+            # While a DLNA renderer's clock drives a bounded track, the
+            # local decode clock does not advance, so report the
+            # renderer's own position instead. This is what lets the
+            # frontend's position-gated preload (fire ~10s into the
+            # track) run for the track after a renderer auto-advance, and
+            # keeps the scrubber honest in DLNA mode.
+            renderer_ms = None
+            if _upnp_manager is not None:
+                try:
+                    renderer_ms = _upnp_manager.renderer_position_ms()
+                except Exception:
+                    renderer_ms = None
+            if renderer_ms is not None:
+                pos_ms = renderer_ms
+            elif self._stream_sample_rate and self._samples_emitted > 0:
                 pos_ms = int(
                     self._samples_emitted * 1000 / self._stream_sample_rate
                 )
-                # Clamp to duration so the UI's progress bar doesn't
-                # overshoot when the callback reports samples beyond
-                # the real track end (can happen for ~one frame).
-                if self._current_duration_ms > 0:
-                    pos_ms = min(pos_ms, self._current_duration_ms)
+            # Clamp to duration so the UI's progress bar doesn't
+            # overshoot when the callback reports samples beyond
+            # the real track end (can happen for ~one frame).
+            if self._current_duration_ms > 0:
+                pos_ms = min(pos_ms, self._current_duration_ms)
             return PlayerSnapshot(
                 state=self._state,
                 track_id=self._current_track_id,
@@ -3394,6 +3558,7 @@ class PCMPlayer:
                     pre.source_urls,
                     prefetched=None,
                     metadata=getattr(pre, "track_meta", None) or self._current_track_meta,
+                    track_id=getattr(pre, "track_id", None),
                 )
             except Exception as exc:  # noqa: BLE001 - passthrough is optional
                 print(
@@ -3677,6 +3842,56 @@ class PCMPlayer:
             except Exception:
                 pass
 
+    def _renderer_clock_active(self) -> bool:
+        """True when a bounded per-track DLNA file is being served AND
+        the renderer has confirmed it reports its own playback position.
+
+        In that mode the renderer — not the muted desktop decoder — is
+        the playback clock, so the player must not advance the queue on
+        its own (earlier) EOF. Lock-free (one attribute read on the
+        manager) so the realtime audio callback can gate on it.
+        Chromecast never serves a bounded UpnpManager file, so this is
+        always False for Cast and for local playback."""
+        return bool(
+            _upnp_manager is not None
+            and _upnp_manager.is_active()
+            and _upnp_manager.renderer_clock_active()
+        )
+
+    def on_renderer_track_ended(self) -> None:
+        """Called by the UpnpManager watchdog when the renderer reaches
+        the end of the current bounded DLNA track.
+
+        Emits `ended` so the frontend advances its queue (it owns the
+        queue), then restores `playing` so the redundant play_track(next)
+        lands on Path 0b and adopts the preload instead of tearing the
+        stream down. Runs on the watchdog thread, not the realtime
+        callback, so emitting snapshots is safe. No-op unless a bounded
+        DLNA renderer clock is actually driving playback."""
+        if not self._renderer_clock_active():
+            return
+        with self._lock:
+            if self._state not in ("playing", "paused"):
+                return
+            # ended -> frontend advance; playing -> so play_track(next)
+            # takes the adopt path rather than a full teardown.
+            self._state = "ended"
+            self._seq += 1
+            self._emit()
+            pre = self._preload
+            if pre is not None:
+                # Renderer-clock advance is backend-driven: adopt the
+                # preloaded next track here so playback and the backend's
+                # current-track state move even if the frontend misses or
+                # drops the single `ended` frame. The following `playing`
+                # snapshot carries the new track id, which the frontend
+                # uses to re-sync its queue index and preload the track
+                # after it.
+                self._adopt_preload_locked(pre)
+                return
+            self._state = "playing"
+            self._seq += 1
+
     def _try_gapless_swap(self) -> bool:
         """Called from the audio callback when the current queue is
         empty + primary decoder is done. Swaps in the preloaded
@@ -3697,6 +3912,17 @@ class PCMPlayer:
         callback is the sole modifier during the track-boundary
         moment.
         """
+        # Renderer-clock mode: the renderer is the playback clock, so the
+        # muted desktop decoder's EOF must NOT advance the queue — the
+        # UpnpManager watchdog emits `ended` at the renderer's real end.
+        # Bail to CallbackStop -> _on_stream_finished, which keeps the
+        # preload alive for the renderer-driven adopt.
+        if self._renderer_clock_active():
+            print(
+                "[pcm] _try_gapless_swap bailed: renderer clock active",
+                flush=True,
+            )
+            return False
         # Atomically capture + clear the preload slot so a racing
         # `_drop_preload` on the HTTP thread can't close the
         # preload's decoder between our capability check below and
@@ -3835,7 +4061,34 @@ class PCMPlayer:
                     daemon=True,
                 ).start()
                 return
-            self._preload = None
+            # Renderer-clock mode: the muted local stream ended early by
+            # design; the renderer's watchdog will emit `ended` at the
+            # real end. Close the dead local stream but keep the preload
+            # and the 'playing' state so the pending play_track(next)
+            # adopts the preload. Only when a preload actually exists —
+            # with none there is nothing for the renderer-driven adopt to
+            # take, so fall through to the normal `ended` instead of
+            # waiting on a watchdog that has nothing to advance into.
+            renderer_clock = self._renderer_clock_active() and pre is not None
+            if renderer_clock:
+                bound_stream = self._stream
+                self._stream = None
+                print(
+                    "[pcm] EOF: renderer clock active, keeping preload "
+                    f"preload={getattr(self._preload, 'track_id', None)}",
+                    flush=True,
+                )
+            else:
+                bound_stream = None
+                self._preload = None
+
+        if renderer_clock:
+            if bound_stream is not None:
+                try:
+                    bound_stream.close()
+                except Exception:
+                    pass
+            return
 
         # Cross-rate bridge: preload exists but has a different
         # sample rate / dtype than the current stream, so the
@@ -4126,6 +4379,7 @@ class PCMPlayer:
                             pre.source_urls,
                             prefetched=None,
                             metadata=getattr(pre, "track_meta", None) or self._current_track_meta,
+                            track_id=getattr(pre, "track_id", None),
                         )
                     except Exception as exc:  # noqa: BLE001 - passthrough is optional
                         print(

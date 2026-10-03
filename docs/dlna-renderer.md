@@ -95,6 +95,29 @@ AVTransport SOAP:
   has no effect; use the device's own volume control in that
   case.
 
+## Gapless track changes
+
+Each track is served as a bounded FLAC file — the real track, with its
+real length, not an open-ended stream. At the end of a track the
+renderer has to move on to the next file. Tideway picks between two
+mechanisms:
+
+- **Renderers that advertise `SetNextAVTransportURI`** get the next
+  track pre-staged while the current one still plays. The renderer
+  advances on its own at the natural end, so there is no decoder
+  re-init and no audible gap.
+- **Renderers that don't** get a fresh `SetAVTransportURI` at the
+  boundary. Tideway polls the renderer's own playback position
+  (`GetPositionInfo`) and drives the switch when the renderer — not the
+  desktop decoder, whose muted stream finishes ahead of the renderer's
+  buffer — reaches the end. That avoids cutting the previous track's
+  tail; the renderer still re-initialises its decoder, so a small gap
+  can remain.
+
+The position poll only times the advance. A pause pressed on the
+device's own remote is still not reflected in the Tideway UI (see
+below).
+
 ## Known limits
 
 - **No hardware verification by the maintainer.** The unit tests
@@ -103,11 +126,10 @@ AVTransport SOAP:
   Bluesound / Cambridge unit on the bench. Device-side behaviour
   is unverified. File a GitHub issue if your specific renderer
   misbehaves.
-- **No device-side state polling.** If you pause via the
-  device's own remote (or its mobile app), Tideway doesn't yet
-  notice and reflect the change in its UI. Same gap the Cast
-  path has. The fix is a periodic `GetTransportInfo` poll; out
-  of scope until someone reports it as a real annoyance.
+- **Device-initiated transport changes aren't shown.** Tideway polls
+  the renderer's position to time gapless track changes, but it doesn't
+  reflect a pause, resume, or stop pressed on the device's own remote
+  (or its mobile app) in the Tideway UI. Same gap the Cast path has.
 - **No multi-room.** Some renderers (Bluesound BluOS, Sonos via
   their DLNA-bridge mode) support synchronised playback across
   multiple speakers. Tideway sends to one renderer at a time.

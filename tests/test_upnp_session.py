@@ -17,6 +17,7 @@ Network is mocked out at two layers:
 """
 from __future__ import annotations
 
+import threading
 from typing import Optional
 from unittest.mock import MagicMock
 
@@ -160,9 +161,13 @@ def mock_http_server(monkeypatch):
     test the SOAP handshake path."""
     fake_server = MagicMock()
     fake_server.server_address = ("0.0.0.0", 54321)
+    fake_server.dlna = True
 
     def _fake_start(
-        buffer, stream_path="/stream", content_type="audio/flac", dlna=False
+        buffer,
+        stream_path="/stream",
+        content_type="audio/flac",
+        dlna=False,
     ):
         return fake_server
 
@@ -515,6 +520,86 @@ class TestConnect:
         assert mgr._session is None
 
 
+    def test_connect_gapless_uses_bounded_path(
+        self, mock_soap, mock_http_server, monkeypatch,
+    ):
+        """connect(gapless=True) opts into bounded per-track gapless:
+        `session.gapless` is set, the initial track is served from a
+        bounded TrackFileSource, and the live ring-buffer encoder is not
+        built."""
+        mgr = UpnpManager()
+        device = _device_record()
+        mgr._devices = {device.id: device}
+        monkeypatch.setattr(
+            "app.audio.upnp.fetch_device",
+            lambda location, **_kw: _openhome_device(),
+        )
+
+        created = []
+
+        class _StubEncoder:
+            def __init__(self, *a, **k):
+                created.append(k)
+
+            def start(self):
+                pass
+
+            def close(self):
+                pass
+
+        class _StubReader:
+            def __init__(self, *a, **k):
+                pass
+
+        class _StubTrackSource:
+            """Ready bounded file: connect must pick this path and not
+            block on a real demux (which would depend on thread timing)."""
+
+            def __init__(self, *a, **k):
+                self.ready = threading.Event()
+                self.ready.set()
+                self.failed = False
+                self.path = "/tmp/stub.flac"
+                self.track_id = k.get("track_id", 0)
+                self.source_released = threading.Event()
+                self.source_released.set()
+
+            def start(self):
+                pass
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(
+            "app.audio.upnp.FlacPassthroughEncoder", _StubEncoder
+        )
+        monkeypatch.setattr(
+            "app.audio.upnp.TrackFileSource", _StubTrackSource
+        )
+        monkeypatch.setattr(
+            mgr, "_arm_renderer_watch", lambda *a, **k: None
+        )
+        monkeypatch.setattr(
+            "app.audio.segment_reader.SegmentReader", _StubReader
+        )
+        mgr.set_source_provider(lambda: ["http://192.168.1.9/seg0"])
+        mgr.set_metadata_provider(lambda: {"title": "T", "artist": "A"})
+        mgr.set_next_source_provider(
+            lambda: (["http://192.168.1.9/next"], {"title": "N"})
+        )
+        staged = []
+        monkeypatch.setattr(
+            mgr, "set_next_track", lambda *a, **k: staged.append(a)
+        )
+
+        mgr.connect(device.id, gapless=True)
+
+        assert mgr._session is not None
+        assert mgr._session.gapless is True
+        assert created == [], "live ring-buffer encoder must not be built"
+        assert staged == []
+
+
 # ---------------------------------------------------------------------
 # Disconnect teardown
 # ---------------------------------------------------------------------
@@ -620,6 +705,59 @@ class TestBoundedServing:
         http.track_source = object()
         sess.http_server = http
         assert mgr.bounded_serving() is False
+
+    def _ready_source(self, path="/tmp/t.flac", failed=False):
+        import threading
+        from types import SimpleNamespace
+
+        ts = SimpleNamespace(
+            ready=threading.Event(), path=path, failed=failed
+        )
+        ts.ready.set()
+        return ts
+
+    def test_current_bounded_file_returns_path_when_ready(self):
+        mgr = UpnpManager()
+        sess = _attach_session(mgr)
+        http = MagicMock()
+        http.dlna = True
+        http.track_source = self._ready_source()
+        sess.http_server = http
+        sess._passthrough_source_urls = ("u0", "u1")
+        assert (
+            mgr.current_bounded_file(["u0", "u1"], timeout=0.1)
+            == "/tmp/t.flac"
+        )
+
+    def test_current_bounded_file_none_on_url_mismatch(self):
+        mgr = UpnpManager()
+        sess = _attach_session(mgr)
+        http = MagicMock()
+        http.dlna = True
+        http.track_source = self._ready_source()
+        sess.http_server = http
+        sess._passthrough_source_urls = ("other",)
+        assert mgr.current_bounded_file(["u0", "u1"], timeout=0.1) is None
+
+    def test_current_bounded_file_none_when_failed(self):
+        mgr = UpnpManager()
+        sess = _attach_session(mgr)
+        http = MagicMock()
+        http.dlna = True
+        http.track_source = self._ready_source(failed=True)
+        sess.http_server = http
+        sess._passthrough_source_urls = ("u0",)
+        assert mgr.current_bounded_file(["u0"], timeout=0.1) is None
+
+    def test_current_bounded_file_none_when_not_dlna(self):
+        mgr = UpnpManager()
+        sess = _attach_session(mgr)
+        http = MagicMock()
+        http.dlna = False
+        http.track_source = self._ready_source()
+        sess.http_server = http
+        sess._passthrough_source_urls = ("u0",)
+        assert mgr.current_bounded_file(["u0"], timeout=0.1) is None
 
 
 class TestPushPcmNoSession:

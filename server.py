@@ -94,6 +94,16 @@ if not logger.handlers:
     logger.setLevel(logging.INFO)
     logger.propagate = False
 
+# TEMP debug: emit app.audio.upnp debug lines to stderr during DLNA
+# hardware bring-up. Remove before commit.
+_upnp_log = logging.getLogger("app.audio.upnp")
+_upnp_log.setLevel(logging.DEBUG)
+if not any(isinstance(_x, logging.StreamHandler) for _x in _upnp_log.handlers):
+    _uh = logging.StreamHandler(sys.stderr)
+    _uh.setFormatter(logging.Formatter("[upnp][debug] %(message)s"))
+    _upnp_log.addHandler(_uh)
+    _upnp_log.propagate = False
+
 
 # Tidal's V2 home feed delivers "Because you liked X" / "Because you
 # listened to Y" modules as HORIZONTAL_LIST_WITH_CONTEXT with the
@@ -1031,6 +1041,22 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         )
         _upnp_manager.set_metadata_provider(
             _native_player().get_current_track_metadata
+        )
+        _upnp_manager.set_position_provider(
+            _native_player().get_current_position_s
+        )
+        # A preload may already exist when the DLNA session connects (the
+        # user switched output mid-track). Let connect() stage it on the
+        # renderer so it has a `next` and doesn't stop at track end.
+        _upnp_manager.set_next_source_provider(
+            _native_player().get_preloaded_source
+        )
+        # The renderer is the DLNA playback clock. When its watchdog sees
+        # the current bounded track reach the real end, the player emits
+        # `ended` so the frontend advances its queue at the renderer's
+        # boundary instead of the desktop decoder's earlier EOF.
+        _upnp_manager.set_renderer_ended_callback(
+            _native_player().on_renderer_track_ended
         )
     except Exception as exc:
         print(f"[upnp] startup wiring failed: {exc}", flush=True)
@@ -5372,6 +5398,10 @@ class _PlayerLoadRequest(BaseModel):
     quality: Optional[str] = None
 
 
+class _FeDebugRequest(BaseModel):
+    msg: str = ""
+
+
 class _PlayerSeekRequest(BaseModel):
     fraction: float  # 0..1
 
@@ -5924,6 +5954,12 @@ def player_play_track(req: _PlayerLoadRequest) -> dict:
         _dlna_send("play")
     snap = _native_player().play_track(req.track_id, quality=req.quality)
     return _snapshot_dict(snap)
+
+
+@app.post("/api/player/fe-debug")
+def player_fe_debug(req: "_FeDebugRequest") -> dict:
+    print(f"[fe-debug] {req.msg}", flush=True)
+    return {"ok": True}
 
 
 @app.post("/api/player/preload")
@@ -7509,6 +7545,10 @@ def dlna_refresh(req: Optional[_DlnaRefreshRequest] = None) -> dict:
 
 class _DlnaConnectRequest(BaseModel):
     device_id: str
+    # Opt into gapless album playback: bounded per-track serving with
+    # SetNextAVTransportURI pre-staging so the renderer advances at the
+    # natural track boundary instead of a gapped re-set.
+    gapless: bool = False
 
 
 @app.post("/api/dlna/connect")
@@ -7522,7 +7562,7 @@ def dlna_connect(req: _DlnaConnectRequest) -> dict:
     from app.audio.upnp import upnp_manager  # noqa: WPS433
 
     try:
-        device = upnp_manager.connect(req.device_id)
+        device = upnp_manager.connect(req.device_id, gapless=req.gapless)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RuntimeError as exc:

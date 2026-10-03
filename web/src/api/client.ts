@@ -1613,7 +1613,7 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ timeout_s: timeoutS }),
       }),
-    connect: (deviceId: string) =>
+    connect: (deviceId: string, gapless = false) =>
       req<{
         ok: boolean;
         device: {
@@ -1624,7 +1624,7 @@ export const api = {
         };
       }>("/api/dlna/connect", {
         method: "POST",
-        body: JSON.stringify({ device_id: deviceId }),
+        body: JSON.stringify({ device_id: deviceId, gapless }),
       }),
     disconnect: () =>
       req<{ ok: boolean }>("/api/dlna/disconnect", { method: "POST" }),

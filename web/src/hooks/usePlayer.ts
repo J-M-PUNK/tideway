@@ -39,6 +39,24 @@ import {
 
 export type RepeatMode = "off" | "all" | "one";
 
+// Temporary preload diagnostics: one POST per distinct decision. Deduped
+// by message so repeated ticks don't spam; the point is to see WHY a
+// preload didn't fire after a renderer auto-advance.
+const _feSeen = new Set<string>();
+function feDebug(msg: string) {
+  if (_feSeen.has(msg)) return;
+  _feSeen.add(msg);
+  try {
+    void fetch("/api/player/fe-debug", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ msg }),
+    });
+  } catch {
+    /* diagnostic only */
+  }
+}
+
 /** What the user clicked to start this queue. Drives Tidal's play-log
  *  sourceType/sourceId so Recently Played shows the container (album /
  *  playlist / mix) rather than a sourceless track event that gets
@@ -532,6 +550,13 @@ export function usePlayer() {
   // for the rest of the track, so the crossfade faded into a track
   // the queue was no longer going to play (#291).
   const preloadedNextIdRef = useRef<string | null>(null);
+  // The current track the preload above was computed FOR. Paired with
+  // the next id so a track change invalidates the memo even when the
+  // "next" string happens to be unchanged — e.g. after a renderer-clock
+  // auto-advance where the pre-stage was dropped by the backend, the
+  // bare next-id memo would say "already primed" and never re-fire,
+  // leaving the renderer with no `next` and cutting at track end.
+  const preloadedForTrackRef = useRef<string | null>(null);
   // Track ids we've already kicked off a rehydrate fetch for. Keeps
   // us from firing the same GET /api/track/{id} on every position
   // tick when the frontend has no cached Track for the current id.
@@ -717,19 +742,68 @@ export function usePlayer() {
     // buffer is freed as soon as the swap completes or the queue
     // changes.
     const triggerPreloadIfNeeded = (snap: PlayerSnapshot) => {
-      if (snap.state !== "playing" || snap.track_id === null) return;
+      if (snap.state !== "playing" || snap.track_id === null) {
+        feDebug(`preload skip: state=${snap.state} track=${snap.track_id}`);
+        return;
+      }
       const currentTime = snap.position_ms / 1000;
       if (currentTime < 10) return;
       const s = stateRef.current;
-      const nextIdx = pickNextIndex(s, true);
-      if (nextIdx === null || nextIdx === s.queueIndex) return;
+      // Resolve the current index from the snapshot's track id instead
+      // of trusting s.queueIndex. After a renderer-clock auto-advance
+      // (backend emits `ended` on the renderer's boundary), the queue
+      // index is moved by an async setState in syncTrackFromQueueOrApi
+      // that has not committed yet when this runs, so s.queueIndex can
+      // still point at the previous track. That computes the wrong
+      // "next" — often the current track itself — and skips the
+      // preload, leaving the following track with no `next` staged
+      // (issue #354: the transition after an auto-advance cuts).
+      const curIdx =
+        s.track?.id === snap.track_id
+          ? s.queueIndex
+          : s.queue.findIndex((q) => q.id === snap.track_id);
+      if (curIdx < 0) {
+        feDebug(
+          `preload skip: curIdx<0 track=${snap.track_id} ` +
+            `stateTrack=${s.track?.id} queue=[${s.queue
+              .map((q) => q.id)
+              .join(",")}]`,
+        );
+        return;
+      }
+      const nextIdx = pickNextIndex({ ...s, queueIndex: curIdx }, true);
+      if (nextIdx === null || nextIdx === curIdx) {
+        feDebug(
+          `preload skip: nextIdx=${nextIdx} curIdx=${curIdx} ` +
+            `repeat=${s.repeat} shuffle=${s.shuffle} track=${snap.track_id} ` +
+            `queue=[${s.queue.map((q) => q.id).join(",")}]`,
+        );
+        return;
+      }
       const nextTrack = s.queue[nextIdx];
-      if (!nextTrack || nextTrack.id === snap.track_id) return;
-      // Already primed with this exact track — nothing to do. Cheap
-      // enough to re-check every tick (SSE runs at ~4Hz) and that is
-      // the point: it's what notices the answer changing mid-track.
-      if (preloadedNextIdRef.current === nextTrack.id) return;
+      if (!nextTrack || nextTrack.id === snap.track_id) {
+        feDebug(
+          `preload skip: nextTrack=${nextTrack?.id} curIdx=${curIdx} ` +
+            `nextIdx=${nextIdx} track=${snap.track_id}`,
+        );
+        return;
+      }
+      // Already primed with this exact (current, next) pair — nothing
+      // to do. Cheap enough to re-check every tick (SSE runs at ~4Hz)
+      // and that is the point: it's what notices the answer changing
+      // mid-track.
+      if (
+        preloadedNextIdRef.current === nextTrack.id &&
+        preloadedForTrackRef.current === snap.track_id
+      ) {
+        return;
+      }
+      feDebug(
+        `preload FIRE next=${nextTrack.id} cur=${snap.track_id} ` +
+          `ref=${preloadedNextIdRef.current}`,
+      );
       preloadedNextIdRef.current = nextTrack.id;
+      preloadedForTrackRef.current = snap.track_id;
       api.player.preload(nextTrack.id, qualityRef.current).catch(() => {
         /* fire-and-forget; failure falls back to the slow-path
            load on track-end. */
@@ -737,7 +811,34 @@ export function usePlayer() {
     };
 
     const applySnapshot = (snap: PlayerSnapshot) => {
-      if (isLateEcho(snap)) return;
+      const late = isLateEcho(snap);
+      if (late || snap.state !== "playing") {
+        feDebug(
+          `apply state=${snap.state} track=${snap.track_id} ` +
+            `expected=${expectedTrackIdRef.current} late=${late} ` +
+            `stateTrack=${stateRef.current.track?.id} ` +
+            `queueIndex=${stateRef.current.queueIndex}`,
+        );
+      } else {
+        // One line per 10s of the current track: proves whether the
+        // reported position actually advances (the preload gate needs
+        // >= 10s).
+        feDebug(
+          `apply playing track=${snap.track_id} ` +
+            `pos=${Math.floor(snap.position_ms / 10000) * 10}s`,
+        );
+      }
+      if (late) return;
+      // A fresh load (or a stop) tears down the backend pipeline and
+      // drops any preload, but our "already primed" marker is keyed on
+      // (current, next) ids — which don't change when the same track is
+      // re-loaded or the output is switched. Clear it so the next
+      // playing snapshot re-fires the preload instead of trusting a
+      // preload the backend no longer has.
+      if (snap.state === "loading" || snap.state === "idle") {
+        preloadedNextIdRef.current = null;
+        preloadedForTrackRef.current = null;
+      }
       syncTrackFromQueueOrApi(snap);
       applyTransportState(snap);
       // Advance triggers fire AFTER the state setState so any
