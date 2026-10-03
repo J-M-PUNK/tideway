@@ -576,3 +576,32 @@ def test_send_next_uri_retry_stops_when_superseded(monkeypatch):
     assert session.renderer_next_uri is None
     assert av.set_next_av_transport_uri.call_count == 1
 
+
+
+def test_pause_rebinds_and_retries_on_stale_endpoint():
+    """After UAPP moves its control port, Pause against the stale URL
+    fails and never reaches the renderer. It must re-discover and retry."""
+    av = MagicMock()
+    av.pause.side_effect = [RuntimeError("Connection refused"), None]
+    session = _session(av)
+    mgr = _manager(session)
+    rebinds = []
+    mgr._rebind_session_renderer = lambda s: (rebinds.append(1), True)[1]
+
+    mgr.pause()
+
+    assert av.pause.call_count == 2
+    assert rebinds == [1]
+
+
+def test_pause_no_rebind_when_first_call_succeeds():
+    av = MagicMock()
+    session = _session(av)
+    mgr = _manager(session)
+    rebinds = []
+    mgr._rebind_session_renderer = lambda s: (rebinds.append(1), True)[1]
+
+    mgr.pause()
+
+    assert av.pause.call_count == 1
+    assert rebinds == []

@@ -2544,27 +2544,39 @@ class UpnpManager:
 
     # ---- transport control passthroughs ---------------------------
 
+    def _transport_action(self, name: str) -> None:
+        """Invoke an AVTransport action, re-binding once on failure.
+
+        UAPP re-registers its UPnP device at some boundaries, moving the
+        control endpoint; a Pause/Play then fails against the stale URL and
+        the command silently never reaches the renderer (the watchdog's
+        position probe recovers via rebind, but transport actions did not).
+        Re-discover and retry once so Pause/Play actually land."""
+        with self._session_lock:
+            session = self._session
+        if session is None:
+            return
+        try:
+            getattr(session.av, name)()
+            return
+        except Exception as exc:
+            log.debug("upnp %s failed: %r", name, exc)
+        if self._rebind_session_renderer(session):
+            try:
+                getattr(session.av, name)()
+            except Exception as exc:
+                log.debug("upnp %s failed after rebind: %r", name, exc)
+
     def pause(self) -> None:
         """Send AVTransport.Pause. Used by the diversion in
         server.py when DLNA is the active output."""
-        with self._session_lock:
-            session = self._session
-        if session is None:
-            return
-        try:
-            session.av.pause()
-        except Exception as exc:
-            log.debug("upnp pause failed: %r", exc)
+        self._transport_action("pause")
 
     def play(self) -> None:
-        with self._session_lock:
-            session = self._session
-        if session is None:
-            return
-        try:
-            session.av.play()
-        except Exception as exc:
-            log.debug("upnp play failed: %r", exc)
+        self._transport_action("play")
+
+    def stop(self) -> None:
+        self._transport_action("stop")
 
     def set_volume(self, level_percent: int) -> None:
         """Set device volume via RenderingControl. No-op when the
