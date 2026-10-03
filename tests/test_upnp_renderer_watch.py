@@ -398,11 +398,35 @@ def test_fire_renderer_ended_records_sticky_consumed_track_id():
     fired = threading.Event()
     mgr._renderer_ended_callback = lambda: fired.set()
 
-    mgr._fire_renderer_ended(session, 3, "test")
+    mgr._fire_renderer_ended(session, 3, "test", consumed=True)
 
     assert fired.is_set()
     assert session.renderer_consumed_next is True
     assert session.renderer_consumed_track_id == "tid-n1"
+
+
+def test_deadline_fires_with_staged_uri_but_records_no_evidence(monkeypatch):
+    """A renderer that ignores the staged NextURI must not stall forever:
+    the deadline fires even while a URI is staged, and records no
+    consumption evidence so the player falls back to announcing instead
+    of falsely adopting a track the renderer never switched to."""
+    monkeypatch.setattr(upnp_mod, "_RENDERER_EOS_MARGIN_S", 0.0)
+    staged = "http://x/dlna/stream?ts=9"
+    # Position pinned at 0 (never reaches duration) and CurrentURI is not
+    # the staged URI, so neither signal 1 nor signal 2 can fire.
+    av = _FakeAV(positions=[(0.0, 1.0)] * 2000, current_uri=None)
+    session = _session(av)
+    session.renderer_next_uri = staged
+    session.renderer_next_track_id = "tid-n1"
+    mgr = _manager(session)
+    fired = threading.Event()
+    mgr._renderer_ended_callback = lambda: fired.set()
+
+    _run_watch(mgr, session, fallback=1.0)
+
+    assert fired.wait(timeout=3.0)
+    assert session.renderer_consumed_next is False
+    assert session.renderer_consumed_track_id is None
 
 
 def test_arm_renderer_watch_preserves_sticky_consumed_track_id():

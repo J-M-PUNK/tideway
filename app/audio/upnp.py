@@ -1290,10 +1290,13 @@ class UpnpManager:
                         last_rebind = now
                         self._rebind_session_renderer(session)
                 if current_uri and _same_track_uri(current_uri, staged_uri):
+                    # Signal 1 is the ONLY positive proof of consumption:
+                    # the renderer's CurrentURI is now the URI we staged.
                     self._fire_renderer_ended(
                         session,
                         gen,
                         f"uri-consumed current={current_uri} staged={staged_uri}",
+                        consumed=True,
                     )
                     return
 
@@ -1353,18 +1356,18 @@ class UpnpManager:
                 errors += 1
 
             # Safety net: no usable signal within the track's length plus
-            # a generous margin. Fire rather than hang the session — but
-            # ONLY when no next URI is staged. With a next staged, Signal 1
-            # (the renderer consumed that URI) is authoritative; firing on
-            # the deadline instead is what produced a late re-announce of
-            # the track the renderer was already playing (a stop/restart).
-            if (
-                deadline is not None
-                and time.monotonic() > deadline
-                and not staged_uri
-            ):
+            # a generous margin. Fire rather than stall the session — even
+            # when a next URI is staged. A renderer that ignores the
+            # staged SetNextAVTransportURI would otherwise hang forever
+            # (the deadline used to be suppressed while staged). The fire
+            # carries no consumption evidence, so the player falls back to
+            # the announce path and actually switches the renderer.
+            if deadline is not None and time.monotonic() > deadline:
                 self._fire_renderer_ended(
-                    session, gen, f"deadline pos={position_s if position else None}"
+                    session,
+                    gen,
+                    f"deadline pos={position_s if position else None}",
+                    consumed=False,
                 )
                 return
             if errors >= _RENDERER_POLL_ERROR_LIMIT:
@@ -1386,19 +1389,29 @@ class UpnpManager:
                     self._rebind_session_renderer(session)
 
     def _fire_renderer_ended(
-        self, session: "_SessionState", gen: int, reason: str = ""
+        self,
+        session: "_SessionState",
+        gen: int,
+        reason: str = "",
+        *,
+        consumed: bool = False,
     ) -> None:
         """Fire the ended callback once for this track generation.
 
         Sets the clock-active gate first: the player's callback checks it
         and would otherwise no-op, and by the time we fire we know the
-        renderer's clock is the one that matters."""
+        renderer's clock is the one that matters.
+
+        ``consumed`` is True only when the renderer proved it advanced into
+        the staged next URI (CurrentURI matched). Position-reached and
+        deadline fires carry no such proof, so they record no evidence and
+        the player falls back to announcing."""
         with session.passthrough_lock:
             if session.renderer_watch_gen != gen or session.renderer_ended_fired:
                 return
             session.renderer_ended_fired = True
             session.renderer_clock_usable = True
-            if session.renderer_next_uri:
+            if consumed and session.renderer_next_uri:
                 session.renderer_consumed_next = True
                 # Sticky evidence of WHICH track the renderer advanced
                 # into. Survives the new track's _arm_renderer_watch
