@@ -7836,18 +7836,29 @@ def _snapshot_needs_client_action(state: Optional[str]) -> bool:
     return state in ("ended", "error")
 
 
-def _should_forward_snapshot(seq, last_seq, state: Optional[str]) -> bool:
-    """Whether a polled snapshot should be sent, given the last seq we
-    already put on the wire.
+def _should_forward_snapshot(
+    seq,
+    last_seq,
+    state: Optional[str],
+    position_ms: Optional[int] = None,
+    last_position: Optional[int] = None,
+) -> bool:
+    """Whether a polled snapshot should be sent, given what we already
+    put on the wire.
 
-    A new seq always goes out. A *repeat* seq is normally deduped to
-    keep idle keepalive ticks off the wire — except for states the
-    client must respond to (`ended`/`error`), which keep flowing so a
-    client that missed the one transition edge still receives it and
-    advances. The client's own monotonic seq guard makes the repeats a
-    no-op once it has acted.
+    A new seq always goes out. A repeat seq is normally deduped to keep
+    idle keepalive ticks off the wire — except when the *position*
+    moved, or the state is one the client must respond to
+    (`ended`/`error`). Position matters because seq is bumped from the
+    audio callback, which does not run in DLNA renderer-clock mode once
+    the muted local stream has ended: seq freezes while the renderer's
+    position keeps advancing, and a seq-only dedup would starve the
+    frontend clock. The client's own monotonic seq guard makes repeat
+    frames a no-op where they are not needed.
     """
     if seq != last_seq:
+        return True
+    if position_ms is not None and position_ms != last_position:
         return True
     return _snapshot_needs_client_action(state)
 
@@ -7909,6 +7920,7 @@ async def player_events(request: Request):
             # snapshot without waiting for the first change event.
             yield f"data: {json.dumps(_snapshot_dict(player.snapshot()))}\n\n"
             last_seq = -1
+            last_position: Optional[int] = None
             while True:
                 if await request.is_disconnected():
                     break
@@ -7921,13 +7933,21 @@ async def player_events(request: Request):
                 if payload is None:
                     break
                 seq = payload.get("seq", 0)
-                if not _should_forward_snapshot(seq, last_seq, payload.get("state")):
+                position_ms = payload.get("position_ms")
+                if not _should_forward_snapshot(
+                    seq,
+                    last_seq,
+                    payload.get("state"),
+                    position_ms,
+                    last_position,
+                ):
                     # Dedupe keepalive ticks while nothing actionable is
                     # pending. States the client must respond to
                     # (`ended`/`error`) keep flowing so a client that
                     # missed the transition can still act.
                     continue
                 last_seq = seq
+                last_position = position_ms
                 yield f"data: {json.dumps(payload)}\n\n"
         finally:
             unsubscribe()
