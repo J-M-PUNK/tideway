@@ -501,6 +501,12 @@ export function usePlayer() {
   // SSE subscription — backend pushes state changes + position updates.
   // `seq` is our monotonic clock so we can ignore out-of-order frames.
   const lastSeqRef = useRef(-1);
+  // Last position we applied, so a frame with an unchanged seq can still
+  // update the clock when only the position moved. seq is bumped from
+  // the audio callback, which stops in DLNA renderer-clock mode once the
+  // muted local stream ends, so seq can freeze mid-track while the
+  // renderer position keeps advancing.
+  const lastPositionRef = useRef(-1);
   const expectedTrackIdRef = useRef<string | null>(null);
   const endOfTrackPendingRef = useRef(false);
   // Set to true while an `endOfQueueAdvance` is awaiting the
@@ -808,8 +814,22 @@ export function usePlayer() {
       es.onmessage = (event) => {
         try {
           const snap = JSON.parse(event.data) as PlayerSnapshot;
-          if (snap.seq <= lastSeqRef.current) return;
+          // A newer seq always applies. A repeat seq still applies when
+          // only the position moved: seq is bumped from the audio
+          // callback, which stops in DLNA renderer-clock mode once the
+          // muted local stream ends — seq freezes while the renderer
+          // position keeps advancing, and a seq-only guard would freeze
+          // the UI clock. Out-of-order (older) seq frames are still
+          // dropped.
+          if (snap.seq < lastSeqRef.current) return;
+          if (
+            snap.seq === lastSeqRef.current &&
+            snap.position_ms === lastPositionRef.current
+          ) {
+            return;
+          }
           lastSeqRef.current = snap.seq;
+          lastPositionRef.current = snap.position_ms;
           applySnapshot(snap);
         } catch {
           /* malformed frame */
