@@ -1132,6 +1132,18 @@ class PCMPlayer:
                                 track_id=self._current_track_id,
                                 restart=True,
                             )
+                            # The re-announce cleared the renderer's next
+                            # and closed its bounded file. Drop the cast
+                            # preload record too, or the frontend's
+                            # re-preload short-circuits as a cache hit and
+                            # the next track is never re-staged.
+                            with self._lock:
+                                pre = self._preload
+                                if (
+                                    pre is not None
+                                    and getattr(pre, "cast", False) is True
+                                ):
+                                    self._preload = None
                         else:
                             _upnp_manager.stop_passthrough()
                             # A pre-staged next the renderer still holds

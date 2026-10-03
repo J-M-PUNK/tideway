@@ -318,6 +318,7 @@ def test_seek_on_bounded_dlna_reannounces_with_restart(monkeypatch):
     fake = _FakeUpnp(True, True, bounded=True)
     monkeypatch.setattr(player_mod, "_upnp_manager", fake)
     _prime_seek(p)
+    p._preload = _cast_preload("N1")
     monkeypatch.setattr(p, "_restart_decoder_at", lambda s: s)
 
     p.seek(0.5)
@@ -327,6 +328,9 @@ def test_seek_on_bounded_dlna_reannounces_with_restart(monkeypatch):
     assert call["start_s"] == 50.0
     assert call["restart"] is True
     assert call["track_id"] == "N0"
+    # The re-announce wiped the renderer's next; the stale cast preload
+    # record must go too or the frontend's re-preload is a cache hit.
+    assert p._preload is None
 
 
 def test_seek_on_non_bounded_dlna_stops_passthrough(monkeypatch):

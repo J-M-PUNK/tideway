@@ -1252,6 +1252,8 @@ export function usePlayer() {
     //     button on the first track of an album — a no-op press would
     //     read as a bug.
     if (s.currentTime > 3 || p === null) {
+      preloadedNextIdRef.current = null;
+      preloadedForTrackRef.current = null;
       void api.player.seek(0).catch(() => {});
       return;
     }
@@ -1264,6 +1266,11 @@ export function usePlayer() {
     const clamped = Math.max(0, Math.min(cap, t));
     const fraction = cap && cap > 0 && cap !== Infinity ? clamped / cap : 0;
     setState((cur) => ({ ...cur, currentTime: clamped }));
+    // A DLNA seek re-announces the current track, which clears the
+    // renderer's pre-staged next. Forget the (current,next) preload memo
+    // so the next playing snapshot re-fires the preload and re-stages it.
+    preloadedNextIdRef.current = null;
+    preloadedForTrackRef.current = null;
     void api.player.seek(fraction).catch(() => {});
   }, []);
 
@@ -1276,6 +1283,8 @@ export function usePlayer() {
     const s = stateRef.current;
     if (!s.track) return;
     setState((cur) => ({ ...cur, currentTime: 0 }));
+    preloadedNextIdRef.current = null;
+    preloadedForTrackRef.current = null;
     void api.player.seek(0).catch(() => {});
     if (!s.playing) {
       void api.player.resume().catch(() => {});
