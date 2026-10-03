@@ -39,24 +39,6 @@ import {
 
 export type RepeatMode = "off" | "all" | "one";
 
-// Temporary preload diagnostics: one POST per distinct decision. Deduped
-// by message so repeated ticks don't spam; the point is to see WHY a
-// preload didn't fire after a renderer auto-advance.
-const _feSeen = new Set<string>();
-function feDebug(msg: string) {
-  if (_feSeen.has(msg)) return;
-  _feSeen.add(msg);
-  try {
-    void fetch("/api/player/fe-debug", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ msg }),
-    });
-  } catch {
-    /* diagnostic only */
-  }
-}
-
 /** What the user clicked to start this queue. Drives Tidal's play-log
  *  sourceType/sourceId so Recently Played shows the container (album /
  *  playlist / mix) rather than a sourceless track event that gets
@@ -743,7 +725,6 @@ export function usePlayer() {
     // changes.
     const triggerPreloadIfNeeded = (snap: PlayerSnapshot) => {
       if (snap.state !== "playing" || snap.track_id === null) {
-        feDebug(`preload skip: state=${snap.state} track=${snap.track_id}`);
         return;
       }
       const currentTime = snap.position_ms / 1000;
@@ -763,29 +744,14 @@ export function usePlayer() {
           ? s.queueIndex
           : s.queue.findIndex((q) => q.id === snap.track_id);
       if (curIdx < 0) {
-        feDebug(
-          `preload skip: curIdx<0 track=${snap.track_id} ` +
-            `stateTrack=${s.track?.id} queue=[${s.queue
-              .map((q) => q.id)
-              .join(",")}]`,
-        );
         return;
       }
       const nextIdx = pickNextIndex({ ...s, queueIndex: curIdx }, true);
       if (nextIdx === null || nextIdx === curIdx) {
-        feDebug(
-          `preload skip: nextIdx=${nextIdx} curIdx=${curIdx} ` +
-            `repeat=${s.repeat} shuffle=${s.shuffle} track=${snap.track_id} ` +
-            `queue=[${s.queue.map((q) => q.id).join(",")}]`,
-        );
         return;
       }
       const nextTrack = s.queue[nextIdx];
       if (!nextTrack || nextTrack.id === snap.track_id) {
-        feDebug(
-          `preload skip: nextTrack=${nextTrack?.id} curIdx=${curIdx} ` +
-            `nextIdx=${nextIdx} track=${snap.track_id}`,
-        );
         return;
       }
       // Already primed with this exact (current, next) pair — nothing
@@ -798,10 +764,6 @@ export function usePlayer() {
       ) {
         return;
       }
-      feDebug(
-        `preload FIRE next=${nextTrack.id} cur=${snap.track_id} ` +
-          `ref=${preloadedNextIdRef.current}`,
-      );
       preloadedNextIdRef.current = nextTrack.id;
       preloadedForTrackRef.current = snap.track_id;
       api.player.preload(nextTrack.id, qualityRef.current).catch(() => {
@@ -812,22 +774,6 @@ export function usePlayer() {
 
     const applySnapshot = (snap: PlayerSnapshot) => {
       const late = isLateEcho(snap);
-      if (late || snap.state !== "playing") {
-        feDebug(
-          `apply state=${snap.state} track=${snap.track_id} ` +
-            `expected=${expectedTrackIdRef.current} late=${late} ` +
-            `stateTrack=${stateRef.current.track?.id} ` +
-            `queueIndex=${stateRef.current.queueIndex}`,
-        );
-      } else {
-        // One line per 10s of the current track: proves whether the
-        // reported position actually advances (the preload gate needs
-        // >= 10s).
-        feDebug(
-          `apply playing track=${snap.track_id} ` +
-            `pos=${Math.floor(snap.position_ms / 10000) * 10}s`,
-        );
-      }
       if (late) return;
       // A fresh load (or a stop) tears down the backend pipeline and
       // drops any preload, but our "already primed" marker is keyed on

@@ -5398,10 +5398,6 @@ class _PlayerLoadRequest(BaseModel):
     quality: Optional[str] = None
 
 
-class _FeDebugRequest(BaseModel):
-    msg: str = ""
-
-
 class _PlayerSeekRequest(BaseModel):
     fraction: float  # 0..1
 
@@ -5954,12 +5950,6 @@ def player_play_track(req: _PlayerLoadRequest) -> dict:
         _dlna_send("play")
     snap = _native_player().play_track(req.track_id, quality=req.quality)
     return _snapshot_dict(snap)
-
-
-@app.post("/api/player/fe-debug")
-def player_fe_debug(req: "_FeDebugRequest") -> dict:
-    print(f"[fe-debug] {req.msg}", flush=True)
-    return {"ok": True}
 
 
 @app.post("/api/player/preload")
