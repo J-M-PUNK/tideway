@@ -1013,18 +1013,28 @@ class PCMPlayer:
         with self._lock:
             stream = self._stream
             if stream is None:
-                return self.snapshot()
-            self._paused = False
-            try:
-                if not stream.active:
-                    stream.start()
-            except Exception as exc:
-                log.exception("stream.start failed")
-                self._last_error = str(exc)
-                self._transition("error")
-                self._emit()
-                return self.snapshot()
-            self._transition("playing")
+                # Bounded-DLNA renderer-clock mode: the muted local stream
+                # is closed once its decode reaches EOF, but the renderer
+                # is the audio source and keeps playing. Resume is then a
+                # state transition, not a stream.start() — without this the
+                # backend reported 'paused' while the renderer played, and
+                # the UI clock froze.
+                if _upnp_manager is None or not _upnp_manager.is_active():
+                    return self.snapshot()
+                self._paused = False
+                self._transition("playing")
+            else:
+                self._paused = False
+                try:
+                    if not stream.active:
+                        stream.start()
+                except Exception as exc:
+                    log.exception("stream.start failed")
+                    self._last_error = str(exc)
+                    self._transition("error")
+                    self._emit()
+                    return self.snapshot()
+                self._transition("playing")
         self._emit()
         return self.snapshot()
 

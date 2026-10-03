@@ -347,3 +347,29 @@ def test_seek_on_non_bounded_dlna_stops_passthrough(monkeypatch):
     assert stopped == [1]
     assert fake.started == []
 
+
+def test_play_without_stream_resumes_renderer_clock(monkeypatch):
+    """In bounded-DLNA the muted local stream closes at EOF; Play must
+    still transition to 'playing' (the renderer is the audio source), or
+    the backend reports paused while the renderer plays and the UI clock
+    freezes."""
+    p = _player()
+    monkeypatch.setattr(player_mod, "_upnp_manager", _FakeUpnp(True, True))
+    p._stream = None
+    p._state = "paused"
+
+    p.play()
+
+    assert p._state == "playing"
+
+
+def test_play_without_stream_noop_without_dlna(monkeypatch):
+    p = _player()
+    monkeypatch.setattr(player_mod, "_upnp_manager", None)
+    p._stream = None
+    p._state = "paused"
+
+    p.play()
+
+    assert p._state == "paused"
+
