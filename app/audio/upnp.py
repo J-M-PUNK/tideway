@@ -464,6 +464,17 @@ class _SessionState:
     # promotion skips the redundant re-announce without needing
     # GetMediaInfo (which UAPP doesn't answer usefully).
     renderer_consumed_next: bool = False
+    # TIDAL track id carried alongside renderer_next_uri, so the watchdog
+    # can record WHICH track the renderer advanced into (see
+    # renderer_consumed_track_id).
+    renderer_next_track_id: Optional[str] = None
+    # Sticky evidence that the renderer consumed the pre-staged next URI
+    # and advanced into `renderer_consumed_track_id`. Deliberately NOT
+    # cleared by _arm_renderer_watch: the consumption is recorded before
+    # the new track's watchdog generation resets renderer_consumed_next /
+    # renderer_next_uri, and the player's follow-up play_track(next) may
+    # arrive after that reset. Cleared only when a fresh next is staged.
+    renderer_consumed_track_id: Optional[str] = None
     # Serializes every read-modify-write of the passthrough fields above.
     # Touched from three threads — player pipeline (start/stop), realtime
     # audio callback (push_pcm), and last-track EOF (signal_source_done).
@@ -649,6 +660,24 @@ class UpnpManager:
         with self._session_lock:
             session = self._session
         return bool(session is not None and session.gapless)
+
+    def last_consumed_track_id(self) -> Optional[str]:
+        """The TIDAL track id the renderer auto-advanced into, recorded
+        by the watchdog when it detected the pre-staged next URI was
+        consumed, or None.
+
+        Sticky across the watchdog's generation reset so the player can
+        still match a preload to the renderer's advance after the new
+        track's watchdog has armed (issue #354: the reset used to clear
+        the evidence before the frontend's follow-up play_track arrived,
+        so the redundant SetAVTransportURI went out and UAPP
+        Stop/restarted — the boundary cut)."""
+        with self._session_lock:
+            session = self._session
+        if session is None:
+            return None
+        with session.passthrough_lock:
+            return session.renderer_consumed_track_id
 
     def current_bounded_file(
         self, source_urls, timeout: float = 60.0
@@ -980,6 +1009,7 @@ class UpnpManager:
         promoted = False
         staged_uri: Optional[str] = None
         consumed_next = False
+        consumed_track_id: Optional[str] = None
         if (
             http_server is not None
             and getattr(http_server, "dlna", False)
@@ -996,6 +1026,10 @@ class UpnpManager:
                 pre_track_id = session.next_track_id
                 staged_uri = session.renderer_next_uri
                 consumed_next = session.renderer_consumed_next
+                # Sticky across the watchdog generation reset; see
+                # _fire_renderer_ended. Not cleared here so a repeated
+                # start_passthrough for the same advance stays a no-op.
+                consumed_track_id = session.renderer_consumed_track_id
                 session.next_track_source = None
                 session.next_source_urls = None
                 session.next_track_id = None
@@ -1097,7 +1131,13 @@ class UpnpManager:
         # callers in player.py catch and keep the existing stream going.
         if metadata:
             if self._renderer_already_advanced(
-                session, promoted, staged_uri, _track_ts, consumed_next
+                session,
+                promoted,
+                staged_uri,
+                _track_ts,
+                consumed_next,
+                consumed_track_id=consumed_track_id,
+                track_id=track_id,
             ):
                 # The renderer consumed the pre-staged SetNextAVTransportURI
                 # on its own; it is already playing this track. Sending
@@ -1161,6 +1201,11 @@ class UpnpManager:
             session.renderer_clock_usable = False
             session.renderer_ended_fired = False
             session.renderer_consumed_next = False
+            # renderer_consumed_track_id is deliberately NOT cleared here:
+            # it is sticky evidence of the advance the renderer just made,
+            # and the player's follow-up play_track(next) may still be in
+            # flight. It is cleared when a fresh next is staged.
+            session.renderer_next_track_id = None
             # A fresh current track has no pre-staged next yet (that is
             # sent later, when the frontend preloads). The previous
             # track's staged URI is exactly what the renderer just
@@ -1355,6 +1400,14 @@ class UpnpManager:
             session.renderer_clock_usable = True
             if session.renderer_next_uri:
                 session.renderer_consumed_next = True
+                # Sticky evidence of WHICH track the renderer advanced
+                # into. Survives the new track's _arm_renderer_watch
+                # (which clears renderer_consumed_next / renderer_next_uri)
+                # so the player can still match a cast preload when the
+                # frontend's play_track(next) lands after the reset.
+                session.renderer_consumed_track_id = (
+                    session.renderer_next_track_id
+                )
         self._set_renderer_clock_active(True)
         print(
             f"[upnp] renderer reached end; firing advance ({reason})",
@@ -1375,15 +1428,22 @@ class UpnpManager:
         staged_uri: Optional[str],
         track_ts: int,
         consumed_next: bool = False,
+        *,
+        consumed_track_id: Optional[str] = None,
+        track_id: Optional[str] = None,
     ) -> bool:
         """True when the renderer is already on the track we promoted.
 
-        ``consumed_next`` is authoritative and probe-free: the watchdog
-        ended the previous track while a next URI was pre-staged, so the
-        renderer advanced into it. The renderer's CurrentURI (matching
-        the staged URI or carrying the promoted ts) is a fallback.
-        Announcing now would Stop and reopen the stream (an audible
-        stop/restart).
+        ``consumed_track_id`` is the sticky, probe-free evidence that the
+        watchdog recorded the renderer consuming the pre-staged next URI
+        and advancing into that TIDAL track. It is authoritative and
+        survives the watchdog generation reset, so the redundant announce
+        is skipped even when the renderer's control endpoint has moved
+        and ``get_current_uri`` would fail. ``consumed_next`` is the
+        older boolean form of the same signal. The renderer's CurrentURI
+        (matching the staged URI or carrying the promoted ts) is a
+        fallback. Announcing now would Stop and reopen the stream (an
+        audible stop/restart).
         """
         # The watchdog saw the renderer end while a next URI was staged,
         # so it advanced into it. Authoritative regardless of whether we
@@ -1392,6 +1452,12 @@ class UpnpManager:
             return True
         if not promoted:
             return False
+        if (
+            consumed_track_id is not None
+            and track_id is not None
+            and str(track_id) == str(consumed_track_id)
+        ):
+            return True
         if session.av is None:
             return False
         if not session.av.supports_next_uri():
@@ -1576,6 +1642,10 @@ class UpnpManager:
             session.next_track_source = ts
             session.next_source_urls = _src
             session.next_track_id = _tid
+            # A fresh next is staged: the previous track's consumption
+            # evidence is no longer needed and must not match a later
+            # reuse of the same track id.
+            session.renderer_consumed_track_id = None
         ts.start()
 
     def set_next_track(
@@ -1719,6 +1789,7 @@ class UpnpManager:
         with session.passthrough_lock:
             if session.next_track_source is ts_next:
                 session.renderer_next_uri = uri
+                session.renderer_next_track_id = session.next_track_id
         print(
             f"[upnp] nextURI staged: {metadata.get('title', '?')} "
             f"url={uri}",
@@ -1780,6 +1851,7 @@ class UpnpManager:
             with session.passthrough_lock:
                 if session.next_track_source is ts_next:
                     session.renderer_next_uri = uri
+                    session.renderer_next_track_id = session.next_track_id
             print(
                 f"[upnp] nextURI staged on retry: "
                 f"{metadata.get('title', '?')} url={uri}",

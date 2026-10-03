@@ -338,6 +338,89 @@ def test_already_advanced_false_when_uri_unknown():
     assert _advanced(session, "http://x/dlna/stream?ts=42", 42) is False
 
 
+def test_already_advanced_true_on_sticky_consumed_track_id():
+    """The CurrentURI probe can fail after UAPP moves its control port.
+    The sticky consumed-track id is probe-free evidence the renderer
+    advanced, so the announce must still be skipped."""
+    av = MagicMock()
+    av.supports_next_uri.return_value = True
+    av.get_current_uri.side_effect = RuntimeError("Connection refused")
+    session = _session(av)
+
+    assert (
+        _manager(session)._renderer_already_advanced(
+            session,
+            True,
+            None,
+            42,
+            False,
+            consumed_track_id="tid-n1",
+            track_id="tid-n1",
+        )
+        is True
+    )
+
+
+def test_already_advanced_sticky_ignored_without_promotion():
+    """Sticky evidence only applies when the file we promoted is the one
+    the renderer consumed; a fresh (non-promoted) build must announce."""
+    av = MagicMock()
+    av.supports_next_uri.return_value = True
+    session = _session(av)
+
+    assert (
+        _manager(session)._renderer_already_advanced(
+            session,
+            False,
+            None,
+            42,
+            False,
+            consumed_track_id="tid-n1",
+            track_id="tid-n1",
+        )
+        is False
+    )
+
+
+def test_start_passthrough_skips_announce_on_sticky_evidence(monkeypatch):
+    """End-to-end of the boundary fix: the watchdog recorded that the
+    renderer consumed the pre-staged next (sticky, and the CurrentURI
+    probe now fails because UAPP moved its control port). The follow-up
+    start_passthrough for that track must promote the file and NOT send a
+    second SetAVTransportURI."""
+    av = MagicMock()
+    av.supports_next_uri.return_value = True
+    av.get_current_uri.side_effect = RuntimeError("Connection refused")
+    session = _session(av)
+    mgr = _manager(session)
+
+    staged = _FakeTrackSource(track_id=1000)
+    session.next_track_source = staged
+    session.next_source_urls = ("uN",)
+    session.next_track_id = "tid-n1"
+    # Watchdog evidence recorded before the generation reset.
+    session.renderer_consumed_track_id = "tid-n1"
+    session.http_server.track_source = _FakeTrackSource(track_id=999)
+
+    announced = []
+    monkeypatch.setattr(
+        mgr, "_announce_track", lambda *a, **k: announced.append(a)
+    )
+    monkeypatch.setattr(mgr, "_arm_renderer_watch", lambda *a, **k: None)
+    import app.audio.segment_reader as _sr_mod
+
+    monkeypatch.setattr(_sr_mod, "SegmentReader", lambda *a, **k: object())
+
+    mgr.start_passthrough(
+        ["uN"], metadata={"title": "N1"}, track_id="tid-n1"
+    )
+
+    assert announced == [], "must not re-announce the consumed track"
+    assert session.http_server.track_source is staged
+
+
+
+
 def _rebind_manager(session: _SessionState) -> UpnpManager:
     mgr = UpnpManager.__new__(UpnpManager)
     mgr._session_lock = threading.Lock()

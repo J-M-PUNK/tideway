@@ -379,3 +379,40 @@ def test_renderer_position_ms_none_when_stale():
     mgr._renderer_clock_active = True
     assert mgr.renderer_position_ms() is None
 
+
+# ---------------------------------------------------------------------
+# Sticky consumed-track evidence
+# ---------------------------------------------------------------------
+
+
+def test_fire_renderer_ended_records_sticky_consumed_track_id():
+    """When the watchdog fires with a next URI pre-staged, it records
+    WHICH TIDAL track the renderer advanced into. That evidence must
+    outlive the watchdog generation reset so the player can match a cast
+    preload after the frontend's follow-up play arrives."""
+    session = _session(_FakeAV())
+    session.renderer_watch_gen = 3
+    session.renderer_next_uri = "http://x/dlna/stream?ts=9"
+    session.renderer_next_track_id = "tid-n1"
+    mgr = _manager(session)
+    fired = threading.Event()
+    mgr._renderer_ended_callback = lambda: fired.set()
+
+    mgr._fire_renderer_ended(session, 3, "test")
+
+    assert fired.is_set()
+    assert session.renderer_consumed_next is True
+    assert session.renderer_consumed_track_id == "tid-n1"
+
+
+def test_arm_renderer_watch_preserves_sticky_consumed_track_id():
+    session = _session(_FakeAV())
+    session.renderer_consumed_track_id = "tid-n1"
+    session.renderer_next_track_id = "tid-n1"
+    mgr = _manager(session)
+
+    mgr._arm_renderer_watch(session, MagicMock(), {"duration_s": 30})
+
+    assert session.renderer_consumed_track_id == "tid-n1"
+    assert session.renderer_next_track_id is None
+

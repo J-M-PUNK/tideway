@@ -198,19 +198,24 @@ class _Preload:
     stream_info: StreamInfo
     source_urls: Optional[list[str]]
     source_path: Optional[str]
-    decoder: Decoder
-    queue: "queue.Queue[Optional[np.ndarray]]"
-    thread: threading.Thread
-    stop_flag: threading.Event
-    done: threading.Event
-    sample_rate: int
-    channels: int
-    sd_dtype: str
+    decoder: Optional[Decoder] = None
+    queue: "Optional[queue.Queue[Optional[np.ndarray]]]" = None
+    thread: Optional[threading.Thread] = None
+    stop_flag: Optional[threading.Event] = None
+    done: Optional[threading.Event] = None
+    sample_rate: int = 0
+    channels: int = 0
+    sd_dtype: str = ""
     # Metadata for THIS preloaded track. Carried on the preload so the
     # gapless swap notifies the renderer with the track actually being
     # adopted, not the shared _current_track_meta slot (which the racing
     # desktop clock may have clobbered with a later track's metadata).
     track_meta: Optional[dict] = None
+    # Cast/bounded-DLNA preload: a metadata-only record (no local decoder
+    # or PCM queue). The renderer streams the bounded temp file; this
+    # record only lets the renderer-clock watchdog adopt the track the
+    # renderer already auto-advanced into (see on_renderer_track_ended).
+    cast: bool = False
 
 
 @dataclass
@@ -1372,8 +1377,9 @@ class PCMPlayer:
                 and _upnp_manager.is_active()
                 and _upnp_manager.is_gapless()
             ):
+                staged = False
                 try:
-                    _upnp_manager.set_next_track(
+                    staged = _upnp_manager.set_next_track(
                         source_spec,
                         prefetched_bytes,
                         metadata=track_meta,
@@ -1385,6 +1391,25 @@ class PCMPlayer:
                         f"(cast preload): {exc!r}",
                         flush=True,
                     )
+                if staged:
+                    # Metadata-only record: the renderer streams the
+                    # bounded file, and the renderer-clock watchdog uses
+                    # this to adopt the track the renderer auto-advanced
+                    # into without opening a second TIDAL reader (TIDAL
+                    # closes the session when two tracks are open).
+                    with self._lock:
+                        self._preload = _Preload(
+                            track_id=track_id,
+                            quality=quality,
+                            duration_ms=(
+                                int(duration_s * 1000) if duration_s else 0
+                            ),
+                            stream_info=stream_info,
+                            source_urls=list(source_spec),
+                            source_path=None,
+                            track_meta=track_meta,
+                            cast=True,
+                        )
                 return {"ok": True, "cached": False, "cast": True}
 
             try:
@@ -1586,6 +1611,9 @@ class PCMPlayer:
             if pre is None:
                 return
             print(f"[pcm] drop preload track={pre.track_id}", flush=True)
+            if getattr(pre, "cast", False) is True:
+                # Metadata-only cast record: nothing to stop or close.
+                return
             pre.stop_flag.set()
             # Abort any in-flight HTTP fetch on the preload's decoder
             # so its thread exits promptly instead of waiting out the
@@ -3528,6 +3556,55 @@ class PCMPlayer:
         running against its own queue, which now becomes the
         primary queue.
         """
+        if getattr(pre, "cast", False) is True:
+            # Bounded-DLNA cast: there is no local decoder to swap. The
+            # renderer streams the bounded file; just move the backend's
+            # current track so the frontend's follow-up play_track(next)
+            # lands on Path 0 and the UI re-syncs off the `playing`
+            # snapshot. Idempotent: a duplicate adopt of the track we are
+            # already on is a no-op.
+            if (
+                self._current_track_id == pre.track_id
+                and self._state == "playing"
+            ):
+                self._preload = None
+                return self.snapshot()
+            self._current_track_id = pre.track_id
+            self._current_duration_ms = pre.duration_ms
+            self._current_stream_info = pre.stream_info
+            if pre.track_meta is not None:
+                self._current_track_meta = pre.track_meta
+            self._source_urls = pre.source_urls
+            self._source_path = pre.source_path
+            self._preload = None
+            self._state = "playing"
+            self._last_error = None
+            self._seq += 1
+            # Promote the pre-staged bounded file to the current source
+            # and re-arm the renderer watchdog for the new track. The
+            # sticky consumed-track evidence makes start_passthrough's
+            # announce a no-op, so the renderer is not Stop/restarted —
+            # its clock just continues into the file it already holds.
+            if (
+                _upnp_manager is not None
+                and _upnp_manager.is_active()
+                and pre.source_urls is not None
+            ):
+                try:
+                    _upnp_manager.start_passthrough(
+                        pre.source_urls,
+                        prefetched=None,
+                        metadata=pre.track_meta or self._current_track_meta,
+                        track_id=pre.track_id,
+                    )
+                except Exception as exc:  # noqa: BLE001 - passthrough is optional
+                    print(
+                        f"[player] upnp start_passthrough failed "
+                        f"(cast adopt): {exc!r}",
+                        flush=True,
+                    )
+            self._emit()
+            return self.snapshot()
         # Capture pieces we need to clean up OUTSIDE the lock so we
         # don't hold it during slow I/O (thread.join, decoder.close).
         old_thread = self._decoder_thread
@@ -3701,6 +3778,8 @@ class PCMPlayer:
             pre = self._preload
             if pre is None:
                 return
+            if getattr(pre, "cast", False) is True:
+                return  # cast records carry no PCM to crossfade
             if (
                 pre.sample_rate != self._stream_sample_rate
                 or pre.sd_dtype != self._stream_sd_dtype
@@ -3858,20 +3937,47 @@ class PCMPlayer:
             and _upnp_manager.renderer_clock_active()
         )
 
+    def _upnp_consumed_track_id(self) -> Optional[str]:
+        """The TIDAL track id the renderer auto-advanced into, if the
+        UpnpManager recorded it. Sticky: it survives the watchdog's
+        generation reset and is cleared only when a new next is staged,
+        so the evidence is still available after the frontend's
+        follow-up play_track(next). None when there is no manager or no
+        consumption was recorded."""
+        mgr = _upnp_manager
+        if mgr is None or not mgr.is_active():
+            return None
+        getter = getattr(mgr, "last_consumed_track_id", None)
+        if getter is None:
+            return None
+        try:
+            return getter()
+        except Exception:
+            return None
+
     def on_renderer_track_ended(self) -> None:
         """Called by the UpnpManager watchdog when the renderer reaches
         the end of the current bounded DLNA track.
 
         Emits `ended` so the frontend advances its queue (it owns the
-        queue), then restores `playing` so the redundant play_track(next)
-        lands on Path 0b and adopts the preload instead of tearing the
-        stream down. Runs on the watchdog thread, not the realtime
+        queue). When the manager recorded that the renderer consumed the
+        pre-staged next URI (positive evidence), the matching preload is
+        adopted and `playing` is emitted for the new track, so the
+        frontend's redundant play_track(next) lands on Path 0. Without
+        evidence nothing is adopted — the announce path advances instead
+        — because adopting would show N+1 in the UI while the renderer is
+        still on N. Runs on the watchdog thread, not the realtime
         callback, so emitting snapshots is safe. No-op unless a bounded
         DLNA renderer clock is actually driving playback."""
         if not self._renderer_clock_active():
             return
+        consumed = self._upnp_consumed_track_id()
         with self._lock:
             if self._state not in ("playing", "paused"):
+                return
+            # Idempotency: a duplicate fire for an advance already
+            # adopted must not emit a second `ended`.
+            if consumed is not None and self._current_track_id == consumed:
                 return
             # ended -> frontend advance; playing -> so play_track(next)
             # takes the adopt path rather than a full teardown.
@@ -3879,14 +3985,24 @@ class PCMPlayer:
             self._seq += 1
             self._emit()
             pre = self._preload
+            if pre is not None and getattr(pre, "cast", False) is True:
+                if consumed is not None and pre.track_id == consumed:
+                    # Renderer-clock advance is backend-driven: adopt the
+                    # pre-staged next track here so playback and the
+                    # backend's current-track state move even if the
+                    # frontend misses or drops the single `ended` frame.
+                    # The following `playing` snapshot carries the new
+                    # track id, which the frontend uses to re-sync and
+                    # preload the track after it.
+                    self._adopt_preload_locked(pre)
+                    return
+                # Cast preload but no positive evidence: keep it for the
+                # frontend's play_track(next) to adopt; the announce path
+                # handles the actual switch.
+                self._state = "playing"
+                self._seq += 1
+                return
             if pre is not None:
-                # Renderer-clock advance is backend-driven: adopt the
-                # preloaded next track here so playback and the backend's
-                # current-track state move even if the frontend misses or
-                # drops the single `ended` frame. The following `playing`
-                # snapshot carries the new track id, which the frontend
-                # uses to re-sync its queue index and preload the track
-                # after it.
                 self._adopt_preload_locked(pre)
                 return
             self._state = "playing"

@@ -18,19 +18,32 @@ import threading
 from unittest.mock import MagicMock
 
 from app.audio import player as player_mod
-from app.audio.player import PCMPlayer
+from app.audio.player import PCMPlayer, _Preload
 
 
 class _FakeUpnp:
-    def __init__(self, active: bool = True, clock: bool = True) -> None:
+    def __init__(self, active: bool = True, clock: bool = True,
+                 consumed: str | None = None) -> None:
         self._active = active
         self._clock = clock
+        self._consumed = consumed
+        self.started: list = []
 
     def is_active(self) -> bool:
         return self._active
 
     def renderer_clock_active(self) -> bool:
         return self._clock
+
+    def is_gapless(self) -> bool:
+        return True
+
+    def last_consumed_track_id(self):
+        return self._consumed
+
+    def start_passthrough(self, source, prefetched=None, metadata=None,
+                          *, track_id=None, **kwargs):
+        self.started.append(track_id)
 
 
 class _FakeStream:
@@ -162,3 +175,87 @@ def test_on_renderer_track_ended_ignores_non_playing_states(monkeypatch):
     p.on_renderer_track_ended()
 
     assert seen == []
+
+
+# ---------------------------------------------------------------------
+# Cast (bounded per-track) adoption
+# ---------------------------------------------------------------------
+
+
+def _cast_preload(track_id: str) -> _Preload:
+    import queue as _q
+
+    return _Preload(
+        track_id=track_id,
+        quality=None,
+        duration_ms=1000,
+        stream_info=None,
+        source_urls=["https://x/seg"],
+        source_path=None,
+        queue=_q.Queue(),
+        cast=True,
+    )
+
+
+def test_cast_adopt_emits_playing_and_is_idempotent(monkeypatch):
+    """The renderer auto-advanced into the pre-staged next track. The
+    player must adopt the cast preload and emit `playing` for N+1 so the
+    frontend re-syncs, without touching a decoder. A duplicate fire for
+    the same consumed track is a no-op."""
+    p = _player()
+    fake = _FakeUpnp(True, True, consumed="N1")
+    monkeypatch.setattr(player_mod, "_upnp_manager", fake)
+    p._state = "playing"
+    p._current_track_id = "N0"
+    p._preload = _cast_preload("N1")
+    seen = []
+    p.subscribe(lambda snap: seen.append((snap.state, snap.track_id)))
+
+    p.on_renderer_track_ended()
+
+    assert p._current_track_id == "N1"
+    assert p._preload is None
+    assert ("playing", "N1") in seen
+
+    before = len(seen)
+    p.on_renderer_track_ended()  # duplicate fire
+    assert len(seen) == before
+    assert p._current_track_id == "N1"
+
+
+def test_cast_adopt_requires_consumption_evidence(monkeypatch):
+    """A fire with no recorded consumption must NOT adopt N+1: that
+    would show N+1 in the UI while the renderer is still on N. It falls
+    back to the announce path instead."""
+    p = _player()
+    fake = _FakeUpnp(True, True, consumed=None)
+    monkeypatch.setattr(player_mod, "_upnp_manager", fake)
+    p._state = "playing"
+    p._current_track_id = "N0"
+    pre = _cast_preload("N1")
+    p._preload = pre
+    seen = []
+    p.subscribe(lambda snap: seen.append(snap.state))
+
+    p.on_renderer_track_ended()
+
+    assert p._current_track_id == "N0"
+    assert p._preload is pre
+    assert p._state == "playing"
+    assert seen == ["ended"]
+
+
+def test_cast_adopt_noop_when_consumed_differs_from_preload(monkeypatch):
+    p = _player()
+    fake = _FakeUpnp(True, True, consumed="OTHER")
+    monkeypatch.setattr(player_mod, "_upnp_manager", fake)
+    p._state = "playing"
+    p._current_track_id = "N0"
+    pre = _cast_preload("N1")
+    p._preload = pre
+
+    p.on_renderer_track_ended()
+
+    assert p._current_track_id == "N0"
+    assert p._preload is pre
+
