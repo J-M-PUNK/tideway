@@ -7562,6 +7562,18 @@ def dlna_connect(req: _DlnaConnectRequest) -> dict:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    # The connect handshake issues SetAVTransportURI + Play, so the
+    # renderer is now the active output and playing. Mirror that on the
+    # local player when a track is loaded: in bounded-DLNA mode the muted
+    # local stream may be closed at EOF, and without a 'playing' state the
+    # player emits no periodic position snapshots — leaving the UI clock
+    # frozen while the renderer plays.
+    try:
+        player = _native_player()
+        if player.snapshot().track_id is not None:
+            player.play()
+    except Exception:
+        pass
     return {
         "ok": True,
         "device": {
