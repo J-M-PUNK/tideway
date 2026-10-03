@@ -135,6 +135,30 @@ def test_eof_clears_preload_without_renderer_clock():
     assert p._stream is None
 
 
+def test_eof_keeps_cast_preload_even_without_clock(monkeypatch):
+    """A cast (metadata-only) preload has no local decoder/dtype. When
+    the local decode ends early and the renderer clock happens to be
+    inactive, the EOF path must still keep the cast preload for the
+    renderer-driven adopt — never hand it to the cross-rate bridge,
+    which re-opened an OutputStream with dtype '' and crashed."""
+    p = _player()
+    monkeypatch.setattr(player_mod, "_upnp_manager", _FakeUpnp(True, False))
+    stream = _FakeStream()
+    pre = _cast_preload("N1")
+    _prime_eof(p, stream, pre)
+    bridged = []
+    monkeypatch.setattr(
+        p, "_bridge_to_preload", lambda *a, **k: bridged.append(a)
+    )
+
+    p._on_stream_finished()
+
+    assert p._stream is None
+    assert p._preload is pre
+    assert p._state == "playing"
+    assert bridged == []
+
+
 # ---------------------------------------------------------------------
 # on_renderer_track_ended contract
 # ---------------------------------------------------------------------

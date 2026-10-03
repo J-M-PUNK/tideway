@@ -4177,15 +4177,23 @@ class PCMPlayer:
                     daemon=True,
                 ).start()
                 return
-            # Renderer-clock mode: the muted local stream ended early by
-            # design; the renderer's watchdog will emit `ended` at the
-            # real end. Close the dead local stream but keep the preload
-            # and the 'playing' state so the pending play_track(next)
-            # adopts the preload. Only when a preload actually exists —
-            # with none there is nothing for the renderer-driven adopt to
-            # take, so fall through to the normal `ended` instead of
-            # waiting on a watchdog that has nothing to advance into.
-            renderer_clock = self._renderer_clock_active() and pre is not None
+            # Renderer-clock mode (or a metadata-only cast preload): the
+            # muted local stream ended early by design; the renderer's
+            # watchdog will emit `ended` at the real end. Close the dead
+            # local stream but keep the preload and the 'playing' state so
+            # the pending play_track(next) adopts the preload. A cast
+            # preload has NO local pipeline (no decoder, no dtype), so it
+            # must never fall through to the cross-rate bridge — that
+            # re-opened an OutputStream with dtype '' and raised
+            # "Invalid output sample format". Only when a real preload
+            # actually exists — with none there is nothing for the
+            # renderer-driven adopt to take, so fall through to the normal
+            # `ended` instead of waiting on a watchdog that has nothing to
+            # advance into.
+            is_cast = pre is not None and getattr(pre, "cast", False) is True
+            renderer_clock = pre is not None and (
+                is_cast or self._renderer_clock_active()
+            )
             if renderer_clock:
                 bound_stream = self._stream
                 self._stream = None
