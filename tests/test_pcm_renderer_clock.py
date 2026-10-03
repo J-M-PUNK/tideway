@@ -23,10 +23,11 @@ from app.audio.player import PCMPlayer, _Preload
 
 class _FakeUpnp:
     def __init__(self, active: bool = True, clock: bool = True,
-                 consumed: str | None = None) -> None:
+                 consumed: str | None = None, bounded: bool = True) -> None:
         self._active = active
         self._clock = clock
         self._consumed = consumed
+        self._bounded = bounded
         self.started: list = []
 
     def is_active(self) -> bool:
@@ -38,12 +39,24 @@ class _FakeUpnp:
     def is_gapless(self) -> bool:
         return True
 
+    def bounded_serving(self) -> bool:
+        return self._bounded
+
     def last_consumed_track_id(self):
         return self._consumed
 
+    def stop_passthrough(self):
+        pass
+
+    def invalidate_next_track(self):
+        pass
+
     def start_passthrough(self, source, prefetched=None, metadata=None,
-                          *, track_id=None, **kwargs):
-        self.started.append(track_id)
+                          *, track_id=None, start_s=0.0, restart=False,
+                          **kwargs):
+        self.started.append(
+            {"track_id": track_id, "start_s": start_s, "restart": restart}
+        )
 
 
 class _FakeStream:
@@ -282,4 +295,51 @@ def test_cast_adopt_noop_when_consumed_differs_from_preload(monkeypatch):
 
     assert p._current_track_id == "N0"
     assert p._preload is pre
+
+
+# ---------------------------------------------------------------------
+# DLNA seek / restart
+# ---------------------------------------------------------------------
+
+
+def _prime_seek(p: PCMPlayer) -> None:
+    p._current_track_id = "N0"
+    p._source_urls = ["https://x/seg"]
+    p._current_duration_ms = 100_000
+    p._stream_sample_rate = 44100
+    p._state = "playing"
+
+
+def test_seek_on_bounded_dlna_reannounces_with_restart(monkeypatch):
+    """The renderer only follows SetAVTransportURI, so a DLNA seek must
+    re-announce the current track trimmed to the seek offset (restart),
+    or the scrubber/restart never reaches the renderer."""
+    p = _player()
+    fake = _FakeUpnp(True, True, bounded=True)
+    monkeypatch.setattr(player_mod, "_upnp_manager", fake)
+    _prime_seek(p)
+    monkeypatch.setattr(p, "_restart_decoder_at", lambda s: s)
+
+    p.seek(0.5)
+
+    assert fake.started, "seek must re-announce on the renderer"
+    call = fake.started[-1]
+    assert call["start_s"] == 50.0
+    assert call["restart"] is True
+    assert call["track_id"] == "N0"
+
+
+def test_seek_on_non_bounded_dlna_stops_passthrough(monkeypatch):
+    p = _player()
+    fake = _FakeUpnp(True, True, bounded=False)
+    monkeypatch.setattr(player_mod, "_upnp_manager", fake)
+    _prime_seek(p)
+    monkeypatch.setattr(p, "_restart_decoder_at", lambda s: s)
+    stopped = []
+    monkeypatch.setattr(fake, "stop_passthrough", lambda: stopped.append(1))
+
+    p.seek(0.5)
+
+    assert stopped == [1]
+    assert fake.started == []
 

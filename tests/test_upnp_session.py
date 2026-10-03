@@ -1001,3 +1001,66 @@ class TestRefreshEndpointNaNGuard:
         )
         assert r.status_code == 400, r.text
         assert "finite" in r.json()["detail"].lower()
+
+
+def test_start_passthrough_restart_bypasses_same_source_guard(
+    mock_soap, mock_http_server, monkeypatch,
+):
+    """A DLNA seek re-announces the same source from a new offset, so
+    start_passthrough(restart=True) must rebuild + re-announce rather
+    than short-circuit on the already-running guard."""
+    mgr = UpnpManager()
+    device = _device_record()
+    mgr._devices = {device.id: device}
+    monkeypatch.setattr(
+        "app.audio.upnp.fetch_device",
+        lambda location, **_kw: _openhome_device(),
+    )
+
+    built = []
+
+    class _StubTrackSource:
+        def __init__(self, *a, **k):
+            self.ready = threading.Event()
+            self.ready.set()
+            self.failed = False
+            self.path = "/tmp/stub.flac"
+            self.track_id = k.get("track_id", 0)
+            self.source_released = threading.Event()
+            self.source_released.set()
+            built.append(self)
+
+        def start(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("app.audio.upnp.TrackFileSource", _StubTrackSource)
+    monkeypatch.setattr(
+        "app.audio.segment_reader.SegmentReader", lambda *a, **k: object()
+    )
+    monkeypatch.setattr(mgr, "_arm_renderer_watch", lambda *a, **k: None)
+    announced = []
+    monkeypatch.setattr(
+        mgr, "_announce_track", lambda *a, **k: announced.append(a)
+    )
+    mgr.set_source_provider(lambda: ["http://192.168.1.9/seg0"])
+    mgr.set_metadata_provider(lambda: {"title": "T"})
+
+    mgr.connect(device.id, gapless=False)
+    built_after_connect = len(built)
+
+    # Same source, no restart: the guard short-circuits.
+    mgr.start_passthrough(["http://192.168.1.9/seg0"], metadata={"title": "T"})
+    assert len(built) == built_after_connect
+
+    # Restart: rebuild + re-announce even for the same source.
+    mgr.start_passthrough(
+        ["http://192.168.1.9/seg0"],
+        metadata={"title": "T"},
+        start_s=50.0,
+        restart=True,
+    )
+    assert len(built) == built_after_connect + 1
+    assert len(announced) >= 2

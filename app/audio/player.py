@@ -1115,14 +1115,30 @@ class PCMPlayer:
             if _upnp_manager is not None:
                 try:
                     if _upnp_manager.is_active():
-                        if not _upnp_manager.bounded_serving():
+                        if (
+                            _upnp_manager.bounded_serving()
+                            and isinstance(self._source_urls, list)
+                        ):
+                            # The renderer is the DLNA playback clock and
+                            # only follows SetAVTransportURI, so a local
+                            # decoder seek is inaudible to it. Re-announce
+                            # this track trimmed to the seek offset: the
+                            # scrubbed/restarted position actually reaches
+                            # the renderer, and the SetAVTransportURI also
+                            # clears its stale NextURI.
+                            _upnp_manager.start_passthrough(
+                                self._source_urls,
+                                start_s=target_s,
+                                track_id=self._current_track_id,
+                                restart=True,
+                            )
+                        else:
                             _upnp_manager.stop_passthrough()
-                        # A seek makes any pre-staged next track wrong:
-                        # drop the renderer's NextURI and delete its
-                        # bounded file so it can't be promoted.
-                        _upnp_manager.invalidate_next_track()
+                            # A pre-staged next the renderer still holds
+                            # is wrong after a seek; drop it.
+                            _upnp_manager.invalidate_next_track()
                 except Exception as exc:
-                    print(f"[player] upnp seek cleanup failed: {exc!r}", flush=True)
+                    print(f"[player] upnp seek failed: {exc!r}", flush=True)
             effective_s = target_s
             try:
                 effective_s = self._restart_decoder_at(target_s)

@@ -6300,9 +6300,14 @@ def player_stop() -> dict:
         return _tc_snapshot()
     if _dlna_active():
         # Same logic as TC: stop pauses the device, leaves the
-        # session intact for a subsequent play. Disconnect is
-        # what the picker does to fully tear down.
+        # session intact for a subsequent play. Pause the local
+        # pipeline too — a full stop/teardown would drop the muted
+        # local decoder and invalidate the staged next, so Stop→Play
+        # would resume the renderer while the backend sat idle (and
+        # the renderer could auto-advance into a deleted file).
+        # Disconnect is what the picker does to fully tear down.
         _dlna_send("pause")
+        return _snapshot_dict(_native_player().pause())
     return _snapshot_dict(_native_player().stop())
 
 

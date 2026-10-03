@@ -905,7 +905,7 @@ class UpnpManager:
     def start_passthrough(
         self, source, prefetched=None, metadata=None,
         *, wait_for_ready: bool = False, start_s: float = 0.0,
-        track_id: Optional[str] = None,
+        track_id: Optional[str] = None, restart: bool = False,
     ) -> None:
         """Start bit-perfect FLAC passthrough for the current track.
 
@@ -926,6 +926,12 @@ class UpnpManager:
             metadata: dict with title, artist, album, duration_s, cover_url
                       for the new track; falls back to _metadata_provider
                       if not given and the provider is registered.
+            start_s: serve the file trimmed to begin at this offset.
+            restart: rebuild and re-announce even when the same source is
+                      already being served. Used by a DLNA seek: the same
+                      track/URLs are served but from a new offset, and the
+                      re-announce (SetAVTransportURI) is what moves the
+                      renderer and clears its stale NextURI.
         """
         with self._session_lock:
             session = self._session
@@ -949,7 +955,8 @@ class UpnpManager:
         _source_urls = tuple(source) if isinstance(source, (list, tuple)) else None
         with session.passthrough_lock:
             if (
-                session.passthrough_active
+                not restart
+                and session.passthrough_active
                 and session._passthrough_source_urls == _source_urls
             ):
                 print(
