@@ -1382,7 +1382,8 @@ class UpnpManager:
                 self._fire_renderer_ended(
                     session,
                     gen,
-                    f"deadline pos={position_s if position else None}",
+                    f"deadline pos={position_s if position else None} "
+                    f"overdue={time.monotonic() - deadline:.1f}s",
                     consumed=False,
                 )
                 return
@@ -1440,7 +1441,8 @@ class UpnpManager:
                 )
         self._set_renderer_clock_active(True)
         print(
-            f"[upnp] renderer reached end; firing advance ({reason})",
+            f"[upnp] renderer reached end; firing advance "
+            f"gen={gen} ({reason})",
             flush=True,
         )
         cb = self._renderer_ended_callback

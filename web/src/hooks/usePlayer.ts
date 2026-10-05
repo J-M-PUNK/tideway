@@ -571,10 +571,30 @@ export function usePlayer() {
     // track changes when the previous track's "playing" tail still
     // has frames in flight — without the guard, those would
     // overwrite the new track's UI state.
-    const isLateEcho = (snap: PlayerSnapshot): boolean =>
-      snap.track_id !== null &&
-      expectedTrackIdRef.current !== null &&
-      snap.track_id !== expectedTrackIdRef.current;
+    //
+    // But the guard must not be permanent: if the backend keeps
+    // reporting a different track, our optimistic target never
+    // arrived and we are desynced. In DLNA renderer-clock mode the
+    // backend can auto-advance into the pre-staged next and emit
+    // `playing(N+1)` while our `expected` is still N; a permanent
+    // guard would drop that snapshot forever, so `applySnapshot`
+    // never runs, the preload trigger never fires, and the next
+    // boundary cuts. Drop only within a short window after an
+    // optimistic change; after that, trust the backend and resync.
+    const _LATE_ECHO_GRACE_MS = 2000;
+    const expectedSeenRef = useRef<string | null>(null);
+    const expectedSeenAtRef = useRef(0);
+    const isLateEcho = (snap: PlayerSnapshot): boolean => {
+      if (snap.track_id === null) return false;
+      const expected = expectedTrackIdRef.current;
+      if (expected === null) return false;
+      if (expected !== expectedSeenRef.current) {
+        expectedSeenRef.current = expected;
+        expectedSeenAtRef.current = Date.now();
+      }
+      if (snap.track_id === expected) return false;
+      return Date.now() - expectedSeenAtRef.current < _LATE_ECHO_GRACE_MS;
+    };
 
     // Sync the now-playing bar to whatever the backend says is
     // playing. Two sources, in priority order:
