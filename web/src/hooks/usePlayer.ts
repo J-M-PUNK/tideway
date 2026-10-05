@@ -508,6 +508,11 @@ export function usePlayer() {
   // renderer position keeps advancing.
   const lastPositionRef = useRef(-1);
   const expectedTrackIdRef = useRef<string | null>(null);
+  // When `expectedTrackIdRef` last changed, so the late-echo guard can
+  // be time-bounded (see isLateEcho): a mismatched snapshot is only a
+  // late echo for a short window after an optimistic change.
+  const expectedSeenRef = useRef<string | null>(null);
+  const expectedSeenAtRef = useRef(0);
   const endOfTrackPendingRef = useRef(false);
   // Set to true while an `endOfQueueAdvance` is awaiting the
   // Artist Radio fetch. Stops a second "ended" SSE event from
@@ -582,8 +587,6 @@ export function usePlayer() {
     // boundary cuts. Drop only within a short window after an
     // optimistic change; after that, trust the backend and resync.
     const _LATE_ECHO_GRACE_MS = 2000;
-    const expectedSeenRef = useRef<string | null>(null);
-    const expectedSeenAtRef = useRef(0);
     const isLateEcho = (snap: PlayerSnapshot): boolean => {
       if (snap.track_id === null) return false;
       const expected = expectedTrackIdRef.current;
