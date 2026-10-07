@@ -10,6 +10,7 @@ load-stall recovery flips a stuck "loading" to a (recoverable) error.
 from __future__ import annotations
 
 import threading
+import time
 from unittest.mock import MagicMock
 
 from app.audio.player import PCMPlayer
@@ -57,6 +58,8 @@ def _stuck_loading_player() -> PCMPlayer:
     p._current_track_id = "t1"
     p._last_error = None
     p._seq = 0
+    p._loading_since = None
+    p._awaiting_cast_file = False
     # _emit() reads these; keep it a clean no-op (no listeners).
     p._listeners = []
     p.snapshot = MagicMock()  # type: ignore[method-assign]
@@ -80,3 +83,41 @@ def test_load_stall_is_a_noop_when_the_load_already_completed():
     assert p._state == "playing"
     assert p._last_error is None
     assert p._seq == 0
+
+
+# --- _tick_load_stall (watchdog timer) ----------------------------------
+
+
+def test_tick_fires_past_the_window():
+    p = _stuck_loading_player()
+    p._loading_since = time.monotonic() - 100.0
+    p._tick_load_stall()
+    assert p._state == "error"
+    assert p._loading_since is None
+
+
+def test_tick_starts_the_timer_on_first_loading_tick():
+    p = _stuck_loading_player()
+    p._tick_load_stall()
+    assert p._state == "loading"
+    assert p._loading_since is not None
+
+
+def test_tick_does_not_fire_while_awaiting_the_cast_file():
+    # The DLNA cast demux wait is bounded by _CAST_FILE_READY_S and is
+    # expected to run past the stall window for long tracks; forcing an
+    # error here made the frontend auto-advance in a loop.
+    p = _stuck_loading_player()
+    p._awaiting_cast_file = True
+    p._loading_since = time.monotonic() - 100.0
+    p._tick_load_stall()
+    assert p._state == "loading"
+    assert p._loading_since is None
+
+
+def test_tick_clears_the_timer_once_not_loading():
+    p = _stuck_loading_player()
+    p._state = "playing"
+    p._loading_since = 123.0
+    p._tick_load_stall()
+    assert p._loading_since is None

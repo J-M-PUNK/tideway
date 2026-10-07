@@ -160,6 +160,13 @@ _RESOLVE_TIMEOUT_S = 45.0
 # connection for the same track) trips TIDAL's one-track-at-a-time limit.
 _CAST_FILE_READY_S = 60.0
 
+# How long a load may sit in "loading" before the watchdog calls it
+# wedged. Kept below _CAST_FILE_READY_S, but the cast demux wait is
+# excluded from this timer explicitly (see _tick_load_stall) since it
+# is bounded on its own and legitimately exceeds this window for long,
+# hi-res tracks.
+_LOAD_STALL_S = 30.0
+
 
 @dataclass
 class StreamInfo:
@@ -519,6 +526,14 @@ class PCMPlayer:
         # load that never produces audio (wedged segment fetch, dead
         # stream id) would otherwise pin the UI in "loading" forever.
         self._loading_since: Optional[float] = None
+        # True while the load thread is blocked in the (bounded) wait
+        # for a DLNA cast's per-track file to finish demuxing. That wait
+        # is expected, has its own timeout (_CAST_FILE_READY_S), and for
+        # long hi-res tracks routinely runs past LOAD_STALL_S. The
+        # watchdog must not treat it as a wedged load, or it forces a
+        # false error that the frontend's continue-playing turns into a
+        # track-advance loop.
+        self._awaiting_cast_file = False
         threading.Thread(
             target=self._stall_watchdog,
             name="player-stall-watchdog",
@@ -1307,6 +1322,15 @@ class PCMPlayer:
             and isinstance(source_spec, list)
             and _upnp_manager.is_active()
         ):
+            path = None
+            # This wait is expected to be long on a cast (the whole
+            # track is fetched and demuxed before the decoder can read
+            # it), so flag it while it runs. It is bounded by
+            # _CAST_FILE_READY_S, so the stuck-loading watchdog is
+            # redundant here and must not fire — a false error would
+            # make the frontend advance to the next track and stall
+            # again, looping.
+            self._awaiting_cast_file = True
             try:
                 path = _upnp_manager.current_bounded_file(
                     source_spec, timeout=_CAST_FILE_READY_S
@@ -1314,6 +1338,8 @@ class PCMPlayer:
             except Exception as exc:  # noqa: BLE001 - cast is optional
                 path = None
                 log.debug("bounded file lookup failed: %r", exc)
+            finally:
+                self._awaiting_cast_file = False
             if path:
                 print(
                     f"[pcm] cast: decoding from bounded file {path}",
@@ -3167,25 +3193,10 @@ class PCMPlayer:
         _lock. Fires once per stall; rearms when audio resumes.
         """
         STALL_S = 10.0
-        # A load that never produces audio leaves the player pinned in
-        # "loading" forever. Beyond any plausible real load time (the
-        # [perf] load lines run ~1-2s even on a contended machine),
-        # surface it as an error so the UI stops hanging and — with
-        # "continue playing" on — auto-advances past the dead track.
-        LOAD_STALL_S = 30.0
         while True:
             time.sleep(5.0)
             try:
-                # Stuck-loading recovery. Tracked here (not via a hook in
-                # the load path) so there's one owner of the timer.
-                if self._state == "loading":
-                    if self._loading_since is None:
-                        self._loading_since = time.monotonic()
-                    elif time.monotonic() - self._loading_since > LOAD_STALL_S:
-                        self._force_load_stall_error()
-                        self._loading_since = None
-                else:
-                    self._loading_since = None
+                self._tick_load_stall()
             except Exception:
                 pass
             try:
@@ -3232,6 +3243,35 @@ class PCMPlayer:
             except Exception:
                 # The watchdog must never take the process down.
                 pass
+
+    def _tick_load_stall(self) -> None:
+        """One stuck-loading recovery tick.
+
+        A load that never produces audio leaves the player pinned in
+        "loading" forever, so past _LOAD_STALL_S we surface an error and
+        the frontend (with "continue playing" on) auto-advances past the
+        dead track.
+
+        The DLNA cast file wait is excluded: it is bounded by
+        _CAST_FILE_READY_S and is *expected* to take longer than
+        _LOAD_STALL_S for long, hi-res tracks. Counting it here forced a
+        false error that the frontend turned into a track-advance loop —
+        every new track stalled in the same bounded wait and errored
+        again. Dropping the timer during that wait gives the portion
+        after it a fresh window. Strictly lock-free, like the watchdog
+        that drives it."""
+        if self._state != "loading":
+            self._loading_since = None
+            return
+        if self._awaiting_cast_file:
+            self._loading_since = None
+            return
+        if self._loading_since is None:
+            self._loading_since = time.monotonic()
+            return
+        if time.monotonic() - self._loading_since > _LOAD_STALL_S:
+            self._force_load_stall_error()
+            self._loading_since = None
 
     def _force_load_stall_error(self) -> None:
         """Recover a load wedged in "loading" past LOAD_STALL_S by
