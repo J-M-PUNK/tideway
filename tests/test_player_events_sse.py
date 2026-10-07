@@ -100,3 +100,26 @@ def test_repeat_seq_of_an_actionable_state_is_re_advertised(state):
     # the seq hasn't advanced. Before the fix this returned False and
     # the player hung at end-of-track forever.
     assert server._should_forward_snapshot(9179, 9179, state) is True
+
+
+def test_repeat_seq_with_moved_position_is_forwarded():
+    # DLNA renderer-clock mode: seq is bumped from the audio callback,
+    # which stops once the muted local stream ends, so seq can freeze
+    # while the renderer position keeps advancing. A seq-only dedup
+    # would starve the frontend clock; the moved position must flow.
+    assert (
+        server._should_forward_snapshot(
+            5, 5, "playing", position_ms=12345, last_position=12000
+        )
+        is True
+    )
+
+
+def test_repeat_seq_with_unchanged_position_is_deduped():
+    assert (
+        server._should_forward_snapshot(
+            5, 5, "playing", position_ms=12345, last_position=12345
+        )
+        is False
+    )
+

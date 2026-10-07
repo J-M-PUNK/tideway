@@ -670,6 +670,24 @@ def _parse_flac_frame_bps(frame_bytes: bytes) -> int:
     return _FLAC_SAMPLE_SIZE_MAP.get(code, 16)
 
 
+def _streaminfo_total_samples(raw_streaminfo: bytes) -> int:
+    """Read the 36-bit total_samples field from a FLAC STREAMINFO.
+
+    Bytes 13[3:0] hold the top 4 bits; 14..17 the rest (big-endian).
+    Zero means "unknown/streaming", which is what Tidal's extradata
+    carries for open-ended encodes.
+    """
+    if not raw_streaminfo or len(raw_streaminfo) < 18:
+        return 0
+    return (
+        ((raw_streaminfo[13] & 0x0F) << 32)
+        | (raw_streaminfo[14] << 24)
+        | (raw_streaminfo[15] << 16)
+        | (raw_streaminfo[16] << 8)
+        | raw_streaminfo[17]
+    )
+
+
 def _build_flac_stream_header(
     sample_rate: int,
     channels: int,
@@ -1039,17 +1057,30 @@ class TrackFileSource:
     passthrough state machine advances exactly as with the live encoder.
     """
 
-    def __init__(self, source, track_id: int = 0, *, tempdir=None, done_event=None) -> None:
+    def __init__(self, source, track_id: int = 0, *, tempdir=None, done_event=None,
+                 start_s: float = 0.0) -> None:
         self._source = source
         self.track_id = track_id
         self.total_size = 0
         self.failed = False
         self.ready = threading.Event()
+        # Fires once the source container (and therefore the underlying
+        # TIDAL SegmentReader/HTTP connection) has been closed. `ready`
+        # fires slightly earlier, when the last byte is on disk; a
+        # single-flight downloader must wait for `source_released` to be
+        # sure the TIDAL stream is gone before opening a different track.
+        self.source_released = threading.Event()
         self._done_event = done_event
         self._tempdir = tempdir
         self._path = None
         self._thread = None
         self._container_in = None
+        # Offset to start the served file at, in seconds. Non-zero on a
+        # DLNA resume: the renderer starts at byte 0 of this file, so
+        # byte 0 must be the position the desktop decoder is already at.
+        # Native FLAC can't be trimmed by rewriting a header alone, so
+        # _run drops the leading frames and rewrites total_samples.
+        self._start_s = max(0.0, float(start_s))
 
     @property
     def path(self) -> Optional[str]:
@@ -1062,18 +1093,46 @@ class TrackFileSource:
         self._thread.start()
 
     def close(self) -> None:
+        # Abort the input reader first: closing the SegmentReader is the
+        # thread-safe cancellation the decoder already relies on — it
+        # aborts an in-flight segment fetch, so a demux blocked on the
+        # network unwinds instead of pinning av.demux().
+        close_src = getattr(self._source, "close", None)
+        if callable(close_src):
+            try:
+                close_src()
+            except Exception:
+                pass
         if self._thread is not None:
-            self._thread.join(timeout=5.0)
-        try:
-            if self._container_in is not None:
-                self._container_in.close()
-        except Exception:
-            pass
+            self._thread.join(timeout=10.0)
+        # Only touch the PyAV container once the demux thread has exited.
+        # Closing a container from another thread while av.demux() is
+        # active segfaults; if the thread is still winding down it owns
+        # the container and its `_run` finally releases it.
+        if self._thread is None or not self._thread.is_alive():
+            self._release_source()
         if self._path and os.path.exists(self._path):
             try:
                 os.unlink(self._path)
             except OSError:
                 pass
+
+    def _release_source(self) -> None:
+        """Close the input container/reader so the TIDAL HTTP connection
+        is released, then flag it. Safe to call more than once."""
+        try:
+            if self._container_in is not None:
+                self._container_in.close()
+        except Exception:
+            pass
+        self._container_in = None
+        close = getattr(self._source, "close", None)
+        if callable(close):
+            try:
+                close()
+            except Exception:
+                pass
+        self.source_released.set()
 
     def _run(self) -> None:
         import av
@@ -1093,21 +1152,24 @@ class TrackFileSource:
                 raw_streaminfo = b""
 
             demux_iter = self._container_in.demux(stream_in)
-            first_packet = next(demux_iter)
-            raw_first = bytes(first_packet)
-            frame_bps = _parse_flac_frame_bps(raw_first) if raw_first else 16
-
+            time_base = stream_in.time_base
+            sample_rate = stream_in.codec_context.sample_rate or 44100
+            channels = (
+                getattr(stream_in.codec_context.layout, "nb_channels", 2) or 2
+            )
+            original_total = _streaminfo_total_samples(raw_streaminfo)
+            # Duration in seconds when the container knows it; the
+            # fallback for computing the trimmed sample count when the
+            # source extradata carried total_samples=0 (streaming).
+            duration_s: Optional[float] = None
+            if stream_in.duration is not None and time_base is not None:
+                duration_s = float(stream_in.duration * time_base)
             bps = 16
             if raw_streaminfo and len(raw_streaminfo) >= 18:
-                bps = (((raw_streaminfo[12] & 1) << 4) | (raw_streaminfo[13] >> 4)) + 1
-
-            header = _build_flac_stream_header(
-                sample_rate=stream_in.codec_context.sample_rate,
-                channels=getattr(stream_in.codec_context.layout, "nb_channels", 2) or 2,
-                bits_per_sample=bps if raw_streaminfo else frame_bps,
-                total_samples=0,
-                streaminfo_bytes=raw_streaminfo if raw_streaminfo else None,
-            )
+                bps = (
+                    ((raw_streaminfo[12] & 1) << 4)
+                    | (raw_streaminfo[13] >> 4)
+                ) + 1
 
             tf = tempfile.NamedTemporaryFile(
                 prefix="tideway-track-", suffix=".flac",
@@ -1115,28 +1177,87 @@ class TrackFileSource:
             )
             self._path = tf.name
             total = 0
+            header_written = False
             with tf:
-                tf.write(header)
-                total += len(header)
-                if raw_first:
-                    tf.write(raw_first)
-                    total += len(raw_first)
                 for packet in demux_iter:
                     raw = bytes(packet)
                     if not raw:
                         continue
+                    pts_s: Optional[float] = None
+                    if time_base is not None and packet.pts is not None:
+                        pts_s = float(packet.pts * time_base)
+                    # Trim: drop leading frames so the served file
+                    # begins at the desktop decoder's position. The
+                    # first kept frame becomes the file's byte 0.
+                    if (
+                        self._start_s > 0.0
+                        and pts_s is not None
+                        and pts_s < self._start_s
+                    ):
+                        continue
+                    if not header_written:
+                        if not raw_streaminfo:
+                            bps = _parse_flac_frame_bps(raw)
+                        trimmed_total = original_total
+                        if original_total and pts_s is not None:
+                            skipped = int(round(pts_s * sample_rate))
+                            trimmed_total = max(0, original_total - skipped)
+                        elif duration_s and pts_s is not None:
+                            trimmed_total = max(
+                                0, int(round((duration_s - pts_s) * sample_rate))
+                            )
+                        streaminfo_for_header = raw_streaminfo
+                        if (
+                            raw_streaminfo
+                            and len(raw_streaminfo) >= 34
+                            and trimmed_total != original_total
+                        ):
+                            # The original MD5 describes the untrimmed
+                            # stream; zero it ("not computed") rather
+                            # than ship a checksum that can no longer
+                            # match.
+                            patched = bytearray(raw_streaminfo)
+                            patched[18:34] = b"\x00" * 16
+                            streaminfo_for_header = bytes(patched)
+                            print(
+                                f"[upnp] bounded file trimmed to start "
+                                f"{pts_s:.2f}s (total_samples "
+                                f"{original_total} -> {trimmed_total})",
+                                flush=True,
+                            )
+                        header = _build_flac_stream_header(
+                            sample_rate=sample_rate,
+                            channels=channels,
+                            bits_per_sample=bps,
+                            total_samples=trimmed_total,
+                            streaminfo_bytes=streaminfo_for_header or None,
+                        )
+                        tf.write(header)
+                        total += len(header)
+                        header_written = True
                     tf.write(raw)
                     total += len(raw)
+                if not header_written:
+                    # No frames survived the trim (or the source had
+                    # none): emit a valid header so the file is not an
+                    # empty zero-byte response.
+                    header = _build_flac_stream_header(
+                        sample_rate=sample_rate,
+                        channels=channels,
+                        bits_per_sample=bps,
+                        total_samples=0,
+                        streaminfo_bytes=(
+                            raw_streaminfo if raw_streaminfo else None
+                        ),
+                    )
+                    tf.write(header)
+                    total += len(header)
             self.total_size = total
         except Exception as exc:
             self.failed = True
             print(f"[upnp] track-filesource failed: {exc!r}", flush=True)
         finally:
-            try:
-                if self._container_in is not None:
-                    self._container_in.close()
-            except Exception:
-                pass
+            self._release_source()
             self.ready.set()
             if self._done_event is not None:
                 self._done_event.set()
@@ -1181,6 +1302,11 @@ class StreamHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     # the UPnP session on start_passthrough, cleared when passthrough
     # stops (fallback PCM re-encode is served from the RingBuffer).
     track_source: Optional["TrackFileSource"] = None
+    # The NEXT track's bounded file while it is pre-staged on the
+    # renderer via SetNextAVTransportURI. It has its own track_id, so a
+    # request carrying that ?ts= is routed here even though the current
+    # track is still the active one. Cleared on advance / invalidate.
+    next_track_source: Optional["TrackFileSource"] = None
     # Cover-art cache (cover_id -> (bytes, content_type)). Populated
     # lazily on first renderer fetch; covers are tiny and stable for
     # the life of a session.
@@ -1329,7 +1455,41 @@ class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
             flush=True,
         )
 
-    def _serve_track(self, server: "StreamHTTPServer", head: bool = False) -> None:
+    def _request_ts(self) -> int:
+        """The ?ts= track id on the request, or 0 when absent/malformed."""
+        parsed = urllib.parse.urlsplit(self.path)
+        try:
+            return int(urllib.parse.parse_qs(parsed.query).get("ts", [0])[0])
+        except (TypeError, ValueError):
+            return 0
+
+    def _select_track_source(
+        self, server: "StreamHTTPServer", req_ts: int
+    ) -> Optional["TrackFileSource"]:
+        """Pick the bounded file a request should be served from.
+
+        Two can be live at once during a gapless pre-stage: the current
+        track and the next one the renderer is pre-fetching before it
+        advances. They are told apart by ?ts= (each file carries its own
+        track_id). A request with no ts (older probes) falls back to the
+        current track.
+        """
+        current = server.track_source
+        nxt = server.next_track_source
+        if req_ts:
+            if nxt is not None and nxt.track_id == req_ts:
+                return nxt
+            if current is not None and current.track_id == req_ts:
+                return current
+            return None
+        return current or nxt
+
+    def _serve_track(
+        self,
+        server: "StreamHTTPServer",
+        src: "TrackFileSource",
+        head: bool = False,
+    ) -> None:
         """Serve a fully-buffered track file with the REAL byte length.
 
         The renderer's decoder uses the FLAC STREAMINFO (real
@@ -1349,14 +1509,8 @@ class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
         for SEEK_END during decoder-init still get one either way,
         because this path always knows the real total.
         """
-        src = server.track_source
         if src is None:
             self.send_error(503, "no track")
-            return
-        parsed = urllib.parse.urlsplit(self.path)
-        req_ts = int(urllib.parse.parse_qs(parsed.query).get("ts", [0])[0])
-        if req_ts and src.track_id and req_ts != src.track_id:
-            self.send_error(410, "stale track")
             return
         if not src.ready.wait(timeout=15.0):
             self.send_error(503, "track not ready")
@@ -1420,8 +1574,15 @@ class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
             self.send_error(404, "not found")
             return
         # Bounded per-track file: headers only, with the real length.
-        if server.dlna and server.track_source is not None:
-            self._serve_track(server, head=True)
+        if server.dlna and (
+            server.track_source is not None
+            or server.next_track_source is not None
+        ):
+            src = self._select_track_source(server, self._request_ts())
+            if src is None:
+                self.send_error(410, "stale track")
+                return
+            self._serve_track(server, src, head=True)
             return
         if server.buffer is None:
             self.send_error(503, "stream session not ready")
@@ -1499,8 +1660,15 @@ class _StreamRequestHandler(http.server.BaseHTTPRequestHandler):
         # is buffered to disk before we answer), so UAPP never seeks
         # past the real end or hits the "unexpected end of stream"
         # recovery that the synthetic ~1TB Content-Length caused.
-        if server.dlna and server.track_source is not None:
-            self._serve_track(server)
+        if server.dlna and (
+            server.track_source is not None
+            or server.next_track_source is not None
+        ):
+            src = self._select_track_source(server, self._request_ts())
+            if src is None:
+                self.send_error(410, "stale track")
+                return
+            self._serve_track(server, src)
             return
         if server.buffer is None:
             self.send_error(503, "stream session not ready")
@@ -1724,17 +1892,77 @@ def start_stream_http_server(
     return server
 
 
+def _default_route_iface() -> Optional[str]:
+    """Name of the interface holding the kernel's default route.
+
+    Reads the routing table (Linux ``/proc/net/route``) and returns the
+    lowest-metric row whose destination AND mask are both ``0.0.0.0`` —
+    a true ``/0`` default. VPNs commonly install ``0.0.0.0/1`` +
+    ``128.0.0.0/1`` overrides instead of replacing the default (Surfshark
+    WireGuard does), so matching on the destination alone would pick the
+    tunnel; requiring a ``/0`` mask skips those. None off Linux or when
+    the table is unreadable."""
+    try:
+        with open("/proc/net/route", encoding="ascii") as fh:
+            next(fh, None)  # header row
+            best: Optional[str] = None
+            best_metric = 1 << 30
+            for line in fh:
+                parts = line.split()
+                if len(parts) < 8:
+                    continue
+                iface, dest, metric, mask = parts[0], parts[1], parts[6], parts[7]
+                if dest != "00000000" or mask != "00000000":
+                    continue
+                try:
+                    m = int(metric)
+                except ValueError:
+                    m = 1 << 30
+                if m < best_metric:
+                    best, best_metric = iface, m
+            return best
+    except OSError:
+        return None
+
+
+def _iface_ipv4(name: str) -> Optional[str]:
+    """IPv4 address of a local interface, or None. Unix only."""
+    try:
+        import fcntl
+        import struct as _struct
+
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    except Exception:
+        return None
+    try:
+        req = _struct.pack("256s", name.encode("utf-8")[:15])
+        res = fcntl.ioctl(s.fileno(), 0x8915, req)  # SIOCGIFADDR
+        return socket.inet_ntoa(res[20:24])
+    except OSError:
+        return None
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+
+
 def primary_lan_ip() -> str:
     """Best-effort local IP address for a LAN receiver to reach
     back to this machine.
 
-    Connecting a UDP socket to a public address without sending
-    forces the OS to populate the socket's source address, which
-    gives us the right interface. Falls back to 127.0.0.1 if
-    something blocks the lookup; that won't work for a real
-    receiver but keeps the app from crashing on disconnected
-    networks.
+    Picks the address on the interface that holds the kernel's default
+    route — the LAN NIC — so a VPN that hijacks the route to a public
+    address (WireGuard's ``/1`` split default) can't make discovery bind
+    to the tunnel and miss LAN renderers. Falls back to asking the OS
+    which source address it would use for a public destination (correct
+    on a single-homed host), then to 127.0.0.1 if even that is blocked.
     """
+    iface = _default_route_iface()
+    if iface:
+        addr = _iface_ipv4(iface)
+        if addr and not addr.startswith("127."):
+            return addr
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.connect(("8.8.8.8", 80))

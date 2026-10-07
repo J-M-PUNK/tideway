@@ -60,6 +60,31 @@ _RENDERING_CONTROL_PREFIX = "urn:schemas-upnp-org:service:RenderingControl:"
 _INSTANCE_ID = "0"
 
 
+def parse_rel_time(value: Optional[str]) -> Optional[float]:
+    """Parse an AVTransport time string to seconds.
+
+    The spec's REL_TIME / TrackDuration fields are `HH:MM:SS`, with
+    optional fractional seconds on some devices. Returns None for a
+    missing, malformed, or `NOT_IMPLEMENTED` value — renderers with no
+    internal playback clock report those, and the caller must treat
+    them as "position unknown" rather than 0.
+    """
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text or text.upper() == "NOT_IMPLEMENTED":
+        return None
+    parts = text.split(":")
+    try:
+        if len(parts) == 3:
+            return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+        if len(parts) == 2:
+            return int(parts[0]) * 60 + float(parts[1])
+        return float(text)
+    except (TypeError, ValueError):
+        return None
+
+
 def _find_service(
     device: OpenHomeDevice, prefix: str,
 ) -> Optional[OpenHomeService]:
@@ -126,6 +151,40 @@ class AVTransportController:
                 "InstanceID": _INSTANCE_ID,
                 "CurrentURI": uri,
                 "CurrentURIMetaData": didl_metadata,
+            },
+        )
+
+    def supports_next_uri(self) -> bool:
+        """True when the renderer's SCPD advertises
+        SetNextAVTransportURI.
+
+        That action is the DLNA-native gapless mechanism: the renderer
+        pre-stages the next URI and advances on its own at the natural
+        end, so no second SetAVTransportURI (and no decoder re-init
+        gap) is needed. Renderers that don't advertise it must fall
+        back to a gapped transition.
+        """
+        return any(
+            action.name == "SetNextAVTransportURI"
+            for action in self._service.actions
+        )
+
+    def set_next_av_transport_uri(
+        self, uri: str, didl_metadata: str
+    ) -> None:
+        """Pre-stage the next track on the renderer.
+
+        The renderer advances to `uri` when the current track ends
+        naturally. Only call this when `supports_next_uri()` is True;
+        otherwise the SOAP action is rejected or silently ignored.
+        """
+        invoke(
+            self._service,
+            "SetNextAVTransportURI",
+            {
+                "InstanceID": _INSTANCE_ID,
+                "NextURI": uri,
+                "NextURIMetaData": didl_metadata,
             },
         )
 
@@ -199,6 +258,47 @@ class AVTransportController:
             "GetPositionInfo",
             {"InstanceID": _INSTANCE_ID},
         )
+
+    def get_position_seconds(self) -> Optional[tuple[float, float]]:
+        """Return `(position_s, duration_s)` from GetPositionInfo, or
+        None when the renderer reports neither a usable position nor a
+        usable duration.
+
+        The duration is what the renderer believes the loaded media
+        lasts; for our bounded FLAC file that is the per-track file's
+        real length. Used by the manager's renderer-clock watchdog to
+        detect end-of-track without relying on the desktop's decode
+        clock, which runs ahead of the renderer's buffer."""
+        info = self.get_position_info()
+        position_s = parse_rel_time(info.get("RelTime"))
+        duration_s = parse_rel_time(info.get("TrackDuration"))
+        if position_s is None or duration_s is None or duration_s <= 0:
+            return None
+        return position_s, duration_s
+
+    def get_media_info(self) -> dict[str, str]:
+        """Return the media currently loaded. `CurrentURI` is the URI
+        the renderer is actually on right now — the only reliable way
+        to tell whether a pre-staged NextURI has been consumed yet."""
+        return invoke(
+            self._service,
+            "GetMediaInfo",
+            {"InstanceID": _INSTANCE_ID},
+        )
+
+    def get_current_uri(self) -> Optional[str]:
+        """The URI the renderer is currently playing, or None if it
+        can't be determined. Used to detect an auto-advance into a
+        pre-staged SetNextAVTransportURI: after the renderer consumes
+        it, its CurrentURI is that URI, and re-sending
+        SetAVTransportURI would stop and restart the stream (a gap)."""
+        try:
+            out = self.get_media_info()
+        except Exception as exc:
+            log.debug("GetMediaInfo failed: %r", exc)
+            return None
+        uri = (out.get("CurrentURI") or "").strip()
+        return uri or None
 
 
 # ---------------------------------------------------------------------

@@ -501,7 +501,18 @@ export function usePlayer() {
   // SSE subscription — backend pushes state changes + position updates.
   // `seq` is our monotonic clock so we can ignore out-of-order frames.
   const lastSeqRef = useRef(-1);
+  // Last position we applied, so a frame with an unchanged seq can still
+  // update the clock when only the position moved. seq is bumped from
+  // the audio callback, which stops in DLNA renderer-clock mode once the
+  // muted local stream ends, so seq can freeze mid-track while the
+  // renderer position keeps advancing.
+  const lastPositionRef = useRef(-1);
   const expectedTrackIdRef = useRef<string | null>(null);
+  // When `expectedTrackIdRef` last changed, so the late-echo guard can
+  // be time-bounded (see isLateEcho): a mismatched snapshot is only a
+  // late echo for a short window after an optimistic change.
+  const expectedSeenRef = useRef<string | null>(null);
+  const expectedSeenAtRef = useRef(0);
   const endOfTrackPendingRef = useRef(false);
   // Set to true while an `endOfQueueAdvance` is awaiting the
   // Artist Radio fetch. Stops a second "ended" SSE event from
@@ -532,6 +543,13 @@ export function usePlayer() {
   // for the rest of the track, so the crossfade faded into a track
   // the queue was no longer going to play (#291).
   const preloadedNextIdRef = useRef<string | null>(null);
+  // The current track the preload above was computed FOR. Paired with
+  // the next id so a track change invalidates the memo even when the
+  // "next" string happens to be unchanged — e.g. after a renderer-clock
+  // auto-advance where the pre-stage was dropped by the backend, the
+  // bare next-id memo would say "already primed" and never re-fire,
+  // leaving the renderer with no `next` and cutting at track end.
+  const preloadedForTrackRef = useRef<string | null>(null);
   // Track ids we've already kicked off a rehydrate fetch for. Keeps
   // us from firing the same GET /api/track/{id} on every position
   // tick when the frontend has no cached Track for the current id.
@@ -558,10 +576,28 @@ export function usePlayer() {
     // track changes when the previous track's "playing" tail still
     // has frames in flight — without the guard, those would
     // overwrite the new track's UI state.
-    const isLateEcho = (snap: PlayerSnapshot): boolean =>
-      snap.track_id !== null &&
-      expectedTrackIdRef.current !== null &&
-      snap.track_id !== expectedTrackIdRef.current;
+    //
+    // But the guard must not be permanent: if the backend keeps
+    // reporting a different track, our optimistic target never
+    // arrived and we are desynced. In DLNA renderer-clock mode the
+    // backend can auto-advance into the pre-staged next and emit
+    // `playing(N+1)` while our `expected` is still N; a permanent
+    // guard would drop that snapshot forever, so `applySnapshot`
+    // never runs, the preload trigger never fires, and the next
+    // boundary cuts. Drop only within a short window after an
+    // optimistic change; after that, trust the backend and resync.
+    const _LATE_ECHO_GRACE_MS = 2000;
+    const isLateEcho = (snap: PlayerSnapshot): boolean => {
+      if (snap.track_id === null) return false;
+      const expected = expectedTrackIdRef.current;
+      if (expected === null) return false;
+      if (expected !== expectedSeenRef.current) {
+        expectedSeenRef.current = expected;
+        expectedSeenAtRef.current = Date.now();
+      }
+      if (snap.track_id === expected) return false;
+      return Date.now() - expectedSeenAtRef.current < _LATE_ECHO_GRACE_MS;
+    };
 
     // Sync the now-playing bar to whatever the backend says is
     // playing. Two sources, in priority order:
@@ -717,19 +753,48 @@ export function usePlayer() {
     // buffer is freed as soon as the swap completes or the queue
     // changes.
     const triggerPreloadIfNeeded = (snap: PlayerSnapshot) => {
-      if (snap.state !== "playing" || snap.track_id === null) return;
+      if (snap.state !== "playing" || snap.track_id === null) {
+        return;
+      }
       const currentTime = snap.position_ms / 1000;
       if (currentTime < 10) return;
       const s = stateRef.current;
-      const nextIdx = pickNextIndex(s, true);
-      if (nextIdx === null || nextIdx === s.queueIndex) return;
+      // Resolve the current index from the snapshot's track id instead
+      // of trusting s.queueIndex. After a renderer-clock auto-advance
+      // (backend emits `ended` on the renderer's boundary), the queue
+      // index is moved by an async setState in syncTrackFromQueueOrApi
+      // that has not committed yet when this runs, so s.queueIndex can
+      // still point at the previous track. That computes the wrong
+      // "next" — often the current track itself — and skips the
+      // preload, leaving the following track with no `next` staged
+      // (issue #354: the transition after an auto-advance cuts).
+      const curIdx =
+        s.track?.id === snap.track_id
+          ? s.queueIndex
+          : s.queue.findIndex((q) => q.id === snap.track_id);
+      if (curIdx < 0) {
+        return;
+      }
+      const nextIdx = pickNextIndex({ ...s, queueIndex: curIdx }, true);
+      if (nextIdx === null || nextIdx === curIdx) {
+        return;
+      }
       const nextTrack = s.queue[nextIdx];
-      if (!nextTrack || nextTrack.id === snap.track_id) return;
-      // Already primed with this exact track — nothing to do. Cheap
-      // enough to re-check every tick (SSE runs at ~4Hz) and that is
-      // the point: it's what notices the answer changing mid-track.
-      if (preloadedNextIdRef.current === nextTrack.id) return;
+      if (!nextTrack || nextTrack.id === snap.track_id) {
+        return;
+      }
+      // Already primed with this exact (current, next) pair — nothing
+      // to do. Cheap enough to re-check every tick (SSE runs at ~4Hz)
+      // and that is the point: it's what notices the answer changing
+      // mid-track.
+      if (
+        preloadedNextIdRef.current === nextTrack.id &&
+        preloadedForTrackRef.current === snap.track_id
+      ) {
+        return;
+      }
       preloadedNextIdRef.current = nextTrack.id;
+      preloadedForTrackRef.current = snap.track_id;
       api.player.preload(nextTrack.id, qualityRef.current).catch(() => {
         /* fire-and-forget; failure falls back to the slow-path
            load on track-end. */
@@ -737,7 +802,18 @@ export function usePlayer() {
     };
 
     const applySnapshot = (snap: PlayerSnapshot) => {
-      if (isLateEcho(snap)) return;
+      const late = isLateEcho(snap);
+      if (late) return;
+      // A fresh load (or a stop) tears down the backend pipeline and
+      // drops any preload, but our "already primed" marker is keyed on
+      // (current, next) ids — which don't change when the same track is
+      // re-loaded or the output is switched. Clear it so the next
+      // playing snapshot re-fires the preload instead of trusting a
+      // preload the backend no longer has.
+      if (snap.state === "loading" || snap.state === "idle") {
+        preloadedNextIdRef.current = null;
+        preloadedForTrackRef.current = null;
+      }
       syncTrackFromQueueOrApi(snap);
       applyTransportState(snap);
       // Advance triggers fire AFTER the state setState so any
@@ -761,8 +837,22 @@ export function usePlayer() {
       es.onmessage = (event) => {
         try {
           const snap = JSON.parse(event.data) as PlayerSnapshot;
-          if (snap.seq <= lastSeqRef.current) return;
+          // A newer seq always applies. A repeat seq still applies when
+          // only the position moved: seq is bumped from the audio
+          // callback, which stops in DLNA renderer-clock mode once the
+          // muted local stream ends — seq freezes while the renderer
+          // position keeps advancing, and a seq-only guard would freeze
+          // the UI clock. Out-of-order (older) seq frames are still
+          // dropped.
+          if (snap.seq < lastSeqRef.current) return;
+          if (
+            snap.seq === lastSeqRef.current &&
+            snap.position_ms === lastPositionRef.current
+          ) {
+            return;
+          }
           lastSeqRef.current = snap.seq;
+          lastPositionRef.current = snap.position_ms;
           applySnapshot(snap);
         } catch {
           /* malformed frame */
@@ -1205,6 +1295,8 @@ export function usePlayer() {
     //     button on the first track of an album — a no-op press would
     //     read as a bug.
     if (s.currentTime > 3 || p === null) {
+      preloadedNextIdRef.current = null;
+      preloadedForTrackRef.current = null;
       void api.player.seek(0).catch(() => {});
       return;
     }
@@ -1217,6 +1309,11 @@ export function usePlayer() {
     const clamped = Math.max(0, Math.min(cap, t));
     const fraction = cap && cap > 0 && cap !== Infinity ? clamped / cap : 0;
     setState((cur) => ({ ...cur, currentTime: clamped }));
+    // A DLNA seek re-announces the current track, which clears the
+    // renderer's pre-staged next. Forget the (current,next) preload memo
+    // so the next playing snapshot re-fires the preload and re-stages it.
+    preloadedNextIdRef.current = null;
+    preloadedForTrackRef.current = null;
     void api.player.seek(fraction).catch(() => {});
   }, []);
 
@@ -1229,6 +1326,8 @@ export function usePlayer() {
     const s = stateRef.current;
     if (!s.track) return;
     setState((cur) => ({ ...cur, currentTime: 0 }));
+    preloadedNextIdRef.current = null;
+    preloadedForTrackRef.current = null;
     void api.player.seek(0).catch(() => {});
     if (!s.playing) {
       void api.player.resume().catch(() => {});

@@ -17,7 +17,7 @@ from types import SimpleNamespace
 
 import numpy as np
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock, mock_open, patch
 
 from app.audio.http_stream import (
     FlacPassthroughEncoder,
@@ -25,6 +25,7 @@ from app.audio.http_stream import (
     RingBuffer,
     _StreamRequestHandler,
     _build_flac_stream_header,
+    _default_route_iface,
     primary_lan_ip,
     start_stream_http_server,
 )
@@ -419,6 +420,9 @@ class TestPrimaryLanIp:
             def connect(self, *_a, **_k):
                 raise OSError("network unreachable")
 
+            def fileno(self):
+                raise OSError("network unreachable")
+
             def getsockname(self):
                 # Should never be reached given the connect error.
                 return ("0.0.0.0", 0)
@@ -428,6 +432,109 @@ class TestPrimaryLanIp:
 
         monkeypatch.setattr(_socket, "socket", _BrokenSocket)
         assert primary_lan_ip() == "127.0.0.1"
+
+    def test_prefers_default_route_interface_over_public_route(self, monkeypatch):
+        """A VPN can win the route to a public address (WireGuard's
+        0.0.0.0/1 split default) while the kernel's real default route
+        still points at the LAN NIC. The LAN NIC is what a renderer can
+        reach, so that interface's address must win over whatever the
+        connect()-to-8.8.8.8 probe would report."""
+        monkeypatch.setattr(
+            "app.audio.http_stream._default_route_iface", lambda: "wlp3s0"
+        )
+        monkeypatch.setattr(
+            "app.audio.http_stream._iface_ipv4", lambda name: "192.168.17.240"
+        )
+        assert primary_lan_ip() == "192.168.17.240"
+
+    def test_falls_back_to_public_route_when_default_unreadable(self, monkeypatch):
+        """Off Linux (or when the routing table is unreadable) we still
+        get a usable address from the OS source-address probe."""
+        monkeypatch.setattr(
+            "app.audio.http_stream._default_route_iface", lambda: None
+        )
+        import socket as _socket
+
+        class _Probe:
+            def __init__(self, *_a, **_k):
+                pass
+
+            def connect(self, *_a, **_k):
+                pass
+
+            def getsockname(self):
+                return ("10.14.0.2", 12345)
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(_socket, "socket", _Probe)
+        assert primary_lan_ip() == "10.14.0.2"
+
+    def test_ignores_loopback_from_route_lookup(self, monkeypatch):
+        """If the default-route interface only has a loopback address
+        (odd, but possible in restricted sandboxes) we don't hand that
+        back to a renderer — fall through to the probe/loopback path."""
+        monkeypatch.setattr(
+            "app.audio.http_stream._default_route_iface", lambda: "lo"
+        )
+        monkeypatch.setattr(
+            "app.audio.http_stream._iface_ipv4", lambda name: "127.0.0.1"
+        )
+        import socket as _socket
+
+        class _Probe:
+            def __init__(self, *_a, **_k):
+                pass
+
+            def connect(self, *_a, **_k):
+                raise OSError("no route")
+
+            def getsockname(self):
+                return ("0.0.0.0", 0)
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(_socket, "socket", _Probe)
+        assert primary_lan_ip() == "127.0.0.1"
+
+
+class TestDefaultRouteIface:
+    def test_skips_split_default_overrides(self, monkeypatch):
+        """Surfshark-style WireGuard installs 0.0.0.0/1 +
+        128.0.0.0/1 overrides on the tunnel. Only the /0 default
+        (mask 00000000) is the LAN interface; the /1 row must not be
+        mistaken for it."""
+        table = (
+            "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask"
+            "\t\tMTU\tWindow\tIRTT\n"
+            "surfshark_wg\t00000000\t00000000\t0001\t0\t0\t0\t80000000"
+            "\t1420\t0\t0\n"
+            "wlp3s0\t00000000\t0110A8C0\t0003\t0\t0\t600\t00000000"
+            "\t0\t0\t0\n"
+        )
+        monkeypatch.setattr("builtins.open", mock_open(read_data=table))
+        assert _default_route_iface() == "wlp3s0"
+
+    def test_picks_lowest_metric_default(self, monkeypatch):
+        """When more than one interface holds a true default route, the
+        lowest metric is the one the kernel prefers."""
+        table = (
+            "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask"
+            "\t\tMTU\tWindow\tIRTT\n"
+            "eth0\t00000000\t0101A8C0\t0003\t0\t0\t900\t00000000\t0\t0\t0\n"
+            "wlan0\t00000000\t0201A8C0\t0003\t0\t0\t100\t00000000\t0\t0\t0\n"
+        )
+        monkeypatch.setattr("builtins.open", mock_open(read_data=table))
+        assert _default_route_iface() == "wlan0"
+
+    def test_returns_none_when_table_missing(self, monkeypatch):
+        def _boom(*_a, **_k):
+            raise OSError("no /proc")
+
+        monkeypatch.setattr("builtins.open", _boom)
+        assert _default_route_iface() is None
 
 
 # ---------------------------------------------------------------------
