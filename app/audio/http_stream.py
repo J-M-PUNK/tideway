@@ -1892,17 +1892,77 @@ def start_stream_http_server(
     return server
 
 
+def _default_route_iface() -> Optional[str]:
+    """Name of the interface holding the kernel's default route.
+
+    Reads the routing table (Linux ``/proc/net/route``) and returns the
+    lowest-metric row whose destination AND mask are both ``0.0.0.0`` —
+    a true ``/0`` default. VPNs commonly install ``0.0.0.0/1`` +
+    ``128.0.0.0/1`` overrides instead of replacing the default (Surfshark
+    WireGuard does), so matching on the destination alone would pick the
+    tunnel; requiring a ``/0`` mask skips those. None off Linux or when
+    the table is unreadable."""
+    try:
+        with open("/proc/net/route", encoding="ascii") as fh:
+            next(fh, None)  # header row
+            best: Optional[str] = None
+            best_metric = 1 << 30
+            for line in fh:
+                parts = line.split()
+                if len(parts) < 8:
+                    continue
+                iface, dest, metric, mask = parts[0], parts[1], parts[6], parts[7]
+                if dest != "00000000" or mask != "00000000":
+                    continue
+                try:
+                    m = int(metric)
+                except ValueError:
+                    m = 1 << 30
+                if m < best_metric:
+                    best, best_metric = iface, m
+            return best
+    except OSError:
+        return None
+
+
+def _iface_ipv4(name: str) -> Optional[str]:
+    """IPv4 address of a local interface, or None. Unix only."""
+    try:
+        import fcntl
+        import struct as _struct
+
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    except Exception:
+        return None
+    try:
+        req = _struct.pack("256s", name.encode("utf-8")[:15])
+        res = fcntl.ioctl(s.fileno(), 0x8915, req)  # SIOCGIFADDR
+        return socket.inet_ntoa(res[20:24])
+    except OSError:
+        return None
+    finally:
+        try:
+            s.close()
+        except Exception:
+            pass
+
+
 def primary_lan_ip() -> str:
     """Best-effort local IP address for a LAN receiver to reach
     back to this machine.
 
-    Connecting a UDP socket to a public address without sending
-    forces the OS to populate the socket's source address, which
-    gives us the right interface. Falls back to 127.0.0.1 if
-    something blocks the lookup; that won't work for a real
-    receiver but keeps the app from crashing on disconnected
-    networks.
+    Picks the address on the interface that holds the kernel's default
+    route — the LAN NIC — so a VPN that hijacks the route to a public
+    address (WireGuard's ``/1`` split default) can't make discovery bind
+    to the tunnel and miss LAN renderers. Falls back to asking the OS
+    which source address it would use for a public destination (correct
+    on a single-homed host), then to 127.0.0.1 if even that is blocked.
     """
+    iface = _default_route_iface()
+    if iface:
+        addr = _iface_ipv4(iface)
+        if addr and not addr.startswith("127."):
+            return addr
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.connect(("8.8.8.8", 80))
