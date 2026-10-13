@@ -249,6 +249,54 @@ class TestSetAVTransportURI:
             f'"{svc.service_type}#SetAVTransportURI"'
 
 
+class TestGetMediaInfo:
+    def test_get_current_uri_parses_media_info(self):
+        """The watchdog detects a consumed SetNextAVTransportURI by
+        reading CurrentURI from GetMediaInfo. A missing method here made
+        get_current_uri() silently return None (AttributeError swallowed
+        by its except), so the watchdog fell back to the slow position
+        path and fired the advance ~30s late."""
+        svc = _service(
+            service_type="urn:schemas-upnp-org:service:AVTransport:1",
+            short_name="AVTransport",
+        )
+        ctrl = AVTransportController(svc)
+        body = (
+            '<?xml version="1.0"?>'
+            '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">'
+            '<s:Body>'
+            f'<u:GetMediaInfoResponse xmlns:u="{svc.service_type}">'
+            '<CurrentURI>http://192.168.1.10:54321/dlna/stream?ts=42</CurrentURI>'
+            '</u:GetMediaInfoResponse>'
+            '</s:Body>'
+            '</s:Envelope>'
+        )
+        with _capture("GetMediaInfo", svc.service_type, response_body=body) as cap:
+            assert ctrl.get_current_uri() == \
+                "http://192.168.1.10:54321/dlna/stream?ts=42"
+        args = _parse_envelope(cap.calls[0]["data"].decode())
+        assert args["InstanceID"] == "0"
+
+    def test_get_current_uri_none_when_empty(self):
+        svc = _service(
+            service_type="urn:schemas-upnp-org:service:AVTransport:1",
+            short_name="AVTransport",
+        )
+        ctrl = AVTransportController(svc)
+        body = (
+            '<?xml version="1.0"?>'
+            '<s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/">'
+            '<s:Body>'
+            f'<u:GetMediaInfoResponse xmlns:u="{svc.service_type}">'
+            '<CurrentURI></CurrentURI>'
+            '</u:GetMediaInfoResponse>'
+            '</s:Body>'
+            '</s:Envelope>'
+        )
+        with _capture("GetMediaInfo", svc.service_type, response_body=body):
+            assert ctrl.get_current_uri() is None
+
+
 class TestPlayPauseStop:
     def test_play_with_default_speed(self):
         svc = _service(

@@ -15,6 +15,7 @@ import {
   DropdownMenuLabel,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
+  DropdownMenuCheckboxItem,
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
@@ -132,6 +133,10 @@ export function OutputDevicePicker() {
   const [dlna, setDlna] = useState<DlnaDevicesResponse | null>(null);
   const [busy, setBusy] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
+  // Gapless album opt-in: when on, the DLNA connect serves one bounded
+  // track at a time and pre-stages the next via SetNextAVTransportURI,
+  // so the renderer advances at the natural boundary.
+  const [dlnaGapless, setDlnaGapless] = useState(true);
   // Pending Tidal Connect device — once the user picks one, we
   // surface an "experimental" confirmation dialog before actually
   // calling connect. The TC protocol is built blind without
@@ -293,11 +298,13 @@ export function OutputDevicePicker() {
       } else if (value.startsWith(DLNA_PREFIX)) {
         const deviceId = value.slice(DLNA_PREFIX.length);
         await switchAwayFromRemoteIfActive();
-        const result = await api.dlna.connect(deviceId);
+        const result = await api.dlna.connect(deviceId, dlnaGapless);
         toast.show({
           kind: "success",
           title: `Streaming to ${result.device.name}`,
-          description: "Audio is going to the DLNA renderer.",
+          description: dlnaGapless
+            ? "Gapless album mode: one continuous stream."
+            : "Audio is going to the DLNA renderer.",
         });
       } else if (value.startsWith(LOCAL_PREFIX)) {
         const localId = value.slice(LOCAL_PREFIX.length);
@@ -603,6 +610,20 @@ export function OutputDevicePicker() {
                 <DropdownMenuLabel className="text-muted-foreground">
                   DLNA / UPnP
                 </DropdownMenuLabel>
+                <DropdownMenuCheckboxItem
+                  checked={dlnaGapless}
+                  onCheckedChange={(v) => setDlnaGapless(v === true)}
+                  onSelect={(e) => e.preventDefault()}
+                  className="text-sm"
+                >
+                  <div className="flex flex-col">
+                    <span>Gapless (album)</span>
+                    <span className="text-[11px] text-muted-foreground">
+                      One continuous stream; per-track info/seek on the renderer
+                      is sacrificed.
+                    </span>
+                  </div>
+                </DropdownMenuCheckboxItem>
                 {dlna.devices.length === 0 ? (
                   <div className="px-2 py-1.5 text-xs text-muted-foreground">
                     No DLNA renderers visible. Open the dropdown to re-scan;

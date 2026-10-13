@@ -94,6 +94,16 @@ if not logger.handlers:
     logger.setLevel(logging.INFO)
     logger.propagate = False
 
+# TEMP debug: emit app.audio.upnp debug lines to stderr during DLNA
+# hardware bring-up. Remove before commit.
+_upnp_log = logging.getLogger("app.audio.upnp")
+_upnp_log.setLevel(logging.DEBUG)
+if not any(isinstance(_x, logging.StreamHandler) for _x in _upnp_log.handlers):
+    _uh = logging.StreamHandler(sys.stderr)
+    _uh.setFormatter(logging.Formatter("[upnp][debug] %(message)s"))
+    _upnp_log.addHandler(_uh)
+    _upnp_log.propagate = False
+
 
 # Tidal's V2 home feed delivers "Because you liked X" / "Because you
 # listened to Y" modules as HORIZONTAL_LIST_WITH_CONTEXT with the
@@ -1031,6 +1041,22 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         )
         _upnp_manager.set_metadata_provider(
             _native_player().get_current_track_metadata
+        )
+        _upnp_manager.set_position_provider(
+            _native_player().get_current_position_s
+        )
+        # A preload may already exist when the DLNA session connects (the
+        # user switched output mid-track). Let connect() stage it on the
+        # renderer so it has a `next` and doesn't stop at track end.
+        _upnp_manager.set_next_source_provider(
+            _native_player().get_preloaded_source
+        )
+        # The renderer is the DLNA playback clock. When its watchdog sees
+        # the current bounded track reach the real end, the player emits
+        # `ended` so the frontend advances its queue at the renderer's
+        # boundary instead of the desktop decoder's earlier EOF.
+        _upnp_manager.set_renderer_ended_callback(
+            _native_player().on_renderer_track_ended
         )
     except Exception as exc:
         print(f"[upnp] startup wiring failed: {exc}", flush=True)
@@ -6274,9 +6300,14 @@ def player_stop() -> dict:
         return _tc_snapshot()
     if _dlna_active():
         # Same logic as TC: stop pauses the device, leaves the
-        # session intact for a subsequent play. Disconnect is
-        # what the picker does to fully tear down.
+        # session intact for a subsequent play. Pause the local
+        # pipeline too — a full stop/teardown would drop the muted
+        # local decoder and invalidate the staged next, so Stop→Play
+        # would resume the renderer while the backend sat idle (and
+        # the renderer could auto-advance into a deleted file).
+        # Disconnect is what the picker does to fully tear down.
         _dlna_send("pause")
+        return _snapshot_dict(_native_player().pause())
     return _snapshot_dict(_native_player().stop())
 
 
@@ -7509,6 +7540,10 @@ def dlna_refresh(req: Optional[_DlnaRefreshRequest] = None) -> dict:
 
 class _DlnaConnectRequest(BaseModel):
     device_id: str
+    # Opt into gapless album playback: bounded per-track serving with
+    # SetNextAVTransportURI pre-staging so the renderer advances at the
+    # natural track boundary instead of a gapped re-set.
+    gapless: bool = False
 
 
 @app.post("/api/dlna/connect")
@@ -7522,11 +7557,23 @@ def dlna_connect(req: _DlnaConnectRequest) -> dict:
     from app.audio.upnp import upnp_manager  # noqa: WPS433
 
     try:
-        device = upnp_manager.connect(req.device_id)
+        device = upnp_manager.connect(req.device_id, gapless=req.gapless)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except RuntimeError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    # The connect handshake issues SetAVTransportURI + Play, so the
+    # renderer is now the active output and playing. Mirror that on the
+    # local player when a track is loaded: in bounded-DLNA mode the muted
+    # local stream may be closed at EOF, and without a 'playing' state the
+    # player emits no periodic position snapshots — leaving the UI clock
+    # frozen while the renderer plays.
+    try:
+        player = _native_player()
+        if player.snapshot().track_id is not None:
+            player.play()
+    except Exception:
+        pass
     return {
         "ok": True,
         "device": {
@@ -7789,18 +7836,29 @@ def _snapshot_needs_client_action(state: Optional[str]) -> bool:
     return state in ("ended", "error")
 
 
-def _should_forward_snapshot(seq, last_seq, state: Optional[str]) -> bool:
-    """Whether a polled snapshot should be sent, given the last seq we
-    already put on the wire.
+def _should_forward_snapshot(
+    seq,
+    last_seq,
+    state: Optional[str],
+    position_ms: Optional[int] = None,
+    last_position: Optional[int] = None,
+) -> bool:
+    """Whether a polled snapshot should be sent, given what we already
+    put on the wire.
 
-    A new seq always goes out. A *repeat* seq is normally deduped to
-    keep idle keepalive ticks off the wire — except for states the
-    client must respond to (`ended`/`error`), which keep flowing so a
-    client that missed the one transition edge still receives it and
-    advances. The client's own monotonic seq guard makes the repeats a
-    no-op once it has acted.
+    A new seq always goes out. A repeat seq is normally deduped to keep
+    idle keepalive ticks off the wire — except when the *position*
+    moved, or the state is one the client must respond to
+    (`ended`/`error`). Position matters because seq is bumped from the
+    audio callback, which does not run in DLNA renderer-clock mode once
+    the muted local stream has ended: seq freezes while the renderer's
+    position keeps advancing, and a seq-only dedup would starve the
+    frontend clock. The client's own monotonic seq guard makes repeat
+    frames a no-op where they are not needed.
     """
     if seq != last_seq:
+        return True
+    if position_ms is not None and position_ms != last_position:
         return True
     return _snapshot_needs_client_action(state)
 
@@ -7862,6 +7920,7 @@ async def player_events(request: Request):
             # snapshot without waiting for the first change event.
             yield f"data: {json.dumps(_snapshot_dict(player.snapshot()))}\n\n"
             last_seq = -1
+            last_position: Optional[int] = None
             while True:
                 if await request.is_disconnected():
                     break
@@ -7874,13 +7933,21 @@ async def player_events(request: Request):
                 if payload is None:
                     break
                 seq = payload.get("seq", 0)
-                if not _should_forward_snapshot(seq, last_seq, payload.get("state")):
+                position_ms = payload.get("position_ms")
+                if not _should_forward_snapshot(
+                    seq,
+                    last_seq,
+                    payload.get("state"),
+                    position_ms,
+                    last_position,
+                ):
                     # Dedupe keepalive ticks while nothing actionable is
                     # pending. States the client must respond to
                     # (`ended`/`error`) keep flowing so a client that
                     # missed the transition can still act.
                     continue
                 last_seq = seq
+                last_position = position_ms
                 yield f"data: {json.dumps(payload)}\n\n"
         finally:
             unsubscribe()
