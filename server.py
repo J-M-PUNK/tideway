@@ -8920,6 +8920,13 @@ _artist_detail_cache_lock = threading.Lock()
 _ARTIST_DETAIL_CACHE_TTL_SEC = 300.0
 
 
+def _invalidate_artist_detail_cache() -> None:
+    """Drop every artist page. Used when a content filter changes,
+    since the cached payload was filtered under the old setting."""
+    with _artist_detail_cache_lock:
+        _artist_detail_cache.clear()
+
+
 @app.get("/api/artist/{artist_id}")
 def artist_detail(artist_id: int) -> dict:
     _require_auth()
@@ -11141,6 +11148,35 @@ def get_settings() -> dict:
     return asdict(settings)
 
 
+# Settings that decide which tracks a payload contains. Several endpoints
+# apply them before caching, so the cached payload is only valid for the
+# value it was built under.
+_CONTENT_FILTER_SETTINGS = ("hide_ai_content", "explicit_content_preference")
+
+
+def _invalidate_content_filter_caches() -> None:
+    """Drop every cache holding output filtered by a content setting.
+
+    `hide_ai_content` is applied before the album, mix and playlist
+    detail payloads (`_detail_cache`), artist pages
+    (`_artist_detail_cache`), Home and the other editorial pages
+    (`_page_cache`) and the release feed (`_feed_cache`) are stored;
+    `explicit_content_preference` before artist pages. Without this,
+    flipping either setting looked like it did nothing: downloads honoured
+    the new value at once, but a page already opened kept showing the old
+    filtering for its full TTL — up to fifteen minutes for the feed. That
+    is how #439 read the AI toggle as missing.
+
+    Clearing everything is deliberate rather than keying each cache on
+    the setting: these are rare user actions, and a missed cache under a
+    keyed scheme would fail silently in exactly the way this fixes.
+    """
+    _invalidate_detail_cache()
+    _invalidate_artist_detail_cache()
+    _invalidate_page_cache()
+    _invalidate_feed_cache()
+
+
 @app.put("/api/settings")
 def update_settings(payload: SettingsPayload) -> dict:
     _require_local_access()
@@ -11256,12 +11292,17 @@ def update_settings(payload: SettingsPayload) -> dict:
         data = asdict(settings)
         prev_exclusive = bool(data.get("exclusive_mode", False))
         prev_force_volume = bool(data.get("force_volume", False))
+        prev_filters = {k: data.get(k) for k in _CONTENT_FILTER_SETTINGS}
         data.update(patch)
         new_settings = Settings(**data)
         save_settings(new_settings)
         settings = new_settings
         downloader.settings = new_settings
     downloader.gate.set_limit(new_settings.concurrent_downloads)
+    if any(
+        getattr(new_settings, k) != prev_filters[k] for k in _CONTENT_FILTER_SETTINGS
+    ):
+        _invalidate_content_filter_caches()
     if "exclusive_mode" in patch and bool(new_settings.exclusive_mode) != prev_exclusive:
         try:
             _native_player().set_exclusive_mode(new_settings.exclusive_mode)
@@ -12199,6 +12240,14 @@ _FEED_TTL_SEC = 900.0  # 15 minutes — releases don't come out that often.
 _FEED_MAX_ITEMS = 300
 _feed_cache: dict[str, Any] = {"at": 0.0, "value": None}
 _feed_lock = threading.Lock()
+
+
+def _invalidate_feed_cache() -> None:
+    """Drop the cached feed. Used when a content filter changes, since
+    the cached payload was filtered under the old setting."""
+    with _feed_lock:
+        _feed_cache["at"] = 0.0
+        _feed_cache["value"] = None
 
 
 def _album_release_at(album) -> Optional[datetime]:
