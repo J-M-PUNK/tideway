@@ -160,6 +160,8 @@ export interface StreamInfo {
 }
 
 export interface PlayerSnapshot {
+  /** Receiver identity; sequence numbers belong to this output. */
+  output_id?: string;
   state: "idle" | "loading" | "playing" | "paused" | "ended" | "error";
   track_id: string | null;
   position_ms: number;
