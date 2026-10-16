@@ -169,6 +169,8 @@ export interface PlayerSnapshot {
   volume: number;
   muted: boolean;
   error: string | null;
+  /** Whether an error applies to the current track or the receiver session. */
+  error_scope?: "track" | "session" | null;
   seq: number;
   /** What's actually audible. Null when the player is idle or still
    *  loading; the UI hides the badge in that case. */

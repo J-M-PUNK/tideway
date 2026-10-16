@@ -826,7 +826,7 @@ export function usePlayer() {
       // or otherwise unstreamable id. The expected-track guard
       // (isLateEcho) naturally dedupes repeat error frames for the
       // same track, so we only advance once per failure.
-      if (snap.state === "error" && continuePlayingRef.current) {
+      if (snap.state === "error" && snap.error_scope !== "session" && continuePlayingRef.current) {
         advanceRef.current();
       }
       triggerPreloadIfNeeded(snap);

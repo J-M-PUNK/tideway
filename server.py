@@ -5599,6 +5599,7 @@ def _tcr_snapshot(track_id: Optional[str] = None) -> dict:
             "volume": 100,
             "muted": False,
             "error": None,
+            "error_scope": None,
             "seq": 0,
             "stream_info": None,
             "force_volume": False,
@@ -5624,6 +5625,13 @@ def _tcr_snapshot(track_id: Optional[str] = None) -> dict:
         "muted": bool(rs.get("muted")),
         "error": (f"Tidal Connect {rs["error"]["command"]} failed "
                   f"(code {rs["error"]["code"]})") if rs.get("error") else None,
+        # Session/socket failures describe the receiver connection, not
+        # an unplayable track. Don't let Continue Playing skip the queue.
+        "error_scope": (
+            "session" if rs.get("error", {}).get("command") in
+            ("notifySessionError", "connectionLost") else
+            "track" if rs.get("error") else None
+        ),
         "seq": int(rs.get("seq") or 0),
         "stream_info": None,
         "force_volume": False,
