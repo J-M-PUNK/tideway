@@ -398,10 +398,15 @@ describe("player SSE output changes", () => {
 
       act(() => stream!.emit(snapshot(400, 40000)));
       expect(latest!.currentTime).toBe(40);
+      expect(latest!.volume).toBe(0.2);
 
       // The WiiM owns a separate clock; its seq 3 follows local seq 400.
-      act(() => stream!.emit(snapshot(3, 3000, "wiim")));
+      act(() =>
+        stream!.emit({ ...snapshot(3, 3000, "wiim"), volume: 40, muted: true }),
+      );
       expect(latest!.currentTime).toBe(3);
+      expect(latest!.volume).toBe(0.4);
+      expect(latest!.muted).toBe(true);
 
       act(() => stream!.emit(snapshot(2, 99000, "wiim")));
       expect(latest!.currentTime).toBe(3);
@@ -412,6 +417,8 @@ describe("player SSE output changes", () => {
 
       act(() => stream!.emit(snapshot(401, 41000)));
       expect(latest!.currentTime).toBe(41);
+      expect(latest!.volume).toBe(0.2);
+      expect(latest!.muted).toBe(false);
 
       act(() => stream!.emit(snapshot(400, 99000)));
       expect(latest!.currentTime).toBe(41);
@@ -422,4 +429,94 @@ describe("player SSE output changes", () => {
       vi.unstubAllGlobals();
     }
   });
+});
+
+describe("receiver errors while paused", () => {
+  it.each(["session", "track"] as const)(
+    "only skips a %s error if it applies to a track",
+    async (scope) => {
+      let emit: (snapshot: PlayerSnapshot) => void = () => {};
+      class ReplayEventSource {
+        static CLOSED = 2;
+        onmessage: ((event: { data: string }) => void) | null = null;
+        onerror = null;
+        readyState = 1;
+        close = vi.fn();
+        constructor(url: string) {
+          if (url === "/api/player/events") {
+            emit = (snapshot) =>
+              this.onmessage?.({ data: JSON.stringify(snapshot) });
+          }
+        }
+      }
+      vi.stubGlobal("EventSource", ReplayEventSource);
+      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+      const storage = new Map<string, string>();
+      vi.stubGlobal("localStorage", {
+        getItem: (key: string) => storage.get(key) ?? null,
+        setItem: (key: string, value: string) => storage.set(key, value),
+        removeItem: (key: string) => storage.delete(key),
+      });
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue({ ok: true, json: async () => ({}) }),
+      );
+      const paused: PlayerSnapshot = {
+        seq: 1,
+        output_id: "receiver",
+        state: "paused",
+        track_id: "1",
+        position_ms: 5000,
+        duration_ms: 180000,
+        volume: 20,
+        muted: false,
+        error: null,
+        stream_info: null,
+      };
+      const play = vi.spyOn(api.player, "playTrack").mockResolvedValue(paused);
+      vi.spyOn(api.player, "preloadClear").mockResolvedValue({ ok: true });
+      vi.spyOn(api.nowPlayingState, "get").mockResolvedValue({ state: null });
+      vi.spyOn(api.settings, "get").mockRejectedValue(new Error("offline"));
+      const container = document.createElement("div");
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      let latest: ReturnType<typeof usePlayer> | undefined;
+      function Probe() {
+        latest = usePlayer();
+        return null;
+      }
+      try {
+        await act(async () => root.render(createElement(Probe)));
+        await act(async () =>
+          latest!.play(_track("1"), [_track("1"), _track("2")]),
+        );
+        await act(async () => emit(paused));
+        expect(latest!.playing).toBe(false);
+        play.mockClear();
+        await act(async () =>
+          emit({
+            ...paused,
+            seq: 2,
+            state: "error",
+            error: "Receiver error",
+            error_scope: scope,
+          }),
+        );
+        if (scope === "session") {
+          expect(play).not.toHaveBeenCalled();
+          expect(latest!.track!.id).toBe("1");
+          expect(latest!.playing).toBe(false);
+          expect(latest!.error).toBe("Receiver error");
+        } else {
+          expect(play).toHaveBeenCalledOnce();
+          expect(play.mock.calls[0][0]).toBe("2");
+        }
+      } finally {
+        act(() => root.unmount());
+        container.remove();
+        vi.restoreAllMocks();
+        vi.unstubAllGlobals();
+      }
+    },
+  );
 });

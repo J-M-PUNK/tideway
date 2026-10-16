@@ -9,6 +9,7 @@ from app.audio import tidal_connect_real
 def receiver(monkeypatch):
     mgr = Mock()
     mgr.is_active.return_value = True
+    mgr.get_connection.return_value = object()
     mgr.remote_state.return_value = {
         'player_state': 'PAUSED', 'position_ms': 12000, 'duration_ms': 180000,
         'volume': 0, 'muted': True, 'seq': 3, 'device_id': 'wiim-test',
@@ -54,3 +55,25 @@ def test_dead_receiver_selection_does_not_fall_back_to_local(receiver, monkeypat
     monkeypatch.setattr(server, '_native_player', lambda: local)
     assert server.player_state()['state'] == 'error'
     local.snapshot.assert_not_called()
+
+
+@pytest.mark.parametrize('command,scope', [
+    ('connectionLost', 'session'), ('notifySessionError', 'session'),
+    ('notifyQueueServerError', 'session'), ('notifyPlaybackError', 'track'),
+    ('notifyContentServerError', 'track'),
+])
+def test_receiver_error_scope(receiver, command, scope):
+    receiver.remote_state.return_value['error'] = {'command': command, 'code': 1002}
+    assert server.player_state()['error_scope'] == scope
+
+
+def test_healthy_receiver_has_no_error_scope(receiver):
+    assert server.player_state()['error_scope'] is None
+
+
+@pytest.mark.parametrize('endpoint', [server.player_play, server.player_resume])
+def test_resume_passes_persisted_fallback_to_manager(receiver, monkeypatch, endpoint):
+    monkeypatch.setattr(server.now_playing_state, 'read_state', lambda: {'track': {'id': '456'}})
+    endpoint()
+    receiver.resume.assert_called_once_with(456)
+    receiver.load_track.assert_not_called()

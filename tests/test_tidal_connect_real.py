@@ -359,9 +359,7 @@ def test_remote_errors_retain_only_safe_codes_and_do_not_unmute_local_audio():
         "details": {"description": "sensitive-server-body"},
     })
     manager._record_notification({"command": "connectionLost"})
-    assert manager.remote_state()["error"] == {
-        "command": "notifyContentServerError", "code": 1012,
-    }
+    assert manager.remote_state()["error"] == {"command": "connectionLost", "code": None}
     assert "sensitive" not in str(manager.remote_state())
     silencer.assert_not_called()
 
@@ -488,3 +486,134 @@ def test_legacy_load_media_remains_available():
         loop.run_until_complete(task)
     finally:
         loop.close()
+
+
+def test_new_media_clears_a_previous_track_error():
+    manager = tcr.TidalConnectRealManager(lambda: None, lambda _: None)
+    manager._record_notification({'command': 'notifyPlaybackError', 'errorCode': 1002})
+    manager._record_notification({
+        'command': 'notifyMediaChanged', 'mediaInfo': {'mediaId': '456'},
+    })
+    assert manager.remote_state()['error'] is None
+
+
+def test_session_error_survives_media_notifications_and_socket_close():
+    manager = tcr.TidalConnectRealManager(lambda: None, lambda _: None)
+    manager._record_notification({'command': 'notifySessionError', 'errorCode': 1001})
+    manager._record_notification({'command': 'notifyMediaChanged', 'mediaInfo': {'mediaId': '456'}})
+    manager._record_notification({'command': 'connectionLost'})
+    assert manager.remote_state()['error'] == {'command': 'notifySessionError', 'code': 1001}
+
+
+def test_failed_reconnect_keeps_output_selected_and_allows_retry(monkeypatch):
+    async def check():
+        manager = tcr.TidalConnectRealManager(lambda: None, lambda _: None)
+        manager._loop = asyncio.get_running_loop()
+        old, _ = _make_connection_with_fake_socket()
+        old.close = AsyncMock()
+        manager._connection = old
+        failed, _ = _make_connection_with_fake_socket()
+        failed.open = AsyncMock(side_effect=ConnectionError('offline'))
+        failed.close = AsyncMock()
+        recovered, _ = _make_connection_with_fake_socket()
+        recovered.open = AsyncMock()
+        recovered.play = AsyncMock(return_value={'resultCode': 0})
+        monkeypatch.setattr(tcr, 'TidalConnectConnection', MagicMock(side_effect=[failed, recovered]))
+
+        with pytest.raises(ConnectionError, match='offline'):
+            await asyncio.to_thread(manager.play)
+        assert manager.get_connection() is failed
+        assert manager.remote_state()['device_id'] == old.device.id
+        assert manager.remote_state()['error']['command'] == 'connectionLost'
+
+        assert await asyncio.to_thread(manager.play) == {'resultCode': 0}
+        recovered.play.assert_awaited_once()
+    asyncio.run(check())
+
+
+def test_concurrent_commands_share_one_reconnect(monkeypatch):
+    async def check():
+        manager = tcr.TidalConnectRealManager(lambda: None, lambda _: None)
+        manager._loop = asyncio.get_running_loop()
+        old, _ = _make_connection_with_fake_socket()
+        old.close = AsyncMock()
+        manager._connection = old
+        recovered, _ = _make_connection_with_fake_socket()
+        opened = asyncio.Event()
+        release = asyncio.Event()
+
+        async def open_connection():
+            opened.set()
+            await release.wait()
+            recovered._session_id = 'reconnected'
+            recovered._receiver_task = asyncio.create_task(asyncio.sleep(3600))
+
+        recovered.open = AsyncMock(side_effect=open_connection)
+        recovered.play = AsyncMock(return_value={'resultCode': 0})
+        recovered.set_volume = AsyncMock(return_value={'resultCode': 0})
+        factory = MagicMock(return_value=recovered)
+        monkeypatch.setattr(tcr, 'TidalConnectConnection', factory)
+        first = asyncio.create_task(asyncio.to_thread(manager.play))
+        await opened.wait()
+        second = asyncio.create_task(asyncio.to_thread(manager.set_volume, 20))
+        release.set()
+        try:
+            await asyncio.gather(first, second)
+            assert factory.call_count == 1
+            recovered.play.assert_awaited_once()
+            recovered.set_volume.assert_awaited_once_with(20)
+        finally:
+            recovered._receiver_task.cancel()
+            await asyncio.gather(recovered._receiver_task, return_exceptions=True)
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize('remote_state,reconnect', [('PAUSED', True), ('IDLE', False)])
+def test_resume_restores_receiver_track_and_position_after_session_loss(monkeypatch, remote_state, reconnect):
+    async def check():
+        manager = tcr.TidalConnectRealManager(lambda: None, lambda _: None)
+        manager._loop = asyncio.get_running_loop()
+        conn, _ = _make_connection_with_fake_socket()
+        manager._connection = conn
+        conn.is_active = MagicMock(return_value=not reconnect)
+        conn.play = AsyncMock(return_value={'resultCode': 0})
+        conn.load_cloud_queue = AsyncMock(return_value={'resultCode': 0})
+        manager._remote_state.update(
+            player_state=remote_state, position_ms=12000, duration_ms=180000,
+            media_info={'mediaId': '123'}, device_id=conn.device.id,
+        )
+        payload = _cloud_queue_payload()
+        resolver = MagicMock(return_value=payload)
+        manager.set_track_url_resolver(resolver)
+
+        async def reconnect_device(device):
+            replacement, _ = _make_connection_with_fake_socket()
+            replacement.play = conn.play
+            replacement.load_cloud_queue = conn.load_cloud_queue
+            manager._connection = replacement
+            manager._record_notification({'command': 'notifyPlayerStatusChanged', 'playerState': 'IDLE', 'progress': 0})
+
+        manager._connect_device = reconnect_device
+        await asyncio.to_thread(manager.resume, 456)
+        resolver.assert_called_once_with(123)
+        conn.load_cloud_queue.assert_awaited_once_with({**payload, 'position': 12000})
+        conn.play.assert_awaited_once()
+        assert payload['position'] == 0
+    asyncio.run(check())
+
+
+def test_resume_of_live_paused_queue_does_not_reload():
+    async def check():
+        manager = tcr.TidalConnectRealManager(lambda: None, lambda _: None)
+        manager._loop = asyncio.get_running_loop()
+        conn, _ = _make_connection_with_fake_socket()
+        conn.is_active = MagicMock(return_value=True)
+        conn.play = AsyncMock(return_value={'resultCode': 0})
+        manager._connection = conn
+        manager._remote_state['player_state'] = 'PAUSED'
+        resolver = MagicMock()
+        manager.set_track_url_resolver(resolver)
+        await asyncio.to_thread(manager.resume, 456)
+        resolver.assert_not_called()
+        conn.play.assert_awaited_once()
+    asyncio.run(check())

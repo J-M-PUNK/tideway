@@ -299,6 +299,8 @@ class TidalConnectConnection:
             # a missing pong must eventually close the transport.
             ping_interval=15,
             ping_timeout=16,
+            open_timeout=10,
+            close_timeout=2,
         )
         # Spawn the receiver task before sending startSession so its
         # response is captured.
@@ -563,6 +565,9 @@ class TidalConnectRealManager:
     _devices: dict[str, DiscoveredDevice] = field(default_factory=dict, init=False)
     _devices_lock: threading.Lock = field(default_factory=threading.Lock, init=False)
     _connection: Optional[TidalConnectConnection] = field(default=None, init=False)
+    # All connection replacement and commands run on _loop under this
+    # lock. HTTP controls may arrive concurrently from different threads.
+    _command_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _loop: Optional[asyncio.AbstractEventLoop] = field(default=None, init=False)
     _loop_thread: Optional[threading.Thread] = field(default=None, init=False)
     _zeroconf: Any = field(default=None, init=False)
@@ -637,6 +642,9 @@ class TidalConnectRealManager:
                     self._remote_state["muted"] = mute
             elif cmd in ("notifyMediaChanged", "notifyMediaInfoChanged"):
                 self._remote_state["media_info"] = frame.get("mediaInfo")
+                error = self._remote_state.get("error") or {}
+                if error.get("command") in ("notifyPlaybackError", "notifyContentServerError"):
+                    self._remote_state["error"] = None
                 meta = (frame.get("mediaInfo") or {}).get("metadata") or {}
                 duration = meta.get("duration")
                 if isinstance(duration, (int, float)):
@@ -659,7 +667,8 @@ class TidalConnectRealManager:
             elif cmd in ("notifySessionEnded", "connectionLost"):
                 self._remote_state["session_id"] = None
                 self._remote_state["player_state"] = "IDLE"
-                if cmd == "connectionLost" and self._remote_state["error"] is None:
+                error = self._remote_state.get("error") or {}
+                if cmd == "connectionLost" and error.get("command") != "notifySessionError":
                     self._remote_state["error"] = {"command": cmd, "code": None}
 
     def _toggle_silencer(self, active: bool) -> None:
@@ -747,6 +756,25 @@ class TidalConnectRealManager:
             else:
                 raise KeyError(f"unknown device: {device_id}")
 
+        async def _do_connect() -> None:
+            async with self._command_lock:
+                await self._connect_device(device)
+
+        future = asyncio.run_coroutine_threadsafe(_do_connect(), self._loop)
+        try:
+            future.result(timeout=20.0)
+        except TimeoutError:
+            future.cancel()
+            raise
+
+    async def _connect_device(self, device: DiscoveredDevice) -> None:
+        """Replace the transport while retaining the selected output on failure.
+
+        Caller holds _command_lock on the manager loop.
+        """
+        if self._connection is not None:
+            await self._connection.close()
+
         # Notification wrapper: record into remote_state first, then
         # forward to the user-supplied callback. The wrapper is what
         # the connection sees, so internal state stays current even
@@ -760,48 +788,58 @@ class TidalConnectRealManager:
                     "tidal_connect_real: on_notification raised: %s", exc,
                 )
 
-        async def _do_connect() -> None:
-            if self._connection is not None:
-                await self._connection.close()
-                self._connection = None
-            conn = TidalConnectConnection(
-                device=device,
-                token_provider=self.token_provider,
-                on_notification=_tap,
-            )
-            await conn.open()
-            self._connection = conn
-
-        future = asyncio.run_coroutine_threadsafe(_do_connect(), self._loop)
-        future.result(timeout=15.0)
+        conn = TidalConnectConnection(
+            device=device,
+            token_provider=self.token_provider,
+            on_notification=_tap,
+        )
+        self._connection = conn
         with self._remote_state_lock:
+            if self._remote_state["device_id"] != device.id:
+                self._remote_state.update(
+                    player_state="IDLE", position_ms=0, duration_ms=0,
+                    media_info=None, volume=100, muted=False, error=None,
+                )
             self._remote_state["device_id"] = device.id
+            self._remote_state["session_id"] = None
+            self._remote_state["seq"] += 1
+        try:
+            await conn.open()
+        except BaseException:
+            self._record_notification({"command": "connectionLost"})
+            raise
         self._toggle_silencer(True)
 
     def disconnect(self) -> None:
-        if self._loop is None or self._connection is None:
+        if self._loop is None:
             return
+
+        async def _do_disconnect() -> None:
+            async with self._command_lock:
+                if self._connection is not None:
+                    await self._connection.close()
+                self._connection = None
+                self._toggle_silencer(False)
+                with self._remote_state_lock:
+                    self._remote_state.update({
+                        "player_state": "IDLE",
+                        "position_ms": 0,
+                        "duration_ms": 0,
+                        "media_info": None,
+                        "session_id": None,
+                        "device_id": None,
+                        "error": None,
+                        "seq": self._remote_state["seq"] + 1,
+                    })
+
         future = asyncio.run_coroutine_threadsafe(
-            self._connection.close(), self._loop
+            _do_disconnect(), self._loop
         )
         try:
-            future.result(timeout=5.0)
-        except Exception:
-            pass
-        self._connection = None
-        self._toggle_silencer(False)
-        with self._remote_state_lock:
-            # Reset remote-state so the snapshot endpoint reports
-            # idle once the session is gone.
-            self._remote_state.update({
-                "player_state": "IDLE",
-                "position_ms": 0,
-                "duration_ms": 0,
-                "media_info": None,
-                "session_id": None,
-                "device_id": None,
-                "error": None,
-            })
+            future.result(timeout=25.0)
+        except TimeoutError:
+            future.cancel()
+            raise
 
     def get_connection(self) -> Optional[TidalConnectConnection]:
         """Returns the current connection so the player can call
@@ -813,23 +851,26 @@ class TidalConnectRealManager:
 
     # -- sync command wrappers -----------------------------------------------
     # Each dispatches the connection's async method onto the manager's
-    # event-loop thread and waits for the result. Times out at 5s; the
-    # device should ack a command within a couple hundred ms. Anything
-    # beyond that means a wedged WSS, and we'd rather raise than hang
-    # the request thread indefinitely.
+    # event-loop thread. The outer deadline includes closing an old
+    # session (4s + 2s transport close), opening a new one (10s + 4s
+    # handshake), and the command's own 4s deadline.
 
-    def _call(self, coro_factory: Callable[[], Any], timeout: float = 5.0) -> dict:
+    def _call(self, coro_factory: Callable[[], Any], timeout: float = 25.0) -> dict:
         if self._loop is None:
             raise RuntimeError("manager not started")
-        if not self.is_active():
-            selected = self._connection
-            if selected is None:
-                raise RuntimeError("no Tidal Connect device selected")
-            # The device can close an otherwise healthy WebSocket after
-            # idling. Re-establish the selected session before dispatching
-            # the user's command so Play/Resume can recover its queue.
-            self.connect(selected.device.id)
-        future = asyncio.run_coroutine_threadsafe(coro_factory(), self._loop)
+
+        async def _dispatch() -> dict:
+            async with self._command_lock:
+                selected = self._connection
+                if selected is None:
+                    raise RuntimeError("no Tidal Connect device selected")
+                if not selected.is_active():
+                    with self._devices_lock:
+                        device = self._devices.get(selected.device.id, selected.device)
+                    await self._connect_device(device)
+                return await coro_factory()
+
+        future = asyncio.run_coroutine_threadsafe(_dispatch(), self._loop)
         try:
             return future.result(timeout=timeout)
         except TimeoutError:
@@ -838,6 +879,33 @@ class TidalConnectRealManager:
 
     def play(self) -> dict:
         return self._call(lambda: self._connection.play())  # type: ignore[union-attr]
+
+    def resume(self, fallback_track_id: Optional[int] = None) -> dict:
+        """Resume the receiver's track, restoring its queue after session loss."""
+        selected = self._connection
+        saved = self.remote_state()
+
+        async def _resume() -> dict:
+            remote = self.remote_state()
+            if self._connection is not selected or remote.get("player_state") in ("IDLE", "ERROR"):
+                media = saved.get("media_info") or {}
+                try:
+                    track_id = int(media.get("mediaId") or fallback_track_id or 0)
+                except (TypeError, ValueError):
+                    track_id = 0
+                if track_id <= 0 or self._track_url_resolver is None:
+                    raise RuntimeError("No current Tidal Connect track to resume")
+                payload = await asyncio.to_thread(self._track_url_resolver, track_id)
+                position = int(saved.get("position_ms") or 0)
+                duration = int(saved.get("duration_ms") or 0)
+                # The saved clock belongs to the receiver's media, not
+                # an unrelated persisted fallback from local playback.
+                if str(media.get("mediaId")) == str(track_id) and 0 < position < duration:
+                    payload = {**payload, "position": position}
+                await self._connection.load_cloud_queue(payload)
+            return await self._connection.play()
+
+        return self._call(_resume)
 
     def pause(self) -> dict:
         return self._call(lambda: self._connection.pause())  # type: ignore[union-attr]

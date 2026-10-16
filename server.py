@@ -5605,6 +5605,7 @@ def _tcr_snapshot(track_id: Optional[str] = None) -> dict:
             "force_volume": False,
         }
     rs = mgr.remote_state()
+    error = rs.get("error") or {}
     # Map device's PLAYING / PAUSED / STOPPED / IDLE to the local
     # player_state vocab (playing / paused / idle / ended). The
     # frontend matches on "playing" / "paused" exactly; everything
@@ -5616,21 +5617,21 @@ def _tcr_snapshot(track_id: Optional[str] = None) -> dict:
         else "idle"
     )
     return {
-        "state": "error" if rs.get("error") else state,
+        "state": "error" if error else state,
         "track_id": track_id or str((rs.get("media_info") or {}).get("mediaId") or "") or None,
         "output_id": rs.get("device_id") or "tidal-connect",
         "position_ms": int(rs.get("position_ms") or 0),
         "duration_ms": int(rs.get("duration_ms") or 0),
         "volume": int(rs.get("volume", 100)),
         "muted": bool(rs.get("muted")),
-        "error": (f"Tidal Connect {rs["error"]["command"]} failed "
-                  f"(code {rs["error"]["code"]})") if rs.get("error") else None,
+        "error": (f"Tidal Connect {error['command']} failed "
+                  f"(code {error['code']})") if error else None,
         # Session/socket failures describe the receiver connection, not
         # an unplayable track. Don't let Continue Playing skip the queue.
         "error_scope": (
-            "session" if rs.get("error", {}).get("command") in
-            ("notifySessionError", "connectionLost") else
-            "track" if rs.get("error") else None
+            "track" if error.get("command") in
+            ("notifyPlaybackError", "notifyContentServerError") else
+            "session" if error else None
         ),
         "seq": int(rs.get("seq") or 0),
         "stream_info": None,
@@ -5645,20 +5646,16 @@ def _tcr_play_or_resume() -> None:
     mgr = get_manager()
     if mgr is None:
         raise RuntimeError("Tidal Connect manager is unavailable")
-    remote = mgr.remote_state()
-    if remote.get("player_state") in ("IDLE", "ERROR"):
-        persisted = now_playing_state.read_state() or {}
-        track_id = persisted.get("trackId")
-        if track_id is None:
-            track = persisted.get("track")
-            track_id = track.get("id") if isinstance(track, dict) else None
-        try:
-            track_id = int(track_id)
-        except (TypeError, ValueError):
-            track_id = None
-        if track_id is not None and track_id > 0:
-            mgr.load_track(track_id)
-    mgr.play()
+    persisted = now_playing_state.read_state() or {}
+    track_id = persisted.get("trackId")
+    if track_id is None:
+        track = persisted.get("track")
+        track_id = track.get("id") if isinstance(track, dict) else None
+    try:
+        track_id = int(track_id)
+    except (TypeError, ValueError):
+        track_id = None
+    mgr.resume(track_id)
 
 
 def _current_player_snapshot(snap=None) -> dict:
@@ -6172,7 +6169,6 @@ def player_dismiss_pause_reason() -> dict:
 def player_play() -> dict:
     _require_local_access()
     if _tcr_active():
-        from app.audio.tidal_connect_real import get_manager as _tcr_get
         try:
             _tcr_play_or_resume()
         except Exception as exc:
@@ -6224,7 +6220,6 @@ def player_pause() -> dict:
 def player_resume() -> dict:
     _require_local_access()
     if _tcr_active():
-        from app.audio.tidal_connect_real import get_manager as _tcr_get
         try:
             _tcr_play_or_resume()
         except Exception as exc:
@@ -7833,6 +7828,8 @@ def _should_forward_snapshot(
     state: Optional[str],
     position_ms: Optional[int] = None,
     last_position: Optional[int] = None,
+    output_id: Optional[str] = None,
+    last_output_id: Optional[str] = None,
 ) -> bool:
     """Whether a polled snapshot should be sent, given what we already
     put on the wire.
@@ -7847,7 +7844,7 @@ def _should_forward_snapshot(
     frontend clock. The client's own monotonic seq guard makes repeat
     frames a no-op where they are not needed.
     """
-    if seq != last_seq:
+    if output_id != last_output_id or seq != last_seq:
         return True
     if position_ms is not None and position_ms != last_position:
         return True
@@ -7912,6 +7909,7 @@ async def player_events(request: Request):
             yield f"data: {json.dumps(_current_player_snapshot())}\n\n"
             last_seq = -1
             last_position: Optional[int] = None
+            last_output_id: Optional[str] = None
             while True:
                 if await request.is_disconnected():
                     break
@@ -7933,6 +7931,8 @@ async def player_events(request: Request):
                     payload.get("state"),
                     position_ms,
                     last_position,
+                    payload.get("output_id"),
+                    last_output_id,
                 ):
                     # Dedupe keepalive ticks while nothing actionable is
                     # pending. States the client must respond to
@@ -7941,6 +7941,7 @@ async def player_events(request: Request):
                     continue
                 last_seq = seq
                 last_position = position_ms
+                last_output_id = payload.get("output_id")
                 yield f"data: {json.dumps(payload)}\n\n"
         finally:
             unsubscribe()
