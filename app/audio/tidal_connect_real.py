@@ -739,7 +739,13 @@ class TidalConnectRealManager:
         with self._devices_lock:
             device = self._devices.get(device_id)
         if device is None:
-            raise KeyError(f"unknown device: {device_id}")
+            selected = self._connection
+            if selected is not None and selected.device.id == device_id:
+                # Keep a selected receiver reconnectable while mDNS is
+                # temporarily absent; it may still be reachable by IP.
+                device = selected.device
+            else:
+                raise KeyError(f"unknown device: {device_id}")
 
         # Notification wrapper: record into remote_state first, then
         # forward to the user-supplied callback. The wrapper is what
@@ -816,7 +822,13 @@ class TidalConnectRealManager:
         if self._loop is None:
             raise RuntimeError("manager not started")
         if not self.is_active():
-            raise RuntimeError("no active TC session")
+            selected = self._connection
+            if selected is None:
+                raise RuntimeError("no Tidal Connect device selected")
+            # The device can close an otherwise healthy WebSocket after
+            # idling. Re-establish the selected session before dispatching
+            # the user's command so Play/Resume can recover its queue.
+            self.connect(selected.device.id)
         future = asyncio.run_coroutine_threadsafe(coro_factory(), self._loop)
         try:
             return future.result(timeout=timeout)
