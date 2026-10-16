@@ -5606,22 +5606,23 @@ def _tcr_snapshot(track_id: Optional[str] = None) -> dict:
         }
     rs = mgr.remote_state()
     error = rs.get("error") or {}
-    # Map device's PLAYING / PAUSED / STOPPED / IDLE to the local
-    # player_state vocab (playing / paused / idle / ended). The
-    # frontend matches on "playing" / "paused" exactly; everything
-    # else collapses to "idle".
+    media_id = str((rs.get("media_info") or {}).get("mediaId") or "") or None
+    position_ms = int(rs.get("position_ms") or 0)
+    duration_ms = int(rs.get("duration_ms") or 0)
+    # WiiM parks at PAUSED with progress at/past duration when its
+    # single-item cloud queue finishes. Report that receiver-confirmed
+    # boundary as ended so the frontend advances its album queue.
+    # Neither an ordinary pause nor an idle/lost session implies EOF.
     ps = rs.get("player_state", "IDLE")
-    state = (
-        "playing" if ps == "PLAYING"
-        else "paused" if ps == "PAUSED"
-        else "idle"
-    )
+    state = {"PLAYING": "playing", "PAUSED": "paused"}.get(ps, "idle")
+    if ps == "PAUSED" and media_id and duration_ms > 0 and position_ms >= duration_ms:
+        state = "ended"
     return {
         "state": "error" if error else state,
-        "track_id": track_id or str((rs.get("media_info") or {}).get("mediaId") or "") or None,
+        "track_id": track_id or media_id,
         "output_id": rs.get("device_id") or "tidal-connect",
-        "position_ms": int(rs.get("position_ms") or 0),
-        "duration_ms": int(rs.get("duration_ms") or 0),
+        "position_ms": position_ms,
+        "duration_ms": duration_ms,
         "volume": int(rs.get("volume", 100)),
         "muted": bool(rs.get("muted")),
         "error": (f"Tidal Connect {error['command']} failed "

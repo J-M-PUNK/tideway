@@ -431,9 +431,9 @@ describe("player SSE output changes", () => {
   });
 });
 
-describe("receiver errors while paused", () => {
-  it.each(["session", "track"] as const)(
-    "only skips a %s error if it applies to a track",
+describe("receiver queue advancement", () => {
+  it.each(["session", "track", "ended", "pause"] as const)(
+    "advances only on track errors and completion (%s)",
     async (scope) => {
       let emit: (snapshot: PlayerSnapshot) => void = () => {};
       class ReplayEventSource {
@@ -488,28 +488,49 @@ describe("receiver errors while paused", () => {
       try {
         await act(async () => root.render(createElement(Probe)));
         await act(async () =>
-          latest!.play(_track("1"), [_track("1"), _track("2")]),
+          latest!.play(_track("1"), [_track("1"), _track("2"), _track("3")]),
         );
         await act(async () => emit(paused));
         expect(latest!.playing).toBe(false);
         play.mockClear();
-        await act(async () =>
-          emit({
-            ...paused,
-            seq: 2,
-            state: "error",
-            error: "Receiver error",
-            error_scope: scope,
-          }),
-        );
-        if (scope === "session") {
+        if (scope === "ended") {
+          // Within-album advancement must work even with auto-radio off.
+          window.dispatchEvent(
+            new CustomEvent("tidal-settings-updated", {
+              detail: { continue_playing_after_queue_ends: false },
+            }),
+          );
+        }
+        const update: PlayerSnapshot = {
+          ...paused,
+          seq: 2,
+          state:
+            scope === "ended"
+              ? "ended"
+              : scope === "pause"
+                ? "paused"
+                : "error",
+          error:
+            scope === "session" || scope === "track" ? "Receiver error" : null,
+          error_scope: scope === "session" || scope === "track" ? scope : null,
+        };
+        await act(async () => emit(update));
+        if (scope === "session" || scope === "pause") {
           expect(play).not.toHaveBeenCalled();
           expect(latest!.track!.id).toBe("1");
           expect(latest!.playing).toBe(false);
-          expect(latest!.error).toBe("Receiver error");
+          expect(latest!.error).toBe(
+            scope === "session" ? "Receiver error" : null,
+          );
         } else {
           expect(play).toHaveBeenCalledOnce();
           expect(play.mock.calls[0][0]).toBe("2");
+          if (scope === "ended") {
+            await act(async () => emit(update));
+            await act(async () => emit({ ...update, seq: 3 }));
+            expect(play).toHaveBeenCalledOnce();
+            expect(latest!.queueIndex).toBe(1);
+          }
         }
       } finally {
         act(() => root.unmount());

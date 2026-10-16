@@ -77,3 +77,36 @@ def test_resume_passes_persisted_fallback_to_manager(receiver, monkeypatch, endp
     endpoint()
     receiver.resume.assert_called_once_with(456)
     receiver.load_track.assert_not_called()
+
+
+@pytest.mark.parametrize('player_state,position,duration,expected', [
+    ('PAUSED', 237653, 237000, 'ended'),  # observed WiiM completion
+    ('PAUSED', 237000, 237000, 'ended'),
+    ('PAUSED', 236999, 237000, 'paused'),
+    ('PAUSED', 12000, 237000, 'paused'),
+    ('PAUSED', 0, 0, 'paused'),
+    ('PLAYING', 237653, 237000, 'playing'),
+    ('IDLE', 237653, 237000, 'idle'),
+])
+def test_receiver_completion_requires_pause_at_known_track_end(receiver, player_state, position, duration, expected):
+    receiver.remote_state.return_value.update(
+        player_state=player_state, position_ms=position, duration_ms=duration,
+    )
+    assert server.player_state()['state'] == expected
+
+
+def test_connection_loss_at_track_end_does_not_complete_or_advance(receiver):
+    receiver.remote_state.return_value.update(
+        player_state='IDLE', position_ms=237653, duration_ms=237000,
+        error={'command': 'connectionLost', 'code': None},
+    )
+    snapshot = server.player_state()
+    assert snapshot['state'] == 'error'
+    assert snapshot['error_scope'] == 'session'
+
+
+def test_paused_receiver_without_media_identity_does_not_complete(receiver):
+    receiver.remote_state.return_value.update(
+        media_info=None, position_ms=237653, duration_ms=237000,
+    )
+    assert server.player_state()['state'] == 'paused'
