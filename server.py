@@ -5630,6 +5630,29 @@ def _tcr_snapshot(track_id: Optional[str] = None) -> dict:
     }
 
 
+def _tcr_play_or_resume() -> None:
+    """Resume playback, rebuilding the queue if the receiver lost it."""
+    from app.audio.tidal_connect_real import get_manager
+
+    mgr = get_manager()
+    if mgr is None:
+        raise RuntimeError("Tidal Connect manager is unavailable")
+    remote = mgr.remote_state()
+    if remote.get("player_state") in ("IDLE", "ERROR"):
+        persisted = now_playing_state.read_state() or {}
+        track_id = persisted.get("trackId")
+        if track_id is None:
+            track = persisted.get("track")
+            track_id = track.get("id") if isinstance(track, dict) else None
+        try:
+            track_id = int(track_id)
+        except (TypeError, ValueError):
+            track_id = None
+        if track_id is not None and track_id > 0:
+            mgr.load_track(track_id)
+    mgr.play()
+
+
 def _current_player_snapshot(snap=None) -> dict:
     """Report the selected receiver, rather than the muted local engine."""
     if _tcr_active():
@@ -6143,7 +6166,7 @@ def player_play() -> dict:
     if _tcr_active():
         from app.audio.tidal_connect_real import get_manager as _tcr_get
         try:
-            _tcr_get().play()  # type: ignore[union-attr]
+            _tcr_play_or_resume()
         except Exception as exc:
             raise HTTPException(
                 status_code=502, detail=f"Tidal Connect: {exc}"
@@ -6195,7 +6218,7 @@ def player_resume() -> dict:
     if _tcr_active():
         from app.audio.tidal_connect_real import get_manager as _tcr_get
         try:
-            _tcr_get().play()  # type: ignore[union-attr]
+            _tcr_play_or_resume()
         except Exception as exc:
             raise HTTPException(
                 status_code=502, detail=f"Tidal Connect: {exc}"
