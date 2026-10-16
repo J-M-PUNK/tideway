@@ -617,3 +617,82 @@ def test_resume_of_live_paused_queue_does_not_reload():
         resolver.assert_not_called()
         conn.play.assert_awaited_once()
     asyncio.run(check())
+
+
+def _receiver_queue_manager():
+    from app.audio.tidal_connect_queue import CloudQueue, QueueContext, QueueProvider
+    manager = tcr.TidalConnectRealManager(lambda: None, lambda _: None)
+    conn, _ = _make_connection_with_fake_socket()
+    for method in ('load_cloud_queue', 'select_queue_item', 'play', 'refresh_queue', 'set_repeat_mode'):
+        setattr(conn, method, AsyncMock(return_value={'resultCode': 0}))
+    manager._connection = conn
+    manager._call = lambda factory: asyncio.run(factory())
+    ctx = QueueContext((123, 456, 123), (0, 1, 2), 0, 'off', 'revision')
+    cloud = CloudQueue({'queueInfo': {'queueId': 'queue'}}, ('a', 'b', 'c'), (123, 456, 123), 0)
+    provider = QueueProvider(MagicMock(return_value=cloud), MagicMock(return_value=cloud), MagicMock(return_value={'itemId': 'c'}))
+    manager.set_queue_provider(provider)
+    manager._store_queue(ctx, cloud)
+    manager._remote_state.update(media_info={'mediaId': '123', 'itemId': 'c'}, player_state='PAUSED', position_ms=5000)
+    return manager, conn, ctx, cloud, provider
+
+
+def test_receiver_item_identity_selects_duplicate_queue_position():
+    manager, _, _, _, _ = _receiver_queue_manager()
+    state = manager.remote_state()
+    assert state['queue_index'] == 2
+    assert state['queue_has_next'] is False
+    assert state['queue_token'] == 'revision'
+
+
+def test_skip_inside_owned_queue_does_not_create_or_load_new_queue():
+    from dataclasses import replace
+    manager, conn, ctx, _, provider = _receiver_queue_manager()
+    manager.play_queue(replace(ctx, index=2))
+    provider.media_info.assert_called_once_with(123, 'c')
+    conn.select_queue_item.assert_awaited_once_with({'itemId': 'c'})
+    conn.play.assert_awaited_once()
+    provider.create.assert_not_called()
+    conn.load_cloud_queue.assert_not_awaited()
+
+
+def test_paused_queue_edit_refreshes_without_play_or_reload():
+    from dataclasses import replace
+    manager, conn, ctx, cloud, provider = _receiver_queue_manager()
+    edited = replace(ctx, repeat='all', index=2, token='edited')
+    manager.update_queue(edited)
+    provider.update.assert_called_once_with(cloud, [123, 456, 123], 2, 'c')
+    conn.set_repeat_mode.assert_awaited_once_with('ALL')
+    conn.refresh_queue.assert_awaited_once_with('queue')
+    conn.play.assert_not_awaited()
+    conn.load_cloud_queue.assert_not_awaited()
+    assert manager.remote_state()['queue_has_next'] is True
+
+
+def test_failed_queue_load_restores_previous_ownership():
+    from dataclasses import replace
+    manager, conn, ctx, cloud, _ = _receiver_queue_manager()
+    conn.load_cloud_queue.side_effect = RuntimeError('receiver rejected load')
+    with pytest.raises(RuntimeError, match='receiver rejected'):
+        manager.play_queue(replace(ctx, token='new-queue'))
+    assert manager._queue_context is ctx
+    assert manager._cloud_queue is cloud
+
+
+def test_shutdown_closes_session_without_issuing_a_playback_stop(monkeypatch):
+    from concurrent.futures import Future
+    manager, conn, _, _, _ = _receiver_queue_manager()
+    conn.close = AsyncMock()
+    conn.stop = AsyncMock()
+    loop = MagicMock()
+    manager._loop = loop
+    def schedule(coroutine, target):
+        assert target is loop
+        future = Future()
+        future.set_result(asyncio.run(coroutine))
+        return future
+    monkeypatch.setattr(asyncio, 'run_coroutine_threadsafe', schedule)
+    manager.stop()
+    conn.close.assert_awaited_once()
+    conn.stop.assert_not_awaited()
+    assert manager.get_connection() is None
+    loop.call_soon_threadsafe.assert_called_once_with(loop.stop)

@@ -541,3 +541,118 @@ describe("receiver queue advancement", () => {
     },
   );
 });
+
+it("follows native duplicate positions and synchronizes paused edits without playing", async () => {
+  let emit: (snapshot: PlayerSnapshot) => void = () => {};
+  class ReceiverEvents {
+    static CLOSED = 2;
+    onmessage: ((event: { data: string }) => void) | null = null;
+    onerror = null;
+    readyState = 1;
+    close = vi.fn();
+    constructor(url: string) {
+      if (url === "/api/player/events")
+        emit = (s) => this.onmessage?.({ data: JSON.stringify(s) });
+    }
+  }
+  vi.stubGlobal("EventSource", ReceiverEvents);
+  vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+  const storage = new Map<string, string>();
+  vi.stubGlobal("localStorage", {
+    getItem: (key: string) => storage.get(key) ?? null,
+    setItem: (key: string, value: string) => storage.set(key, value),
+    removeItem: (key: string) => storage.delete(key),
+  });
+  vi.stubGlobal(
+    "fetch",
+    vi.fn().mockResolvedValue({ ok: true, json: async () => ({}) }),
+  );
+  const snapshot: PlayerSnapshot = {
+    seq: 1,
+    output_id: "receiver",
+    state: "paused",
+    track_id: "1",
+    position_ms: 5000,
+    duration_ms: 180000,
+    volume: 20,
+    muted: false,
+    error: null,
+    stream_info: null,
+    queue_owner: "receiver",
+    queue_index: 0,
+  };
+  const play = vi.spyOn(api.player, "playTrack").mockResolvedValue(snapshot);
+  const edit = vi
+    .spyOn(api.player, "queue")
+    .mockResolvedValue({ updated: true });
+  const preload = vi.spyOn(api.player, "preload");
+  vi.spyOn(api.player, "preloadClear").mockResolvedValue({ ok: true });
+  vi.spyOn(api.nowPlayingState, "get").mockResolvedValue({ state: null });
+  vi.spyOn(api.settings, "get").mockRejectedValue(new Error("offline"));
+  const container = document.createElement("div");
+  document.body.appendChild(container);
+  const root = createRoot(container);
+  let latest: ReturnType<typeof usePlayer> | undefined;
+  function Probe() {
+    latest = usePlayer();
+    return null;
+  }
+  try {
+    await act(async () => root.render(createElement(Probe)));
+    await act(async () =>
+      latest!.play(_track("1"), [_track("1"), _track("2"), _track("1")]),
+    );
+    const context = play.mock.calls[0][2]!;
+    expect(context.track_ids).toEqual(["1", "2", "1"]);
+    expect(context.order).toEqual([0, 1, 2]);
+    await act(async () => emit({ ...snapshot, queue_token: context.token }));
+    play.mockClear();
+    // Native transitions can reach another occurrence of the same ID.
+    await act(async () =>
+      emit({
+        ...snapshot,
+        seq: 2,
+        queue_token: context.token,
+        queue_index: 2,
+        state: "playing",
+      }),
+    );
+    expect(latest!.queueIndex).toBe(2);
+    expect(play).not.toHaveBeenCalled();
+    expect(preload).not.toHaveBeenCalled();
+    await act(async () =>
+      emit({ ...snapshot, seq: 3, queue_token: context.token, queue_index: 2 }),
+    );
+    await act(async () => latest!.addToQueue(_track("3")));
+    expect(edit).toHaveBeenCalledOnce();
+    expect(edit.mock.calls[0][0].track_ids).toEqual(["1", "2", "1", "3"]);
+    expect(edit.mock.calls[0][0].index).toBe(2);
+    expect(latest!.playing).toBe(false);
+    expect(play).not.toHaveBeenCalled();
+    await act(async () => latest!.setSleepTimer("end-of-track"));
+    expect(
+      edit.mock.calls[edit.mock.calls.length - 1][0].stop_after_current,
+    ).toBe(true);
+    await act(async () => latest!.clearSleepTimer());
+    expect(
+      edit.mock.calls[edit.mock.calls.length - 1][0].stop_after_current,
+    ).toBe(false);
+    await act(async () =>
+      emit({
+        ...snapshot,
+        seq: 4,
+        queue_index: 2,
+        queue_token: edit.mock.calls[edit.mock.calls.length - 1][0].token,
+        position_ms: 0,
+      }),
+    );
+    await act(async () => latest!.prev());
+    expect(play).toHaveBeenCalledOnce();
+    expect(play.mock.calls[0][0]).toBe("2");
+  } finally {
+    act(() => root.unmount());
+    container.remove();
+    vi.restoreAllMocks();
+    vi.unstubAllGlobals();
+  }
+});

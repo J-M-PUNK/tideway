@@ -159,7 +159,20 @@ export interface StreamInfo {
   audio_mode: string | null;
 }
 
+export interface PlayerQueue {
+  track_ids: string[];
+  order: number[];
+  index: number;
+  repeat: "off" | "all" | "one";
+  token: string;
+  quality: string;
+  stop_after_current: boolean;
+}
+
 export interface PlayerSnapshot {
+  queue_owner?: "receiver" | null;
+  queue_index?: number | null;
+  queue_token?: string | null;
   /** Receiver identity; sequence numbers belong to this output. */
   output_id?: string;
   state: "idle" | "loading" | "playing" | "paused" | "ended" | "error";

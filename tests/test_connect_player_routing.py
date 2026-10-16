@@ -110,3 +110,26 @@ def test_paused_receiver_without_media_identity_does_not_complete(receiver):
         media_info=None, position_ms=237653, duration_ms=237000,
     )
     assert server.player_state()['state'] == 'paused'
+
+
+@pytest.mark.parametrize('has_next,expected', [(True, 'paused'), (False, 'ended')])
+def test_native_queue_does_not_request_frontend_advance_between_items(receiver, has_next, expected):
+    receiver.remote_state.return_value.update(
+        player_state='PAUSED', position_ms=180000, duration_ms=180000,
+        queue_owner='receiver', queue_index=2, queue_token='revision', queue_has_next=has_next,
+    )
+    snap = server.player_state()
+    assert snap['state'] == expected
+    assert snap['queue_index'] == 2
+    assert snap['queue_token'] == 'revision'
+
+
+def test_queue_context_must_match_requested_track(receiver):
+    req = server._PlayerLoadRequest(track_id='123', queue={
+        'track_ids': [123, 456], 'order': [0, 1], 'index': 1,
+        'repeat': 'off', 'token': 'revision',
+    })
+    with pytest.raises(server.HTTPException) as exc:
+        server.player_play_track(req)
+    assert exc.value.status_code == 422
+    receiver.play_queue.assert_not_called()

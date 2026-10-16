@@ -46,8 +46,9 @@ import socket
 import ssl
 import tempfile
 import threading
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Awaitable, Callable, Optional
+from app.audio.tidal_connect_queue import CloudQueue, QueueContext, QueueProvider
 
 log = logging.getLogger(__name__)
 
@@ -525,6 +526,15 @@ class TidalConnectConnection:
     async def set_shuffle(self, shuffle: bool) -> dict:
         return await self._send({"command": "setShuffle", "shuffle": bool(shuffle)})
 
+    async def refresh_queue(self, queue_id: str) -> dict:
+        return await self._send({"command": "refreshQueue", "queueId": queue_id})
+
+    async def select_queue_item(self, media_info: dict) -> dict:
+        return await self._send({
+            "command": "selectQueueItem", "mediaInfo": media_info,
+            "policy": {"canNext": True, "canPrevious": True},
+        })
+
     async def load_media(self, media_info: dict) -> dict:
         """Load a single track. media_info has the shape
         `tidalConnect/mediaInfo.js` documents: itemId, mediaId,
@@ -574,6 +584,9 @@ class TidalConnectRealManager:
     _browser: Any = field(default=None, init=False)
     _local_silencer: Optional[LocalSilencer] = field(default=None, init=False)
     _track_url_resolver: Optional[TrackUrlResolver] = field(default=None, init=False)
+    _queue_provider: Optional[QueueProvider] = field(default=None, init=False)
+    _queue_context: Optional[QueueContext] = field(default=None, init=False)
+    _cloud_queue: Optional[CloudQueue] = field(default=None, init=False)
     # Snapshot of the device's last-reported state. Updated by the
     # notification tap below. Fields mirror the player snapshot the
     # frontend reads, so the status endpoint can serve from here
@@ -612,7 +625,25 @@ class TidalConnectRealManager:
         """Snapshot of the device's last-reported state. Safe to call
         from any thread."""
         with self._remote_state_lock:
-            return dict(self._remote_state)
+            state = dict(self._remote_state)
+            context, cloud = self._queue_context, self._cloud_queue
+            if context is not None and cloud is not None:
+                item_id = (state.get("media_info") or {}).get("itemId")
+                native_index = cloud.item_ids.index(item_id) if item_id in cloud.item_ids else None
+                state.update(
+                    queue_owner="receiver", queue_token=context.token,
+                    queue_index=context.order[native_index] if native_index is not None else None,
+                    queue_has_next=(native_index is None or (context.repeat != "off" and not context.stop_after_current) or native_index < len(cloud.item_ids) - 1),
+                )
+            return state
+
+    def set_queue_provider(self, provider: QueueProvider) -> None:
+        self._queue_provider = provider
+
+    def _store_queue(self, context, cloud) -> None:
+        with self._remote_state_lock:
+            self._queue_context, self._cloud_queue = context, cloud
+            self._remote_state["seq"] += 1
 
     def _record_notification(self, frame: dict) -> None:
         """Tap that updates the manager's remote_state from the
@@ -796,6 +827,7 @@ class TidalConnectRealManager:
         self._connection = conn
         with self._remote_state_lock:
             if self._remote_state["device_id"] != device.id:
+                self._queue_context = self._cloud_queue = None
                 self._remote_state.update(
                     player_state="IDLE", position_ms=0, duration_ms=0,
                     media_info=None, volume=100, muted=False, error=None,
@@ -831,6 +863,7 @@ class TidalConnectRealManager:
                         "error": None,
                         "seq": self._remote_state["seq"] + 1,
                     })
+                    self._queue_context = self._cloud_queue = None
 
         future = asyncio.run_coroutine_threadsafe(
             _do_disconnect(), self._loop
@@ -888,6 +921,12 @@ class TidalConnectRealManager:
         async def _resume() -> dict:
             remote = self.remote_state()
             if self._connection is not selected or remote.get("player_state") in ("IDLE", "ERROR"):
+                if self._queue_context is not None and self._queue_provider is not None:
+                    context = replace(self._queue_context, index=saved.get("queue_index") if saved.get("queue_index") is not None else self._queue_context.index)
+                    position = int(saved.get("position_ms") or 0)
+                    if position >= int(saved.get("duration_ms") or 0):
+                        position = 0
+                    return await self._load_queue(context, True, position)
                 media = saved.get("media_info") or {}
                 try:
                     track_id = int(media.get("mediaId") or fallback_track_id or 0)
@@ -910,7 +949,7 @@ class TidalConnectRealManager:
     def pause(self) -> dict:
         return self._call(lambda: self._connection.pause())  # type: ignore[union-attr]
 
-    def stop(self) -> dict:
+    def stop_playback(self) -> dict:
         return self._call(lambda: self._connection.stop())  # type: ignore[union-attr]
 
     def next_track(self) -> dict:
@@ -928,7 +967,7 @@ class TidalConnectRealManager:
     def set_mute(self, mute: bool) -> dict:
         return self._call(lambda: self._connection.set_mute(bool(mute)))  # type: ignore[union-attr]
 
-    def load_track(self, track_id: int) -> dict:
+    def load_track(self, track_id: int, autoplay: bool = True) -> dict:
         """Create a cloud queue for `track_id` and load it on the receiver."""
         if self._track_url_resolver is None:
             raise RuntimeError(
@@ -936,13 +975,87 @@ class TidalConnectRealManager:
                 "call set_track_url_resolver at startup"
             )
         payload = self._track_url_resolver(int(track_id))
+        if not autoplay:
+            payload = {**payload, "autoplay": False}
         return self.load_cloud_queue(payload)
+
+    def load_queue(self, context: QueueContext) -> dict:
+        return self._call(lambda: self._load_queue(context, False, 0))
+
+    async def _load_queue(self, context: QueueContext, autoplay: bool, position: int) -> dict:
+        if self._queue_provider is None:
+            raise RuntimeError("Tidal Connect queue provider is unavailable")
+        cloud = await asyncio.to_thread(self._queue_provider.create, context, autoplay, position)
+        previous = self._queue_context, self._cloud_queue
+        self._store_queue(context, cloud)
+        try:
+            return await self._connection.load_cloud_queue(cloud.payload)
+        except BaseException:
+            self._store_queue(*previous)
+            raise
+
+    def play_queue(self, context: QueueContext) -> dict:
+        """Start a queue or select another item in the current cloud queue."""
+        selected = self._connection
+
+        async def _play_queue():
+            old, cloud = self._queue_context, self._cloud_queue
+            if (self._connection is selected and old is not None and cloud is not None
+                    and replace(old, index=context.index) == context):
+                native_index = context.order.index(context.index)
+                media = await asyncio.to_thread(
+                    self._queue_provider.media_info, context.track_ids[context.index], cloud.item_ids[native_index],
+                )
+                await self._connection.select_queue_item(media)
+                return await self._connection.play()
+            return await self._load_queue(context, True, 0)
+
+        return self._call(_play_queue)
+
+    def update_queue(self, context: QueueContext) -> dict:
+        """Synchronize edits without restarting or resuming the current media."""
+        selected, saved = self._connection, self.remote_state()
+
+        async def _update():
+            old, cloud = self._queue_context, self._cloud_queue
+            if old is None or cloud is None:
+                return {"updated": False}
+            if self._connection is not selected:
+                # Editing a timed-out session is not an explicit Play.
+                await self._load_queue(context, False, int(saved.get("position_ms") or 0))
+                return {"updated": True}
+            if replace(old, index=context.index) == context:
+                return {"updated": True}
+            remote = self.remote_state()
+            media = remote.get("media_info") or {}
+            ids, index = context.ordered_ids, context.order.index(context.index)
+            if str(ids[index]) != str(media.get("mediaId")):
+                matches = [i for i, tid in enumerate(ids) if str(tid) == str(media.get("mediaId"))]
+                if len(matches) != 1:
+                    raise RuntimeError("Receiver changed tracks during queue edit; retry the edit")
+                index = matches[0]
+                context_at_receiver = replace(context, index=context.order[index])
+            else:
+                context_at_receiver = context
+            if old.quality != context.quality:
+                await self._load_queue(context_at_receiver, remote.get("player_state") == "PLAYING", int(remote.get("position_ms") or 0))
+                return {"updated": True}
+            edited = await asyncio.to_thread(self._queue_provider.update, cloud, ids, index, media.get("itemId"))
+            self._store_queue(context_at_receiver, edited)
+            if old.repeat != context.repeat or old.stop_after_current != context.stop_after_current:
+                repeat = "off" if context.stop_after_current else context.repeat
+                await self._connection.set_repeat_mode({"off": "OFF", "all": "ALL", "one": "SINGLE"}[repeat])
+            await self._connection.refresh_queue(edited.payload["queueInfo"]["queueId"])
+            return {"updated": True}
+
+        return self._call(_update)
 
     def load_cloud_queue(self, payload: dict) -> dict:
         """Send a prepared queue payload through the live connection."""
-        return self._call(
-            lambda: self._connection.load_cloud_queue(payload)  # type: ignore[union-attr]
-        )
+        async def _load_single():
+            self._store_queue(None, None)
+            return await self._connection.load_cloud_queue(payload)
+        return self._call(_load_single)
 
     # -- discovery ----------------------------------------------------------
 

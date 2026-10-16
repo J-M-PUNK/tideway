@@ -26,7 +26,7 @@ from contextlib import asynccontextmanager
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Generator, Optional
+from typing import Any, AsyncIterator, Callable, Generator, Optional, Literal
 from urllib.parse import quote, urljoin, urlparse
 
 import tidalapi
@@ -958,6 +958,26 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             return create_track_queue(tidal.session, track_id, "HI_RES_LOSSLESS")
 
         _tcr_mgr.set_track_url_resolver(_tcr_url_resolver)
+        from app.audio.tidal_connect_queue import (
+            QueueProvider, create_playback_queue, update_playback_queue, create_media_info,
+        )
+
+        def _tcr_queue_resolver(context, autoplay, position):
+            quality = tidal.clamp_quality_to_subscription(context.quality) or "hi_res_lossless"
+            wire_quality = {
+                "hi_res_lossless": "HI_RES_LOSSLESS", "high_lossless": "LOSSLESS",
+                "low_320k": "HIGH", "low_96k": "LOW",
+            }.get(quality, "LOSSLESS")
+            return create_playback_queue(
+                tidal.session, context.ordered_ids, context.order.index(context.index), wire_quality,
+                "off" if context.stop_after_current else context.repeat, autoplay, position,
+            )
+
+        _tcr_mgr.set_queue_provider(QueueProvider(
+            create=_tcr_queue_resolver,
+            update=lambda cloud, ids, index, item_id: update_playback_queue(tidal.session, cloud, ids, index, item_id),
+            media_info=lambda tid, item_id: create_media_info(tidal.session, tid, item_id),
+        ))
     except Exception as exc:
         print(f"[tidal-connect-real] startup failed: {exc}", flush=True)
 
@@ -5329,9 +5349,27 @@ def is_following(user_id: int) -> dict:
 # ---------------------------------------------------------------------------
 
 
+class _PlayerQueueContext(BaseModel):
+    track_ids: list[int]
+    order: list[int]
+    index: int
+    repeat: Literal["off", "all", "one"] = "off"
+    token: str
+    quality: str = "hi_res_lossless"
+    stop_after_current: bool = False
+
+    def context(self):
+        from app.audio.tidal_connect_queue import QueueContext
+        try:
+            return QueueContext(tuple(self.track_ids), tuple(self.order), self.index, self.repeat, self.token, self.quality, self.stop_after_current)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 class _PlayerLoadRequest(BaseModel):
     track_id: str
     quality: Optional[str] = None
+    queue: Optional[_PlayerQueueContext] = None
 
 
 class _PlayerSeekRequest(BaseModel):
@@ -5615,7 +5653,8 @@ def _tcr_snapshot(track_id: Optional[str] = None) -> dict:
     # Neither an ordinary pause nor an idle/lost session implies EOF.
     ps = rs.get("player_state", "IDLE")
     state = {"PLAYING": "playing", "PAUSED": "paused"}.get(ps, "idle")
-    if ps == "PAUSED" and media_id and duration_ms > 0 and position_ms >= duration_ms:
+    if (ps == "PAUSED" and media_id and duration_ms > 0 and position_ms >= duration_ms
+            and not rs.get("queue_has_next", False)):
         state = "ended"
     return {
         "state": "error" if error else state,
@@ -5637,6 +5676,9 @@ def _tcr_snapshot(track_id: Optional[str] = None) -> dict:
         "seq": int(rs.get("seq") or 0),
         "stream_info": None,
         "force_volume": False,
+        "queue_owner": rs.get("queue_owner"),
+        "queue_token": rs.get("queue_token"),
+        "queue_index": rs.get("queue_index"),
     }
 
 
@@ -5877,8 +5919,41 @@ def now_playing_update(payload: _NowPlayingMetadata) -> dict:
 @app.post("/api/player/load")
 def player_load(req: _PlayerLoadRequest) -> dict:
     _require_local_access()
+    if _tcr_active():
+        from app.audio.tidal_connect_real import get_manager
+        try:
+            if req.queue is not None:
+                get_manager().load_queue(_tcr_queue_context(req))
+            else:
+                get_manager().load_track(int(req.track_id), autoplay=False)
+        except HTTPException:
+            raise
+        except Exception as exc:
+            raise HTTPException(status_code=502, detail=f"Tidal Connect: {exc}") from exc
+        return _tcr_snapshot(track_id=req.track_id)
     snap = _native_player().load(req.track_id, quality=req.quality)
     return _snapshot_dict(snap)
+
+
+def _tcr_queue_context(req: _PlayerLoadRequest):
+    context = req.queue.context()
+    if str(context.track_ids[context.index]) != str(req.track_id):
+        raise HTTPException(status_code=422, detail="Queue position does not match requested track")
+    return context
+
+
+@app.post("/api/player/queue")
+def player_queue(req: _PlayerQueueContext) -> dict:
+    """Edits synchronize only an already-owned Connect queue; never start playback."""
+    _require_local_access()
+    if not _tcr_active():
+        return {"updated": False}
+    from app.audio.tidal_connect_real import get_manager
+    context = req.context()
+    try:
+        return get_manager().update_queue(context)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=f"Tidal Connect: {exc}") from exc
 
 
 @app.post("/api/player/play_track")
@@ -5905,8 +5980,13 @@ def player_play_track(req: _PlayerLoadRequest) -> dict:
     if _tcr_active():
         from app.audio.tidal_connect_real import get_manager as _tcr_get
         try:
-            _tcr_get().load_track(int(req.track_id))  # type: ignore[union-attr]
-            _tcr_get().play()  # type: ignore[union-attr]
+            if req.queue is not None:
+                _tcr_get().play_queue(_tcr_queue_context(req))
+            else:
+                _tcr_get().load_track(int(req.track_id))
+                _tcr_get().play()
+        except HTTPException:
+            raise
         except Exception as exc:
             raise HTTPException(
                 status_code=502, detail=f"Tidal Connect: {exc}"
@@ -5935,6 +6015,8 @@ def player_preload(req: _PlayerLoadRequest) -> dict:
     called well in advance, so it doesn't race track-end.
     """
     _require_local_access()
+    if _tcr_active():
+        return {"ok": True, "cached": False}
     return _native_player().preload(req.track_id, quality=req.quality)
 
 
