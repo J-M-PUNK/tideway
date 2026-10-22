@@ -496,7 +496,7 @@ export function usePlayer() {
   // Persist queue + prefs so a relaunch picks up where the user
   // left off. Owned by usePlayerPersistence — see that file's
   // docstring for the lifecycle-hook trio + backend-backstop story.
-  usePlayerPersistence(stateRef);
+  usePlayerPersistence(stateRef, qualityRef);
 
   // SSE subscription — backend pushes state changes + position updates.
   // `seq` is our monotonic clock so we can ignore out-of-order frames.
