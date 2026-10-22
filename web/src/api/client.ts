@@ -31,6 +31,7 @@ import type {
   LocalVideo,
   Lyrics,
   MixDetail,
+  EqManualProfile,
   ManualEqConfig,
   ParametricBand,
   PlayerSnapshot,
@@ -1243,7 +1244,38 @@ export const api = {
         config: ManualEqConfig;
         default_bands: ParametricBand[];
         presets: { index: number; name: string; bands: ParametricBand[] }[];
+        manual_profiles: EqManualProfile[];
+        manual_profiles_max: number;
       }>("/api/player/eq"),
+    /** Saved manual EQ curves. Storage only — loading one is a plain
+     *  `setEq(profile.bands, profile.preamp)`. Each call returns the
+     *  full updated list so the editor never has to merge. */
+    createEqProfile: (
+      name: string,
+      bands: ParametricBand[],
+      preamp: number | null,
+    ) =>
+      req<{ profile: EqManualProfile; profiles: EqManualProfile[] }>(
+        "/api/player/eq/manual-profiles",
+        { method: "POST", body: JSON.stringify({ name, bands, preamp }) },
+      ),
+    updateEqProfile: (
+      id: string,
+      patch: {
+        name?: string;
+        bands?: ParametricBand[];
+        preamp?: number | null;
+      },
+    ) =>
+      req<{ profile: EqManualProfile; profiles: EqManualProfile[] }>(
+        `/api/player/eq/manual-profiles/${encodeURIComponent(id)}`,
+        { method: "PUT", body: JSON.stringify(patch) },
+      ),
+    deleteEqProfile: (id: string) =>
+      req<{ profiles: EqManualProfile[] }>(
+        `/api/player/eq/manual-profiles/${encodeURIComponent(id)}`,
+        { method: "DELETE" },
+      ),
     setEq: (bands: ParametricBand[], preamp: number | null) =>
       req<{
         ok: boolean;
