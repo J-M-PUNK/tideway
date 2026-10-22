@@ -39,10 +39,10 @@ from dataclasses import dataclass
 from typing import Callable, Optional, Union
 
 import numpy as np
-import requests
 import sounddevice as sd  # type: ignore
 import tidalapi
 
+from app.http import STREAM_SESSION
 from app.audio.decoder import Decoder
 from app.audio.crossfade import mix_crossfade_block
 from app.audio.crossfeed import Crossfeed
@@ -2715,7 +2715,9 @@ class PCMPlayer:
 
         def _fetch(i: int) -> Optional[tuple[int, bytes]]:
             try:
-                r = requests.get(urls[i], timeout=30)
+                # The playback reader's pool, so warming a track also
+                # leaves a live CDN connection for the click to reuse.
+                r = STREAM_SESSION.get(urls[i], timeout=30)
                 r.raise_for_status()
                 return i, r.content
             except Exception as exc:
