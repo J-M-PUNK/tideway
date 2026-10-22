@@ -798,37 +798,11 @@ class PCMPlayer:
                     # "playing".
                     self._transition("paused")
 
-                # Outside the lock: clean up old refs without holding it
-                # while we wait on a thread join.
-                if old_stop_flag is not None:
-                    old_stop_flag.set()
-                if old_decoder is not None:
-                    try:
-                        old_decoder.cancel_source()
-                    except Exception:
-                        pass
-                if old_thread is not None and old_thread.is_alive():
-                    old_thread.join(timeout=0.5)
-                if old_decoder is not None:
-                    try:
-                        old_decoder.close()
-                    except Exception:
-                        pass
-                # Stale preload: stop its thread and close its decoder
-                # so we don't leak. cancel_source aborts any in-flight
-                # HTTP fetch so the join returns promptly.
-                if stale_preload is not None:
-                    stale_preload.stop_flag.set()
-                    try:
-                        stale_preload.decoder.cancel_source()
-                    except Exception:
-                        pass
-                    if stale_preload.thread.is_alive():
-                        stale_preload.thread.join(timeout=0.5)
-                    try:
-                        stale_preload.decoder.close()
-                    except Exception:
-                        pass
+                # The old pipeline and any stale preload are detached
+                # now; neither is on the audible path, so release them
+                # without making this click wait for their threads.
+                self._retire_pipeline(old_stop_flag, old_decoder, old_thread)
+                self._retire_preload(stale_preload)
 
                 _perf = (
                     f"[perf] load track={track_id} "
@@ -857,17 +831,7 @@ class PCMPlayer:
                     f"{active_rate}/{active_dtype}/{active_channels}); "
                     f"discarding synthetic pipeline"
                 )
-                synthetic.stop_flag.set()
-                try:
-                    synthetic.decoder.cancel_source()
-                except Exception:
-                    pass
-                if synthetic.thread.is_alive():
-                    synthetic.thread.join(timeout=0.5)
-                try:
-                    synthetic.decoder.close()
-                except Exception:
-                    pass
+                self._retire_preload(synthetic)
 
         # Path (B): no active stream (or format mismatch fell through).
         # Full teardown + fresh open at the new decoder's native rate.
@@ -1675,25 +1639,7 @@ class PCMPlayer:
             if pre is None:
                 return
             print(f"[pcm] drop preload track={pre.track_id}", flush=True)
-            if getattr(pre, "cast", False) is True:
-                # Metadata-only cast record: nothing to stop or close.
-                return
-            pre.stop_flag.set()
-            # Abort any in-flight HTTP fetch on the preload's decoder
-            # so its thread exits promptly instead of waiting out the
-            # rest of a 150-300 ms segment download. Drop-preload
-            # fires on every track change while a preload is buffering;
-            # without this, a fast skip stalls behind the dead preload.
-            try:
-                pre.decoder.cancel_source()
-            except Exception:
-                pass
-            if pre.thread.is_alive():
-                pre.thread.join(timeout=2.0)
-            try:
-                pre.decoder.close()
-            except Exception:
-                pass
+            self._retire_preload(pre)
 
     def set_volume(self, volume: int) -> PlayerSnapshot:
         volume = max(0, min(100, int(volume)))
@@ -2245,6 +2191,44 @@ class PCMPlayer:
                 decoder.close()
             except Exception:
                 pass
+
+    def _retire_pipeline(self, stop_flag, decoder, thread) -> None:
+        """Stop a pipeline that is no longer the player's and release
+        it in the background.
+
+        For a track change, never for seek: the old thread must own a
+        queue the audio callback no longer reads, because it may push
+        one more chunk before it notices the stop flag. Seek reuses the
+        live queue, which is why `_restart_decoder_at` joins inline.
+
+        Joining inline here is what made a track change wait: a
+        producer that is ahead of playback sits in `pcm_queue.put`
+        with a 0.5 s timeout and only sees the stop flag when that
+        expires, so the join cost up to half a second per pipeline on
+        every click (`swap=~450ms` in the load perf line). Stopping is
+        immediate: the flag is set, and cancel_source() aborts an
+        in-flight segment fetch, which also releases the TIDAL reader
+        right away (TIDAL drops the session with two tracks open).
+        Only the join + close wait, on the disposer thread."""
+        if stop_flag is not None:
+            stop_flag.set()
+        if decoder is not None:
+            decoder.cancel_source()
+        if thread is not None or decoder is not None:
+            threading.Thread(
+                target=self._dispose_pipeline_async,
+                args=(thread, decoder),
+                daemon=True,
+                name="pcm-dispose",
+            ).start()
+
+    def _retire_preload(self, pre: Optional["_Preload"]) -> None:
+        """`_retire_pipeline` for a preload (or the synthetic preload a
+        gapless load builds). A cast preload is a metadata-only record
+        with no thread or decoder, so there's nothing to release."""
+        if pre is None or getattr(pre, "cast", False) is True:
+            return
+        self._retire_pipeline(pre.stop_flag, pre.decoder, pre.thread)
 
     def _teardown(self) -> None:
         """Stop the pipeline fully. State transitions to idle BEFORE
@@ -3726,33 +3710,9 @@ class PCMPlayer:
         self._last_error = None
         self._seq += 1
 
-        # Outside the lock (well — RLock held; cleanup stays
-        # short): signal + close the old pipeline's resources.
-        old_stop_flag.set()
-        # Cancel the old decoder's source BEFORE joining. Same
-        # reasoning as _teardown / _restart_decoder_at: stop_flag
-        # only gets checked between PCM frames, and the old thread
-        # is very often mid-HTTP-fetch on a track change. Closing
-        # the source aborts the in-flight read so the join returns
-        # in milliseconds instead of waiting the segment out.
-        if old_decoder is not None:
-            try:
-                old_decoder.cancel_source()
-            except Exception:
-                pass
-        if old_thread is not None and old_thread.is_alive():
-            # Short bounded join: gives the thread a chance to
-            # notice the stop flag and release its PyAV container
-            # + SegmentReader session. If it's blocked in network
-            # I/O past the timeout we give up (it's a daemon and
-            # won't prevent process exit), but we've tried rather
-            # than dropping the ref and guaranteeing a ~30s leak.
-            old_thread.join(timeout=0.5)
-        if old_decoder is not None:
-            try:
-                old_decoder.close()
-            except Exception:
-                pass
+        # The old pipeline is detached; release it without holding the
+        # lock for its thread to unwind.
+        self._retire_pipeline(old_stop_flag, old_decoder, old_thread)
         if old_stream is not None:
             # abort() over stop() — same reason as _teardown above:
             # stop() drains the buffer and stalls the cross-rate

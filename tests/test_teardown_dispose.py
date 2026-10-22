@@ -9,11 +9,14 @@ load-stall recovery flips a stuck "loading" to a (recoverable) error.
 """
 from __future__ import annotations
 
+import queue
 import threading
 import time
 from unittest.mock import MagicMock
 
-from app.audio.player import PCMPlayer
+import numpy as np
+
+from app.audio.player import PCMPlayer, _Preload
 
 
 # --- _dispose_pipeline_async --------------------------------------------
@@ -46,6 +49,95 @@ def test_dispose_swallows_a_close_error():
     decoder.close.side_effect = RuntimeError("container already gone")
     PCMPlayer._dispose_pipeline_async(None, decoder)  # must not raise
     decoder.close.assert_called_once()
+
+
+# --- _retire_pipeline / _retire_preload --------------------------------
+
+
+def _producer_parked_on_a_full_queue():
+    """A real decoder thread in the state a track change finds it in:
+    ahead of playback, blocked in `pcm_queue.put` on a full queue."""
+    decoder = MagicMock()
+    decoder.next_pcm.return_value = np.zeros((512, 2), dtype=np.int16)
+    q: queue.Queue = queue.Queue(maxsize=1)
+    stop_flag = threading.Event()
+    done = threading.Event()
+    thread = threading.Thread(
+        target=PCMPlayer._decoder_loop,
+        args=(decoder, q, stop_flag, done),
+        daemon=True,
+    )
+    thread.start()
+    deadline = time.monotonic() + 2.0
+    while not q.full() and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert q.full()
+    return decoder, q, stop_flag, done, thread
+
+
+def test_retire_returns_without_waiting_for_a_parked_producer():
+    decoder, _q, stop_flag, done, thread = _producer_parked_on_a_full_queue()
+    p = PCMPlayer.__new__(PCMPlayer)
+
+    t0 = time.monotonic()
+    p._retire_pipeline(stop_flag, decoder, thread)
+    elapsed = time.monotonic() - t0
+
+    # The inline join this replaced sat out the producer's 0.5 s put
+    # timeout on every track change.
+    assert elapsed < 0.1
+    assert stop_flag.is_set()
+    decoder.cancel_source.assert_called_once()
+    # The disposer still joins and then closes, in that order.
+    assert done.wait(2.0)
+    deadline = time.monotonic() + 3.0
+    while not decoder.close.called and time.monotonic() < deadline:
+        time.sleep(0.01)
+    decoder.close.assert_called_once()
+    assert not thread.is_alive()
+
+
+def test_retire_preload_ignores_a_cast_record():
+    p = PCMPlayer.__new__(PCMPlayer)
+    p._retire_pipeline = MagicMock()  # type: ignore[method-assign]
+    cast = _Preload(
+        track_id="t2",
+        quality=None,
+        duration_ms=0,
+        stream_info=None,
+        source_urls=["u"],
+        source_path=None,
+        cast=True,
+    )
+    p._retire_preload(cast)
+    p._retire_preload(None)
+    p._retire_pipeline.assert_not_called()
+
+
+def test_drop_preload_does_not_wait_for_the_preload_thread():
+    decoder, q, stop_flag, done, thread = _producer_parked_on_a_full_queue()
+    p = PCMPlayer.__new__(PCMPlayer)
+    p._pipeline_lock = threading.RLock()
+    p._lock = threading.RLock()
+    p._preload = _Preload(
+        track_id="t2",
+        quality=None,
+        duration_ms=0,
+        stream_info=None,
+        source_urls=None,
+        source_path=None,
+        decoder=decoder,
+        queue=q,
+        thread=thread,
+        stop_flag=stop_flag,
+        done=done,
+    )
+
+    t0 = time.monotonic()
+    p._drop_preload()
+    assert time.monotonic() - t0 < 0.1
+    assert p._preload is None
+    assert done.wait(2.0)
 
 
 # --- load-stall watchdog recovery ---------------------------------------
