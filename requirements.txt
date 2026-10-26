@@ -35,7 +35,7 @@ orjson>=3.12.0
 # bump here wants a live AOTY check, not just the test suite.
 curl-cffi>=0.16.3,<0.17
 pillow>=12.3.0
-fastapi>=0.141.1
+fastapi>=0.161.1
 uvicorn[standard]>=0.52.4
 sse-starlette>=3.4.11
 # Packaged desktop app — pywebview wraps the web UI in a native window.
