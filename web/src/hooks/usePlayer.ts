@@ -501,6 +501,7 @@ export function usePlayer() {
   // SSE subscription — backend pushes state changes + position updates.
   // `seq` is our monotonic clock so we can ignore out-of-order frames.
   const lastSeqRef = useRef(-1);
+  const lastOutputRef = useRef<string | undefined>(undefined);
   // Last position we applied, so a frame with an unchanged seq can still
   // update the clock when only the position moved. seq is bumped from
   // the audio callback, which stops in DLNA renderer-clock mode once the
@@ -825,7 +826,11 @@ export function usePlayer() {
       // or otherwise unstreamable id. The expected-track guard
       // (isLateEcho) naturally dedupes repeat error frames for the
       // same track, so we only advance once per failure.
-      if (snap.state === "error" && continuePlayingRef.current) {
+      if (
+        snap.state === "error" &&
+        snap.error_scope !== "session" &&
+        continuePlayingRef.current
+      ) {
         advanceRef.current();
       }
       triggerPreloadIfNeeded(snap);
@@ -837,6 +842,13 @@ export function usePlayer() {
       es.onmessage = (event) => {
         try {
           const snap = JSON.parse(event.data) as PlayerSnapshot;
+          if (snap.output_id !== lastOutputRef.current) {
+            lastOutputRef.current = snap.output_id;
+            lastSeqRef.current = -1;
+            lastPositionRef.current = -1;
+            serverVolumeAdopted.current = false;
+            serverMutedAdopted.current = false;
+          }
           // A newer seq always applies. A repeat seq still applies when
           // only the position moved: seq is bumped from the audio
           // callback, which stops in DLNA renderer-clock mode once the
