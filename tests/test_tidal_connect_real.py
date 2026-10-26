@@ -505,6 +505,152 @@ def test_session_error_survives_media_notifications_and_socket_close():
     assert manager.remote_state()['error'] == {'command': 'notifySessionError', 'code': 1001}
 
 
+@pytest.mark.parametrize('replace_output', [False, True])
+def test_failed_first_connection_does_not_keep_receiver_selected(monkeypatch, replace_output):
+    async def check():
+        manager = tcr.TidalConnectRealManager(lambda: None, lambda _: None)
+        silencer = MagicMock()
+        manager.set_local_silencer(silencer)
+        failed, _ = _make_connection_with_fake_socket()
+        failed.open = AsyncMock(side_effect=ConnectionError('offline'))
+        if replace_output:
+            previous, _ = _make_connection_with_fake_socket()
+            previous.device = tcr.DiscoveredDevice('other', 'Other', '192.0.2.1', 1234)
+            previous.close = AsyncMock()
+            manager._connection = previous
+        monkeypatch.setattr(tcr, 'TidalConnectConnection', MagicMock(return_value=failed))
+        with pytest.raises(ConnectionError, match='offline'):
+            await manager._connect_device(failed.device)
+        assert manager.get_connection() is None
+        assert manager.remote_state()['device_id'] is None
+        assert manager.remote_state()['player_state'] == 'IDLE'
+        silencer.assert_called_once_with(False)
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize('failure', [None, ConnectionError('offline'), TimeoutError('timed out')])
+def test_disconnect_clears_selection_even_when_close_fails(failure):
+    async def check():
+        manager = tcr.TidalConnectRealManager(lambda: None, lambda _: None)
+        manager._loop = asyncio.get_running_loop()
+        conn, _ = _make_connection_with_fake_socket()
+        conn.close = AsyncMock(side_effect=failure)
+        manager._connection = conn
+        manager._remote_state.update(device_id=conn.device.id, player_state='PLAYING')
+        silencer = MagicMock()
+        manager.set_local_silencer(silencer)
+        await asyncio.to_thread(manager.disconnect)
+        assert manager.get_connection() is None
+        assert manager.remote_state()['device_id'] is None
+        assert manager.remote_state()['error'] is None
+        silencer.assert_called_once_with(False)
+        conn.close.assert_awaited_once()
+    asyncio.run(check())
+
+
+def test_disconnect_interrupts_stalled_command_and_queued_controls():
+    async def check():
+        manager = tcr.TidalConnectRealManager(lambda: None, lambda _: None)
+        manager._loop = asyncio.get_running_loop()
+        conn, _ = _make_connection_with_fake_socket()
+        conn.is_active = MagicMock(return_value=True)
+        conn.close = AsyncMock()
+        entered = asyncio.Event()
+
+        async def stalled_play():
+            entered.set()
+            await asyncio.Event().wait()
+
+        conn.play = stalled_play
+        conn.pause = AsyncMock()
+        manager._connection = conn
+        playing = asyncio.create_task(asyncio.to_thread(manager.play))
+        await entered.wait()
+        paused = asyncio.create_task(asyncio.to_thread(manager.pause))
+        await asyncio.sleep(0)
+        await asyncio.wait_for(asyncio.to_thread(manager.disconnect), 1.0)
+        results = await asyncio.gather(playing, paused, return_exceptions=True)
+        assert all(isinstance(result, BaseException) for result in results)
+        conn.pause.assert_not_awaited()
+        assert manager.get_connection() is None
+        assert not manager._command_tasks
+        assert not manager._disconnect_requests
+    asyncio.run(check())
+
+
+def test_disconnect_bounds_a_receiver_that_never_closes(monkeypatch):
+    monkeypatch.setattr(tcr, 'DISCONNECT_TIMEOUT', 0.01)
+
+    async def check():
+        manager = tcr.TidalConnectRealManager(lambda: None, lambda _: None)
+        manager._loop = asyncio.get_running_loop()
+        conn, _ = _make_connection_with_fake_socket()
+
+        async def stalled_close():
+            await asyncio.Event().wait()
+
+        conn.close = stalled_close
+        manager._connection = conn
+        await asyncio.wait_for(asyncio.to_thread(manager.disconnect), 1.0)
+        assert manager.get_connection() is None
+        assert manager.remote_state()['device_id'] is None
+    asyncio.run(check())
+
+
+def test_disconnect_cancels_reconnect_without_reselecting_output(monkeypatch):
+    async def check():
+        manager = tcr.TidalConnectRealManager(lambda: None, lambda _: None)
+        manager._loop = asyncio.get_running_loop()
+        old, _ = _make_connection_with_fake_socket()
+        old.close = AsyncMock()
+        manager._connection = old
+        replacement, _ = _make_connection_with_fake_socket()
+        entered = asyncio.Event()
+
+        async def stalled_open():
+            entered.set()
+            await asyncio.Event().wait()
+
+        replacement.open = stalled_open
+        replacement.close = AsyncMock()
+        monkeypatch.setattr(tcr, 'TidalConnectConnection', MagicMock(return_value=replacement))
+        playing = asyncio.create_task(asyncio.to_thread(manager.play))
+        await entered.wait()
+        await asyncio.wait_for(asyncio.to_thread(manager.disconnect), 1.0)
+        await asyncio.gather(playing, return_exceptions=True)
+        assert manager.get_connection() is None
+        assert manager.remote_state()['device_id'] is None
+        replacement.close.assert_awaited_once()
+    asyncio.run(check())
+
+
+def test_cancelled_close_releases_transport_and_pending_requests():
+    async def check():
+        conn, _ = _make_connection_with_fake_socket()
+        conn._session_id = 'fixture'
+        entered = asyncio.Event()
+
+        async def end_session(*args):
+            entered.set()
+            await asyncio.Event().wait()
+
+        conn._send_unmatched = end_session
+        conn._websocket.close = AsyncMock()
+        pending = asyncio.get_running_loop().create_future()
+        conn._pending[10] = pending
+        closing = asyncio.create_task(conn.close())
+        await entered.wait()
+        closing.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await closing
+        conn._websocket.close.assert_awaited_once()
+        assert conn._closed
+        assert conn._session_id is None
+        with pytest.raises(ConnectionError, match='closed'):
+            await pending
+    asyncio.run(check())
+
+
 def test_failed_reconnect_keeps_output_selected_and_allows_retry(monkeypatch):
     async def check():
         manager = tcr.TidalConnectRealManager(lambda: None, lambda _: None)
