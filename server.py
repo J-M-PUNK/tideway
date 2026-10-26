@@ -952,12 +952,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             _native_player().set_external_output_active
         )
 
-        def _tcr_url_resolver(track_id: int) -> dict:
-            from app.audio.tidal_connect_queue import create_track_queue
-
-            return create_track_queue(tidal.session, track_id, "HI_RES_LOSSLESS")
-
-        _tcr_mgr.set_track_url_resolver(_tcr_url_resolver)
+        _tcr_mgr.set_track_url_resolver(_tcr_track_queue)
     except Exception as exc:
         print(f"[tidal-connect-real] startup failed: {exc}", flush=True)
 
@@ -5617,6 +5612,14 @@ def _tcr_snapshot(track_id: Optional[str] = None) -> dict:
     state = {"PLAYING": "playing", "PAUSED": "paused"}.get(ps, "idle")
     if ps == "PAUSED" and media_id and duration_ms > 0 and position_ms >= duration_ms:
         state = "ended"
+    error_message = None
+    if error:
+        if error.get("command") == "connectionLost":
+            error_message = "Connection to the Tidal Connect receiver was lost"
+        else:
+            error_message = f"Tidal Connect {error['command']} failed"
+            if error.get("code") is not None:
+                error_message += f" (code {error['code']})"
     return {
         "state": "error" if error else state,
         "track_id": track_id or media_id,
@@ -5625,8 +5628,7 @@ def _tcr_snapshot(track_id: Optional[str] = None) -> dict:
         "duration_ms": duration_ms,
         "volume": int(rs.get("volume", 100)),
         "muted": bool(rs.get("muted")),
-        "error": (f"Tidal Connect {error['command']} failed "
-                  f"(code {error['code']})") if error else None,
+        "error": error_message,
         # Session/socket failures describe the receiver connection, not
         # an unplayable track. Don't let Continue Playing skip the queue.
         "error_scope": (
@@ -5638,6 +5640,17 @@ def _tcr_snapshot(track_id: Optional[str] = None) -> dict:
         "stream_info": None,
         "force_volume": False,
     }
+
+
+def _tcr_track_queue(track_id: int, quality: Optional[str] = None) -> dict:
+    from app.audio.tidal_connect_queue import create_track_queue
+
+    effective = tidal.clamp_quality_to_subscription(quality or "hi_res_lossless")
+    wire_quality = {
+        "hi_res_lossless": "HI_RES_LOSSLESS", "high_lossless": "LOSSLESS",
+        "low_320k": "HIGH", "low_96k": "LOW",
+    }.get(effective, "LOSSLESS")
+    return create_track_queue(tidal.session, track_id, wire_quality)
 
 
 def _tcr_play_or_resume() -> None:
@@ -5905,7 +5918,7 @@ def player_play_track(req: _PlayerLoadRequest) -> dict:
     if _tcr_active():
         from app.audio.tidal_connect_real import get_manager as _tcr_get
         try:
-            _tcr_get().load_track(int(req.track_id))  # type: ignore[union-attr]
+            _tcr_get().load_track(int(req.track_id), quality=req.quality)  # type: ignore[union-attr]
             _tcr_get().play()  # type: ignore[union-attr]
         except Exception as exc:
             raise HTTPException(
@@ -7887,13 +7900,12 @@ async def player_events(request: Request):
     """
     _require_local_access()
     player = _native_player()
-    queue: asyncio.Queue[Optional[dict]] = asyncio.Queue(maxsize=32)
+    queue: asyncio.Queue = asyncio.Queue(maxsize=32)
     loop = asyncio.get_running_loop()
 
     def _on_snapshot(snap) -> None:
-        payload = _current_player_snapshot(snap)
         try:
-            loop.call_soon_threadsafe(_put_latest, queue, payload)
+            loop.call_soon_threadsafe(_put_latest, queue, snap)
         except RuntimeError:
             # Event loop already closed: the SSE connection is tearing
             # down and unsubscribe() is about to detach us. Nothing to
@@ -7907,23 +7919,25 @@ async def player_events(request: Request):
         try:
             # Send the current state immediately so the client has a
             # snapshot without waiting for the first change event.
-            yield f"data: {json.dumps(_current_player_snapshot())}\n\n"
+            payload = _current_player_snapshot()
+            yield f"data: {json.dumps(payload)}\n\n"
             last_seq = -1
             last_position: Optional[int] = None
             last_output_id: Optional[str] = None
             while True:
                 if await request.is_disconnected():
                     break
-                active = _current_player_snapshot()["state"] == "playing"
+                active = payload["state"] == "playing"
                 timeout = 0.25 if active else 1.0
                 try:
-                    payload = await asyncio.wait_for(queue.get(), timeout=timeout)
+                    snap = await asyncio.wait_for(queue.get(), timeout=timeout)
+                    if snap is None:
+                        break
                 except asyncio.TimeoutError:
-                    payload = _current_player_snapshot()
-                if payload is None:
-                    break
-                if _tcr_active():
-                    payload = _tcr_snapshot()
+                    snap = None
+                # Resolve output selection once, at delivery time. Queued
+                # local edges remain intact; a receiver uses its latest state.
+                payload = _current_player_snapshot(snap)
                 seq = payload.get("seq", 0)
                 position_ms = payload.get("position_ms")
                 if not _should_forward_snapshot(

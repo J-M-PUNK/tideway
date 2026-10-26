@@ -230,7 +230,7 @@ LocalSilencer = Callable[[bool], None]
 # using the app's Tidal session; the receiver fetches the audio itself.
 # The payload contains credentials and must never be logged.
 # Retain the existing alias/setter name for callers registering it.
-TrackUrlResolver = Callable[[int], dict]
+TrackUrlResolver = Callable[[int, Optional[str]], dict]
 
 # Notification callback. Fires for every server-side notification
 # (`notifyPlayerStatusChanged`, `notifyMediaInfoChanged`, etc).
@@ -320,10 +320,13 @@ class TidalConnectConnection:
         self._closing = True
         try:
             if self._session_id and not self._closed:
-                await self._send_unmatched({
-                    "command": "endSession", "sessionId": self._session_id,
-                    "stopCasting": False,
-                }, "notifySessionEnded")
+                # Some receivers never acknowledge endSession. Flush the
+                # command before closing WSS without waiting for that reply.
+                async with asyncio.timeout(REQUEST_TIMEOUT):
+                    await self._websocket.send(json.dumps({
+                        "command": "endSession", "sessionId": self._session_id,
+                        "stopCasting": False,
+                    }))
         except Exception:
             pass
         finally:
@@ -583,6 +586,7 @@ class TidalConnectRealManager:
     _browser: Any = field(default=None, init=False)
     _local_silencer: Optional[LocalSilencer] = field(default=None, init=False)
     _track_url_resolver: Optional[TrackUrlResolver] = field(default=None, init=False)
+    _track_quality: Optional[str] = field(default=None, init=False)
     # Snapshot of the device's last-reported state. Updated by the
     # notification tap below. Fields mirror the player snapshot the
     # frontend reads, so the status endpoint can serve from here
@@ -612,8 +616,8 @@ class TidalConnectRealManager:
         self._local_silencer = fn
 
     def set_track_url_resolver(self, fn: TrackUrlResolver) -> None:
-        """Register a callable that turns a Tidal track id into a
-        loadCloudQueue payload. Owned by server.py because it needs
+        """Register a callable taking a track id and requested quality.
+        It returns a loadCloudQueue payload. Owned by server.py because it needs
         the authenticated Tidal session to create the cloud queue."""
         self._track_url_resolver = fn
 
@@ -823,6 +827,7 @@ class TidalConnectRealManager:
 
     def _clear_selection(self) -> None:
         self._connection = None
+        self._track_quality = None
         self._toggle_silencer(False)
         with self._remote_state_lock:
             self._remote_state.update(
@@ -933,7 +938,9 @@ class TidalConnectRealManager:
                     track_id = 0
                 if track_id <= 0 or self._track_url_resolver is None:
                     raise RuntimeError("No current Tidal Connect track to resume")
-                payload = await asyncio.to_thread(self._track_url_resolver, track_id)
+                payload = await asyncio.to_thread(
+                    self._track_url_resolver, track_id, self._track_quality
+                )
                 position = int(saved.get("position_ms") or 0)
                 duration = int(saved.get("duration_ms") or 0)
                 # The saved clock belongs to the receiver's media, not
@@ -966,15 +973,23 @@ class TidalConnectRealManager:
     def set_mute(self, mute: bool) -> dict:
         return self._call(lambda: self._connection.set_mute(bool(mute)))  # type: ignore[union-attr]
 
-    def load_track(self, track_id: int) -> dict:
+    def load_track(self, track_id: int, quality: Optional[str] = None) -> dict:
         """Create a cloud queue for `track_id` and load it on the receiver."""
         if self._track_url_resolver is None:
             raise RuntimeError(
                 "no track URL resolver registered; "
                 "call set_track_url_resolver at startup"
             )
-        payload = self._track_url_resolver(int(track_id))
-        return self.load_cloud_queue(payload)
+        async def _load() -> dict:
+            payload = await asyncio.to_thread(
+                self._track_url_resolver, int(track_id), quality
+            )
+            result = await self._connection.load_cloud_queue(payload)
+            # A reconnect must rebuild this queue at the requested quality.
+            self._track_quality = quality
+            return result
+
+        return self._call(_load)
 
     def load_cloud_queue(self, payload: dict) -> dict:
         """Send a prepared queue payload through the live connection."""
@@ -1011,7 +1026,7 @@ class TidalConnectRealManager:
                 return
             device = DiscoveredDevice(
                 id=name,
-                name=(info.properties.get(b"fn") or info.properties.get(b"name", b"")).decode(errors="replace") or name,
+                name=(info.properties.get(b"fn") or info.properties.get(b"name") or b"").decode(errors="replace") or name,
                 address=addr,
                 port=info.port or 0,
             )

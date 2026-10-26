@@ -316,14 +316,14 @@ def test_close_uses_session_id_without_request_id():
         conn, socket = _make_connection_with_fake_socket()
         socket.close = AsyncMock()
         conn._session_id = "test-session"
-        task = asyncio.create_task(conn.close())
-        await asyncio.sleep(0)
+        # This receiver never sends notifySessionEnded.
+        await asyncio.wait_for(conn.close(), timeout=0.1)
         frame = _last_sent_frame(socket)
         assert frame == {
             "command": "endSession", "sessionId": "test-session", "stopCasting": False,
         }
-        conn._pending["notifySessionEnded"].set_result({"command": "notifySessionEnded"})
-        await task
+        assert not conn._pending
+        socket.close.assert_awaited_once()
         assert not conn.is_active()
     asyncio.run(check())
 
@@ -452,15 +452,33 @@ def test_cloud_queue_sends_complete_payload_without_mutation_or_logging(caplog):
     assert "content.invalid" not in caplog.text
 
 
-def test_load_track_routes_resolved_payload_to_cloud_queue():
+@pytest.mark.parametrize('quality', [None, 'low_320k', 'high_lossless'])
+def test_load_track_routes_resolved_payload_to_cloud_queue(quality):
     manager = tcr.TidalConnectRealManager(lambda: None, lambda _: None)
     payload = _cloud_queue_payload()
     resolver = MagicMock(return_value=payload)
     manager.set_track_url_resolver(resolver)
-    manager.load_cloud_queue = MagicMock(return_value={"resultCode": 0})
-    assert manager.load_track(123) == {"resultCode": 0}
-    resolver.assert_called_once_with(123)
-    manager.load_cloud_queue.assert_called_once_with(payload)
+    conn, _ = _make_connection_with_fake_socket()
+    conn.load_cloud_queue = AsyncMock(return_value={"resultCode": 0})
+    manager._connection = conn
+    manager._call = lambda factory: asyncio.run(factory())
+    assert manager.load_track(123, quality=quality) == {"resultCode": 0}
+    resolver.assert_called_once_with(123, quality)
+    conn.load_cloud_queue.assert_awaited_once_with(payload)
+    assert manager._track_quality == quality
+
+
+def test_rejected_load_does_not_replace_the_selected_quality():
+    manager = tcr.TidalConnectRealManager(lambda: None, lambda _: None)
+    manager._track_quality = 'low_320k'
+    manager.set_track_url_resolver(MagicMock(return_value=_cloud_queue_payload()))
+    conn, _ = _make_connection_with_fake_socket()
+    conn.load_cloud_queue = AsyncMock(side_effect=ConnectionError('offline'))
+    manager._connection = conn
+    manager._call = lambda factory: asyncio.run(factory())
+    with pytest.raises(ConnectionError):
+        manager.load_track(123, quality='hi_res_lossless')
+    assert manager._track_quality == 'low_320k'
 
 
 def test_manager_load_cloud_queue_calls_connection():
@@ -634,7 +652,7 @@ def test_cancelled_close_releases_transport_and_pending_requests():
             entered.set()
             await asyncio.Event().wait()
 
-        conn._send_unmatched = end_session
+        conn._websocket.send = AsyncMock(side_effect=end_session)
         conn._websocket.close = AsyncMock()
         pending = asyncio.get_running_loop().create_future()
         conn._pending[10] = pending
@@ -715,12 +733,14 @@ def test_concurrent_commands_share_one_reconnect(monkeypatch):
 
 
 @pytest.mark.parametrize('remote_state,reconnect', [('PAUSED', True), ('IDLE', False)])
-def test_resume_restores_receiver_track_and_position_after_session_loss(monkeypatch, remote_state, reconnect):
+@pytest.mark.parametrize('quality', [None, 'low_320k'])
+def test_resume_restores_receiver_track_and_position_after_session_loss(monkeypatch, remote_state, reconnect, quality):
     async def check():
         manager = tcr.TidalConnectRealManager(lambda: None, lambda _: None)
         manager._loop = asyncio.get_running_loop()
         conn, _ = _make_connection_with_fake_socket()
         manager._connection = conn
+        manager._track_quality = quality
         conn.is_active = MagicMock(return_value=not reconnect)
         conn.play = AsyncMock(return_value={'resultCode': 0})
         conn.load_cloud_queue = AsyncMock(return_value={'resultCode': 0})
@@ -741,11 +761,33 @@ def test_resume_restores_receiver_track_and_position_after_session_loss(monkeypa
 
         manager._connect_device = reconnect_device
         await asyncio.to_thread(manager.resume, 456)
-        resolver.assert_called_once_with(123)
+        resolver.assert_called_once_with(123, quality)
         conn.load_cloud_queue.assert_awaited_once_with({**payload, 'position': 12000})
         conn.play.assert_awaited_once()
         assert payload['position'] == 0
     asyncio.run(check())
+
+
+@pytest.mark.parametrize('properties,expected', [
+    ({b'fn': None, b'name': None}, 'fixture-service'),
+    ({b'fn': b'', b'name': None}, 'fixture-service'),
+    ({b'fn': None, b'name': b'Receiver'}, 'Receiver'),
+    ({b'fn': b'Friendly', b'name': b'Receiver'}, 'Friendly'),
+    ({b'fn': b'Bad\xff'}, 'Bad\ufffd'),
+])
+def test_discovery_retains_devices_with_valueless_txt_names(properties, expected):
+    from types import SimpleNamespace
+    from zeroconf import ServiceStateChange
+
+    manager = tcr.TidalConnectRealManager(lambda: None, lambda _: None)
+    zeroconf = MagicMock()
+    zeroconf.get_service_info.return_value = SimpleNamespace(
+        addresses=[b'\xc0\x00\x02\x01'], properties=properties, port=1234,
+    )
+    manager._on_service(zeroconf, tcr.TIDAL_CONNECT_SERVICE, 'fixture-service', ServiceStateChange.Added)
+    device, = manager.list_devices()
+    assert device.name == expected
+    assert device.address == '192.0.2.1'
 
 
 def test_resume_of_live_paused_queue_does_not_reload():
