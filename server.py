@@ -237,9 +237,18 @@ ALLOWED_IMAGE_HOSTS = {
 
 # check_login() hits Tidal over the network. Cache the result briefly so a
 # page load that fires a dozen authed requests doesn't fan out to a dozen
-# round-trips (and risk rate-limiting).
+# round-trips (and risk rate-limiting). Past the TTL a signed-in result is
+# re-checked in the background rather than on the request (see
+# _is_logged_in). `gen` is bumped by _invalidate_auth_cache so a check
+# that was already in flight can't write its older answer over a logout;
+# `refreshing` keeps it to one background re-check at a time.
 _AUTH_CACHE_TTL = 30.0
-_auth_cache: dict[str, Any] = {"at": 0.0, "ok": False}
+_auth_cache: dict[str, Any] = {
+    "at": 0.0,
+    "ok": False,
+    "gen": 0,
+    "refreshing": False,
+}
 _auth_cache_lock = threading.Lock()
 
 # Set once the background boot thread has finished loading the Tidal
@@ -375,6 +384,39 @@ def _is_logged_in() -> bool:
     with _auth_cache_lock:
         if now - _auth_cache["at"] < _AUTH_CACHE_TTL:
             return bool(_auth_cache["ok"])
+        if _auth_cache["ok"]:
+            # Signed in, but the answer has aged out. Every player
+            # endpoint runs this gate, so re-checking here put a Tidal
+            # round-trip (300 ms to over a second) in front of whichever
+            # request came first after the TTL — a play click after a
+            # few minutes of listening, typically. Answer from the
+            # known-good result and re-check in the background. Losing
+            # the login is still noticed: a Tidal call that fails auth
+            # invalidates the cache through tidal.on_auth_lost, and the
+            # re-check itself records a rejection for the next request.
+            if not _auth_cache["refreshing"]:
+                _auth_cache["refreshing"] = True
+                threading.Thread(
+                    target=_recheck_login,
+                    args=(_auth_cache["gen"],),
+                    name="auth-recheck",
+                    daemon=True,
+                ).start()
+            return True
+        gen = _auth_cache["gen"]
+    # Nothing known-good to answer from (first check, signed out, or
+    # just invalidated): this request has to wait for the answer.
+    return _recheck_login(gen)
+
+
+def _recheck_login(gen: int) -> bool:
+    """Ask Tidal whether the session is still signed in and cache the
+    answer, unless _invalidate_auth_cache ran meanwhile (`gen` moved):
+    a check that started before a logout must not record "signed in"
+    after it."""
+    import time
+
+    now = time.monotonic()
     try:
         ok = bool(tidal.session.check_login())
         if not ok and tidal.session_load_deferred():
@@ -404,8 +446,10 @@ def _is_logged_in() -> bool:
     except Exception:
         ok = False
     with _auth_cache_lock:
-        _auth_cache["at"] = now
-        _auth_cache["ok"] = ok
+        if _auth_cache["gen"] == gen:
+            _auth_cache["at"] = now
+            _auth_cache["ok"] = ok
+            _auth_cache["refreshing"] = False
     return ok
 
 
@@ -413,6 +457,11 @@ def _invalidate_auth_cache() -> None:
     with _auth_cache_lock:
         _auth_cache["at"] = 0.0
         _auth_cache["ok"] = False
+        _auth_cache["gen"] += 1
+        # A re-check still in flight belongs to the old generation and
+        # won't record anything; let the next stale answer start a new
+        # one.
+        _auth_cache["refreshing"] = False
 
 
 # When a hard refresh failure logs the user out (dead refresh
