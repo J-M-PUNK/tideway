@@ -747,6 +747,40 @@ def _cleanup_part_files(root: Path) -> None:
         pass
 
 
+def _prefetch_persisted_now_playing() -> None:
+    """Warm the manifest cache for the track that was playing when
+    the user last quit. Run from lifespan startup on its own thread;
+    see the comment there."""
+    try:
+        persisted = now_playing_state.read_state()
+    except Exception:
+        return
+    if not isinstance(persisted, dict):
+        return
+    track_id = persisted.get("trackId")
+    if not isinstance(track_id, str) or not track_id:
+        return
+    # Warm at the quality the restore will ask for. The cache is
+    # keyed on (track, quality), and the restore always passes the
+    # user's streaming quality, so warming at the session default
+    # (quality=None) was a guaranteed miss: the relaunch paid the
+    # full resolve anyway. Snapshots written before the frontend
+    # recorded the quality have none, which keeps the old guess.
+    quality = persisted.get("quality")
+    if not isinstance(quality, str) or not quality:
+        quality = None
+    try:
+        player = _native_player()
+    except Exception:
+        return
+    try:
+        player.prefetch(str(track_id), quality, warm_bytes=True)
+    except Exception:
+        # prefetch() should already swallow internally, but
+        # belt-and-braces — startup must not raise.
+        pass
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     broker.bind_loop(asyncio.get_running_loop())
@@ -1075,27 +1109,6 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # are already swallowed; if Tidal auth hasn't been refreshed
     # yet at this moment, the prefetch is a silent no-op and the
     # user pays the same cold-start cost they pay today.
-    def _prefetch_persisted_now_playing() -> None:
-        try:
-            persisted = now_playing_state.read_state()
-        except Exception:
-            return
-        if not isinstance(persisted, dict):
-            return
-        track_id = persisted.get("trackId")
-        if not isinstance(track_id, str) or not track_id:
-            return
-        try:
-            player = _native_player()
-        except Exception:
-            return
-        try:
-            player.prefetch(str(track_id), warm_bytes=True)
-        except Exception:
-            # prefetch() should already swallow internally, but
-            # belt-and-braces — startup must not raise.
-            pass
-
     threading.Thread(
         target=_prefetch_persisted_now_playing,
         name="cold-start-prefetch",

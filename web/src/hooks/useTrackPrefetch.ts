@@ -3,19 +3,33 @@ import { api } from "@/api/client";
 import { useUiPreferences } from "@/hooks/useUiPreferences";
 
 /**
- * Client-side cooperative cache for stream-manifest prefetches.
+ * Client-side de-dupe for stream-manifest prefetches, so repeat hovers
+ * and album re-mounts don't flood the backend with identical requests.
  *
- * Backend (app/audio/player.py) keeps its own 3-minute TTL on the
- * resolved manifest. This set just tracks which (track id, quality)
- * pairs we've already warmed once in this session so the frontend
- * doesn't flood the backend with identical hover / album-mount
- * requests. The backend TTL still decides when the data actually
- * expires — we're only de-duping the requests themselves.
+ * The backend decides what's actually warm: its manifest cache holds a
+ * track for 3 minutes, because Tidal's signed segment URLs expire then
+ * (app/audio/manifest_cache.py). So a warm can only be remembered for
+ * less than that. This used to remember it for the whole session, and
+ * a track warmed more than three minutes earlier — the album you've
+ * been listening to since you opened it — never warmed again: its
+ * hover sent nothing and its click paid the full resolve. Repeats
+ * inside REWARM_AFTER_MS are still de-duped; after that a hover warms
+ * again, which is a no-op on the backend while its entry is still live.
  */
-const warmed = new Set<string>();
+const REWARM_AFTER_MS = 60_000;
+const warmedAt = new Map<string, number>();
 
 function key(id: string, quality: string): string {
   return `${quality}:${id}`;
+}
+
+/** Record a warm for `k` unless one was sent recently. Returns
+ *  whether the caller should send it. */
+function claimWarm(k: string, now: number): boolean {
+  const last = warmedAt.get(k);
+  if (last !== undefined && now - last < REWARM_AFTER_MS) return false;
+  warmedAt.set(k, now);
+  return true;
 }
 
 /**
@@ -23,12 +37,12 @@ function key(id: string, quality: string): string {
  *
  *   prefetchOne(id)   — fire a single-track warm, debounced by the
  *                       caller's own hover delay (see useHoverPrefetch
- *                       below). Safe to call repeatedly; duplicate
- *                       calls for the same id are no-ops this session.
+ *                       below). Safe to call repeatedly; repeats for
+ *                       the same id within REWARM_AFTER_MS are no-ops.
  *
  *   prefetchMany(ids) — batch warm used by album / playlist / mix
- *                       detail pages on mount. Drops ids we've already
- *                       warmed so a re-mount doesn't re-request.
+ *                       detail pages on mount. Drops ids warmed within
+ *                       REWARM_AFTER_MS so a re-mount doesn't re-request.
  *
  * Both variants are fire-and-forget.
  */
@@ -41,22 +55,15 @@ export function useTrackPrefetch() {
 
   const prefetchOne = useCallback((id: string) => {
     if (!id) return;
-    const k = key(id, qualityRef.current);
-    if (warmed.has(k)) return;
-    warmed.add(k);
+    if (!claimWarm(key(id, qualityRef.current), Date.now())) return;
     void api.player.prefetch([id], qualityRef.current);
   }, []);
 
   const prefetchMany = useCallback((ids: string[]) => {
     if (!ids?.length) return;
     const q = qualityRef.current;
-    const fresh = ids.filter((id) => {
-      if (!id) return false;
-      const k = key(id, q);
-      if (warmed.has(k)) return false;
-      warmed.add(k);
-      return true;
-    });
+    const now = Date.now();
+    const fresh = ids.filter((id) => !!id && claimWarm(key(id, q), now));
     if (fresh.length === 0) return;
     void api.player.prefetch(fresh, q);
   }, []);
