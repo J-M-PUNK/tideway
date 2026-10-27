@@ -63,6 +63,7 @@ from app.audio.replaygain import (
 )
 from app.audio.output_devices import list_output_devices, resolve_output_device
 from app.audio.segment_reader import SegmentReader
+from app.audio.win_com import ensure_com_initialized
 
 # Optional audio output taps. Imported at module load (not lazily
 # from inside the audio callback) because Python's `import` statement
@@ -731,22 +732,19 @@ class PCMPlayer:
         #      decoder thread runs against a fresh queue, then we
         #      atomically swap references the way `_adopt_preload_locked`
         #      does for a real preload — the OutputStream stays open
-        #      across the swap, so we never race the OS releasing the
-        #      audio device. This is critical on Windows audio devices
-        #      with slow `IAudioClient::Release` (USB DACs are the
-        #      canonical case: their second `stream.start()` after a
-        #      `close()` fails with a `WdmSyncIoctl` IOCTL error, the
-        #      player flips to state=error, and the frontend's
-        #      auto-advance burns through the queue at ~200 ms / track).
-        #      When the new decoder's format doesn't fit the active
-        #      stream, (A) still adopts the pipeline it built and
-        #      replaces only the stream; that close + reopen can't be
-        #      avoided when the format changes.
+        #      across the swap, so the track change costs no stream
+        #      reopen at all. (This path was first added for a USB DAC
+        #      whose reopened stream failed to start with a
+        #      `WdmSyncIoctl` error; that turned out to be a WASAPI
+        #      start on a thread without COM, fixed in _start_stream,
+        #      not the reopen itself.) When the new decoder's format
+        #      doesn't fit the active stream, (A) still adopts the
+        #      pipeline it built and replaces only the stream; that
+        #      close + reopen can't be avoided when the format changes.
         #
         #  (B) **Full teardown + fresh open** when no stream is open yet
         #      (cold start, after a stop). This is the original slow
-        #      path and the race-prone one — but it only fires when
-        #      there is no stream to keep.
+        #      path; it only fires when there is no stream to keep.
         self._dbg(f"load SLOW PATH: full teardown + fresh resolve for {track_id}")
         self._pending_upnp_notify = False
         # A preload still building was chosen for the track we're
@@ -1061,7 +1059,7 @@ class PCMPlayer:
                 self._paused = False
                 try:
                     if not stream.active:
-                        stream.start()
+                        self._start_stream(stream)
                 except Exception as exc:
                     log.exception("stream.start failed")
                     self._last_error = str(exc)
@@ -2162,7 +2160,7 @@ class PCMPlayer:
                     self._callback_carry = None
                     self._open_output_stream(sample_rate, channels, sd_dtype)
                 try:
-                    self._stream.start()
+                    self._start_stream(self._stream)
                 except Exception:
                     log.exception("set_output_device: stream start failed")
             finally:
@@ -2213,7 +2211,7 @@ class PCMPlayer:
                     self._callback_carry = None
                     self._open_output_stream(sample_rate, channels, sd_dtype)
                 try:
-                    self._stream.start()
+                    self._start_stream(self._stream)
                 except Exception:
                     log.exception("set_exclusive_mode: stream start failed")
             finally:
@@ -2862,6 +2860,15 @@ class PCMPlayer:
                 file=sys.stderr,
                 flush=True,
             )
+
+    @staticmethod
+    def _start_stream(stream) -> None:
+        """Start an output stream from whichever thread is asking.
+        Every stream start goes through here: WASAPI needs COM on the
+        starting thread, and these run on HTTP workers, the bridge and
+        recovery threads (see app/audio/win_com.py)."""
+        ensure_com_initialized()
+        stream.start()
 
     def _open_output_stream(self, sample_rate: int, channels: int, dtype: str) -> None:
         # If the user picked a specific output device, resolve its
@@ -3869,7 +3876,7 @@ class PCMPlayer:
                 pre.sample_rate, pre.channels, pre.sd_dtype
             )
             try:
-                self._stream.start()
+                self._start_stream(self._stream)
             except Exception as exc:
                 log.exception("adopt_preload: stream.start failed")
                 self._last_error = str(exc)
@@ -4538,7 +4545,7 @@ class PCMPlayer:
                     self._open_output_stream(
                         sample_rate, channels, sd_dtype
                     )
-                self._stream.start()
+                self._start_stream(self._stream)
                 if device_gone:
                     log.info(
                         "device-recovery: original device id=%r gone; "
@@ -4574,7 +4581,7 @@ class PCMPlayer:
                     self._open_output_stream(
                         sample_rate, channels, sd_dtype
                     )
-                self._stream.start()
+                self._start_stream(self._stream)
                 log.info(
                     "device-recovery: reopened on system default "
                     "(rate=%d, channels=%d)",
@@ -4692,7 +4699,7 @@ class PCMPlayer:
                 )
                 self._transition("playing")
             try:
-                self._stream.start()
+                self._start_stream(self._stream)
             except Exception:
                 log.exception("bridge: stream.start failed")
                 with self._lock:
