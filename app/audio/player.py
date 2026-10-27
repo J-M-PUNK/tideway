@@ -2439,36 +2439,36 @@ class PCMPlayer:
             except Exception:
                 pass
 
-        # Cache hit path: skip the two parallel Tidal round-trips
-        # (track metadata + playbackinfo) plus the local manifest
-        # parse when a recent prefetch or play already resolved this
-        # (track_id, quality) pair. 3-minute TTL stays well inside
-        # Tidal's signed-URL expiry window.
         cache_key = (track_id, quality)
         t0 = time.monotonic()
-        cached_urls_info = self._manifest_cache.lookup(cache_key)
-        if cached_urls_info is not None:
-            urls, duration, info, bytes_map, track_meta = cached_urls_info
-            # Cache HIT must refresh the UPnP metadata for playback too
-            # — the miss path does this inside _resolve_uncached, but a
-            # hit used to leave _current_track_meta pointing at the
-            # previous track, so the renderer was told the wrong
-            # artist/song at session start (and on every replay, since
-            # cold-start prefetch makes the first play a hit). Guarded
-            # by set_current_meta so speculative prefetch doesn't clobber
-            # it.
-            if track_meta is not None and set_current_meta:
-                self._current_track_meta = track_meta
-            print(
-                f"[perf] resolve track={track_id} quality={quality} "
-                f"cache=HIT elapsed={(time.monotonic() - t0) * 1000.0:.0f}ms "
-                f"prefetched_segments={len(bytes_map)}",
-                file=sys.stderr,
-                flush=True,
+        joined = False
+        while True:
+            hit = self._cached_source(
+                cache_key, t0, set_current_meta, joined=joined
             )
-            return (list(urls), duration, info, bytes_map, track_meta)
+            if hit is not None:
+                return hit
+            in_flight = self._manifest_cache.begin_fill(cache_key)
+            if in_flight is None:
+                break
+            # Another thread is already asking Tidal for this exact
+            # track at this quality: typically the hover warm-up for the
+            # row just clicked, or the preload of the track just skipped
+            # to. Its answer lands in the cache, so wait for it rather
+            # than paying a second, parallel resolve. If it failed, the
+            # loop finds the cache still empty and resolves here. The
+            # owner's own resolve is bounded by _RESOLVE_TIMEOUT_S, and
+            # so is this wait.
+            in_flight.wait(timeout=_RESOLVE_TIMEOUT_S)
+            joined = True
 
         try:
+            # A fill can complete between the miss above and our claim.
+            hit = self._cached_source(
+                cache_key, t0, set_current_meta, joined=joined
+            )
+            if hit is not None:
+                return hit
             return self._resolve_uncached(
                 session, track_id, quality, cache_key, t0,
                 set_current_meta=set_current_meta,
@@ -2503,6 +2503,53 @@ class PCMPlayer:
                     "back in."
                 ) from exc
             raise
+        finally:
+            self._manifest_cache.end_fill(cache_key)
+
+    def _cached_source(
+        self,
+        cache_key: tuple,
+        t0: float,
+        set_current_meta: bool,
+        *,
+        joined: bool,
+    ) -> Optional[
+        tuple[list[str], Optional[float], StreamInfo, dict[int, bytes], Optional[dict]]
+    ]:
+        """The cache-hit half of _resolve_source, or None on a miss.
+
+        Skips the two parallel Tidal round-trips (track metadata +
+        playbackinfo) plus the local manifest parse when a recent
+        prefetch or play already resolved this (track_id, quality)
+        pair. 3-minute TTL stays well inside Tidal's signed-URL expiry
+        window. `joined` marks a hit that came from waiting on another
+        thread's resolve, so the perf line doesn't pass the wait off as
+        a plain cache hit.
+        """
+        cached_urls_info = self._manifest_cache.lookup(cache_key)
+        if cached_urls_info is None:
+            return None
+        urls, duration, info, bytes_map, track_meta = cached_urls_info
+        # Cache HIT must refresh the UPnP metadata for playback too
+        # — the miss path does this inside _resolve_uncached, but a
+        # hit used to leave _current_track_meta pointing at the
+        # previous track, so the renderer was told the wrong
+        # artist/song at session start (and on every replay, since
+        # cold-start prefetch makes the first play a hit). Guarded
+        # by set_current_meta so speculative prefetch doesn't clobber
+        # it.
+        if track_meta is not None and set_current_meta:
+            self._current_track_meta = track_meta
+        track_id, quality = cache_key
+        print(
+            f"[perf] resolve track={track_id} quality={quality} "
+            f"cache={'JOINED' if joined else 'HIT'} "
+            f"elapsed={(time.monotonic() - t0) * 1000.0:.0f}ms "
+            f"prefetched_segments={len(bytes_map)}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return (list(urls), duration, info, bytes_map, track_meta)
 
     def _resolve_uncached(
         self,
