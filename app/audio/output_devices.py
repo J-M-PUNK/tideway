@@ -23,6 +23,9 @@ Per-platform behaviour:
     via MME, DirectSound, and WDM-KS; those produce duplicate listings
     AND ignore the IMMDevice DEVICE_STATE_ACTIVE bit, so they show
     devices the user disabled in Sound settings. WASAPI honors that bit.
+    "System default" resolves to WASAPI's default output too, so every
+    stream on Windows goes through the same host API (see
+    `_system_default_output`).
 
   Linux — no filter applied. The typical PortAudio build only links
     ALSA, so the duplicate-host problem doesn't apply.
@@ -223,11 +226,46 @@ def list_output_devices(stream_active: bool) -> list[dict]:
     return out
 
 
+def _system_default_output() -> Optional[int]:
+    """PortAudio index to open for "System default".
+
+    On Windows that's WASAPI's default output. PortAudio's own default
+    (device=None) is MME's, and MME is the legacy path: on a USB DAC it
+    reported a 180 ms output buffer where WASAPI reports 10 ms, which
+    put ~80 ms more in front of the first sample of every track than a
+    device picked by name gets (the picker, and so every named device,
+    is already WASAPI-only). Exclusive Mode couldn't engage either,
+    because WASAPI's stream settings don't apply to an MME device; the
+    open failed and fell back to shared without telling anyone.
+
+    Both host APIs report the device that was the Windows default when
+    PortAudio initialised, and both refresh on the same re-init (the
+    picker opening, device-loss recovery), so this doesn't change which
+    device "System default" follows.
+
+    None elsewhere, where PortAudio's default already is the native
+    API, and on Windows when WASAPI is missing or has no default output
+    (no active output device), which keeps the MME default as before.
+    """
+    wasapi_idx = wasapi_host_api_index()
+    if wasapi_idx is None:
+        return None
+    try:
+        default = sd.query_hostapis(wasapi_idx).get("default_output_device")
+    except Exception:
+        log.exception("query_hostapis failed resolving the WASAPI default output")
+        return None
+    if not isinstance(default, int) or default < 0:
+        return None
+    return default
+
+
 def resolve_output_device(name: str) -> tuple[Optional[int], bool]:
     """Map a saved output-device *name* to a live PortAudio index.
 
     Returns `(index, available)`:
-      - empty name → `(None, True)`: use the system default.
+      - empty name → `(_system_default_output(), True)`: the system
+        default (None means PortAudio's own default).
       - name matches a current output-capable device → `(index, True)`.
       - name matches nothing usable, the device is unplugged or the
         value is a legacy numeric index from before device identity
@@ -244,7 +282,7 @@ def resolve_output_device(name: str) -> tuple[Optional[int], bool]:
     limitation of the device layer, which keys on name throughout.
     """
     if not name:
-        return None, True
+        return _system_default_output(), True
     try:
         devices = sd.query_devices()
     except Exception:
