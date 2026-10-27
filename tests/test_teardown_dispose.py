@@ -116,9 +116,7 @@ def test_retire_preload_ignores_a_cast_record():
 
 def test_drop_preload_does_not_wait_for_the_preload_thread():
     decoder, q, stop_flag, done, thread = _producer_parked_on_a_full_queue()
-    p = PCMPlayer.__new__(PCMPlayer)
-    p._pipeline_lock = threading.RLock()
-    p._lock = threading.RLock()
+    p = PCMPlayer(lambda: None)
     p._preload = _Preload(
         track_id="t2",
         quality=None,
