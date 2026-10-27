@@ -376,6 +376,11 @@ class PCMPlayer:
         # the current track ends; consumed in-place by the audio
         # callback at end-of-track.
         self._preload: Optional[_Preload] = None
+        # Bumped whenever a preload being built must not be installed:
+        # an explicit drop (stop, a different next track) or a load.
+        # preload() builds outside _pipeline_lock and only installs if
+        # this hasn't moved since it started.
+        self._preload_gen = 0
 
         # Set by _try_gapless_swap() when the audio callback
         # transitions to a new track while UPnP passthrough is active.
@@ -744,6 +749,10 @@ class PCMPlayer:
         #      there is no stream to keep.
         self._dbg(f"load SLOW PATH: full teardown + fresh resolve for {track_id}")
         self._pending_upnp_notify = False
+        # A preload still building was chosen for the track we're
+        # leaving; it must not land as this new track's next.
+        with self._lock:
+            self._preload_gen += 1
         load_t0 = time.monotonic()
 
         # Snapshot the active stream's format so we can decide whether
@@ -1426,31 +1435,44 @@ class PCMPlayer:
             # Different track (or no preload) — tear down any stale
             # one before we build the new one.
             self._drop_preload()
+            with self._lock:
+                gen = self._preload_gen
 
-            try:
-                source_spec, duration_s, stream_info, prefetched_bytes, track_meta = (
-                    self._resolve_source(
-                        track_id, quality, set_current_meta=False
-                    )
+        # The resolve and the decoder init are network round-trips —
+        # several hundred ms together. They run outside _pipeline_lock
+        # so a click doesn't queue behind them: the frontend fires
+        # this ten seconds into every track, and a load() arriving in
+        # that window used to wait out the whole preload before it
+        # could start its own. What they produce is installed below
+        # only if nothing has superseded this request meanwhile.
+        try:
+            source_spec, duration_s, stream_info, prefetched_bytes, track_meta = (
+                self._resolve_source(
+                    track_id, quality, set_current_meta=False
                 )
-            except Exception as exc:
-                log.exception("preload resolve failed for %s", track_id)
-                return {"ok": False, "error": str(exc)}
+            )
+        except Exception as exc:
+            log.exception("preload resolve failed for %s", track_id)
+            return {"ok": False, "error": str(exc)}
 
-            # While casting, do NOT open a second TIDAL reader for the
-            # next track. TIDAL closes the session when two tracks are
-            # open, so the next bounded file is pre-downloaded (serialized
-            # after the current track's TIDAL reader is released) and then
-            # pre-staged on the renderer via SetNextAVTransportURI so it
-            # advances on its own at the boundary. This is the path being
-            # re-tested against UAPP 7.1.2.8 (7.1.1.4 crashed in
-            # HTTPStreamProvider::cleanUp on the SetNext action).
-            if (
-                _upnp_manager is not None
-                and isinstance(source_spec, list)
-                and _upnp_manager.is_active()
-                and _upnp_manager.is_gapless()
-            ):
+        # While casting, do NOT open a second TIDAL reader for the
+        # next track. TIDAL closes the session when two tracks are
+        # open, so the next bounded file is pre-downloaded (serialized
+        # after the current track's TIDAL reader is released) and then
+        # pre-staged on the renderer via SetNextAVTransportURI so it
+        # advances on its own at the boundary. This is the path being
+        # re-tested against UAPP 7.1.2.8 (7.1.1.4 crashed in
+        # HTTPStreamProvider::cleanUp on the SetNext action). The
+        # staging stays serialized with the rest of the pipeline.
+        if (
+            _upnp_manager is not None
+            and isinstance(source_spec, list)
+            and _upnp_manager.is_active()
+            and _upnp_manager.is_gapless()
+        ):
+            with self._pipeline_lock:
+                if not self._preload_still_wanted(gen, track_id):
+                    return {"ok": False, "superseded": True}
                 staged = False
                 try:
                     staged = _upnp_manager.set_next_track(
@@ -1484,14 +1506,20 @@ class PCMPlayer:
                             track_meta=track_meta,
                             cast=True,
                         )
-                return {"ok": True, "cached": False, "cast": True}
+            return {"ok": True, "cached": False, "cast": True}
 
-            try:
-                source = _build_source(source_spec, prefetched=prefetched_bytes)
-                decoder = Decoder(source)
-            except Exception as exc:
-                log.exception("preload resolve failed for %s", track_id)
-                return {"ok": False, "error": str(exc)}
+        try:
+            source = _build_source(source_spec, prefetched=prefetched_bytes)
+            decoder = Decoder(source)
+        except Exception as exc:
+            log.exception("preload resolve failed for %s", track_id)
+            return {"ok": False, "error": str(exc)}
+
+        with self._pipeline_lock:
+            if not self._preload_still_wanted(gen, track_id):
+                self._dbg(f"preload superseded while building track={track_id}")
+                decoder.close()
+                return {"ok": False, "superseded": True}
 
             # Configure the preload's output rate to match the active
             # stream so the gapless splice works for any source-rate
@@ -1501,6 +1529,8 @@ class PCMPlayer:
             # exclusive mode we keep the preload at its own source
             # rate; if it doesn't match the active stream, the adopt
             # path reopens the stream (same ~50 ms gap as before).
+            # Read now, not before the build: the stream may have been
+            # reopened in a new format while we were on the network.
             current_stream_rate = self._stream_sample_rate
             if not self._exclusive_mode and current_stream_rate:
                 decoder.set_target_rate(current_stream_rate)
@@ -1579,6 +1609,18 @@ class PCMPlayer:
                 "sample_rate": pre.sample_rate,
                 "dtype": pre.sd_dtype,
             }
+
+    def _preload_still_wanted(self, gen: int, track_id: str) -> bool:
+        """Whether a preload that started at generation `gen` may still
+        be installed. Call with _pipeline_lock held.
+
+        Not if anything bumped the generation since (a drop, a newer
+        preload, a load), and not if `track_id` became the current
+        track meanwhile: the user clicked the track that was being
+        preloaded and load() built it itself, so installing it as the
+        next track would replay it at the end of itself."""
+        with self._lock:
+            return gen == self._preload_gen and self._current_track_id != track_id
 
     def _build_load_pipeline(
         self,
@@ -1682,6 +1724,7 @@ class PCMPlayer:
             with self._lock:
                 pre = self._preload
                 self._preload = None
+                self._preload_gen += 1
             if pre is None:
                 return
             print(f"[pcm] drop preload track={pre.track_id}", flush=True)
