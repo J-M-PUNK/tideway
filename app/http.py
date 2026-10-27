@@ -158,3 +158,15 @@ IMPERSONATED = type(SESSION).__module__.startswith("curl_cffi")
 # impersonated transport also leaves more curl-cffi capacity for the
 # calls that actually need it.
 IMAGE_SESSION = _build_requests_session()
+
+# Transport for playback's DASH segment reads (SegmentReader) and the
+# segment warm-up behind hover / cold-start prefetch. A connection pool
+# that outlives any one track is the point: each SegmentReader used to
+# open its own session, so every play and every seek paid a fresh TCP +
+# TLS handshake to the CDN before the first byte — ~250 ms for a
+# 600-byte init segment, the single largest step in a warm track
+# change. The CDN is the same one IMAGE_SESSION talks to and doesn't
+# fingerprint, so plain pooled requests is enough, and it keeps segment
+# reads out from behind tidalapi traffic on SESSION. Its own pool, not
+# IMAGE_SESSION's, so a grid of covers can't queue ahead of audio.
+STREAM_SESSION = _build_requests_session()
