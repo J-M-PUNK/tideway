@@ -733,13 +733,15 @@ class PCMPlayer:
         #      `close()` fails with a `WdmSyncIoctl` IOCTL error, the
         #      player flips to state=error, and the frontend's
         #      auto-advance burns through the queue at ~200 ms / track).
+        #      When the new decoder's format doesn't fit the active
+        #      stream, (A) still adopts the pipeline it built and
+        #      replaces only the stream; that close + reopen can't be
+        #      avoided when the format changes.
         #
         #  (B) **Full teardown + fresh open** when no stream is open yet
-        #      (cold start, after a stop), the device id changed, or the
-        #      new decoder's format doesn't fit the active stream. This
-        #      is the original slow path and the race-prone one — but
-        #      it only fires in cases where we genuinely have to close
-        #      and reopen.
+        #      (cold start, after a stop). This is the original slow
+        #      path and the race-prone one — but it only fires when
+        #      there is no stream to keep.
         self._dbg(f"load SLOW PATH: full teardown + fresh resolve for {track_id}")
         self._pending_upnp_notify = False
         load_t0 = time.monotonic()
@@ -775,9 +777,47 @@ class PCMPlayer:
                 and synthetic.sd_dtype == active_dtype
                 and synthetic.channels == active_channels
             )
-            if rate_matches:
-                # Path (A): atomic swap, keep stream open. Mirrors
-                # `_adopt_preload_locked`'s same-rate branch.
+            # Path (A): adopt the pipeline we just built. When its
+            # format matches the open stream, the stream stays open
+            # across the swap. When it doesn't (usually a 16-bit track
+            # after a 24-bit one at the mixer rate, or the reverse),
+            # only the stream is replaced: this used to discard the
+            # pipeline and rebuild the same one from scratch in path
+            # (B), paying the resolve and the decoder init twice
+            # (`teardown=~800ms` and then `decoder_init=~300ms` in the
+            # load perf line, on every bit-depth change).
+            outgoing_stream = None
+            if not rate_matches:
+                self._dbg(
+                    f"load: format change "
+                    f"({active_rate}/{active_dtype}/{active_channels} -> "
+                    f"{synthetic.sample_rate}/{synthetic.sd_dtype}/"
+                    f"{synthetic.channels}); reopening the stream"
+                )
+                with self._lock:
+                    outgoing_stream = self._stream
+                    self._stream = None
+                    # Muzzle the finished_callback that abort() fires,
+                    # as set_output_device does. Unmuzzled it reads the
+                    # stream ending as device loss, or bridges onto the
+                    # stale preload we're about to drop.
+                    self._replacing_stream = True
+            try:
+                if outgoing_stream is not None:
+                    # abort() over stop(): same reason as _teardown —
+                    # stop() drains the device buffer first.
+                    try:
+                        outgoing_stream.abort()
+                    except Exception:
+                        pass
+                    try:
+                        outgoing_stream.close()
+                    except Exception:
+                        pass
+                    # The callback can no longer fire, so a crossfade
+                    # caught mid-window can be cancelled, as _teardown
+                    # did when this case went through path (B).
+                    self._abort_crossfade()
                 with self._lock:
                     old_thread = self._decoder_thread
                     old_stop_flag = self._stop_flag
@@ -793,48 +833,54 @@ class PCMPlayer:
                     self._paused = False
                     self._seeking = False
                     self._last_error = None
+                    if outgoing_stream is not None:
+                        # After the swap: _open_output_stream configures
+                        # whichever decoder is current. The new
+                        # decoder's thread is already running, so its
+                        # output rate must not change under it; it was
+                        # built against the open stream's rate (the
+                        # mixer rate), which is what this asks for
+                        # again, so set_target_rate is a no-op.
+                        self._open_output_stream(
+                            synthetic.sample_rate,
+                            synthetic.channels,
+                            synthetic.sd_dtype,
+                        )
                     # Same contract as the original slow path: load()
                     # leaves us in "paused"; caller's play() flips to
-                    # "playing".
+                    # "playing" (and starts a reopened stream).
                     self._transition("paused")
+            finally:
+                if outgoing_stream is not None:
+                    with self._lock:
+                        self._replacing_stream = False
 
-                # The old pipeline and any stale preload are detached
-                # now; neither is on the audible path, so release them
-                # without making this click wait for their threads.
-                self._retire_pipeline(old_stop_flag, old_decoder, old_thread)
-                self._retire_preload(stale_preload)
+            # The old pipeline and any stale preload are detached
+            # now; neither is on the audible path, so release them
+            # without making this click wait for their threads.
+            self._retire_pipeline(old_stop_flag, old_decoder, old_thread)
+            self._retire_preload(stale_preload)
 
-                _perf = (
-                    f"[perf] load track={track_id} "
-                    f"total={(time.monotonic() - load_t0) * 1000.0:.0f}ms "
-                    f"build={(t_built - load_t0) * 1000.0:.0f}ms "
-                    f"swap={(time.monotonic() - t_built) * 1000.0:.0f}ms "
-                    f"(gapless: kept stream open)"
+            _perf = (
+                f"[perf] load track={track_id} "
+                f"total={(time.monotonic() - load_t0) * 1000.0:.0f}ms "
+                f"build={(t_built - load_t0) * 1000.0:.0f}ms "
+                f"swap={(time.monotonic() - t_built) * 1000.0:.0f}ms "
+                + (
+                    "(gapless: kept stream open)"
+                    if outgoing_stream is None
+                    else "(format change: reopened stream)"
                 )
-                print(_perf, file=sys.stderr, flush=True)
-                # Also persist: a Finder-launched .app discards stderr,
-                # so without this the slow-start breakdown is lost.
-                audio_log.info(_perf)
-                self._emit()
-                return self.snapshot()
-            else:
-                # Format mismatch — the synthetic pipeline's decoder
-                # can't feed the active stream. Tear it down and fall
-                # through to path (B), which closes the old stream and
-                # opens a new one at the new format. The close+open
-                # race can still fire here, but format-change track
-                # changes are far rarer than format-match ones.
-                self._dbg(
-                    f"load slow path: format mismatch "
-                    f"({synthetic.sample_rate}/{synthetic.sd_dtype}/"
-                    f"{synthetic.channels} vs active "
-                    f"{active_rate}/{active_dtype}/{active_channels}); "
-                    f"discarding synthetic pipeline"
-                )
-                self._retire_preload(synthetic)
+            )
+            print(_perf, file=sys.stderr, flush=True)
+            # Also persist: a Finder-launched .app discards stderr,
+            # so without this the slow-start breakdown is lost.
+            audio_log.info(_perf)
+            self._emit()
+            return self.snapshot()
 
-        # Path (B): no active stream (or format mismatch fell through).
-        # Full teardown + fresh open at the new decoder's native rate.
+        # Path (B): no active stream. Full teardown + fresh open at the
+        # new decoder's native rate.
         self._teardown()
         t_teardown = time.monotonic()
         with self._lock:
