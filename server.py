@@ -7989,40 +7989,6 @@ def tidal_connect_real_disconnect() -> dict:
     return {"ok": True}
 
 
-@app.get("/api/upnp/devices")
-def upnp_devices() -> dict:
-    """SSDP-scan the LAN for UPnP MediaRenderers. Used by the
-    forthcoming Settings UPnP section to populate the device
-    picker. Day 1 of UPnP work — no connect / play yet, just
-    confirming that at least one device on the user's network
-    responds to discovery."""
-    _require_local_access()
-    from app.audio.upnp import get_manager  # noqa: WPS433 — lazy
-
-    mgr = get_manager()
-    if not mgr.is_available():
-        return {
-            "available": False,
-            "reason": "async-upnp-client not installed",
-            "devices": [],
-        }
-    devices = mgr.discover(timeout=5.0)
-    return {
-        "available": True,
-        "devices": [
-            {
-                "id": d.id,
-                "name": d.name,
-                "manufacturer": d.manufacturer,
-                "model": d.model,
-                "location": d.location,
-                "service_types": list(d.service_types),
-            }
-            for d in devices
-        ],
-    }
-
-
 # Hotkey bus + routes moved to `app/routers/hotkey.py`. The
 # lifespan call below binds the bus to the running event loop on
 # startup so the pynput listener thread can fan events out.
