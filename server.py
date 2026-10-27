@@ -5498,6 +5498,22 @@ class _PlayerEqEnabledRequest(BaseModel):
     enabled: bool
 
 
+class _EqManualProfileCreate(BaseModel):
+    name: str
+    bands: list[_ParametricBandModel]
+    preamp: Optional[float] = None
+
+
+class _EqManualProfileUpdate(BaseModel):
+    # Any subset: a rename sends `name`; "overwrite with the current
+    # curve" sends `bands` + `preamp`. `preamp` is tri-state, so the
+    # handler checks which fields were actually sent rather than
+    # treating None as "leave alone".
+    name: Optional[str] = None
+    bands: Optional[list[_ParametricBandModel]] = None
+    preamp: Optional[float] = None
+
+
 class _PlayerOutputDeviceRequest(BaseModel):
     # Empty string routes to the system default.
     device_id: str
@@ -6449,6 +6465,10 @@ def player_eq_state() -> dict:
         # bands yet — grabbable flat nodes instead of an empty graph.
         "default_bands": [b.to_dict() for b in default_parametric_bands()],
         "presets": parametric_presets(),
+        "manual_profiles": list(settings.eq_manual_profiles),
+        # Served so the editor disables "Save" at the same cap the
+        # create endpoint enforces, instead of hardcoding it.
+        "manual_profiles_max": _EQ_MANUAL_PROFILES_MAX,
     }
 
 
@@ -6554,6 +6574,136 @@ def player_eq_enabled(req: _PlayerEqEnabledRequest) -> dict:
     settings.eq_enabled = new_enabled
     save_settings(settings)
     return {"ok": True, "enabled": settings.eq_enabled}
+
+
+# --- Manual EQ profiles ----------------------------------------------------
+# Named, user-saved manual curves. Storage only: loading a profile is
+# the client posting its bands/preamp to POST /api/player/eq, so the
+# audible path stays the one validated handler above and there is no
+# second way to put a curve in the engine. Distinct from the AutoEQ
+# headphone profiles further down.
+
+_EQ_MANUAL_PROFILES_MAX = 50
+_EQ_MANUAL_PROFILE_NAME_MAX = 60
+
+
+def _clean_eq_profile_name(raw: str) -> str:
+    """Collapse whitespace and enforce a non-empty, bounded name."""
+    name = " ".join((raw or "").split())
+    if not name:
+        raise HTTPException(status_code=400, detail="Profile name can't be empty")
+    if len(name) > _EQ_MANUAL_PROFILE_NAME_MAX:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Profile name is longer than {_EQ_MANUAL_PROFILE_NAME_MAX} characters",
+        )
+    return name
+
+
+def _validated_eq_curve(
+    bands: list, preamp: Optional[float]
+) -> list[dict]:
+    """Run bands/preamp through the same validator POST /api/player/eq
+    uses, so a saved profile can never hold a curve that handler would
+    reject on load. Returns the bands as normalised dicts."""
+    parsed = _validated_eq_request(_PlayerEqRequest(bands=bands, preamp=preamp))
+    return [b.to_dict() for b in parsed]
+
+
+def _reject_taken_eq_profile_name(
+    profiles: list[dict], name: str, except_id: Optional[str] = None
+) -> None:
+    # Case-insensitive: "Bass" and "bass" side by side in the picker
+    # would be indistinguishable in practice. The message names the
+    # existing profile as saved, since that's what the user can see.
+    folded = name.casefold()
+    for p in profiles:
+        existing = str(p.get("name", ""))
+        if p.get("id") != except_id and existing.casefold() == folded:
+            raise HTTPException(
+                status_code=409, detail=f'A profile named "{existing}" already exists'
+            )
+
+
+@app.post("/api/player/eq/manual-profiles")
+def eq_manual_profile_create(req: _EqManualProfileCreate) -> dict:
+    """Save a curve under a new name. Does not change what's playing —
+    the curve being saved is normally the one already applied."""
+    _require_local_access()
+    name = _clean_eq_profile_name(req.name)
+    bands = _validated_eq_curve(req.bands, req.preamp)
+    # Read-modify-write on a settings list, so take the same lock as
+    # PUT /api/settings, which rebuilds the whole Settings object and
+    # would otherwise race a concurrent save.
+    with _settings_lock:
+        profiles = list(settings.eq_manual_profiles)
+        if len(profiles) >= _EQ_MANUAL_PROFILES_MAX:
+            raise HTTPException(
+                status_code=400,
+                detail=f"You can save up to {_EQ_MANUAL_PROFILES_MAX} EQ profiles",
+            )
+        _reject_taken_eq_profile_name(profiles, name)
+        profile = {
+            "id": uuid.uuid4().hex,
+            "name": name,
+            "bands": bands,
+            "preamp": req.preamp,
+        }
+        profiles.append(profile)
+        settings.eq_manual_profiles = profiles
+        save_settings(settings)
+    return {"profile": profile, "profiles": profiles}
+
+
+@app.put("/api/player/eq/manual-profiles/{profile_id}")
+def eq_manual_profile_update(profile_id: str, req: _EqManualProfileUpdate) -> dict:
+    """Rename a profile and/or overwrite its curve.
+
+    Fields are applied only when sent, because `preamp: null` is a
+    real value (no preamp) rather than "leave it alone"."""
+    _require_local_access()
+    sent = req.model_fields_set
+    if not sent & {"name", "bands", "preamp"}:
+        raise HTTPException(status_code=400, detail="Nothing to update")
+    name = _clean_eq_profile_name(req.name or "") if "name" in sent else None
+    bands = None
+    if "bands" in sent:
+        if req.bands is None:
+            raise HTTPException(status_code=400, detail="bands can't be null")
+        bands = _validated_eq_curve(req.bands, None)
+    if "preamp" in sent:
+        _validated_eq_curve([], req.preamp)  # bounds check only
+    with _settings_lock:
+        profiles = [dict(p) for p in settings.eq_manual_profiles]
+        target = next((p for p in profiles if p.get("id") == profile_id), None)
+        if target is None:
+            raise HTTPException(status_code=404, detail="EQ profile not found")
+        if name is not None:
+            _reject_taken_eq_profile_name(profiles, name, except_id=profile_id)
+            target["name"] = name
+        if bands is not None:
+            target["bands"] = bands
+        if "preamp" in sent:
+            target["preamp"] = req.preamp
+        settings.eq_manual_profiles = profiles
+        save_settings(settings)
+    return {"profile": target, "profiles": profiles}
+
+
+@app.delete("/api/player/eq/manual-profiles/{profile_id}")
+def eq_manual_profile_delete(profile_id: str) -> dict:
+    """Remove a saved profile. The curve currently applied is left
+    alone even if it came from this profile — deleting a saved copy
+    shouldn't change what you're hearing."""
+    _require_local_access()
+    with _settings_lock:
+        profiles = list(settings.eq_manual_profiles)
+        kept = [p for p in profiles if p.get("id") != profile_id]
+        if len(kept) == len(profiles):
+            raise HTTPException(status_code=404, detail="EQ profile not found")
+        settings.eq_manual_profiles = kept
+        save_settings(settings)
+    return {"profiles": kept}
 
 
 # --- AutoEQ headphone profiles ---------------------------------------------
