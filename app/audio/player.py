@@ -1266,9 +1266,15 @@ class PCMPlayer:
         # bit-crushed audio. set_target_rate flips the new decoder
         # into the same flt-at-target_rate config the old one had,
         # or no-ops in the passthrough case (exclusive mode, where
-        # stream rate == source rate).
+        # stream rate == source rate). A float32 stream at the source
+        # rate (shared mode, see _float_output_for) needs float output
+        # from the new decoder too, or its int samples would be read as
+        # float32 the same way.
         if self._stream_sample_rate:
-            new_decoder.set_target_rate(self._stream_sample_rate)
+            new_decoder.set_target_rate(
+                self._stream_sample_rate,
+                float_output=self._stream_sd_dtype == "float32",
+            )
         t_decoder_init = time.monotonic()
         # For local files the new container starts at t=0; tell it
         # to seek forward to the precise target. For DASH we already
@@ -1531,7 +1537,10 @@ class PCMPlayer:
             # reopened in a new format while we were on the network.
             current_stream_rate = self._stream_sample_rate
             if not self._exclusive_mode and current_stream_rate:
-                decoder.set_target_rate(current_stream_rate)
+                decoder.set_target_rate(
+                    current_stream_rate,
+                    float_output=self._float_output_for(False),
+                )
 
             q: queue.Queue[Optional[np.ndarray]] = queue.Queue(
                 maxsize=_PCM_QUEUE_MAX
@@ -1676,7 +1685,9 @@ class PCMPlayer:
         # there — if it ends up differing from the active stream's,
         # the caller falls through to the full teardown path.
         if match_rate is not None and not self._exclusive_mode:
-            decoder.set_target_rate(int(match_rate))
+            decoder.set_target_rate(
+                int(match_rate), float_output=self._float_output_for(False)
+            )
 
         q: "queue.Queue[Optional[np.ndarray]]" = queue.Queue(
             maxsize=_PCM_QUEUE_MAX
@@ -2906,7 +2917,10 @@ class PCMPlayer:
                 target_rate = decoder.sample_rate
             else:
                 target_rate = self._query_device_mixer_rate(device, decoder.sample_rate)
-            decoder.set_target_rate(target_rate)
+            decoder.set_target_rate(
+                target_rate,
+                float_output=self._float_output_for(self._exclusive_mode),
+            )
             sample_rate = decoder.output_sample_rate
             dtype = decoder.sounddevice_dtype
             channels = decoder.channels
@@ -2981,7 +2995,10 @@ class PCMPlayer:
                     fallback_rate = self._query_device_mixer_rate(
                         device, decoder.sample_rate
                     )
-                    decoder.set_target_rate(fallback_rate)
+                    decoder.set_target_rate(
+                        fallback_rate,
+                        float_output=self._float_output_for(False),
+                    )
                     stream_kwargs["samplerate"] = decoder.output_sample_rate
                     stream_kwargs["dtype"] = decoder.sounddevice_dtype
                     sample_rate = decoder.output_sample_rate
@@ -3087,6 +3104,27 @@ class PCMPlayer:
     # realtime callback needs to ride out GIL/CPU contention on wired,
     # low-latency devices — see the long note in _open_output_stream.
     _OUTPUT_LATENCY_FLOOR_S = 0.1
+
+    @staticmethod
+    def _float_output_for(exclusive: bool) -> bool:
+        """Whether decoders feeding a stream should emit float32 even at
+        the source rate.
+
+        True for shared-mode streams on Windows and macOS. WASAPI's and
+        CoreAudio's mixers run in float32, so integer output buys no
+        bit-perfectness there: PortAudio converts it to float32 in C,
+        exactly, before the mixer sees it. What integer output does cost
+        is in the realtime callback. Its volume / ReplayGain / EQ stage
+        then casts int -> float -> int, and numpy releases the GIL during
+        those casts, so every callback has to win the GIL back from
+        whatever request thread took it. With three busy threads that
+        stage took 12 ms median and 118 ms worst case per 46 ms block;
+        on float32 it runs in place in about 10 us under the same load.
+
+        Exclusive mode keeps the source format, which is its point.
+        Linux is left alone: PortAudio can reach an ALSA hw device
+        directly there, where integer output can still matter."""
+        return not exclusive and sys.platform in ("win32", "darwin")
 
     @staticmethod
     def _output_latency_for(device: Optional[int]) -> float:

@@ -74,7 +74,7 @@ def test_seek_calls_set_target_rate_with_cached_stream_rate():
     ):
         p._restart_decoder_at(target_s=12.5)
 
-    fake_decoder.set_target_rate.assert_called_once_with(48000)
+    fake_decoder.set_target_rate.assert_called_once_with(48000, float_output=True)
 
 
 def test_seek_skips_set_target_rate_when_no_stream_open():
@@ -121,4 +121,30 @@ def test_seek_passthrough_when_stream_rate_matches_source():
     ):
         p._restart_decoder_at(target_s=30.0)
 
-    fake_decoder.set_target_rate.assert_called_once_with(96000)
+    fake_decoder.set_target_rate.assert_called_once_with(96000, float_output=False)
+
+
+def test_seek_asks_for_float_when_the_stream_is_float_at_the_source_rate():
+    """Shared mode on Windows / macOS opens a float32 stream even when
+    the source rate matches the mixer (see PCMPlayer._float_output_for).
+    The rebuilt decoder would otherwise fall back to int16 passthrough
+    at that rate and write int16 samples into a float32 buffer, the
+    same blown-out reinterpretation this file was written for."""
+    p = _bare_player()
+    p._stream_sample_rate = 44100
+    p._stream_sd_dtype = "float32"
+    p._stream_channels = 2
+
+    fake_decoder = MagicMock()
+    fake_decoder.sample_rate = 44100
+    fake_decoder.channels = 2
+    fake_decoder.sounddevice_dtype = "int16"
+
+    with (
+        patch.object(p, "_build_source_at", return_value=(["seg1"], 0.0)),
+        patch("app.audio.player.Decoder", return_value=fake_decoder),
+        patch.object(p, "_start_decoder_thread"),
+    ):
+        p._restart_decoder_at(target_s=5.0)
+
+    fake_decoder.set_target_rate.assert_called_once_with(44100, float_output=True)

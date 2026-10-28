@@ -117,7 +117,9 @@ def test_target_rate_is_read_when_installing(player):
     _resolve_running(player, stream_reopened_at_48k)
     player.preload("t2")
 
-    player.decoders[0].set_target_rate.assert_called_once_with(48000)
+    player.decoders[0].set_target_rate.assert_called_once_with(
+        48000, float_output=PCMPlayer._float_output_for(False)
+    )
 
 
 def test_load_supersedes_a_preload_in_flight(player):
