@@ -105,7 +105,35 @@ def _ensure_client() -> tuple[Any, Any]:
         _tls_client = CurlSpotifyClient(auto_retries=2)
         _song_mod = Song(client=_tls_client)
         _artist_mod = Artist(client=_tls_client)
+        _cache_operation_hashes(_song_mod.base)
+        _cache_operation_hashes(_artist_mod.base)
         return _song_mod, _artist_mod
+
+
+def _cache_operation_hashes(base: Any) -> None:
+    """Make `base.part_hash` look each GraphQL operation up once.
+
+    spotapi finds an operation's sha256 hash by splitting `raw_hashes`
+    on the operation name, every call. `raw_hashes` is every Spotify
+    web-player JS bundle concatenated, 7-10 million characters, so each
+    GraphQL request paid a 6-13 ms `str.split` that holds the GIL from
+    start to finish. A page's worth of playcount lookups makes dozens of
+    them, all competing with the audio callback for the GIL. There are
+    only a handful of operation names, and the hashes only change if
+    spotapi refetches the bundles, so each lookup is cached against the
+    `raw_hashes` string it was read from."""
+    lookup = base.part_hash
+    found: dict[str, tuple[Any, str]] = {}
+
+    def part_hash(name: str) -> str:
+        hit = found.get(name)
+        if hit is not None and hit[0] is base.raw_hashes:
+            return hit[1]
+        value = lookup(name)
+        found[name] = (base.raw_hashes, value)
+        return value
+
+    base.part_hash = part_hash
 
 
 # ---------------------------------------------------------------------------
