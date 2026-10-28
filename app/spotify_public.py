@@ -398,7 +398,7 @@ def _resolve_artist_via_name_match(
         ic = (isrc or "").strip().upper()
         if not ic:
             continue
-        for tid, _name in _search_track_candidates(f"isrc:{ic}"):
+        for tid, _name, _artist in _search_track_candidates(f"isrc:{ic}"):
             try:
                 payload = _song_info(tid)
             except Exception as exc:
@@ -963,10 +963,13 @@ def _safe_int(v: object) -> Optional[int]:
         return None
 
 
-def _search_track_candidates(query: str) -> list[tuple[str, str]]:
+def _search_track_candidates(
+    query: str,
+) -> list[tuple[str, str, Optional[str]]]:
     """Run a Spotify GraphQL track search and return
-    `[(track_id, display_name), ...]` for hits whose URI is a
-    spotify:track:. Errors are logged and swallowed — callers
+    `[(track_id, display_name, primary_artist_name), ...]` for hits
+    whose URI is a spotify:track:. The artist is None when the result
+    doesn't carry one. Errors are logged and swallowed — callers
     treat an empty list as "search produced nothing useful".
 
     Limit is 50 (was 5). For tracks that exist in multiple Spotify
@@ -978,7 +981,7 @@ def _search_track_candidates(query: str) -> list[tuple[str, str]]:
     title/artist matches and picks the highest playcount among those,
     so widening the candidate list directly raises ceiling on what
     we can find without making the lookup any less accurate. The
-    pre-filter on `name.lower() == wanted_title` gates the expensive
+    pre-filters on title and primary artist gate the expensive
     per-candidate `_song_info` calls so wider lookups don't blow up
     cost.
     """
@@ -995,13 +998,17 @@ def _search_track_candidates(query: str) -> list[tuple[str, str]]:
         .get("items")
         or []
     )
-    out: list[tuple[str, str]] = []
+    out: list[tuple[str, str, Optional[str]]] = []
     for entry in items:
         item = (entry.get("item") or {}).get("data") or {}
         uri = item.get("uri") or ""
         if not uri.startswith("spotify:track:"):
             continue
-        out.append((uri.split(":")[-1], str(item.get("name") or "")))
+        artists = (item.get("artists") or {}).get("items") or []
+        primary = (artists[0].get("profile") or {}).get("name") if artists else None
+        out.append(
+            (uri.split(":")[-1], str(item.get("name") or ""), primary or None)
+        )
     return out
 
 
@@ -1090,15 +1097,23 @@ def _resolve_canonical_track(
     # Insertion-ordered dedupe across both searches. The ISRC pass
     # often produces zero or one candidate; the title pass covers
     # reissues with unrelated ISRCs.
-    candidates: dict[str, str] = {}
-    for tid, name in _search_track_candidates(f"isrc:{isrc}"):
-        candidates.setdefault(tid, name)
-    for tid, name in _search_track_candidates(f"{artist} {title}"):
-        candidates.setdefault(tid, name)
+    candidates: dict[str, tuple[str, Optional[str]]] = {}
+    for tid, name, primary in _search_track_candidates(f"isrc:{isrc}"):
+        candidates.setdefault(tid, (name, primary))
+    for tid, name, primary in _search_track_candidates(f"{artist} {title}"):
+        candidates.setdefault(tid, (name, primary))
 
     best_pc = -1
     best_id: Optional[str] = None
-    for tid, name in candidates.items():
+    for tid, (name, primary) in candidates.items():
+        # Search results carry each track's artists, so a same-titled
+        # track by someone else can be dropped here instead of after a
+        # getTrack round trip. Bad Bunny's "DtMF" sent six candidates
+        # through getTrack to keep one; with this it sends that one and
+        # gets the same playcount. When the result has no artist,
+        # getTrack's check below still decides.
+        if primary is not None and primary.strip().lower() != wanted_artist:
+            continue
         # Title check at the search-result level — getTrack doesn't
         # always echo the same display name verbatim, and we want
         # to skip "Thriller (Live)" / "Thriller - Remastered" before
