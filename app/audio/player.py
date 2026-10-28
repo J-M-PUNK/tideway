@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import faulthandler
 import logging
+import math
 import os
 import queue
 import sys
@@ -2958,6 +2959,9 @@ class PCMPlayer:
             # output. _output_latency_for honours the device's own deeper
             # latency when it has one, so BT gets the buffer it needs.
             latency=self._output_latency_for(device),
+            # Fewer, larger callbacks so sustained GIL contention can't
+            # starve the stream; see _CALLBACK_BLOCK_TARGET_S.
+            blocksize=self._callback_block_frames(sample_rate),
         )
         if extra_settings is not None:
             stream_kwargs["extra_settings"] = extra_settings
@@ -2986,6 +2990,9 @@ class PCMPlayer:
                     stream_kwargs["dtype"] = decoder.sounddevice_dtype
                     sample_rate = decoder.output_sample_rate
                     channels = decoder.channels
+                    stream_kwargs["blocksize"] = self._callback_block_frames(
+                        sample_rate
+                    )
                 self._stream = sd.OutputStream(**stream_kwargs)
             else:
                 raise
@@ -3017,7 +3024,8 @@ class PCMPlayer:
         print(
             f"[audio] stream open: device={device} rate={sample_rate}Hz "
             f"channels={channels} dtype={dtype!r} hostapi={ha_name!r} "
-            f"exclusive={self._exclusive_mode}",
+            f"exclusive={self._exclusive_mode} "
+            f"block={stream_kwargs['blocksize']}",
             file=sys.stderr,
             flush=True,
         )
@@ -3087,6 +3095,32 @@ class PCMPlayer:
     # realtime callback needs to ride out GIL/CPU contention on wired,
     # low-latency devices — see the long note in _open_output_stream.
     _OUTPUT_LATENCY_FLOOR_S = 0.1
+
+    # How much audio one callback delivers. The latency floor above
+    # absorbs a single long stall, but it does nothing for sustained
+    # contention, because what decides that is how often the callback
+    # has to win the GIL. Left to PortAudio, the callback runs once per
+    # device period (10 ms on WASAPI shared), and each run must
+    # reacquire the GIL before it copies a sample. With two or three
+    # request threads running Python, that handoff averages more than
+    # 10 ms (on Windows the waiter's timed wait rounds up to the 15.6 ms
+    # system timer tick), so the callback falls further behind every
+    # period and WASAPI plays silence in the gaps. PortAudio does not
+    # flag those as underflows, so output_underruns stays 0 while half
+    # the audio is missing. Measured against the real player on WASAPI
+    # shared: with two busy threads, 10 ms callbacks delivered 72% of
+    # the audio and 46 ms callbacks 99.9%; with three, 51% vs 95%. The
+    # cost is about one block of added latency on pause / volume / seek
+    # (~110 ms -> ~150 ms total).
+    _CALLBACK_BLOCK_TARGET_S = 0.045
+
+    @staticmethod
+    def _callback_block_frames(sample_rate: int) -> int:
+        """Frames per audio callback for `sample_rate`: the power of two
+        nearest _CALLBACK_BLOCK_TARGET_S (2048 at 44.1 / 48 kHz, 4096 at
+        88.2 / 96 kHz, 8192 at 176.4 / 192 kHz)."""
+        target = max(1.0, sample_rate * PCMPlayer._CALLBACK_BLOCK_TARGET_S)
+        return 1 << round(math.log2(target))
 
     @staticmethod
     def _output_latency_for(device: Optional[int]) -> float:
