@@ -41,7 +41,6 @@ from fastapi.responses import (
 )
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from sse_starlette.sse import EventSourceResponse
 
 from app import album_collections
 from app import aoty as aoty_module
@@ -1532,6 +1531,7 @@ async def _track_concurrency(request: Request, call_next):
 # `app/routers/__init__.py` for the playbook + which domains have
 # moved. New extractions add their `include_router` call here.
 from app.routers.autostart import router as autostart_router
+from app.routers.hotkey import hotkey_events
 from app.routers.hotkey import router as hotkey_router
 from app.routers.notify import router as notify_router
 
@@ -8064,17 +8064,15 @@ def _put_latest(queue: "asyncio.Queue", payload) -> None:
                 return
 
 
-@app.get("/api/player/events")
-async def player_events(request: Request):
-    """SSE stream of player snapshots.
+async def _player_events() -> AsyncIterator[str]:
+    """Player snapshots for one subscriber, as JSON strings, for the
+    `player` events on GET /api/events.
 
     State-change notifications are pushed immediately via the
     player's subscribe() listener; between those we poll at 4Hz so
-    the frontend gets smooth position updates during playback.
-    When paused/idle we drop to a 1Hz heartbeat to keep the
-    connection alive without wasting cycles.
+    the frontend gets smooth position updates during playback, and
+    at 1Hz when paused/idle.
     """
-    _require_local_access()
     player = _native_player()
     queue: asyncio.Queue[Optional[dict]] = asyncio.Queue(maxsize=32)
     loop = asyncio.get_running_loop()
@@ -8091,44 +8089,141 @@ async def player_events(request: Request):
             pass
 
     unsubscribe = player.subscribe(_on_snapshot)
+    try:
+        # Send the current state immediately so the client has a
+        # snapshot without waiting for the first change event.
+        yield json.dumps(_snapshot_dict(player.snapshot()))
+        last_seq = -1
+        last_position: Optional[int] = None
+        while True:
+            active = player.snapshot().state == "playing"
+            timeout = 0.25 if active else 1.0
+            try:
+                payload = await asyncio.wait_for(queue.get(), timeout=timeout)
+            except asyncio.TimeoutError:
+                payload = _snapshot_dict(player.snapshot())
+            if payload is None:
+                return
+            seq = payload.get("seq", 0)
+            position_ms = payload.get("position_ms")
+            if not _should_forward_snapshot(
+                seq,
+                last_seq,
+                payload.get("state"),
+                position_ms,
+                last_position,
+            ):
+                # Dedupe keepalive ticks while nothing actionable is
+                # pending. States the client must respond to
+                # (`ended`/`error`) keep flowing so a client that
+                # missed the transition can still act.
+                continue
+            last_seq = seq
+            last_position = position_ms
+            yield json.dumps(payload)
+    finally:
+        unsubscribe()
+
+
+async def _download_events() -> AsyncIterator[str]:
+    """Download queue events for one subscriber, as JSON strings, for
+    the `download` events on GET /api/events. The first is a `reset`
+    snapshot of the whole queue (see DownloadBroker.subscribe).
+
+    Ends when the broker gives up on this subscriber: it marks the
+    queue `__desync__` when it couldn't fit a state-changing event.
+    The stream then closes, the browser reconnects, and the new
+    subscription starts over from a fresh reset snapshot."""
+    q = await broker.subscribe()
+    try:
+        while True:
+            payload = await q.get()
+            if isinstance(payload, dict) and payload.get("type") == "__desync__":
+                return
+            yield json.dumps(payload)
+    finally:
+        broker.unsubscribe(q)
+
+
+# How long the event stream may sit silent before it sends an SSE
+# comment, so idle connections aren't dropped as dead.
+_EVENT_STREAM_KEEPALIVE_S = 15.0
+
+
+@app.get("/api/events")
+async def events(request: Request):
+    """Everything the UI listens to, on one SSE connection: player
+    snapshots, download queue events and global hotkey actions, as the
+    named events `player`, `download` and `hotkey`.
+
+    This used to be three EventSources (/api/player/events,
+    /api/downloads/stream, /api/hotkey/events), each holding one of the
+    six HTTP/1.1 connections Chromium allows per host for as long as
+    the app was open. The frontend's own request cap (4) assumes six
+    are available, so with three permanently taken, any three API calls
+    in flight left nothing for cover images or route chunks: on an
+    artist page the covers queued 3.7-3.9 s in the browser behind
+    enrichment requests while the server answered each in under 250 ms.
+
+    Each source keeps its own semantics; they're merged here. When any
+    source ends (the downloads broker desyncs a slow subscriber), the
+    stream closes and the browser reconnects, and every source starts
+    over from a full snapshot.
+    """
+    _require_local_access()
+    sources = {
+        "player": _player_events(),
+        "download": _download_events(),
+        "hotkey": hotkey_events(),
+    }
+    # Bounded so a client that stops reading pushes back into each
+    # source's own overflow policy (the player keeps the newest
+    # snapshot, the broker desyncs) instead of growing without limit.
+    merged: asyncio.Queue[tuple[str, Optional[str]]] = asyncio.Queue(maxsize=64)
+
+    async def _pump(name: str, source: AsyncIterator[str]) -> None:
+        try:
+            async for data in source:
+                await merged.put((name, data))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # A failed source would otherwise go quiet while the stream
+            # stays up. End the stream instead, so the client reconnects
+            # and every source resubscribes.
+            print(f"[events] {name} source failed: {exc!r}", flush=True)
+        await merged.put((name, None))
+
+    tasks = [asyncio.create_task(_pump(n, s)) for n, s in sources.items()]
 
     async def _gen():
         try:
-            # Send the current state immediately so the client has a
-            # snapshot without waiting for the first change event.
-            yield f"data: {json.dumps(_snapshot_dict(player.snapshot()))}\n\n"
-            last_seq = -1
-            last_position: Optional[int] = None
+            # Reconnect after 1 s rather than the browser's default 3 s
+            # when the server closes the stream (a broker desync, a
+            # backend restart): the player UI is frozen until it's back.
+            yield "retry: 1000\n\n"
             while True:
                 if await request.is_disconnected():
                     break
-                active = player.snapshot().state == "playing"
-                timeout = 0.25 if active else 1.0
                 try:
-                    payload = await asyncio.wait_for(queue.get(), timeout=timeout)
+                    name, data = await asyncio.wait_for(
+                        merged.get(), timeout=_EVENT_STREAM_KEEPALIVE_S
+                    )
                 except asyncio.TimeoutError:
-                    payload = _snapshot_dict(player.snapshot())
-                if payload is None:
-                    break
-                seq = payload.get("seq", 0)
-                position_ms = payload.get("position_ms")
-                if not _should_forward_snapshot(
-                    seq,
-                    last_seq,
-                    payload.get("state"),
-                    position_ms,
-                    last_position,
-                ):
-                    # Dedupe keepalive ticks while nothing actionable is
-                    # pending. States the client must respond to
-                    # (`ended`/`error`) keep flowing so a client that
-                    # missed the transition can still act.
+                    yield ": keepalive\n\n"
                     continue
-                last_seq = seq
-                last_position = position_ms
-                yield f"data: {json.dumps(payload)}\n\n"
+                if data is None:
+                    break
+                yield f"event: {name}\ndata: {data}\n\n"
         finally:
-            unsubscribe()
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            # A pump cancelled while waiting on `merged` leaves its
+            # source suspended at a yield; close it so the source's own
+            # finally runs and it unsubscribes now rather than at GC.
+            for s in sources.values():
+                await s.aclose()
 
     return StreamingResponse(
         _gen(),
@@ -11116,34 +11211,6 @@ def download_stats() -> dict:
         "total_bytes": total_bytes,
         "file_count": file_count,
     }
-
-
-@app.get("/api/downloads/stream")
-async def downloads_stream(request: Request) -> EventSourceResponse:
-    _require_local_access()
-    q = await broker.subscribe()
-
-    async def event_gen():
-        try:
-            while True:
-                if await request.is_disconnected():
-                    break
-                try:
-                    payload = await asyncio.wait_for(q.get(), timeout=15)
-                except asyncio.TimeoutError:
-                    yield {"event": "ping", "data": "1"}
-                    continue
-                # Slow-consumer fallback: if the broker couldn't fit a
-                # state-changing event, it drained the queue and pushed
-                # this marker. Close the stream so EventSource reconnects
-                # and gets a fresh reset snapshot via subscribe().
-                if isinstance(payload, dict) and payload.get("type") == "__desync__":
-                    break
-                yield {"event": "download", "data": json.dumps(payload)}
-        finally:
-            broker.unsubscribe(q)
-
-    return EventSourceResponse(event_gen())
 
 
 # ---------------------------------------------------------------------------

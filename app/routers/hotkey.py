@@ -10,8 +10,8 @@ Two surfaces:
   - POST `/api/hotkey/{play_pause,next,previous}` — the global-key
     listener (`app.global_keys`) HTTP-POSTs here when it sees a
     media key.
-  - GET `/api/hotkey/events` — SSE stream the frontend subscribes
-    to from `usePlayer`.
+  - `hotkey_events()` — the `hotkey` events on the app-wide SSE
+    stream (`GET /api/events`), which `usePlayer` subscribes to.
 
 `bus.bind_loop(loop)` must be called once on startup with the
 running asyncio event loop so `publish()` (called from the pynput
@@ -23,10 +23,9 @@ from __future__ import annotations
 import asyncio
 import json
 import threading
-from typing import Optional
+from typing import AsyncIterator, Optional
 
-from fastapi import APIRouter, Request
-from fastapi.responses import StreamingResponse
+from fastapi import APIRouter
 
 
 router = APIRouter(prefix="/api/hotkey", tags=["hotkey"])
@@ -104,36 +103,18 @@ def previous_track() -> dict:
     return _emit("previous")
 
 
-@router.get("/events")
-async def events(request: Request):
-    """SSE stream of hotkey events. The frontend's usePlayer hook
-    subscribes and maps each action onto its own toggle/next/prev so
-    queue state + advance logic stay in one place."""
-    from server import _require_local_access
-    _require_local_access()
+async def hotkey_events() -> AsyncIterator[str]:
+    """Hotkey actions for one subscriber, as JSON strings, for the
+    app-wide event stream (`GET /api/events` in server.py). The
+    frontend's usePlayer hook maps each action onto its own
+    toggle/next/prev so queue state + advance logic stay in one place.
+    Starts with a `_ready` action so the client knows the subscription
+    is up."""
     bus.bind_loop(asyncio.get_running_loop())
     q = bus.subscribe()
-
-    async def _gen():
-        try:
-            # Initial ping so the frontend knows the subscription is up.
-            yield "data: {\"action\": \"_ready\"}\n\n"
-            while True:
-                if await request.is_disconnected():
-                    break
-                try:
-                    action = await asyncio.wait_for(q.get(), timeout=20.0)
-                except asyncio.TimeoutError:
-                    # Keepalive comment — prevents proxies from closing
-                    # a silent connection.
-                    yield ": keepalive\n\n"
-                    continue
-                yield f"data: {json.dumps({'action': action})}\n\n"
-        finally:
-            bus.unsubscribe(q)
-
-    return StreamingResponse(
-        _gen(),
-        media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-    )
+    try:
+        yield json.dumps({"action": "_ready"})
+        while True:
+            yield json.dumps({"action": await q.get()})
+    finally:
+        bus.unsubscribe(q)
