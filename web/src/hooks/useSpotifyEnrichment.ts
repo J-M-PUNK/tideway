@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useLayoutEffect, useState } from "react";
 import { api } from "@/api/client";
 
 /**
@@ -59,6 +59,35 @@ function notify(map: Map<string, Set<() => void>>, key: string): void {
   });
 }
 
+/**
+ * Look up one ISRC on its own and publish the result to its subscribers.
+ * Used by the per-row hook, and by the batch hook for the ISRCs a batch
+ * claimed but didn't resolve.
+ */
+function fetchPlaycount(key: string): void {
+  // Successful resolution: cache the result (including a server-
+  // authoritative null for "Spotify doesn't know this track").
+  // Failure (timeout / network blip / 5xx): do NOT cache. Caching
+  // a null sentinel from a transient failure poisons the entry
+  // for the rest of the session — every subsequent read sees it
+  // as "Spotify said null" and never retries. Letting the cache
+  // stay empty means the next render re-fires the request, which
+  // is the right cold-load recovery.
+  const p = api.spotify
+    .trackPlaycount(key)
+    .then((r) => {
+      playcountCache.set(key, r.playcount);
+      notify(playcountSubs, key);
+      return r.playcount;
+    })
+    .catch(() => {
+      notify(playcountSubs, key);
+      return null;
+    })
+    .finally(() => playcountInflight.delete(key));
+  playcountInflight.set(key, p);
+}
+
 export function useSpotifyTrackPlaycount(
   isrc: string | null | undefined,
 ): number | null {
@@ -68,27 +97,7 @@ export function useSpotifyTrackPlaycount(
     if (!key || !spotifyEnabled) return;
     const off = subscribe(playcountSubs, key, () => force((n) => n + 1));
     if (!playcountCache.has(key) && !playcountInflight.has(key)) {
-      // Successful resolution: cache the result (including a server-
-      // authoritative null for "Spotify doesn't know this track").
-      // Failure (timeout / network blip / 5xx): do NOT cache. Caching
-      // a null sentinel from a transient failure poisons the entry
-      // for the rest of the session — every subsequent read sees it
-      // as "Spotify said null" and never retries. Letting the cache
-      // stay empty means the next render re-fires the request, which
-      // is the right cold-load recovery.
-      const p = api.spotify
-        .trackPlaycount(key)
-        .then((r) => {
-          playcountCache.set(key, r.playcount);
-          notify(playcountSubs, key);
-          return r.playcount;
-        })
-        .catch(() => {
-          notify(playcountSubs, key);
-          return null;
-        })
-        .finally(() => playcountInflight.delete(key));
-      playcountInflight.set(key, p);
+      fetchPlaycount(key);
     }
     return off;
   }, [key]);
@@ -266,13 +275,16 @@ interface PreseedTrack {
  * round-trip plus parallel work — typically 1-3 seconds for a
  * full album.
  *
- * Idempotent: the same set of ISRCs hits the same server-side cache
- * key, so calling this from AlbumDetail, ArtistDetail, and the
- * tracklist's own per-row hooks won't double-up the upstream cost.
+ * The batch claims its ISRCs (marks them in flight) before any row
+ * asks, so the rows wait for it instead of each sending their own
+ * request; see the effect below for why that ordering holds. Only
+ * ISRCs that are neither cached nor already in flight go into the
+ * request. If the batch fails, or answers without one of its ISRCs,
+ * those fall back to the single-ISRC lookup the rows would have made.
  *
  * Skips the request entirely when none of the tracks carry an ISRC
- * (rare; obscure catalog entries) or when the cache already has every
- * key — no point paying for a no-op.
+ * (rare; obscure catalog entries) or when every key is already cached
+ * or in flight.
  */
 export function useSpotifyTrackPlaycountBatch(
   tracks: PreseedTrack[] | null | undefined,
@@ -293,24 +305,44 @@ export function useSpotifyTrackPlaycountBatch(
     .sort()
     .join(",");
 
-  useEffect(() => {
+  // A layout effect, not a passive one. React runs a parent's effects
+  // after its children's, so as a useEffect this ran after every
+  // TrackList row on the page had already sent its own single-ISRC
+  // request, found nothing cached, and requested the same tracks again:
+  // every playcount was fetched twice. Those duplicates also held the
+  // browser's few connections to the backend for seconds while the
+  // page's cover images queued behind them. All layout effects in a
+  // commit run before any passive one, so the claim below lands before
+  // the rows look and they find their ISRCs already in flight.
+  useLayoutEffect(() => {
     if (!cacheKey || !spotifyEnabled) return;
-    // Already cached for every ISRC? Skip the round trip.
-    const allCached = lookup.every((x) => playcountCache.has(x.isrc));
-    if (allCached) return;
-    let cancelled = false;
-    api.spotify
-      .trackPlaycounts(lookup)
-      .then((r) => {
-        if (cancelled) return;
+    const pending = lookup.filter(
+      (x) => !playcountCache.has(x.isrc) && !playcountInflight.has(x.isrc),
+    );
+    if (pending.length === 0) return;
+    const batch = api.spotify.trackPlaycounts(pending).then(
+      (r) => {
+        for (const x of pending) playcountInflight.delete(x.isrc);
+        if (!spotifyEnabled) return;
         preseedSpotifyPlaycounts(r.playcounts);
-      })
-      .catch(() => {
-        /* per-row hooks fall back to their own fetch */
-      });
-    return () => {
-      cancelled = true;
-    };
+        for (const x of pending) {
+          if (!playcountCache.has(x.isrc)) fetchPlaycount(x.isrc);
+        }
+      },
+      () => {
+        for (const x of pending) playcountInflight.delete(x.isrc);
+        if (!spotifyEnabled) return;
+        for (const x of pending) fetchPlaycount(x.isrc);
+      },
+    );
+    for (const x of pending) {
+      playcountInflight.set(
+        x.isrc,
+        batch.then(() => playcountCache.get(x.isrc) ?? null),
+      );
+    }
+    // The results land in the module-level cache whether or not this
+    // page is still mounted, so there is nothing to cancel.
     // `cacheKey` covers the contents of `lookup`. Re-deriving lookup
     // from `tracks` on every render would tempt a deps-array thrash;
     // we capture it once per cacheKey and the effect doesn't read it
