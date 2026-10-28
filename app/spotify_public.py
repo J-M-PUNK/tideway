@@ -45,6 +45,7 @@ import re
 import sqlite3
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 
@@ -1099,6 +1100,26 @@ def _track_primary_artist_name(payload: Mapping[str, Any]) -> str:
     )
 
 
+# getTrack calls made while resolving a canonical track run here. A hit
+# that has been reissued on dozens of compilations leaves that many
+# candidates with the right title and artist, each needing its own
+# ~0.3 s getTrack for its playcount: Cardi B's "I Like It" has 55, which
+# took 20 s one after another. The pool is shared by every resolution
+# so a batch of tracks resolving at once can't multiply how many
+# requests are in flight to Spotify.
+_GET_TRACK_POOL = ThreadPoolExecutor(
+    max_workers=8, thread_name_prefix="spotify-gettrack"
+)
+
+
+def _song_info_or_none(spotify_track_id: str) -> Optional[Mapping[str, Any]]:
+    try:
+        return _song_info(spotify_track_id)
+    except Exception as exc:
+        log.warning("spotify getTrack failed for %s: %s", spotify_track_id, exc)
+        return None
+
+
 def _resolve_canonical_track(
     isrc: str, title: str, artist: str
 ) -> tuple[Optional[int], Optional[str]]:
@@ -1131,8 +1152,7 @@ def _resolve_canonical_track(
     for tid, name, primary in _search_track_candidates(f"{artist} {title}"):
         candidates.setdefault(tid, (name, primary))
 
-    best_pc = -1
-    best_id: Optional[str] = None
+    eligible: list[str] = []
     for tid, (name, primary) in candidates.items():
         # Search results carry each track's artists, so a same-titled
         # track by someone else can be dropped here instead of after a
@@ -1158,10 +1178,13 @@ def _resolve_canonical_track(
         # the rejection on alt-versions.
         if not _track_titles_match(name, wanted_title):
             continue
-        try:
-            payload = _song_info(tid)
-        except Exception as exc:
-            log.warning("spotify getTrack failed for %s: %s", tid, exc)
+        eligible.append(tid)
+
+    best_pc = -1
+    best_id: Optional[str] = None
+    payloads = _GET_TRACK_POOL.map(_song_info_or_none, eligible)
+    for tid, payload in zip(eligible, payloads):
+        if payload is None:
             continue
         if _track_primary_artist_name(payload).strip().lower() != wanted_artist:
             continue

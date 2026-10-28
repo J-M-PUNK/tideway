@@ -275,6 +275,37 @@ def test_other_artists_are_dropped_before_get_track(isolated_cache, fake_clients
     assert sorted(fetched) == ["ADELE_HELLO", "ADELE_ISRC_HIT"]
 
 
+def test_candidate_get_tracks_run_concurrently(isolated_cache, fake_clients):
+    """A hit reissued on many compilations leaves many same-title,
+    same-artist candidates, each needing its own getTrack. They're
+    independent, so they run on a shared pool instead of one after
+    another. The fake blocks every call until three are in flight at
+    once, which a sequential loop could never reach."""
+    import threading
+
+    song, _ = fake_clients
+    song.query_songs.side_effect = lambda q, limit=5: _search_payload(
+        *[
+            {"id": f"COMP_{i}", "name": "I Like It", "artist": "Cardi B"}
+            for i in range(3)
+        ]
+    )
+    all_in_flight = threading.Barrier(3, timeout=5)
+
+    def _get(track_id):
+        all_in_flight.wait()
+        return _get_track_payload(
+            playcount=int(track_id[-1]) * 1000 + 1,
+            primary_artist_name="Cardi B",
+        )
+
+    song.get_track_info.side_effect = _get
+
+    pc = spotify_public.playcount_with_fallback("USAT21801431", "I Like It", "Cardi B")
+
+    assert pc == 2001
+
+
 def test_canonical_caches_under_original_isrc(isolated_cache, fake_clients):
     """Once the canonical playcount is found via the title+artist
     fallback, subsequent lookups under the original ISRC must come
