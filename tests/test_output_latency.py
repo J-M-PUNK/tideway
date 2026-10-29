@@ -129,7 +129,7 @@ def test_exclusive_fallback_recomputes_the_block_for_the_mixer_rate(monkeypatch)
         def __init__(self):
             self.output_sample_rate = 192000
 
-        def set_target_rate(self, rate):
+        def set_target_rate(self, rate, *, float_output=False):
             self.output_sample_rate = rate
 
     p, opened = _open_with(monkeypatch, exclusive=True, fail_exclusive=True)
