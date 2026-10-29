@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import sys
+import threading
 import types
 from typing import Any, Callable, Optional
 
@@ -193,6 +194,16 @@ class CurlSpotifyClient:
         # spotapi assigns to .authenticate after construction with a
         # callable that mutates the kwargs dict before each request.
         self.authenticate: Optional[Callable[[dict], dict]] = None
+        # That callable is spotapi's `BaseClient._auth_rule`, which
+        # fetches the session and tokens on first use and refreshes the
+        # access token by clearing it and fetching a new one. It keeps
+        # all of that on the instance with no locking, and the playcount
+        # batch calls in from several threads at once: without this,
+        # each thread fetches its own session, and a request made
+        # mid-refresh goes out as "Bearer _Undefined". spotapi's token
+        # requests don't set authenticate=True, so the hook never
+        # re-enters itself.
+        self._auth_lock = threading.Lock()
 
     # -- HTTP verbs --------------------------------------------------
 
@@ -234,7 +245,8 @@ class CurlSpotifyClient:
         **kwargs: Any,
     ) -> _SpotapiResponse:
         if authenticate and self.authenticate is not None:
-            kwargs = self.authenticate(kwargs)
+            with self._auth_lock:
+                kwargs = self.authenticate(kwargs)
 
         # spotapi's TLSClient passes `allow_redirects=True` on get/
         # post; curl-cffi follows redirects by default and rejects

@@ -122,17 +122,27 @@ def _cache_operation_hashes(base: Any) -> None:
     them, all competing with the audio callback for the GIL. There are
     only a handful of operation names, and the hashes only change if
     spotapi refetches the bundles, so each lookup is cached against the
-    `raw_hashes` string it was read from."""
+    `raw_hashes` string it was read from.
+
+    The first lookup is also what downloads the bundles, and spotapi
+    builds `raw_hashes` in place: it assigns the main bundle, then
+    appends ~75 chunks one request at a time. The playcount batch makes
+    its first lookups from five threads at once, so without the lock
+    every thread downloaded the whole set, and the ones that read
+    `raw_hashes` half-built found no `searchDesktop` hash, raised
+    IndexError, and had their track cached as having no playcount."""
     lookup = base.part_hash
     found: dict[str, tuple[Any, str]] = {}
+    lock = threading.Lock()
 
     def part_hash(name: str) -> str:
-        hit = found.get(name)
-        if hit is not None and hit[0] is base.raw_hashes:
-            return hit[1]
-        value = lookup(name)
-        found[name] = (base.raw_hashes, value)
-        return value
+        with lock:
+            hit = found.get(name)
+            if hit is not None and hit[0] is base.raw_hashes:
+                return hit[1]
+            value = lookup(name)
+            found[name] = (base.raw_hashes, value)
+            return value
 
     base.part_hash = part_hash
 
