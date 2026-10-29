@@ -7,6 +7,9 @@ wraps it so each operation is looked up once per `raw_hashes` string.
 """
 from __future__ import annotations
 
+import threading
+import time
+
 from app import spotify_public
 
 
@@ -69,3 +72,47 @@ def test_both_clients_are_wrapped(monkeypatch):
     )
     song, artist = spotify_public._ensure_client()
     assert calls == [song.base, artist.base]
+
+
+def test_concurrent_first_lookups_wait_for_the_whole_bundle():
+    # spotapi's first part_hash call downloads the bundles and builds
+    # raw_hashes in place, main bundle first and then one chunk at a
+    # time. Five threads making their first lookup together must not
+    # each download the set, and none may read it half-built.
+    class _SpotapiLikeBase:
+        def __init__(self):
+            self.raw_hashes = None
+            self.downloads = 0
+
+        def part_hash(self, name: str) -> str:
+            if self.raw_hashes is None:
+                self.downloads += 1
+                self.raw_hashes = "main;"
+                for chunk in ("a;", "b;", f"{name}=hash;"):
+                    time.sleep(0.02)
+                    self.raw_hashes += chunk
+            marker = f"{name}="
+            # Same failure as spotapi: IndexError when the operation
+            # isn't in what has been downloaded so far.
+            return self.raw_hashes.split(marker)[1].split(";")[0]
+
+    base = _SpotapiLikeBase()
+    spotify_public._cache_operation_hashes(base)
+    start = threading.Barrier(5)
+    results: list[object] = []
+
+    def lookup():
+        start.wait()
+        try:
+            results.append(base.part_hash("searchDesktop"))
+        except IndexError as exc:
+            results.append(exc)
+
+    threads = [threading.Thread(target=lookup) for _ in range(5)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    assert results == ["hash"] * 5
+    assert base.downloads == 1
