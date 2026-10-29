@@ -70,8 +70,13 @@ def user_data_dir() -> Path:
     Windows:  %APPDATA%\\Tideway  (typically C:\\Users\\<u>\\AppData\\Roaming)
     macOS:    ~/Library/Application Support/Tideway
     Linux:    $XDG_DATA_HOME/Tideway, else ~/.local/share/Tideway
+
+    TIDEWAY_DATA_DIR, when set, is used as is on every platform.
+    tests/conftest.py sets it so a test run never reads or writes the
+    user's real state.
     """
-    path = _app_data_root() / _APP_NAME
+    override = os.environ.get("TIDEWAY_DATA_DIR")
+    path = Path(override) if override else _app_data_root() / _APP_NAME
     path.mkdir(parents=True, exist_ok=True)
     return path
 
@@ -113,6 +118,13 @@ def migrate_legacy_cwd_state() -> None:
         if _migrated:
             return
         _migrated = True
+        # Both older layouts are predecessors of the default location,
+        # not of an explicit TIDEWAY_DATA_DIR. Migrating into one would
+        # hand a test run the settings and Tidal session from the
+        # user's old TidalDownloader folder, or from stray copies in
+        # whatever directory pytest was started in.
+        if os.environ.get("TIDEWAY_DATA_DIR"):
+            return
         dest_root = user_data_dir()
         # (2) Pull forward a full previous-name app-data directory in
         # one shot. Done first so individual cwd files (from even
