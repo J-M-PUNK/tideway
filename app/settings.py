@@ -47,7 +47,26 @@ def _xdg_user_dir(key: str, fallback: Path) -> Path:
 
 
 def _default_output_dir() -> str:
-    """Default audio download folder: the platform music directory
+    """Default audio download folder for a fresh Settings.
+
+    TIDEWAY_OUTPUT_DIR, when set, is used as is. tests/conftest.py
+    sets it so a test run never scans, or deletes `.part` files from,
+    the user's real music folder. Otherwise this is the platform
+    default from _platform_output_dir()."""
+    return os.environ.get("TIDEWAY_OUTPUT_DIR") or _platform_output_dir()
+
+
+def _default_videos_dir() -> str:
+    """Default music-video download folder for a fresh Settings.
+
+    TIDEWAY_VIDEOS_DIR, when set, is used as is, for the same reason
+    as TIDEWAY_OUTPUT_DIR. Otherwise this is the platform default
+    from _platform_videos_dir()."""
+    return os.environ.get("TIDEWAY_VIDEOS_DIR") or _platform_videos_dir()
+
+
+def _platform_output_dir() -> str:
+    """Platform audio download folder: the platform music directory
     plus a Tidal subfolder. On Linux the music directory comes from
     the XDG user-dirs config so it matches what the desktop (and the
     Flatpak sandbox grant) consider the Music folder."""
@@ -57,7 +76,7 @@ def _default_output_dir() -> str:
     return str(music / "Tidal")
 
 
-def _default_videos_dir() -> str:
+def _platform_videos_dir() -> str:
     """Reasonable per-OS default for music-video downloads.
 
     macOS / Linux → ~/Movies/Tidal (macOS convention; Linux also
@@ -393,7 +412,12 @@ def _migrate_default_paths(s: Settings) -> bool:
     "Tidal" to match Tidal's own desktop convention, but existing
     installs already had the old value saved. Only touches paths that
     match a previously-shipped default — custom paths stay untouched.
-    Returns True if anything changed so the caller knows to re-save."""
+    Returns True if anything changed so the caller knows to re-save.
+
+    Compares against the platform defaults, not TIDEWAY_OUTPUT_DIR /
+    TIDEWAY_VIDEOS_DIR: the overrides say where a fresh Settings
+    downloads, not where a shipped default moved, and following them
+    here would rewrite a saved ~/Music/Tidal into the override."""
     changed = False
     home = Path.home()
 
@@ -408,7 +432,7 @@ def _migrate_default_paths(s: Settings) -> bool:
         str(home / "Videos" / "Tideway"),
     }
     if s.videos_dir in legacy_videos:
-        s.videos_dir = _default_videos_dir()
+        s.videos_dir = _platform_videos_dir()
         changed = True
 
     # The Linux defaults became XDG-aware (#261): on a localized
@@ -416,7 +440,7 @@ def _migrate_default_paths(s: Settings) -> bool:
     # XDG dir is the only one the manifest grant maps to the host.
     # Installs that persisted the old hardcoded default get moved to
     # the real dir; custom paths are untouched as usual.
-    default_music = _default_output_dir()
+    default_music = _platform_output_dir()
     if s.output_dir == new_music and default_music != new_music:
         s.output_dir = default_music
         changed = True
@@ -424,7 +448,7 @@ def _migrate_default_paths(s: Settings) -> bool:
         str(home / "Videos" / "Tidal"),
         str(home / "Movies" / "Tidal"),
     }
-    default_videos = _default_videos_dir()
+    default_videos = _platform_videos_dir()
     if s.videos_dir in shipped_default_videos and default_videos not in shipped_default_videos:
         s.videos_dir = default_videos
         changed = True
