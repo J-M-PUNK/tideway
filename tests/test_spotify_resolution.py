@@ -50,22 +50,21 @@ def isolated_cache(tmp_path, monkeypatch):
 
 def _search_payload(*candidates: dict) -> dict:
     """Build a queryV2 search response. Each candidate is
-    `{"id": "<spotify_track_id>", "name": "<title>"}`."""
+    `{"id": "<spotify_track_id>", "name": "<title>"}`, plus an optional
+    `"artist"` that becomes the result's primary artist (real search
+    results carry one; leaving it out models a result without it)."""
+
+    def _data(c: dict) -> dict:
+        data = {"uri": f"spotify:track:{c['id']}", "name": c.get("name", "")}
+        if "artist" in c:
+            data["artists"] = {"items": [{"profile": {"name": c["artist"]}}]}
+        return data
+
     return {
         "data": {
             "searchV2": {
                 "tracksV2": {
-                    "items": [
-                        {
-                            "item": {
-                                "data": {
-                                    "uri": f"spotify:track:{c['id']}",
-                                    "name": c.get("name", ""),
-                                }
-                            }
-                        }
-                        for c in candidates
-                    ]
+                    "items": [{"item": {"data": _data(c)}} for c in candidates]
                 }
             }
         }
@@ -238,6 +237,73 @@ def test_canonical_only_picks_matching_artist(isolated_cache, fake_clients):
     )
 
     assert pc == 2_000_000_000, "Adele's Hello should win, not Lionel's"
+
+
+def test_other_artists_are_dropped_before_get_track(isolated_cache, fake_clients):
+    """Search results name each track's primary artist, so a same-titled
+    track by someone else is rejected without a getTrack round trip.
+    Results that don't name an artist still go through getTrack, whose
+    own artist check decides."""
+    song, _ = fake_clients
+
+    def _query(q, limit=5):
+        if q.startswith("isrc:"):
+            return _search_payload({"id": "ADELE_ISRC_HIT", "name": "Hello"})
+        return _search_payload(
+            {"id": "ADELE_HELLO", "name": "Hello", "artist": "Adele"},
+            {"id": "LIONEL_HELLO", "name": "Hello", "artist": "Lionel Richie"},
+            {"id": "COVER_HELLO", "name": "Hello", "artist": "Some Cover Band"},
+        )
+
+    song.query_songs.side_effect = _query
+    fetched: list[str] = []
+
+    def _get(track_id):
+        fetched.append(track_id)
+        return _get_track_payload(
+            playcount={"ADELE_ISRC_HIT": 10_000, "ADELE_HELLO": 2_000_000_000}[
+                track_id
+            ],
+            primary_artist_name="Adele",
+        )
+
+    song.get_track_info.side_effect = _get
+
+    pc = spotify_public.playcount_with_fallback("USOBSCURE", "Hello", "Adele")
+
+    assert pc == 2_000_000_000
+    assert sorted(fetched) == ["ADELE_HELLO", "ADELE_ISRC_HIT"]
+
+
+def test_candidate_get_tracks_run_concurrently(isolated_cache, fake_clients):
+    """A hit reissued on many compilations leaves many same-title,
+    same-artist candidates, each needing its own getTrack. They're
+    independent, so they run on a shared pool instead of one after
+    another. The fake blocks every call until three are in flight at
+    once, which a sequential loop could never reach."""
+    import threading
+
+    song, _ = fake_clients
+    song.query_songs.side_effect = lambda q, limit=5: _search_payload(
+        *[
+            {"id": f"COMP_{i}", "name": "I Like It", "artist": "Cardi B"}
+            for i in range(3)
+        ]
+    )
+    all_in_flight = threading.Barrier(3, timeout=5)
+
+    def _get(track_id):
+        all_in_flight.wait()
+        return _get_track_payload(
+            playcount=int(track_id[-1]) * 1000 + 1,
+            primary_artist_name="Cardi B",
+        )
+
+    song.get_track_info.side_effect = _get
+
+    pc = spotify_public.playcount_with_fallback("USAT21801431", "I Like It", "Cardi B")
+
+    assert pc == 2001
 
 
 def test_canonical_caches_under_original_isrc(isolated_cache, fake_clients):
