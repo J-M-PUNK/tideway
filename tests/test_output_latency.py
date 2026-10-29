@@ -10,6 +10,8 @@ Bluetooth-like ones, and a safe fallback when the query can't answer.
 """
 from __future__ import annotations
 
+import sys
+
 from app.audio import player
 from app.audio.player import PCMPlayer
 
@@ -80,6 +82,10 @@ class _FakeStream:
 
 
 def _open_with(monkeypatch, *, exclusive=False, fail_exclusive=False):
+    # Exclusive mode only builds extra_settings on Windows / macOS, so
+    # pin the platform or the fallback path never runs on Linux CI.
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(player.sd, "WasapiSettings", lambda **kw: object())
     opened: list[dict] = []
 
     def fake_output_stream(**kwargs):
