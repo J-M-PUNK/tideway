@@ -102,8 +102,11 @@ interface ReqOptions {
 // up, which reads as "the click did nothing".
 //
 // Capping ourselves below the browser's limit keeps headroom for
-// navigation and images. Four is chosen to leave two: enough for a
-// chunk plus the covers on the page being navigated to.
+// navigation and images. The app's event stream (`./eventStream`)
+// holds one of the six for as long as the app is open, so four API
+// calls in flight leave one for route chunks and covers. Three event
+// streams used to hold three, which left nothing: covers on a busy
+// page waited seconds in the browser for a connection.
 const MAX_CONCURRENT_REQUESTS = 4;
 
 let inFlight = 0;

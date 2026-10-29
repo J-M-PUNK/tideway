@@ -14,7 +14,7 @@ import { cn } from "@/lib/utils";
  * whatever the user is working on.
  *
  * Both the main window and the mini-player subscribe to the same
- * /api/player/events SSE stream and POST to the same transport
+ * player events (on /api/events) and POST to the same transport
  * endpoints, so playback is coherent across both surfaces without
  * any explicit sync. Stopping in one stops both, skipping in one
  * skips both, etc.
