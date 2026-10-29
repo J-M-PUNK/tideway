@@ -139,6 +139,66 @@ def test_change_between_two_non_source_targets_rebuilds():
     assert len(calls) == 2
 
 
+# float_output: float32 at the source rate (shared-mode streams on a
+# float32 OS mixer). Same rate, no SRC, no headroom; only the format.
+
+
+def test_float_output_at_source_rate_converts_without_resampling():
+    dec = _make_skeleton(source_rate=44100, source_format="s16")
+    calls = _spy_make_resampler(dec)
+    dec.set_target_rate(44100, float_output=True)
+    assert dec.sounddevice_dtype == "float32"
+    assert dec.output_dtype is np.float32
+    assert dec._output_format == "flt"
+    assert dec.is_resampling_internally is False
+    assert dec.output_sample_rate == 44100
+    # A format change only: 16- and 24-bit samples are exact in float32,
+    # so no headroom attenuation either.
+    assert dec._headroom == 1.0
+    assert len(calls) == 1
+
+
+def test_float_output_is_idempotent():
+    # The gapless and path-A adopt paths re-assert the configuration on
+    # a decoder whose thread is already decoding; a rebuild there would
+    # drop libav's buffered samples.
+    dec = _make_skeleton(source_rate=44100, source_format="s16")
+    calls = _spy_make_resampler(dec)
+    dec.set_target_rate(44100, float_output=True)
+    dec.set_target_rate(44100, float_output=True)
+    assert len(calls) == 1
+
+
+def test_float_output_off_restores_the_source_format():
+    dec = _make_skeleton(source_rate=48000, source_format="s32")
+    calls = _spy_make_resampler(dec)
+    dec.set_target_rate(48000, float_output=True)
+    dec.set_target_rate(48000)
+    assert dec.sounddevice_dtype == "int32"
+    assert dec.output_dtype is np.int32
+    assert len(calls) == 2
+
+
+def test_float_output_is_a_no_op_for_a_float_source():
+    # Lossy sources (AAC / MP3) decode to float already.
+    dec = _make_skeleton(source_rate=44100, source_format="fltp")
+    calls = _spy_make_resampler(dec)
+    dec.set_target_rate(44100, float_output=True)
+    assert dec.sounddevice_dtype == "float32"
+    assert calls == []
+
+
+def test_float_output_does_not_change_resampled_output():
+    # Resampling already emits float32 with headroom; the flag must not
+    # alter that path.
+    dec = _make_skeleton(source_rate=96000, source_format="s32")
+    _spy_make_resampler(dec)
+    dec.set_target_rate(48000, float_output=True)
+    assert dec._target_rate == 48000
+    assert dec.sounddevice_dtype == "float32"
+    assert dec._headroom == _RESAMPLE_HEADROOM
+
+
 # ---------------------------------------------------------------------------
 # _emit (headroom application)
 # ---------------------------------------------------------------------------
