@@ -1121,6 +1121,18 @@ _GET_TRACK_POOL = ThreadPoolExecutor(
     max_workers=8, thread_name_prefix="spotify-gettrack"
 )
 
+# The `<artist> <title>` search of a canonical-track resolution runs
+# here while the resolving thread runs the `isrc:` search. Each is a
+# limit-50 search, ~1 MB and ~1.3 s, and neither depends on the other,
+# so running them one after the other doubled every track's lookup.
+# Sized to the playcount batch's five workers so a full batch runs both
+# searches for every track at once, and shared for the same reason as
+# the getTrack pool: concurrent batches queue here rather than adding
+# more searches in flight to Spotify.
+_SEARCH_POOL = ThreadPoolExecutor(
+    max_workers=5, thread_name_prefix="spotify-search"
+)
+
 
 def _song_info_or_none(spotify_track_id: str) -> Optional[Mapping[str, Any]]:
     try:
@@ -1157,9 +1169,12 @@ def _resolve_canonical_track(
     # often produces zero or one candidate; the title pass covers
     # reissues with unrelated ISRCs.
     candidates: dict[str, tuple[str, Optional[str]]] = {}
+    title_search = _SEARCH_POOL.submit(
+        _search_track_candidates, f"{artist} {title}"
+    )
     for tid, name, primary in _search_track_candidates(f"isrc:{isrc}"):
         candidates.setdefault(tid, (name, primary))
-    for tid, name, primary in _search_track_candidates(f"{artist} {title}"):
+    for tid, name, primary in title_search.result():
         candidates.setdefault(tid, (name, primary))
 
     eligible: list[str] = []

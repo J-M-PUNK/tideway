@@ -306,6 +306,34 @@ def test_candidate_get_tracks_run_concurrently(isolated_cache, fake_clients):
     assert pc == 2001
 
 
+def test_isrc_and_title_searches_run_concurrently(isolated_cache, fake_clients):
+    """The `isrc:` and `<artist> <title>` searches are independent and
+    each takes ~1.3 s, so they run together. The fake holds each search
+    until both are in flight, which one after the other never reaches."""
+    import threading
+
+    song, _ = fake_clients
+    both_in_flight = threading.Barrier(2, timeout=5)
+
+    def _query(q, limit=5):
+        both_in_flight.wait()
+        if q.startswith("isrc:"):
+            return _search_payload({"id": "REISSUE", "name": "Dreams"})
+        return _search_payload({"id": "CANONICAL", "name": "Dreams"})
+
+    song.query_songs.side_effect = _query
+    song.get_track_info.side_effect = lambda track_id: _get_track_payload(
+        playcount=2_000 if track_id == "CANONICAL" else 1_000,
+        primary_artist_name="Fleetwood Mac",
+    )
+
+    pc = spotify_public.playcount_with_fallback(
+        "USWB10400049", "Dreams", "Fleetwood Mac"
+    )
+
+    assert pc == 2_000
+
+
 def test_canonical_caches_under_original_isrc(isolated_cache, fake_clients):
     """Once the canonical playcount is found via the title+artist
     fallback, subsequent lookups under the original ISRC must come
