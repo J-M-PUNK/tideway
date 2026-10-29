@@ -4,7 +4,9 @@ Imports anything non-trivial lazily inside fixtures so collection
 doesn't fail for tests that don't need a fully-configured environment.
 """
 import os
+import shutil
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -23,6 +25,39 @@ os.environ["TIDEWAY_NO_PERF_LOG"] = "1"
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
+
+_MEDIA_DIR = pytest.StashKey[Path]()
+
+
+def pytest_configure(config):
+    """Point the default download folders at a scratch dir for the run.
+
+    Every TestClient lifespan startup in server.py deletes `*.part`
+    files under settings.output_dir and starts a library scan of it,
+    and a fresh Settings takes that folder from ~/Music/Tidal. So
+    without this each run walked the developer's real music folder
+    once per TestClient (close to a hundred times), opened every audio
+    file in it to read tags, and deleted the partial file of any
+    download the installed app had in flight. videos_dir is redirected
+    alongside it for the same reason.
+
+    server.py builds its Settings when it is imported, and test
+    modules import it during collection, so this has to happen before
+    collection rather than in a fixture. A hook rather than module-
+    level code because two test modules import this file as
+    `tests.conftest`, which runs its body a second time.
+    """
+    media_dir = Path(tempfile.mkdtemp(prefix="tideway-tests-media-"))
+    config.stash[_MEDIA_DIR] = media_dir
+    os.environ["TIDEWAY_OUTPUT_DIR"] = str(media_dir / "output")
+    os.environ["TIDEWAY_VIDEOS_DIR"] = str(media_dir / "videos")
+
+
+def pytest_unconfigure(config):
+    """Delete the scratch media dir once the run is over. The
+    overrides stay set on purpose, so anything still running after
+    this falls back to the scratch path rather than the real folders."""
+    shutil.rmtree(config.stash[_MEDIA_DIR])
 
 
 @pytest.fixture(autouse=True)
