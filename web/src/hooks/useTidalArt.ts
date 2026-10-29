@@ -74,7 +74,7 @@ async function resolve(
 
 /**
  * Look up Tidal artwork for a name (+ optional artist). Returns a raw
- * Tidal URL that the caller still needs to pass through `imageProxy`,
+ * Tidal URL that the caller still needs to pass through `imageUrl`,
  * matching how Tidal URLs are handled everywhere else. Returns `null`
  * while loading or when no match exists — the caller keeps its
  * existing fallback icon.

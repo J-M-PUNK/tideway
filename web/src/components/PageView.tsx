@@ -24,7 +24,7 @@ import { PlayMediaButton } from "@/components/PlayMediaButton";
 import { TrackList } from "@/components/TrackList";
 import { useColumnCount } from "@/hooks/useColumnCount";
 import { usePlayerActions, usePlayerMeta } from "@/hooks/PlayerContext";
-import { cn, imageProxy } from "@/lib/utils";
+import { cn, imageUrl } from "@/lib/utils";
 
 interface Props {
   page: TidalPage;
@@ -243,7 +243,7 @@ function SectionHeader({
   viewAllPath?: string;
 }) {
   const ctxPath = context ? contextPath(context) : null;
-  const ctxCover = context ? imageProxy(context.cover) : null;
+  const ctxCover = context ? imageUrl(context.cover) : null;
 
   return (
     <div className="mb-4 flex items-end justify-between gap-4">
@@ -366,7 +366,7 @@ function TrackCard({ track, rowTracks }: { track: Track; rowTracks: Track[] }) {
   const meta = usePlayerMeta();
   const isCurrent = meta.track?.id === track.id;
   const isPlaying = isCurrent && meta.playing;
-  const cover = track.album?.cover ? imageProxy(track.album.cover) : null;
+  const cover = track.album?.cover ? imageUrl(track.album.cover) : null;
   const albumPath = track.album ? `/album/${track.album.id}` : null;
   const handlePlay = (e: React.MouseEvent) => {
     e.preventDefault();
@@ -536,7 +536,7 @@ function MixCard({ mix }: { mix: MixItem }) {
       <div className="relative aspect-square overflow-hidden rounded-md bg-secondary">
         {mix.cover ? (
           <img
-            src={imageProxy(mix.cover)}
+            src={imageUrl(mix.cover)}
             alt=""
             className="h-full w-full object-cover transition-transform group-hover:scale-105"
           />

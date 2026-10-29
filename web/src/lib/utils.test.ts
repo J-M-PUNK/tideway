@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { darkenForLightText } from "./utils";
+import { darkenForLightText, imageUrl } from "./utils";
 
 // WCAG contrast of an `rgb(r, g, b)` string against white, mirroring the
 // math the helper targets — so the test asserts the actual readability
@@ -44,5 +44,21 @@ describe("darkenForLightText", () => {
 
   it("passes an unparseable value through untouched", () => {
     expect(darkenForLightText("transparent")).toBe("transparent");
+  });
+});
+
+describe("imageUrl", () => {
+  it("loads covers straight from the CDN, not through the backend", () => {
+    // Through the backend, covers shared the API's six connections and
+    // loaded one at a time behind slow enrichment calls.
+    const cover =
+      "https://resources.tidal.com/images/cf6fc190/0bea/4d67/a609/9e68e3b653ed/640x640.jpg";
+    expect(imageUrl(cover)).toBe(cover);
+  });
+
+  it("returns undefined when there is no image", () => {
+    expect(imageUrl(null)).toBeUndefined();
+    expect(imageUrl(undefined)).toBeUndefined();
+    expect(imageUrl("")).toBeUndefined();
   });
 });

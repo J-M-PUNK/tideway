@@ -5,7 +5,7 @@ import type { Album, Artist, Playlist, FavoriteKind } from "@/api/types";
 import type { OnDownload } from "@/api/download";
 import { useFavorites } from "@/hooks/useFavorites";
 import { useHeartPop } from "@/components/HeartButton";
-import { cn, imageProxy } from "@/lib/utils";
+import { cn, imageUrl } from "@/lib/utils";
 import { PlayMediaButton } from "@/components/PlayMediaButton";
 import { prefetch } from "@/api/queryKeys";
 
@@ -40,7 +40,7 @@ export function MediaCard({
     else if (item.kind === "artist") prefetch.artist(item.id);
   };
 
-  const cover = imageProxy(item.kind === "artist" ? item.picture : item.cover);
+  const cover = imageUrl(item.kind === "artist" ? item.picture : item.cover);
   const rounded = item.kind === "artist" ? "rounded-full" : "rounded-md";
   const showHoverActions = item.kind !== "artist";
   // Hide-on-leave is suppressed while the play request is in flight, so

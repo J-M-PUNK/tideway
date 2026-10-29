@@ -6,7 +6,7 @@ import type { TidalUser } from "@/api/types";
 import { Button } from "@/components/ui/button";
 import { ErrorView } from "@/components/ErrorView";
 import { Skeleton } from "@/components/Skeletons";
-import { imageProxy } from "@/lib/utils";
+import { imageUrl } from "@/lib/utils";
 
 /**
  * Lists another user's followers or following. One component with a
@@ -79,7 +79,7 @@ export function FollowListPage({ kind }: { kind: "followers" | "following" }) {
 }
 
 function UserRow({ user }: { user: TidalUser }) {
-  const avatar = user.picture ? imageProxy(user.picture) : undefined;
+  const avatar = user.picture ? imageUrl(user.picture) : undefined;
   const initial = (user.name || "?").trim().charAt(0).toUpperCase();
   return (
     <Link

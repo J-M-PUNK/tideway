@@ -5,7 +5,7 @@ import { useApi } from "@/hooks/useApi";
 import { queryKeys } from "@/api/queryKeys";
 import { ErrorView } from "@/components/ErrorView";
 import { GridSkeleton } from "@/components/Skeletons";
-import { imageProxy } from "@/lib/utils";
+import { imageUrl } from "@/lib/utils";
 
 /**
  * Full grid of the user's Tidal mixes (Daily Mix 1/2/3, Discovery Mix,
@@ -48,7 +48,7 @@ export function MixesPage() {
             <div className="aspect-square overflow-hidden rounded-md bg-secondary shadow-sm">
               {m.cover ? (
                 <img
-                  src={imageProxy(m.cover)}
+                  src={imageUrl(m.cover)}
                   alt=""
                   className="h-full w-full object-cover transition-transform group-hover:scale-105"
                   loading="lazy"

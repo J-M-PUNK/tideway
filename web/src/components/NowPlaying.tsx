@@ -20,7 +20,7 @@ import {
 } from "lucide-react";
 import type { OnDownload } from "@/api/download";
 import type { StreamInfo } from "@/api/types";
-import { formatDuration, imageProxy } from "@/lib/utils";
+import { formatDuration, imageUrl } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
@@ -96,7 +96,7 @@ export function NowPlaying({
   // body is just a lighter empty state.
   if (!track) return <EmptyPlayerBar onToggleQueue={onToggleQueue} />;
 
-  const cover = imageProxy(track.album?.cover);
+  const cover = imageUrl(track.album?.cover);
 
   return (
     <div className="border-t border-border bg-[hsl(var(--now-playing-bg))] px-4 py-3">

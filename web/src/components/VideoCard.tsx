@@ -2,7 +2,7 @@ import type { ComponentType } from "react";
 import { Play, Video as VideoIcon } from "lucide-react";
 import type { Video } from "@/api/types";
 import { prefetchVideoStream } from "@/hooks/useVideoStream";
-import { formatDuration, imageProxy } from "@/lib/utils";
+import { formatDuration, imageUrl } from "@/lib/utils";
 
 /**
  * Thumbnail card for a music video. Shared by the artist page (single
@@ -20,7 +20,7 @@ export function VideoCard({
   onPlay: () => void;
   icon?: ComponentType<{ className?: string }>;
 }) {
-  const cover = video.cover ? imageProxy(video.cover) : undefined;
+  const cover = video.cover ? imageUrl(video.cover) : undefined;
   const PlaceholderIcon = icon;
   return (
     <button
