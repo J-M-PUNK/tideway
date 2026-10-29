@@ -65,7 +65,7 @@ from app import spotify_import
 from app import tidal_realtime
 from app.downloader import DownloadItem, DownloadStatus, Downloader
 from app.http import IMAGE_SESSION, SESSION, network_error_classes
-from app.lastfm import LastFmClient
+from app.lastfm import _LASTFM_CONCURRENCY, LastFmClient
 from app.local_index import LocalIndex
 from app import now_playing_state
 from app import search_ranking
@@ -3866,24 +3866,33 @@ def lastfm_track_playcounts(req: _LastFmTrackPlaycountBatchRequest) -> dict:
     without having to rebuild the request key.
     """
     _require_auth()
-    results: dict[str, dict] = {}
     # Dedupe by key before hitting Last.fm; callers can submit the
     # same (artist, track) multiple times when a track appears on
     # several playlists rendered simultaneously.
-    seen: set[tuple[str, str]] = set()
+    todo: dict[str, tuple[str, str]] = {}
     for item in req.items:
         if not item.artist or not item.track:
             continue
-        key_pair = (item.artist.lower(), item.track.lower())
-        if key_pair in seen:
-            continue
-        seen.add(key_pair)
+        key = f"{item.artist.lower()}|{item.track.lower()}"
+        todo.setdefault(key, (item.artist, item.track))
+    if not todo:
+        return {"results": {}}
+
+    def fetch(pair: tuple[str, str]) -> dict:
         try:
-            val = lastfm.get_track_playcount(item.artist, item.track)
+            return lastfm.get_track_playcount(*pair)
         except Exception:
-            val = {}
-        results[f"{key_pair[0]}|{key_pair[1]}"] = val
-    return {"results": results}
+            return {}
+
+    # Fetched concurrently, up to the Last.fm client's own cap on
+    # requests in flight. One at a time, a ten-track artist page took
+    # ~4 s and held one of the browser's API slots for all of it.
+    with ThreadPoolExecutor(
+        max_workers=min(_LASTFM_CONCURRENCY, len(todo)),
+        thread_name_prefix="lastfm-batch",
+    ) as pool:
+        values = list(pool.map(fetch, todo.values()))
+    return {"results": dict(zip(todo, values))}
 
 
 # ---------------------------------------------------------------------------
