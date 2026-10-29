@@ -21,7 +21,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { useToast } from "@/components/toast";
-import { imageProxy } from "@/lib/utils";
+import { imageUrl } from "@/lib/utils";
 import type {
   Album,
   Artist,
@@ -355,7 +355,7 @@ function PlayablePill({
       >
         {cover ? (
           <img
-            src={imageProxy(cover)}
+            src={imageUrl(cover)}
             alt=""
             className="h-full w-full object-cover"
             loading="lazy"
@@ -619,7 +619,7 @@ function PillCover({ cover }: { cover: string | null }) {
     <div className="h-12 w-12 shrink-0 overflow-hidden rounded bg-secondary">
       {cover ? (
         <img
-          src={imageProxy(cover)}
+          src={imageUrl(cover)}
           alt=""
           className="h-full w-full object-cover"
           loading="lazy"

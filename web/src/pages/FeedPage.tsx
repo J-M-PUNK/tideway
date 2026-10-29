@@ -13,7 +13,7 @@ import { EmptyState } from "@/components/EmptyState";
 import { ErrorView } from "@/components/ErrorView";
 import { PageView } from "@/components/PageView";
 import { GridSkeleton } from "@/components/Skeletons";
-import { imageProxy } from "@/lib/utils";
+import { imageUrl } from "@/lib/utils";
 
 type FeedItem = Album & { released_at: string };
 
@@ -126,7 +126,7 @@ function FeedCard({
   item: FeedItem;
   onDownload: OnDownload;
 }) {
-  const cover = imageProxy(item.cover);
+  const cover = imageUrl(item.cover);
   const artist = item.artists?.map((a) => a.name).join(", ") ?? "";
   return (
     <div className="group relative flex flex-col gap-3 rounded-lg bg-card p-4 transition-colors hover:bg-accent">

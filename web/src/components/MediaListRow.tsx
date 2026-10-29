@@ -3,7 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { Music } from "lucide-react";
 import type { Album, Artist, Playlist } from "@/api/types";
 import type { OnDownload } from "@/api/download";
-import { imageProxy, formatDuration } from "@/lib/utils";
+import { imageUrl, formatDuration } from "@/lib/utils";
 import { DownloadButton } from "@/components/DownloadButton";
 import { PlayMediaButton } from "@/components/PlayMediaButton";
 
@@ -32,7 +32,7 @@ export function MediaListRow({
         ? `/artist/${item.id}`
         : `/playlist/${item.id}`;
 
-  const cover = imageProxy(item.kind === "artist" ? item.picture : item.cover);
+  const cover = imageUrl(item.kind === "artist" ? item.picture : item.cover);
   const rounded = item.kind === "artist" ? "rounded-full" : "rounded-md";
 
   return (

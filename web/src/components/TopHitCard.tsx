@@ -4,7 +4,7 @@ import { Music, Play } from "lucide-react";
 import type { Track, TopHit } from "@/api/types";
 import { PlayMediaButton } from "@/components/PlayMediaButton";
 import { usePlayerActions } from "@/hooks/PlayerContext";
-import { cn, imageProxy } from "@/lib/utils";
+import { cn, imageUrl } from "@/lib/utils";
 
 /**
  * Hero card for the search page's "Top Result". Larger and busier than
@@ -36,7 +36,7 @@ export function TopHitCard({
 }) {
   const navigate = useNavigate();
 
-  const cover = imageProxy(
+  const cover = imageUrl(
     hit.kind === "track"
       ? (hit.album?.cover ?? null)
       : hit.kind === "artist"

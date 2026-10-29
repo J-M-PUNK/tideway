@@ -17,7 +17,7 @@ import { ErrorView } from "@/components/ErrorView";
 import { Grid } from "@/components/Grid";
 import { GridSkeleton } from "@/components/Skeletons";
 import { useToast } from "@/components/toast";
-import { imageProxy } from "@/lib/utils";
+import { imageUrl } from "@/lib/utils";
 
 /**
  * Local album collections (#243) — user-defined groups of favorite
@@ -154,7 +154,7 @@ function CollectionThumb({ covers }: { covers: string[] }) {
         <div key={i} className="overflow-hidden bg-secondary">
           {cover ? (
             <img
-              src={imageProxy(cover)}
+              src={imageUrl(cover)}
               alt=""
               loading="lazy"
               className="h-full w-full object-cover"

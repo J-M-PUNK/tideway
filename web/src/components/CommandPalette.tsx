@@ -21,7 +21,7 @@ import type {
   SearchResponse,
   Track,
 } from "@/api/types";
-import { imageProxy, cn } from "@/lib/utils";
+import { imageUrl, cn } from "@/lib/utils";
 
 type Action = {
   kind: "action";
@@ -361,7 +361,7 @@ function PaletteRow({
         >
           {cover ? (
             <img
-              src={imageProxy(cover)}
+              src={imageUrl(cover)}
               alt=""
               className="h-full w-full object-cover"
               loading="lazy"

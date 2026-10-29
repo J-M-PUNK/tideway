@@ -64,7 +64,7 @@ from app import playlist_import
 from app import spotify_import
 from app import tidal_realtime
 from app.downloader import DownloadItem, DownloadStatus, Downloader
-from app.http import IMAGE_SESSION, SESSION, network_error_classes
+from app.http import SESSION, network_error_classes
 from app.lastfm import LastFmClient
 from app.local_index import LocalIndex
 from app import now_playing_state
@@ -221,18 +221,6 @@ _BULK_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="bulk")
 
 _oauth_lock = threading.Lock()
 _oauth_state: dict[str, Any] = {"url": None, "user_code": None, "future": None}
-
-# Hosts we're willing to proxy images from. Keep tight to avoid turning the
-# proxy into a general-purpose SSRF primitive. Last.fm CDN hosts are here
-# because artist/album/user avatars from `user.getRecentTracks` and the
-# stats/popular endpoints come from Fastly/Akamai, not Tidal.
-ALLOWED_IMAGE_HOSTS = {
-    "resources.tidal.com",
-    "images.tidal.com",
-    "lastfm.freetls.fastly.net",
-    "lastfm-img2.akamaized.net",
-    "lastfm.akamaized.net",
-}
 
 # check_login() hits Tidal over the network. Cache the result briefly so a
 # page load that fires a dozen authed requests doesn't fan out to a dozen
@@ -14088,136 +14076,6 @@ def move_track_in_playlist(playlist_id: str, req: MoveTrackRequest) -> dict:
         raise HTTPException(status_code=502, detail=str(exc))
     _invalidate_detail_cache_entry(f"playlist:{playlist_id}")
     return {"ok": True}
-
-
-# ---------------------------------------------------------------------------
-# Image proxy — avoids CORS issues and keeps covers uniform. Restricted to
-# known Tidal CDN hosts so the endpoint can't be turned into an SSRF probe
-# against arbitrary internal services.
-# ---------------------------------------------------------------------------
-
-
-MAX_IMAGE_BYTES = 5 * 1024 * 1024  # 5 MB — covers even oversized Tidal covers
-
-# In-process byte cache for proxied cover art. The browser already caches
-# each cover for a day (Cache-Control below), but that cache is per-browser
-# and doesn't survive a hard reload, a second window pointed at the same
-# local server, or the browser evicting it — and every one of those misses
-# is a fresh round-trip to Tidal's CDN. Holding recently-served covers here
-# turns those back into instant local hits and, on a cache hit, skips the
-# upstream fetch entirely so the request never occupies a connection. Bound
-# by both entry count and total bytes so it can't grow without limit; covers
-# are small (tens of KB) so a few hundred MB ceiling holds thousands of them.
-_IMAGE_CACHE_MAX_ENTRIES = 2048
-_IMAGE_CACHE_MAX_BYTES = 256 * 1024 * 1024
-# url -> (content_type, body). OrderedDict as an LRU: move_to_end on hit,
-# popitem(last=False) evicts the coldest.
-_image_cache: "OrderedDict[str, tuple[str, bytes]]" = OrderedDict()
-_image_cache_bytes = 0
-_image_cache_lock = threading.Lock()
-
-
-def _image_cache_get(url: str) -> Optional[tuple[str, bytes]]:
-    with _image_cache_lock:
-        entry = _image_cache.get(url)
-        if entry is not None:
-            _image_cache.move_to_end(url)
-        return entry
-
-
-def _image_cache_put(url: str, content_type: str, body: bytes) -> None:
-    global _image_cache_bytes
-    with _image_cache_lock:
-        if url in _image_cache:
-            # A concurrent request already populated it; don't double-count.
-            return
-        _image_cache[url] = (content_type, body)
-        _image_cache_bytes += len(body)
-        while _image_cache and (
-            len(_image_cache) > _IMAGE_CACHE_MAX_ENTRIES
-            or _image_cache_bytes > _IMAGE_CACHE_MAX_BYTES
-        ):
-            _, (_ct, evicted) = _image_cache.popitem(last=False)
-            _image_cache_bytes -= len(evicted)
-
-
-def _image_response(content_type: str, body: bytes) -> Response:
-    return Response(
-        content=body,
-        media_type=content_type,
-        headers={
-            "Cache-Control": "public, max-age=86400",
-            # Explicit CORS header so fast-average-color on the frontend
-            # can read pixel data even when the image is cross-origin in dev.
-            "Access-Control-Allow-Origin": "*",
-        },
-    )
-
-
-@app.get("/api/image")
-def image_proxy(url: str) -> Response:
-    _require_auth()
-
-    cached = _image_cache_get(url)
-    if cached is not None:
-        return _image_response(*cached)
-
-    parsed = urlparse(url)
-    if parsed.scheme != "https":
-        raise HTTPException(status_code=400, detail="Only https URLs allowed")
-    if parsed.username or parsed.password:
-        # URLs with embedded credentials are a classic SSRF bypass — the
-        # allowlist check against parsed.hostname can be sidestepped by some
-        # parsers. We reject them outright; Tidal never includes userinfo.
-        raise HTTPException(status_code=400, detail="URL must not contain userinfo")
-    if parsed.hostname not in ALLOWED_IMAGE_HOSTS:
-        raise HTTPException(status_code=403, detail=f"Host not allowed: {parsed.hostname}")
-    try:
-        # IMAGE_SESSION is a dedicated pool so cover fetches don't contend
-        # with the audio path on the shared SESSION. allow_redirects=False —
-        # a redirect from a Tidal CDN to an internal host would otherwise be
-        # followed and turn this into an SSRF probe. Tidal covers are direct
-        # URLs so this should never fire on legitimate traffic.
-        resp = IMAGE_SESSION.get(url, timeout=10, stream=True, allow_redirects=False)
-        if resp.status_code in (301, 302, 303, 307, 308):
-            resp.close()
-            raise HTTPException(status_code=502, detail="Upstream redirect refused")
-        resp.raise_for_status()
-        declared = int(resp.headers.get("Content-Length") or 0)
-        if declared and declared > MAX_IMAGE_BYTES:
-            resp.close()
-            raise HTTPException(status_code=413, detail="Image too large")
-        content_type = resp.headers.get("Content-Type", "image/jpeg")
-        # Buffer the whole cover (covers are small) so we can hand back a
-        # complete, cacheable body. Bounded by MAX_IMAGE_BYTES; a stream
-        # that lies about its size and runs long is cut off rather than
-        # allowed to fill memory.
-        chunks: list[bytes] = []
-        streamed = 0
-        oversized = False
-        try:
-            for chunk in resp.iter_content(chunk_size=65536):
-                if not chunk:
-                    continue
-                streamed += len(chunk)
-                if streamed > MAX_IMAGE_BYTES:
-                    oversized = True
-                    break
-                chunks.append(chunk)
-        finally:
-            resp.close()
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
-
-    body = b"".join(chunks)
-    # Only cache complete, sanely-sized covers. An oversized/truncated body
-    # is served once but never stored, so a bad upstream can't poison the
-    # cache with a broken image.
-    if not oversized and body:
-        _image_cache_put(url, content_type, body)
-    return _image_response(content_type, body)
 
 
 # ---------------------------------------------------------------------------

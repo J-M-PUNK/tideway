@@ -4,7 +4,7 @@ import {
   usePlayerMeta,
   usePlayerTime,
 } from "@/hooks/PlayerContext";
-import { formatDuration, imageProxy } from "@/lib/utils";
+import { formatDuration, imageUrl } from "@/lib/utils";
 import { StreamQualityBadge } from "@/components/StreamQualityBadge";
 import { cn } from "@/lib/utils";
 
@@ -37,7 +37,7 @@ export function MiniPlayerPage() {
     );
   }
 
-  const cover = imageProxy(track.album?.cover);
+  const cover = imageUrl(track.album?.cover);
   const pct = duration > 0 ? (currentTime / duration) * 100 : 0;
   const artists = track.artists.map((a) => a.name).join(", ");
 

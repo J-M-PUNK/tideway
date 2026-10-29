@@ -1,6 +1,6 @@
 import { Link } from "react-router-dom";
 import { Music, User as UserIcon } from "lucide-react";
-import { cn, imageProxy } from "@/lib/utils";
+import { cn, imageUrl } from "@/lib/utils";
 import { useCoverColor } from "@/hooks/useCoverColor";
 
 interface Props {
@@ -53,7 +53,7 @@ export function DetailHero({
   onCoverClick,
   coverHint,
 }: Props) {
-  const src = imageProxy(cover);
+  const src = imageUrl(cover);
   const dominant = useCoverColor(src);
 
   // Non-backdrop pages keep the old dominant-color gradient wash.
@@ -183,7 +183,7 @@ function ArtistPill({
 }: {
   artist: { id: string; name: string; picture: string | null };
 }) {
-  const pic = imageProxy(artist.picture);
+  const pic = imageUrl(artist.picture);
   return (
     <Link
       to={`/artist/${artist.id}`}
