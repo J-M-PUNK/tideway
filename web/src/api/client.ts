@@ -31,6 +31,7 @@ import type {
   LocalVideo,
   Lyrics,
   MixDetail,
+  EqManualProfile,
   ManualEqConfig,
   ParametricBand,
   PlayerSnapshot,
@@ -102,8 +103,11 @@ interface ReqOptions {
 // up, which reads as "the click did nothing".
 //
 // Capping ourselves below the browser's limit keeps headroom for
-// navigation and images. Four is chosen to leave two: enough for a
-// chunk plus the covers on the page being navigated to.
+// navigation and images. The app's event stream (`./eventStream`)
+// holds one of the six for as long as the app is open, so four API
+// calls in flight leave one for route chunks and covers. Three event
+// streams used to hold three, which left nothing: covers on a busy
+// page waited seconds in the browser for a connection.
 const MAX_CONCURRENT_REQUESTS = 4;
 
 let inFlight = 0;
@@ -148,6 +152,22 @@ async function req<T>(
   } finally {
     releaseSlot();
   }
+}
+
+/** Send a window-chrome action (drag, resize, minimize, maximize,
+ *  close) without waiting for an API slot.
+ *
+ *  These fire from a mousedown or a click on the titlebar, and drag
+ *  and resize only work while the button is still held: the backend
+ *  hands the window to the OS move loop from the cursor's position at
+ *  that moment. Queued behind a busy page's data requests, the drag
+ *  reached the backend seconds later, after the mouse was released,
+ *  so the window couldn't be moved until the page finished loading.
+ *  They're tiny and answered immediately, so they can't crowd out the
+ *  requests the cap protects. `priority: "high"` puts them first in
+ *  Chromium's own queue for the next free connection. */
+function windowAction<T>(path: string, init?: RequestInit): Promise<T> {
+  return sendRequest<T>(path, { method: "POST", priority: "high", ...init });
 }
 
 async function sendRequest<T>(
@@ -316,24 +336,18 @@ export const api = {
         reason?: string;
       }>("/api/_internal/window/info").catch(() => ({ ok: false as const })),
     minimize: () =>
-      req<{ ok: boolean }>("/api/_internal/window/minimize", {
-        method: "POST",
-      }),
+      windowAction<{ ok: boolean }>("/api/_internal/window/minimize"),
     maximize: () =>
-      req<{ ok: boolean; maximized?: boolean }>(
+      windowAction<{ ok: boolean; maximized?: boolean }>(
         "/api/_internal/window/maximize",
-        { method: "POST" },
       ),
-    close: () =>
-      req<{ ok: boolean }>("/api/_internal/window/close", { method: "POST" }),
+    close: () => windowAction<{ ok: boolean }>("/api/_internal/window/close"),
     /** Start a native drag from the cursor's current position. The
      *  React titlebar calls this on mousedown — WebView2 ignores
      *  `app-region: drag`, so we route through Win32's move loop
      *  via PostMessage(WM_NCLBUTTONDOWN, HTCAPTION) on the backend. */
     startDrag: () =>
-      req<{ ok: boolean }>("/api/_internal/window/start_drag", {
-        method: "POST",
-      }),
+      windowAction<{ ok: boolean }>("/api/_internal/window/start_drag"),
     /** Start a native resize loop in the given direction. Invisible
      *  edge / corner hit strips on the React shell fire this on
      *  mousedown — WS_THICKFRAME alone isn't enough because the
@@ -349,8 +363,7 @@ export const api = {
         | "bottomleft"
         | "bottomright",
     ) =>
-      req<{ ok: boolean }>("/api/_internal/window/start_resize", {
-        method: "POST",
+      windowAction<{ ok: boolean }>("/api/_internal/window/start_resize", {
         body: JSON.stringify({ direction }),
       }),
   },
@@ -1249,7 +1262,38 @@ export const api = {
         config: ManualEqConfig;
         default_bands: ParametricBand[];
         presets: { index: number; name: string; bands: ParametricBand[] }[];
+        manual_profiles: EqManualProfile[];
+        manual_profiles_max: number;
       }>("/api/player/eq"),
+    /** Saved manual EQ curves. Storage only — loading one is a plain
+     *  `setEq(profile.bands, profile.preamp)`. Each call returns the
+     *  full updated list so the editor never has to merge. */
+    createEqProfile: (
+      name: string,
+      bands: ParametricBand[],
+      preamp: number | null,
+    ) =>
+      req<{ profile: EqManualProfile; profiles: EqManualProfile[] }>(
+        "/api/player/eq/manual-profiles",
+        { method: "POST", body: JSON.stringify({ name, bands, preamp }) },
+      ),
+    updateEqProfile: (
+      id: string,
+      patch: {
+        name?: string;
+        bands?: ParametricBand[];
+        preamp?: number | null;
+      },
+    ) =>
+      req<{ profile: EqManualProfile; profiles: EqManualProfile[] }>(
+        `/api/player/eq/manual-profiles/${encodeURIComponent(id)}`,
+        { method: "PUT", body: JSON.stringify(patch) },
+      ),
+    deleteEqProfile: (id: string) =>
+      req<{ profiles: EqManualProfile[] }>(
+        `/api/player/eq/manual-profiles/${encodeURIComponent(id)}`,
+        { method: "DELETE" },
+      ),
     setEq: (bands: ParametricBand[], preamp: number | null) =>
       req<{
         ok: boolean;

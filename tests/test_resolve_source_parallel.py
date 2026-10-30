@@ -33,6 +33,7 @@ def test_resolve_source_runs_metadata_and_playbackinfo_in_parallel():
     player = PCMPlayer.__new__(PCMPlayer)
     player._manifest_cache = MagicMock()
     player._manifest_cache.lookup.return_value = None
+    player._manifest_cache.begin_fill.return_value = None
     player._local_lookup = None
     player._quality_clamp = None
 
@@ -111,6 +112,7 @@ def test_resolve_source_passes_track_id_as_int():
     player = PCMPlayer.__new__(PCMPlayer)
     player._manifest_cache = MagicMock()
     player._manifest_cache.lookup.return_value = None
+    player._manifest_cache.begin_fill.return_value = None
     player._local_lookup = None
     player._quality_clamp = None
 
@@ -156,6 +158,7 @@ def test_resolve_source_bounded_when_tidal_stalls():
     player = PCMPlayer.__new__(PCMPlayer)
     player._manifest_cache = MagicMock()
     player._manifest_cache.lookup.return_value = None
+    player._manifest_cache.begin_fill.return_value = None
     player._local_lookup = None
     player._quality_clamp = None
 

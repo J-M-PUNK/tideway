@@ -41,7 +41,6 @@ from fastapi.responses import (
 )
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
-from sse_starlette.sse import EventSourceResponse
 
 from app import album_collections
 from app import aoty as aoty_module
@@ -65,8 +64,8 @@ from app import playlist_import
 from app import spotify_import
 from app import tidal_realtime
 from app.downloader import DownloadItem, DownloadStatus, Downloader
-from app.http import IMAGE_SESSION, SESSION, network_error_classes
-from app.lastfm import LastFmClient
+from app.http import SESSION, network_error_classes
+from app.lastfm import _LASTFM_CONCURRENCY, LastFmClient
 from app.local_index import LocalIndex
 from app import now_playing_state
 from app import search_ranking
@@ -223,23 +222,20 @@ _BULK_EXECUTOR = ThreadPoolExecutor(max_workers=1, thread_name_prefix="bulk")
 _oauth_lock = threading.Lock()
 _oauth_state: dict[str, Any] = {"url": None, "user_code": None, "future": None}
 
-# Hosts we're willing to proxy images from. Keep tight to avoid turning the
-# proxy into a general-purpose SSRF primitive. Last.fm CDN hosts are here
-# because artist/album/user avatars from `user.getRecentTracks` and the
-# stats/popular endpoints come from Fastly/Akamai, not Tidal.
-ALLOWED_IMAGE_HOSTS = {
-    "resources.tidal.com",
-    "images.tidal.com",
-    "lastfm.freetls.fastly.net",
-    "lastfm-img2.akamaized.net",
-    "lastfm.akamaized.net",
-}
-
 # check_login() hits Tidal over the network. Cache the result briefly so a
 # page load that fires a dozen authed requests doesn't fan out to a dozen
-# round-trips (and risk rate-limiting).
+# round-trips (and risk rate-limiting). Past the TTL a signed-in result is
+# re-checked in the background rather than on the request (see
+# _is_logged_in). `gen` is bumped by _invalidate_auth_cache so a check
+# that was already in flight can't write its older answer over a logout;
+# `refreshing` keeps it to one background re-check at a time.
 _AUTH_CACHE_TTL = 30.0
-_auth_cache: dict[str, Any] = {"at": 0.0, "ok": False}
+_auth_cache: dict[str, Any] = {
+    "at": 0.0,
+    "ok": False,
+    "gen": 0,
+    "refreshing": False,
+}
 _auth_cache_lock = threading.Lock()
 
 # Set once the background boot thread has finished loading the Tidal
@@ -375,6 +371,39 @@ def _is_logged_in() -> bool:
     with _auth_cache_lock:
         if now - _auth_cache["at"] < _AUTH_CACHE_TTL:
             return bool(_auth_cache["ok"])
+        if _auth_cache["ok"]:
+            # Signed in, but the answer has aged out. Every player
+            # endpoint runs this gate, so re-checking here put a Tidal
+            # round-trip (300 ms to over a second) in front of whichever
+            # request came first after the TTL — a play click after a
+            # few minutes of listening, typically. Answer from the
+            # known-good result and re-check in the background. Losing
+            # the login is still noticed: a Tidal call that fails auth
+            # invalidates the cache through tidal.on_auth_lost, and the
+            # re-check itself records a rejection for the next request.
+            if not _auth_cache["refreshing"]:
+                _auth_cache["refreshing"] = True
+                threading.Thread(
+                    target=_recheck_login,
+                    args=(_auth_cache["gen"],),
+                    name="auth-recheck",
+                    daemon=True,
+                ).start()
+            return True
+        gen = _auth_cache["gen"]
+    # Nothing known-good to answer from (first check, signed out, or
+    # just invalidated): this request has to wait for the answer.
+    return _recheck_login(gen)
+
+
+def _recheck_login(gen: int) -> bool:
+    """Ask Tidal whether the session is still signed in and cache the
+    answer, unless _invalidate_auth_cache ran meanwhile (`gen` moved):
+    a check that started before a logout must not record "signed in"
+    after it."""
+    import time
+
+    now = time.monotonic()
     try:
         ok = bool(tidal.session.check_login())
         if not ok and tidal.session_load_deferred():
@@ -404,8 +433,10 @@ def _is_logged_in() -> bool:
     except Exception:
         ok = False
     with _auth_cache_lock:
-        _auth_cache["at"] = now
-        _auth_cache["ok"] = ok
+        if _auth_cache["gen"] == gen:
+            _auth_cache["at"] = now
+            _auth_cache["ok"] = ok
+            _auth_cache["refreshing"] = False
     return ok
 
 
@@ -413,6 +444,11 @@ def _invalidate_auth_cache() -> None:
     with _auth_cache_lock:
         _auth_cache["at"] = 0.0
         _auth_cache["ok"] = False
+        _auth_cache["gen"] += 1
+        # A re-check still in flight belongs to the old generation and
+        # won't record anything; let the next stale answer start a new
+        # one.
+        _auth_cache["refreshing"] = False
 
 
 # When a hard refresh failure logs the user out (dead refresh
@@ -747,6 +783,40 @@ def _cleanup_part_files(root: Path) -> None:
         pass
 
 
+def _prefetch_persisted_now_playing() -> None:
+    """Warm the manifest cache for the track that was playing when
+    the user last quit. Run from lifespan startup on its own thread;
+    see the comment there."""
+    try:
+        persisted = now_playing_state.read_state()
+    except Exception:
+        return
+    if not isinstance(persisted, dict):
+        return
+    track_id = persisted.get("trackId")
+    if not isinstance(track_id, str) or not track_id:
+        return
+    # Warm at the quality the restore will ask for. The cache is
+    # keyed on (track, quality), and the restore always passes the
+    # user's streaming quality, so warming at the session default
+    # (quality=None) was a guaranteed miss: the relaunch paid the
+    # full resolve anyway. Snapshots written before the frontend
+    # recorded the quality have none, which keeps the old guess.
+    quality = persisted.get("quality")
+    if not isinstance(quality, str) or not quality:
+        quality = None
+    try:
+        player = _native_player()
+    except Exception:
+        return
+    try:
+        player.prefetch(str(track_id), quality, warm_bytes=True)
+    except Exception:
+        # prefetch() should already swallow internally, but
+        # belt-and-braces — startup must not raise.
+        pass
+
+
 @asynccontextmanager
 async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     broker.bind_loop(asyncio.get_running_loop())
@@ -1031,27 +1101,6 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
     # are already swallowed; if Tidal auth hasn't been refreshed
     # yet at this moment, the prefetch is a silent no-op and the
     # user pays the same cold-start cost they pay today.
-    def _prefetch_persisted_now_playing() -> None:
-        try:
-            persisted = now_playing_state.read_state()
-        except Exception:
-            return
-        if not isinstance(persisted, dict):
-            return
-        track_id = persisted.get("trackId")
-        if not isinstance(track_id, str) or not track_id:
-            return
-        try:
-            player = _native_player()
-        except Exception:
-            return
-        try:
-            player.prefetch(str(track_id), warm_bytes=True)
-        except Exception:
-            # prefetch() should already swallow internally, but
-            # belt-and-braces — startup must not raise.
-            pass
-
     threading.Thread(
         target=_prefetch_persisted_now_playing,
         name="cold-start-prefetch",
@@ -1426,6 +1475,7 @@ async def _track_concurrency(request: Request, call_next):
 # `app/routers/__init__.py` for the playbook + which domains have
 # moved. New extractions add their `include_router` call here.
 from app.routers.autostart import router as autostart_router
+from app.routers.hotkey import hotkey_events
 from app.routers.hotkey import router as hotkey_router
 from app.routers.notify import router as notify_router
 
@@ -3760,24 +3810,33 @@ def lastfm_track_playcounts(req: _LastFmTrackPlaycountBatchRequest) -> dict:
     without having to rebuild the request key.
     """
     _require_auth()
-    results: dict[str, dict] = {}
     # Dedupe by key before hitting Last.fm; callers can submit the
     # same (artist, track) multiple times when a track appears on
     # several playlists rendered simultaneously.
-    seen: set[tuple[str, str]] = set()
+    todo: dict[str, tuple[str, str]] = {}
     for item in req.items:
         if not item.artist or not item.track:
             continue
-        key_pair = (item.artist.lower(), item.track.lower())
-        if key_pair in seen:
-            continue
-        seen.add(key_pair)
+        key = f"{item.artist.lower()}|{item.track.lower()}"
+        todo.setdefault(key, (item.artist, item.track))
+    if not todo:
+        return {"results": {}}
+
+    def fetch(pair: tuple[str, str]) -> dict:
         try:
-            val = lastfm.get_track_playcount(item.artist, item.track)
+            return lastfm.get_track_playcount(*pair)
         except Exception:
-            val = {}
-        results[f"{key_pair[0]}|{key_pair[1]}"] = val
-    return {"results": results}
+            return {}
+
+    # Fetched concurrently, up to the Last.fm client's own cap on
+    # requests in flight. One at a time, a ten-track artist page took
+    # ~4 s and held one of the browser's API slots for all of it.
+    with ThreadPoolExecutor(
+        max_workers=min(_LASTFM_CONCURRENCY, len(todo)),
+        thread_name_prefix="lastfm-batch",
+    ) as pool:
+        values = list(pool.map(fetch, todo.values()))
+    return {"results": dict(zip(todo, values))}
 
 
 # ---------------------------------------------------------------------------
@@ -5410,6 +5469,22 @@ class _PlayerEqEnabledRequest(BaseModel):
     enabled: bool
 
 
+class _EqManualProfileCreate(BaseModel):
+    name: str
+    bands: list[_ParametricBandModel]
+    preamp: Optional[float] = None
+
+
+class _EqManualProfileUpdate(BaseModel):
+    # Any subset: a rename sends `name`; "overwrite with the current
+    # curve" sends `bands` + `preamp`. `preamp` is tri-state, so the
+    # handler checks which fields were actually sent rather than
+    # treating None as "leave alone".
+    name: Optional[str] = None
+    bands: Optional[list[_ParametricBandModel]] = None
+    preamp: Optional[float] = None
+
+
 class _PlayerOutputDeviceRequest(BaseModel):
     # Empty string routes to the system default.
     device_id: str
@@ -6456,6 +6531,10 @@ def player_eq_state() -> dict:
         # bands yet — grabbable flat nodes instead of an empty graph.
         "default_bands": [b.to_dict() for b in default_parametric_bands()],
         "presets": parametric_presets(),
+        "manual_profiles": list(settings.eq_manual_profiles),
+        # Served so the editor disables "Save" at the same cap the
+        # create endpoint enforces, instead of hardcoding it.
+        "manual_profiles_max": _EQ_MANUAL_PROFILES_MAX,
     }
 
 
@@ -6561,6 +6640,136 @@ def player_eq_enabled(req: _PlayerEqEnabledRequest) -> dict:
     settings.eq_enabled = new_enabled
     save_settings(settings)
     return {"ok": True, "enabled": settings.eq_enabled}
+
+
+# --- Manual EQ profiles ----------------------------------------------------
+# Named, user-saved manual curves. Storage only: loading a profile is
+# the client posting its bands/preamp to POST /api/player/eq, so the
+# audible path stays the one validated handler above and there is no
+# second way to put a curve in the engine. Distinct from the AutoEQ
+# headphone profiles further down.
+
+_EQ_MANUAL_PROFILES_MAX = 50
+_EQ_MANUAL_PROFILE_NAME_MAX = 60
+
+
+def _clean_eq_profile_name(raw: str) -> str:
+    """Collapse whitespace and enforce a non-empty, bounded name."""
+    name = " ".join((raw or "").split())
+    if not name:
+        raise HTTPException(status_code=400, detail="Profile name can't be empty")
+    if len(name) > _EQ_MANUAL_PROFILE_NAME_MAX:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Profile name is longer than {_EQ_MANUAL_PROFILE_NAME_MAX} characters",
+        )
+    return name
+
+
+def _validated_eq_curve(
+    bands: list, preamp: Optional[float]
+) -> list[dict]:
+    """Run bands/preamp through the same validator POST /api/player/eq
+    uses, so a saved profile can never hold a curve that handler would
+    reject on load. Returns the bands as normalised dicts."""
+    parsed = _validated_eq_request(_PlayerEqRequest(bands=bands, preamp=preamp))
+    return [b.to_dict() for b in parsed]
+
+
+def _reject_taken_eq_profile_name(
+    profiles: list[dict], name: str, except_id: Optional[str] = None
+) -> None:
+    # Case-insensitive: "Bass" and "bass" side by side in the picker
+    # would be indistinguishable in practice. The message names the
+    # existing profile as saved, since that's what the user can see.
+    folded = name.casefold()
+    for p in profiles:
+        existing = str(p.get("name", ""))
+        if p.get("id") != except_id and existing.casefold() == folded:
+            raise HTTPException(
+                status_code=409, detail=f'A profile named "{existing}" already exists'
+            )
+
+
+@app.post("/api/player/eq/manual-profiles")
+def eq_manual_profile_create(req: _EqManualProfileCreate) -> dict:
+    """Save a curve under a new name. Does not change what's playing —
+    the curve being saved is normally the one already applied."""
+    _require_local_access()
+    name = _clean_eq_profile_name(req.name)
+    bands = _validated_eq_curve(req.bands, req.preamp)
+    # Read-modify-write on a settings list, so take the same lock as
+    # PUT /api/settings, which rebuilds the whole Settings object and
+    # would otherwise race a concurrent save.
+    with _settings_lock:
+        profiles = list(settings.eq_manual_profiles)
+        if len(profiles) >= _EQ_MANUAL_PROFILES_MAX:
+            raise HTTPException(
+                status_code=400,
+                detail=f"You can save up to {_EQ_MANUAL_PROFILES_MAX} EQ profiles",
+            )
+        _reject_taken_eq_profile_name(profiles, name)
+        profile = {
+            "id": uuid.uuid4().hex,
+            "name": name,
+            "bands": bands,
+            "preamp": req.preamp,
+        }
+        profiles.append(profile)
+        settings.eq_manual_profiles = profiles
+        save_settings(settings)
+    return {"profile": profile, "profiles": profiles}
+
+
+@app.put("/api/player/eq/manual-profiles/{profile_id}")
+def eq_manual_profile_update(profile_id: str, req: _EqManualProfileUpdate) -> dict:
+    """Rename a profile and/or overwrite its curve.
+
+    Fields are applied only when sent, because `preamp: null` is a
+    real value (no preamp) rather than "leave it alone"."""
+    _require_local_access()
+    sent = req.model_fields_set
+    if not sent & {"name", "bands", "preamp"}:
+        raise HTTPException(status_code=400, detail="Nothing to update")
+    name = _clean_eq_profile_name(req.name or "") if "name" in sent else None
+    bands = None
+    if "bands" in sent:
+        if req.bands is None:
+            raise HTTPException(status_code=400, detail="bands can't be null")
+        bands = _validated_eq_curve(req.bands, None)
+    if "preamp" in sent:
+        _validated_eq_curve([], req.preamp)  # bounds check only
+    with _settings_lock:
+        profiles = [dict(p) for p in settings.eq_manual_profiles]
+        target = next((p for p in profiles if p.get("id") == profile_id), None)
+        if target is None:
+            raise HTTPException(status_code=404, detail="EQ profile not found")
+        if name is not None:
+            _reject_taken_eq_profile_name(profiles, name, except_id=profile_id)
+            target["name"] = name
+        if bands is not None:
+            target["bands"] = bands
+        if "preamp" in sent:
+            target["preamp"] = req.preamp
+        settings.eq_manual_profiles = profiles
+        save_settings(settings)
+    return {"profile": target, "profiles": profiles}
+
+
+@app.delete("/api/player/eq/manual-profiles/{profile_id}")
+def eq_manual_profile_delete(profile_id: str) -> dict:
+    """Remove a saved profile. The curve currently applied is left
+    alone even if it came from this profile — deleting a saved copy
+    shouldn't change what you're hearing."""
+    _require_local_access()
+    with _settings_lock:
+        profiles = list(settings.eq_manual_profiles)
+        kept = [p for p in profiles if p.get("id") != profile_id]
+        if len(kept) == len(profiles):
+            raise HTTPException(status_code=404, detail="EQ profile not found")
+        settings.eq_manual_profiles = kept
+        save_settings(settings)
+    return {"profiles": kept}
 
 
 # --- AutoEQ headphone profiles ---------------------------------------------
@@ -7846,40 +8055,6 @@ def tidal_connect_real_disconnect() -> dict:
     return {"ok": True}
 
 
-@app.get("/api/upnp/devices")
-def upnp_devices() -> dict:
-    """SSDP-scan the LAN for UPnP MediaRenderers. Used by the
-    forthcoming Settings UPnP section to populate the device
-    picker. Day 1 of UPnP work — no connect / play yet, just
-    confirming that at least one device on the user's network
-    responds to discovery."""
-    _require_local_access()
-    from app.audio.upnp import get_manager  # noqa: WPS433 — lazy
-
-    mgr = get_manager()
-    if not mgr.is_available():
-        return {
-            "available": False,
-            "reason": "async-upnp-client not installed",
-            "devices": [],
-        }
-    devices = mgr.discover(timeout=5.0)
-    return {
-        "available": True,
-        "devices": [
-            {
-                "id": d.id,
-                "name": d.name,
-                "manufacturer": d.manufacturer,
-                "model": d.model,
-                "location": d.location,
-                "service_types": list(d.service_types),
-            }
-            for d in devices
-        ],
-    }
-
-
 # Hotkey bus + routes moved to `app/routers/hotkey.py`. The
 # lifespan call below binds the bus to the running event loop on
 # startup so the pynput listener thread can fan events out.
@@ -7957,17 +8132,15 @@ def _put_latest(queue: "asyncio.Queue", payload) -> None:
                 return
 
 
-@app.get("/api/player/events")
-async def player_events(request: Request):
-    """SSE stream of player snapshots.
+async def _player_events() -> AsyncIterator[str]:
+    """Player snapshots for one subscriber, as JSON strings, for the
+    `player` events on GET /api/events.
 
     State-change notifications are pushed immediately via the
     player's subscribe() listener; between those we poll at 4Hz so
-    the frontend gets smooth position updates during playback.
-    When paused/idle we drop to a 1Hz heartbeat to keep the
-    connection alive without wasting cycles.
+    the frontend gets smooth position updates during playback, and
+    at 1Hz when paused/idle.
     """
-    _require_local_access()
     player = _native_player()
     queue: asyncio.Queue[Optional[dict]] = asyncio.Queue(maxsize=32)
     loop = asyncio.get_running_loop()
@@ -7984,50 +8157,145 @@ async def player_events(request: Request):
             pass
 
     unsubscribe = player.subscribe(_on_snapshot)
+    try:
+        # Send the current state immediately so the client has a
+        # snapshot without waiting for the first change event.
+        yield json.dumps(_current_player_snapshot())
+        last_seq = -1
+        last_position: Optional[int] = None
+        last_output_id: Optional[str] = None
+        while True:
+            active = _current_player_snapshot()["state"] == "playing"
+            timeout = 0.25 if active else 1.0
+            try:
+                payload = await asyncio.wait_for(queue.get(), timeout=timeout)
+            except asyncio.TimeoutError:
+                payload = _current_player_snapshot()
+            if payload is None:
+                return
+            if _tcr_active():
+                payload = _tcr_snapshot()
+            seq = payload.get("seq", 0)
+            position_ms = payload.get("position_ms")
+            if not _should_forward_snapshot(
+                seq,
+                last_seq,
+                payload.get("state"),
+                position_ms,
+                last_position,
+                payload.get("output_id"),
+                last_output_id,
+            ):
+                # Dedupe keepalive ticks while nothing actionable is
+                # pending. States the client must respond to
+                # (`ended`/`error`) keep flowing so a client that
+                # missed the transition can still act.
+                continue
+            last_seq = seq
+            last_position = position_ms
+            last_output_id = payload.get("output_id")
+            yield json.dumps(payload)
+    finally:
+        unsubscribe()
+
+
+async def _download_events() -> AsyncIterator[str]:
+    """Download queue events for one subscriber, as JSON strings, for
+    the `download` events on GET /api/events. The first is a `reset`
+    snapshot of the whole queue (see DownloadBroker.subscribe).
+
+    Ends when the broker gives up on this subscriber: it marks the
+    queue `__desync__` when it couldn't fit a state-changing event.
+    The stream then closes, the browser reconnects, and the new
+    subscription starts over from a fresh reset snapshot."""
+    q = await broker.subscribe()
+    try:
+        while True:
+            payload = await q.get()
+            if isinstance(payload, dict) and payload.get("type") == "__desync__":
+                return
+            yield json.dumps(payload)
+    finally:
+        broker.unsubscribe(q)
+
+
+# How long the event stream may sit silent before it sends an SSE
+# comment, so idle connections aren't dropped as dead.
+_EVENT_STREAM_KEEPALIVE_S = 15.0
+
+
+@app.get("/api/events")
+async def events(request: Request):
+    """Everything the UI listens to, on one SSE connection: player
+    snapshots, download queue events and global hotkey actions, as the
+    named events `player`, `download` and `hotkey`.
+
+    This used to be three EventSources (/api/player/events,
+    /api/downloads/stream, /api/hotkey/events), each holding one of the
+    six HTTP/1.1 connections Chromium allows per host for as long as
+    the app was open. The frontend's own request cap (4) assumes six
+    are available, so with three permanently taken, any three API calls
+    in flight left nothing for cover images or route chunks: on an
+    artist page the covers queued 3.7-3.9 s in the browser behind
+    enrichment requests while the server answered each in under 250 ms.
+
+    Each source keeps its own semantics; they're merged here. When any
+    source ends (the downloads broker desyncs a slow subscriber), the
+    stream closes and the browser reconnects, and every source starts
+    over from a full snapshot.
+    """
+    _require_local_access()
+    sources = {
+        "player": _player_events(),
+        "download": _download_events(),
+        "hotkey": hotkey_events(),
+    }
+    # Bounded so a client that stops reading pushes back into each
+    # source's own overflow policy (the player keeps the newest
+    # snapshot, the broker desyncs) instead of growing without limit.
+    merged: asyncio.Queue[tuple[str, Optional[str]]] = asyncio.Queue(maxsize=64)
+
+    async def _pump(name: str, source: AsyncIterator[str]) -> None:
+        try:
+            async for data in source:
+                await merged.put((name, data))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # A failed source would otherwise go quiet while the stream
+            # stays up. End the stream instead, so the client reconnects
+            # and every source resubscribes.
+            print(f"[events] {name} source failed: {exc!r}", flush=True)
+        await merged.put((name, None))
+
+    tasks = [asyncio.create_task(_pump(n, s)) for n, s in sources.items()]
 
     async def _gen():
         try:
-            # Send the current state immediately so the client has a
-            # snapshot without waiting for the first change event.
-            yield f"data: {json.dumps(_current_player_snapshot())}\n\n"
-            last_seq = -1
-            last_position: Optional[int] = None
-            last_output_id: Optional[str] = None
+            # Reconnect promptly if a source or the server closes the stream.
+            yield "retry: 1000\n\n"
             while True:
                 if await request.is_disconnected():
                     break
-                active = _current_player_snapshot()["state"] == "playing"
-                timeout = 0.25 if active else 1.0
                 try:
-                    payload = await asyncio.wait_for(queue.get(), timeout=timeout)
+                    name, data = await asyncio.wait_for(
+                        merged.get(), timeout=_EVENT_STREAM_KEEPALIVE_S
+                    )
                 except asyncio.TimeoutError:
-                    payload = _current_player_snapshot()
-                if payload is None:
-                    break
-                if _tcr_active():
-                    payload = _tcr_snapshot()
-                seq = payload.get("seq", 0)
-                position_ms = payload.get("position_ms")
-                if not _should_forward_snapshot(
-                    seq,
-                    last_seq,
-                    payload.get("state"),
-                    position_ms,
-                    last_position,
-                    payload.get("output_id"),
-                    last_output_id,
-                ):
-                    # Dedupe keepalive ticks while nothing actionable is
-                    # pending. States the client must respond to
-                    # (`ended`/`error`) keep flowing so a client that
-                    # missed the transition can still act.
+                    yield ": keepalive\n\n"
                     continue
-                last_seq = seq
-                last_position = position_ms
-                last_output_id = payload.get("output_id")
-                yield f"data: {json.dumps(payload)}\n\n"
+                if data is None:
+                    break
+                yield f"event: {name}\ndata: {data}\n\n"
         finally:
-            unsubscribe()
+            for t in tasks:
+                t.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            # A pump cancelled while waiting on `merged` leaves its
+            # source suspended at a yield; close it so the source's own
+            # finally runs and it unsubscribes now rather than at GC.
+            for s in sources.values():
+                await s.aclose()
 
     return StreamingResponse(
         _gen(),
@@ -11017,34 +11285,6 @@ def download_stats() -> dict:
     }
 
 
-@app.get("/api/downloads/stream")
-async def downloads_stream(request: Request) -> EventSourceResponse:
-    _require_local_access()
-    q = await broker.subscribe()
-
-    async def event_gen():
-        try:
-            while True:
-                if await request.is_disconnected():
-                    break
-                try:
-                    payload = await asyncio.wait_for(q.get(), timeout=15)
-                except asyncio.TimeoutError:
-                    yield {"event": "ping", "data": "1"}
-                    continue
-                # Slow-consumer fallback: if the broker couldn't fit a
-                # state-changing event, it drained the queue and pushed
-                # this marker. Close the stream so EventSource reconnects
-                # and gets a fresh reset snapshot via subscribe().
-                if isinstance(payload, dict) and payload.get("type") == "__desync__":
-                    break
-                yield {"event": "download", "data": json.dumps(payload)}
-        finally:
-            broker.unsubscribe(q)
-
-    return EventSourceResponse(event_gen())
-
-
 # ---------------------------------------------------------------------------
 # Quality catalog — canonical list with bitrate/codec labels for the UI
 # ---------------------------------------------------------------------------
@@ -13920,136 +14160,6 @@ def move_track_in_playlist(playlist_id: str, req: MoveTrackRequest) -> dict:
         raise HTTPException(status_code=502, detail=str(exc))
     _invalidate_detail_cache_entry(f"playlist:{playlist_id}")
     return {"ok": True}
-
-
-# ---------------------------------------------------------------------------
-# Image proxy — avoids CORS issues and keeps covers uniform. Restricted to
-# known Tidal CDN hosts so the endpoint can't be turned into an SSRF probe
-# against arbitrary internal services.
-# ---------------------------------------------------------------------------
-
-
-MAX_IMAGE_BYTES = 5 * 1024 * 1024  # 5 MB — covers even oversized Tidal covers
-
-# In-process byte cache for proxied cover art. The browser already caches
-# each cover for a day (Cache-Control below), but that cache is per-browser
-# and doesn't survive a hard reload, a second window pointed at the same
-# local server, or the browser evicting it — and every one of those misses
-# is a fresh round-trip to Tidal's CDN. Holding recently-served covers here
-# turns those back into instant local hits and, on a cache hit, skips the
-# upstream fetch entirely so the request never occupies a connection. Bound
-# by both entry count and total bytes so it can't grow without limit; covers
-# are small (tens of KB) so a few hundred MB ceiling holds thousands of them.
-_IMAGE_CACHE_MAX_ENTRIES = 2048
-_IMAGE_CACHE_MAX_BYTES = 256 * 1024 * 1024
-# url -> (content_type, body). OrderedDict as an LRU: move_to_end on hit,
-# popitem(last=False) evicts the coldest.
-_image_cache: "OrderedDict[str, tuple[str, bytes]]" = OrderedDict()
-_image_cache_bytes = 0
-_image_cache_lock = threading.Lock()
-
-
-def _image_cache_get(url: str) -> Optional[tuple[str, bytes]]:
-    with _image_cache_lock:
-        entry = _image_cache.get(url)
-        if entry is not None:
-            _image_cache.move_to_end(url)
-        return entry
-
-
-def _image_cache_put(url: str, content_type: str, body: bytes) -> None:
-    global _image_cache_bytes
-    with _image_cache_lock:
-        if url in _image_cache:
-            # A concurrent request already populated it; don't double-count.
-            return
-        _image_cache[url] = (content_type, body)
-        _image_cache_bytes += len(body)
-        while _image_cache and (
-            len(_image_cache) > _IMAGE_CACHE_MAX_ENTRIES
-            or _image_cache_bytes > _IMAGE_CACHE_MAX_BYTES
-        ):
-            _, (_ct, evicted) = _image_cache.popitem(last=False)
-            _image_cache_bytes -= len(evicted)
-
-
-def _image_response(content_type: str, body: bytes) -> Response:
-    return Response(
-        content=body,
-        media_type=content_type,
-        headers={
-            "Cache-Control": "public, max-age=86400",
-            # Explicit CORS header so fast-average-color on the frontend
-            # can read pixel data even when the image is cross-origin in dev.
-            "Access-Control-Allow-Origin": "*",
-        },
-    )
-
-
-@app.get("/api/image")
-def image_proxy(url: str) -> Response:
-    _require_auth()
-
-    cached = _image_cache_get(url)
-    if cached is not None:
-        return _image_response(*cached)
-
-    parsed = urlparse(url)
-    if parsed.scheme != "https":
-        raise HTTPException(status_code=400, detail="Only https URLs allowed")
-    if parsed.username or parsed.password:
-        # URLs with embedded credentials are a classic SSRF bypass — the
-        # allowlist check against parsed.hostname can be sidestepped by some
-        # parsers. We reject them outright; Tidal never includes userinfo.
-        raise HTTPException(status_code=400, detail="URL must not contain userinfo")
-    if parsed.hostname not in ALLOWED_IMAGE_HOSTS:
-        raise HTTPException(status_code=403, detail=f"Host not allowed: {parsed.hostname}")
-    try:
-        # IMAGE_SESSION is a dedicated pool so cover fetches don't contend
-        # with the audio path on the shared SESSION. allow_redirects=False —
-        # a redirect from a Tidal CDN to an internal host would otherwise be
-        # followed and turn this into an SSRF probe. Tidal covers are direct
-        # URLs so this should never fire on legitimate traffic.
-        resp = IMAGE_SESSION.get(url, timeout=10, stream=True, allow_redirects=False)
-        if resp.status_code in (301, 302, 303, 307, 308):
-            resp.close()
-            raise HTTPException(status_code=502, detail="Upstream redirect refused")
-        resp.raise_for_status()
-        declared = int(resp.headers.get("Content-Length") or 0)
-        if declared and declared > MAX_IMAGE_BYTES:
-            resp.close()
-            raise HTTPException(status_code=413, detail="Image too large")
-        content_type = resp.headers.get("Content-Type", "image/jpeg")
-        # Buffer the whole cover (covers are small) so we can hand back a
-        # complete, cacheable body. Bounded by MAX_IMAGE_BYTES; a stream
-        # that lies about its size and runs long is cut off rather than
-        # allowed to fill memory.
-        chunks: list[bytes] = []
-        streamed = 0
-        oversized = False
-        try:
-            for chunk in resp.iter_content(chunk_size=65536):
-                if not chunk:
-                    continue
-                streamed += len(chunk)
-                if streamed > MAX_IMAGE_BYTES:
-                    oversized = True
-                    break
-                chunks.append(chunk)
-        finally:
-            resp.close()
-    except HTTPException:
-        raise
-    except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
-
-    body = b"".join(chunks)
-    # Only cache complete, sanely-sized covers. An oversized/truncated body
-    # is served once but never stored, so a bad upstream can't poison the
-    # cache with a broken image.
-    if not oversized and body:
-        _image_cache_put(url, content_type, body)
-    return _image_response(content_type, body)
 
 
 # ---------------------------------------------------------------------------

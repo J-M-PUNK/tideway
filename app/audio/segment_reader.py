@@ -20,13 +20,25 @@ import io
 import sys
 import threading
 import time
-from typing import Dict, Optional
+from concurrent.futures import Future, ThreadPoolExecutor
+from typing import Optional
 
 import requests
 
+from app.http import STREAM_SESSION
+
 # libav commonly asks for 32KB at a time. Segments are ~2-3MB each,
 # so one segment covers many reads. We fetch one segment per
-# cache-miss and append to a rolling bytes buffer.
+# cache-miss and append to a rolling bytes buffer, with the segment
+# after it already downloading (see _start_read_ahead).
+
+# Runs the one-segment read-ahead for every live reader: the playing
+# track's decoder, a buffering preload, a seek's fresh reader, a DLNA
+# passthrough. Each holds at most one fetch here, so this only has to
+# be wider than the number of readers alive at once.
+_READ_AHEAD_POOL = ThreadPoolExecutor(
+    max_workers=16, thread_name_prefix="segment-ahead"
+)
 
 
 class SegmentReader(io.RawIOBase):
@@ -43,22 +55,26 @@ class SegmentReader(io.RawIOBase):
         self._buf = bytearray()
         self._pos = 0
         self._lock = threading.Lock()
-        self._session = requests.Session()
         # Cancellation plumbing. The decoder thread blocks inside
         # _fetch_next_segment for ~150-300ms per segment on a track
         # change or seek. The player tears the thread down by calling
         # close() from the foreground. Without active cancellation,
         # close() would have to wait for the in-flight HTTP read to
         # complete on its own, which is the bulk of the visible
-        # teardown latency on the play and seek paths. We track the
-        # current Response object and close it from close() to abort
-        # the read; the thread sees a connection error and exits.
+        # teardown latency on the play and seek paths. We track every
+        # open Response (the segment being read plus the read-ahead)
+        # and close them from close() to abort the reads; the threads
+        # see a connection error and exit.
         self._closed = False
-        self._current_response: Optional[requests.Response] = None
-        # Separate, finer-grained lock for the response handle so
+        self._open_responses: set[requests.Response] = set()
+        # Separate, finer-grained lock for the response handles so
         # close() can preempt a fetch in progress without waiting on
         # the main read lock (which the fetching thread is holding).
         self._response_lock = threading.Lock()
+        # The next segment, downloading while libav reads this one:
+        # (segment index, future of its bytes, or of None if the
+        # reader closed mid-download).
+        self._ahead: Optional[tuple[int, Future]] = None
         # Byte-level prefetch fast path: if the caller hands us
         # pre-downloaded bytes for segment 0, 1, ..., N in order,
         # seed the buffer with them and advance _next_segment_idx
@@ -83,9 +99,15 @@ class SegmentReader(io.RawIOBase):
                 seeded_any = True
         # Eager-fetch the init segment so callers that only probe
         # headers (av.open's stream-probing phase) don't get EOF —
-        # unless prefetch already seeded it.
+        # unless prefetch already seeded it. av.open needs the first
+        # media segment straight after the init segment, so start that
+        # one first and let the two download side by side: the start of
+        # a track then costs one round-trip instead of two.
         if not seeded_any:
+            self._start_read_ahead(1)
             self._fetch_next_segment()
+        else:
+            self._start_read_ahead(self._next_segment_idx)
 
     # --- io.RawIOBase interface ------------------------------------
 
@@ -120,23 +142,20 @@ class SegmentReader(io.RawIOBase):
         super().close()
         with self._response_lock:
             self._closed = True
-            r = self._current_response
-            self._current_response = None
-        if r is not None:
-            # Closing the Response releases the underlying urllib3
-            # connection back to the pool with a forced abort, which
-            # raises a ConnectionError on the thread blocked in
-            # iter_content. That's the whole point: the decoder
-            # thread sees the exception and exits, instead of waiting
-            # out the rest of a 150-300ms segment download.
+            responses = list(self._open_responses)
+            self._open_responses.clear()
+        for r in responses:
+            # Closing a Response mid-body drops its urllib3 connection
+            # rather than returning it to the shared pool, and raises a
+            # ConnectionError on the thread blocked in iter_content.
+            # That's the whole point: the decoder thread sees the
+            # exception and exits, instead of waiting out the rest of a
+            # 150-300ms segment download. The session itself is shared
+            # with every other reader, so it stays open.
             try:
                 r.close()
             except Exception:
                 pass
-        try:
-            self._session.close()
-        except Exception:
-            pass
 
     def read(self, size: int = -1) -> bytes:  # type: ignore[override]
         with self._lock:
@@ -226,10 +245,47 @@ class SegmentReader(io.RawIOBase):
             self._next_segment_idx = len(self._urls)
             return
         idx = self._next_segment_idx
+        ahead = self._ahead
+        if ahead is not None and ahead[0] == idx:
+            # Already downloading (or done) on the read-ahead pool. A
+            # failed download re-raises here, exactly as an inline
+            # fetch would have.
+            self._ahead = None
+            data = ahead[1].result()
+        else:
+            # The init segment, fetched while the read-ahead holds the
+            # first media segment — leave that one running.
+            data = self._download(idx)
+        if data is None:
+            # Closed mid-download. _next_segment_idx is left short of
+            # the end so a subsequent read() would re-attempt — but in
+            # practice close() means the SegmentReader is on its way
+            # out and read() won't be called again.
+            return
+        self._buf.extend(data)
+        self._next_segment_idx += 1
+        self._start_read_ahead(self._next_segment_idx)
+
+    def _start_read_ahead(self, idx: int) -> None:
+        """Start downloading segment `idx` in the background, so it's
+        already here (or close) when libav asks for it. One segment
+        ahead and no more: that hides each segment's round-trip behind
+        the one being decoded, which is the same single-request
+        overlap the downloader uses, and keeps this reader to at most
+        two concurrent requests for its track."""
+        if self._closed or self._ahead is not None or idx >= len(self._urls):
+            return
+        self._ahead = (idx, _READ_AHEAD_POOL.submit(self._download, idx))
+
+    def _download(self, idx: int) -> Optional[bytes]:
+        """GET segment `idx`. Returns None if close() lands first.
+
+        Runs on the reading thread or the read-ahead pool, so it never
+        touches the buffer or the segment index; the caller does.
+        """
         url = self._urls[idx]
         # Tidal CDN URLs are signed with time-bounded policy params,
-        # so this is the only place we hit the network. We keep the
-        # requests.Session around for HTTP/2 connection reuse.
+        # so this is the only place we hit the network.
         #
         # `stream=True` is the part that makes the read interruptible.
         # Without it, requests internally calls Response.content,
@@ -239,21 +295,16 @@ class SegmentReader(io.RawIOBase):
         # delivers them; close() can then abort the active socket
         # mid-fetch by closing the Response.
         t0 = time.monotonic()
-        r = self._session.get(url, timeout=30, stream=True)
+        r = STREAM_SESSION.get(url, timeout=30, stream=True)
         with self._response_lock:
             if self._closed:
-                # Lost the race: close() fired after we issued the
-                # GET. Drop the response and bail. _next_segment_idx
-                # is left short of the end so a subsequent read()
-                # would re-attempt — but in practice close() means
-                # the SegmentReader is on its way out and read()
-                # won't be called again.
+                # Lost the race: close() fired after we issued the GET.
                 try:
                     r.close()
                 except Exception:
                     pass
-                return
-            self._current_response = r
+                return None
+            self._open_responses.add(r)
         chunks: list[bytes] = []
         size = 0
         try:
@@ -264,29 +315,25 @@ class SegmentReader(io.RawIOBase):
             # download one chunk (~5 ms on a residential connection).
             for chunk in r.iter_content(chunk_size=65536):
                 if self._closed:
-                    return
+                    return None
                 if chunk:
                     chunks.append(chunk)
                     size += len(chunk)
         finally:
             with self._response_lock:
-                # Only clear if we're still the current response —
-                # close() may have already nulled it out and called
-                # r.close() itself.
-                if self._current_response is r:
-                    self._current_response = None
+                # close() may have already taken it out of the set and
+                # closed it itself.
+                self._open_responses.discard(r)
             try:
                 r.close()
             except Exception:
                 pass
         if self._closed:
-            return
-        self._buf.extend(b"".join(chunks))
-        self._next_segment_idx += 1
+            return None
         elapsed_ms = (time.monotonic() - t0) * 1000.0
         print(
             f"[perf] segment idx={idx} size={size}B elapsed={elapsed_ms:.0f}ms",
             file=sys.stderr,
             flush=True,
         )
-
+        return b"".join(chunks)

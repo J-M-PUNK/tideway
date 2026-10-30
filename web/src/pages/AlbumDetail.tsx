@@ -27,7 +27,7 @@ import {
   useSpotifyAlbumTotalPlays,
   useSpotifyTrackPlaycountBatch,
 } from "@/hooks/useSpotifyEnrichment";
-import { cn, formatDuration, imageProxy } from "@/lib/utils";
+import { cn, formatDuration, imageUrl } from "@/lib/utils";
 
 export function AlbumDetail({ onDownload }: { onDownload: OnDownload }) {
   const { id = "" } = useParams();
@@ -258,7 +258,7 @@ function CoverLightbox({
   cover: string | null;
   title: string;
 }) {
-  const src = imageProxy(cover);
+  const src = imageUrl(cover);
   if (!src) return null;
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>

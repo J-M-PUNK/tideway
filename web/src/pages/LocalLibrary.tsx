@@ -20,7 +20,7 @@ import { EmptyState } from "@/components/EmptyState";
 import { TrackListSkeleton } from "@/components/Skeletons";
 import { useToast } from "@/components/toast";
 import { usePlayerActions } from "@/hooks/PlayerContext";
-import { formatDuration, imageProxy } from "@/lib/utils";
+import { formatDuration, imageUrl } from "@/lib/utils";
 import { cn } from "@/lib/utils";
 
 // Resolved Tidal track metadata cached by tidal_id. Multiple group
@@ -772,7 +772,7 @@ function MusicGroupSection({
     sort === "artists" ? (
       artistPicture ? (
         <img
-          src={imageProxy(artistPicture)}
+          src={imageUrl(artistPicture)}
           alt=""
           className="h-12 w-12 shrink-0 rounded-full object-cover"
           loading="lazy"
@@ -784,7 +784,7 @@ function MusicGroupSection({
       )
     ) : resolved?.album?.cover ? (
       <img
-        src={imageProxy(resolved.album.cover)}
+        src={imageUrl(resolved.album.cover)}
         alt=""
         className="h-12 w-12 shrink-0 rounded-md object-cover"
         loading="lazy"

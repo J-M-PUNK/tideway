@@ -27,7 +27,7 @@ import { Grid } from "@/components/Grid";
 import { GridSkeleton } from "@/components/Skeletons";
 import { PlayMediaButton } from "@/components/PlayMediaButton";
 import { useToast } from "@/components/toast";
-import { cn, imageProxy } from "@/lib/utils";
+import { cn, imageUrl } from "@/lib/utils";
 
 /**
  * Detail view for a local album collection (#243). Shows the albums in
@@ -192,7 +192,7 @@ function CollectionAlbumCard({
   album: Album;
   onRemove: () => void;
 }) {
-  const cover = imageProxy(album.cover);
+  const cover = imageUrl(album.cover);
   const subtitle = (album.artists ?? []).map((a) => a.name).join(", ");
   return (
     <div className="group relative flex flex-col gap-3 rounded-lg bg-card p-4 transition-colors duration-200 ease-out hover:bg-accent">

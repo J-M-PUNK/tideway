@@ -58,16 +58,20 @@ jobs:
           cache: pip
 
       - name: Install system dependencies
-        # sounddevice needs the PortAudio shared lib and PyAV needs
-        # ffmpeg/libav. Both ship as wheels on PyPI but the sounddevice
-        # wheel doesn't bundle libportaudio for Linux (Linux installs
-        # are expected to pick up the system one), so install via apt.
-        # PyAV's wheels DO bundle libav, so ffmpeg here is belt-and-
-        # suspenders for any test that invokes ffmpeg directly.
+        # sounddevice's Linux wheel doesn't bundle libportaudio (Linux
+        # installs are expected to pick up the system one), so install
+        # it via apt.
+        #
+        # No system ffmpeg. PyAV's wheels bundle their own libav, and
+        # nothing in the app or the tests shells out to an ffmpeg
+        # binary. It used to be installed anyway, and it was 87 of the
+        # 88 packages and almost all of a 62.9 MB download — fine on a
+        # healthy runner (5s), but runners with slow mirror access took
+        # over 15 minutes and hit the job timeout before a single test
+        # ran.
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libportaudio2 ffmpeg
+          sudo apt-get install -y --no-install-recommends libportaudio2
 
       - name: Install Python dependencies
         run: |

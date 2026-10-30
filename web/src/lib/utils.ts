@@ -15,9 +15,20 @@ export function formatDuration(sec: number): string {
     : `${m}:${String(s).padStart(2, "0")}`;
 }
 
-export function imageProxy(url: string | null | undefined): string | undefined {
+/** The `src` for a Tidal or Last.fm image, loaded straight from its CDN.
+ *
+ *  Covers used to go through a backend proxy, which put every one of
+ *  them on the same host as the API. Chromium allows six connections
+ *  per host, the event stream and the API's four request slots hold
+ *  five, so a page's covers loaded one at a time behind its slowest
+ *  enrichment calls: 33 cold artist-page covers took ~6 s. From the
+ *  CDN they get a connection pool of their own and load in ~0.3 s.
+ *
+ *  Both CDNs send `Access-Control-Allow-Origin: *`, so `useCoverColor`
+ *  can still sample the pixels. */
+export function imageUrl(url: string | null | undefined): string | undefined {
   if (!url) return undefined;
-  return `/api/image?url=${encodeURIComponent(url)}`;
+  return url;
 }
 
 // WCAG relative luminance of a single sRGB channel value (0–255).

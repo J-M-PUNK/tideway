@@ -31,12 +31,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { HeartButton } from "@/components/HeartButton";
 import { DownloadButton } from "@/components/DownloadButton";
-import {
-  cn,
-  darkenForLightText,
-  formatDuration,
-  imageProxy,
-} from "@/lib/utils";
+import { cn, darkenForLightText, formatDuration, imageUrl } from "@/lib/utils";
 
 // Right-pane tab in the full-screen player. Matches the affordance
 // the official Tidal desktop client surfaces in the same view —
@@ -80,7 +75,7 @@ export function FullScreenPlayer({
   }, [open, onClose]);
 
   const isLocal = useIsDownloaded(track?.id ?? "");
-  const cover = imageProxy(track?.album?.cover);
+  const cover = imageUrl(track?.album?.cover);
   const dominant = useCoverColor(cover);
   const pct = duration > 0 ? (currentTime / duration) * 100 : 0;
 

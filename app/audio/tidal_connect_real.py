@@ -53,6 +53,7 @@ from app.audio.tidal_connect_queue import CloudQueue, QueueContext, QueueProvide
 log = logging.getLogger(__name__)
 
 REQUEST_TIMEOUT = 4.0
+DISCONNECT_TIMEOUT = 6.0
 
 
 class TidalConnectProtocolError(RuntimeError):
@@ -326,17 +327,23 @@ class TidalConnectConnection:
                 }, "notifySessionEnded")
         except Exception:
             pass
-        if self._receiver_task is not None:
-            self._receiver_task.cancel()
-            await asyncio.gather(self._receiver_task, return_exceptions=True)
-        if self._websocket is not None:
+        finally:
+            # Cancellation can interrupt endSession when an output switch
+            # supersedes a command. The transport must still be released.
             try:
-                await self._websocket.close()
-            except Exception:
-                pass
-        self._closed = True
-        self._session_id = None
-        self._fail_pending(ConnectionError("Tidal Connect connection closed"))
+                if self._receiver_task is not None:
+                    self._receiver_task.cancel()
+                    await asyncio.gather(self._receiver_task, return_exceptions=True)
+                if self._websocket is not None:
+                    try:
+                        async with asyncio.timeout(2.0):
+                            await self._websocket.close()
+                    except (TimeoutError, OSError):
+                        pass
+            finally:
+                self._closed = True
+                self._session_id = None
+                self._fail_pending(ConnectionError("Tidal Connect connection closed"))
 
     # -- request/response ---------------------------------------------------
 
@@ -578,6 +585,8 @@ class TidalConnectRealManager:
     # All connection replacement and commands run on _loop under this
     # lock. HTTP controls may arrive concurrently from different threads.
     _command_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
+    _command_tasks: set[asyncio.Task] = field(default_factory=set, init=False)
+    _disconnect_requests: int = field(default=0, init=False)
     _loop: Optional[asyncio.AbstractEventLoop] = field(default=None, init=False)
     _loop_thread: Optional[threading.Thread] = field(default=None, init=False)
     _zeroconf: Any = field(default=None, init=False)
@@ -787,11 +796,9 @@ class TidalConnectRealManager:
             else:
                 raise KeyError(f"unknown device: {device_id}")
 
-        async def _do_connect() -> None:
-            async with self._command_lock:
-                await self._connect_device(device)
-
-        future = asyncio.run_coroutine_threadsafe(_do_connect(), self._loop)
+        future = asyncio.run_coroutine_threadsafe(
+            self._run_command(lambda: self._connect_device(device)), self._loop
+        )
         try:
             future.result(timeout=20.0)
         except TimeoutError:
@@ -799,12 +806,13 @@ class TidalConnectRealManager:
             raise
 
     async def _connect_device(self, device: DiscoveredDevice) -> None:
-        """Replace the transport while retaining the selected output on failure.
+        """Retain a previously selected receiver when its transport fails.
 
         Caller holds _command_lock on the manager loop.
         """
-        if self._connection is not None:
-            await self._connection.close()
+        previous = self._connection
+        if previous is not None:
+            await previous.close()
 
         # Notification wrapper: record into remote_state first, then
         # forward to the user-supplied callback. The wrapper is what
@@ -838,32 +846,63 @@ class TidalConnectRealManager:
         try:
             await conn.open()
         except BaseException:
-            self._record_notification({"command": "connectionLost"})
+            if previous is not None and previous.device.id == device.id:
+                self._record_notification({"command": "connectionLost"})
+            else:
+                self._clear_selection()
             raise
         self._toggle_silencer(True)
 
+    def _clear_selection(self) -> None:
+        self._connection = None
+        self._toggle_silencer(False)
+        with self._remote_state_lock:
+            self._remote_state.update(
+                player_state="IDLE", position_ms=0, duration_ms=0,
+                media_info=None, session_id=None, device_id=None, error=None,
+                seq=self._remote_state["seq"] + 1,
+            )
+            self._queue_context = self._cloud_queue = None
+
+    async def _run_command(self, operation: Callable[[], Awaitable[Any]]) -> Any:
+        if self._disconnect_requests:
+            raise ConnectionError("Tidal Connect is disconnecting")
+        task = asyncio.current_task()
+        self._command_tasks.add(task)
+        try:
+            async with self._command_lock:
+                return await operation()
+        finally:
+            self._command_tasks.discard(task)
+
     def disconnect(self) -> None:
         if self._loop is None:
+            self._clear_selection()
             return
 
         async def _do_disconnect() -> None:
-            async with self._command_lock:
-                if self._connection is not None:
-                    await self._connection.close()
-                self._connection = None
-                self._toggle_silencer(False)
-                with self._remote_state_lock:
-                    self._remote_state.update({
-                        "player_state": "IDLE",
-                        "position_ms": 0,
-                        "duration_ms": 0,
-                        "media_info": None,
-                        "session_id": None,
-                        "device_id": None,
-                        "error": None,
-                        "seq": self._remote_state["seq"] + 1,
-                    })
-                    self._queue_context = self._cloud_queue = None
+
+            self._disconnect_requests += 1
+            try:
+                # Output switching must interrupt a stalled reconnect/control,
+                # rather than wait behind it until the HTTP deadline expires.
+                tasks = list(self._command_tasks)
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+                async with self._command_lock:
+                    conn = self._connection
+                    try:
+                        if conn is not None:
+                            async with asyncio.timeout(DISCONNECT_TIMEOUT):
+                                await conn.close()
+                    except (TimeoutError, OSError) as exc:
+                        log.warning("tidal_connect_real: disconnect close failed: %s", exc)
+                    finally:
+                        self._clear_selection()
+            finally:
+                self._disconnect_requests -= 1
+
 
         future = asyncio.run_coroutine_threadsafe(
             _do_disconnect(), self._loop
@@ -893,17 +932,18 @@ class TidalConnectRealManager:
             raise RuntimeError("manager not started")
 
         async def _dispatch() -> dict:
-            async with self._command_lock:
-                selected = self._connection
-                if selected is None:
-                    raise RuntimeError("no Tidal Connect device selected")
-                if not selected.is_active():
-                    with self._devices_lock:
-                        device = self._devices.get(selected.device.id, selected.device)
-                    await self._connect_device(device)
-                return await coro_factory()
+            selected = self._connection
+            if selected is None:
+                raise RuntimeError("no Tidal Connect device selected")
+            if not selected.is_active():
+                with self._devices_lock:
+                    device = self._devices.get(selected.device.id, selected.device)
+                await self._connect_device(device)
+            return await coro_factory()
 
-        future = asyncio.run_coroutine_threadsafe(_dispatch(), self._loop)
+        future = asyncio.run_coroutine_threadsafe(
+            self._run_command(_dispatch), self._loop
+        )
         try:
             return future.result(timeout=timeout)
         except TimeoutError:

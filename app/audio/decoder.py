@@ -197,7 +197,7 @@ class Decoder:
         decide whether to advertise a "bit-perfect" stream info."""
         return self._target_rate is not None
 
-    def set_target_rate(self, rate: int) -> None:
+    def set_target_rate(self, rate: int, *, float_output: bool = False) -> None:
         """Reconfigure the decoder's output rate.
 
         If `rate` equals the source sample rate we stay in bit-perfect
@@ -207,20 +207,33 @@ class Decoder:
         intersample-peak overshoot, the only thing that audibly
         clipped under the previous "let the OS resample" behavior.
 
-        Idempotent. Calling with the rate we're already configured
-        for is a no-op and does NOT rebuild the resampler — important
-        for the gapless-bridge path where the preload's decoder
-        thread is mid-decode and a resampler rebuild would drop any
-        samples buffered inside libav."""
+        `float_output` asks for float32 at the source rate too, still
+        without attenuation: 16- and 24-bit samples convert to float32
+        exactly, so the values are the ones PortAudio would have
+        produced converting integers for a float32 OS mixer. The player
+        sets it where that mixer is the destination anyway (see
+        PCMPlayer._float_output_for).
+
+        Idempotent. Calling with the rate and format we're already
+        configured for is a no-op and does NOT rebuild the resampler —
+        important for the gapless-bridge path where the preload's
+        decoder thread is mid-decode and a resampler rebuild would drop
+        any samples buffered inside libav."""
         rate = int(rate)
         wants_passthrough = rate <= 0 or rate == self._sample_rate
         if wants_passthrough:
-            if self._target_rate is None:
+            if float_output:
+                fmt, dtype, sd_dtype = "flt", np.float32, "float32"
+            else:
+                fmt = self._source_format_packed
+                dtype = self._source_dtype
+                sd_dtype = self._source_sd_dtype
+            if self._target_rate is None and self._output_format == fmt:
                 return
             self._target_rate = None
-            self._output_format = self._source_format_packed
-            self._output_dtype = self._source_dtype
-            self._sd_dtype = self._source_sd_dtype
+            self._output_format = fmt
+            self._output_dtype = dtype
+            self._sd_dtype = sd_dtype
             self._headroom = 1.0
         else:
             if self._target_rate == rate:

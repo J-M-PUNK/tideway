@@ -11,7 +11,7 @@ import {
 import type { Track } from "@/api/types";
 import type { OnDownload } from "@/api/download";
 import { prefetch } from "@/api/queryKeys";
-import { formatDuration, imageProxy } from "@/lib/utils";
+import { formatDuration, imageUrl } from "@/lib/utils";
 import { DownloadButton } from "@/components/DownloadButton";
 import { EmptyState } from "@/components/EmptyState";
 import { usePlayerActions, usePlayerMeta } from "@/hooks/PlayerContext";
@@ -493,7 +493,7 @@ function TrackRow({
           <div className="flex min-w-0 items-center gap-3">
             {showAlbum && track.album?.cover && (
               <img
-                src={imageProxy(track.album.cover)}
+                src={imageUrl(track.album.cover)}
                 alt=""
                 className="h-10 w-10 rounded object-cover"
                 loading="lazy"

@@ -33,7 +33,7 @@ import {
 import { useToast } from "@/components/toast";
 import { CreatePlaylistDialog } from "@/components/CreatePlaylistDialog";
 import { effectiveFormatLabel, filterAvailableQualities } from "@/lib/quality";
-import { cn, imageProxy } from "@/lib/utils";
+import { cn, imageUrl } from "@/lib/utils";
 import {
   ContextMenuItem,
   ContextMenuSeparator,
@@ -264,7 +264,7 @@ export function TrackMenuItems({
  */
 function TrackHeader({ parts, track }: { parts: MenuParts; track: Track }) {
   const { Separator } = parts;
-  const cover = track.album?.cover ? imageProxy(track.album.cover) : undefined;
+  const cover = track.album?.cover ? imageUrl(track.album.cover) : undefined;
   const artist = track.artists.map((a) => a.name).join(", ");
   return (
     <>

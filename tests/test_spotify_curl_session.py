@@ -154,6 +154,46 @@ def test_authenticate_hook_runs_when_authenticate_true(mock_curl_session):
     assert sent_headers["Authorization"] == "Bearer test-token"
 
 
+def test_authenticate_hook_runs_one_thread_at_a_time(mock_curl_session):
+    """spotapi's hook fetches and refreshes tokens on the instance with
+    no locking: a refresh clears the token, then fetches a new one. The
+    playcount batch sends from several threads, so a request that
+    reads the token mid-refresh must not go out with the placeholder."""
+    import threading
+    import time
+
+    adapter, sess = _fresh_adapter(mock_curl_session)
+    sess.request.return_value = _ok({})
+    state = {"token": None, "fetches": 0}
+
+    def _auth(kwargs: dict) -> dict:
+        if state["token"] is None:
+            state["token"] = "_Undefined"
+            state["fetches"] += 1
+            time.sleep(0.05)
+            state["token"] = "fresh"
+        kwargs.setdefault("headers", {})
+        kwargs["headers"]["Authorization"] = "Bearer " + state["token"]
+        return kwargs
+
+    adapter.authenticate = _auth
+    start = threading.Barrier(5)
+
+    def send():
+        start.wait()
+        adapter.get("https://example.com/x", authenticate=True)
+
+    threads = [threading.Thread(target=send) for _ in range(5)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    sent = [c.kwargs["headers"]["Authorization"] for c in sess.request.call_args_list]
+    assert sent == ["Bearer fresh"] * 5
+    assert state["fetches"] == 1
+
+
 def test_authenticate_hook_skipped_when_authenticate_false(mock_curl_session):
     """Pre-auth flow (homepage scrape, /api/token) MUST not run the
     auth hook — at that point there's no access_token to inject and

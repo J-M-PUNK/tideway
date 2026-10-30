@@ -194,6 +194,16 @@ class Settings:
     # migration source (see `_migrate_eq_to_parametric`). Empty list =
     # flat / off.
     eq_parametric_bands: list[dict] = field(default_factory=list)
+    # Named manual EQ curves the user has saved, so they can keep more
+    # than one and switch between them. Each entry is
+    # {id, name, bands, preamp} with `bands` in the same shape as
+    # `eq_parametric_bands`. These are storage only: loading one copies
+    # its bands/preamp into `eq_parametric_bands` / `eq_preamp` through
+    # POST /api/player/eq, so the audible path is the same validated
+    # one either way. Distinct from AutoEQ headphone profiles
+    # (`eq_active_profile_id`), which are bundled corrections, not
+    # user-authored curves.
+    eq_manual_profiles: list[dict] = field(default_factory=list)
     # EQ mode. Defaults off so a fresh install plays bit-perfect
     # audio — the user opts into the EQ stage explicitly via the
     # Settings picker rather than discovering one is silently

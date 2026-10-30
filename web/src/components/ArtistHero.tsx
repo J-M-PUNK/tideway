@@ -27,7 +27,7 @@ import { useFavorites } from "@/hooks/useFavorites";
 import { useHeartPop } from "@/components/HeartButton";
 import { useLastfmArtistPlaycount } from "@/hooks/useLastfmPlaycount";
 import { useSpotifyArtistStats } from "@/hooks/useSpotifyEnrichment";
-import { cn, imageProxy } from "@/lib/utils";
+import { cn, imageUrl } from "@/lib/utils";
 
 interface Props {
   artistId: string;
@@ -62,7 +62,7 @@ export function ArtistHero({
   onDownload,
   artistMixId,
 }: Props) {
-  const cover = imageProxy(picture);
+  const cover = imageUrl(picture);
   const [shuffleIntent, setShuffleIntent] = useState(false);
 
   return (
