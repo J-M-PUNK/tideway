@@ -31,6 +31,36 @@ def _patch_devices(monkeypatch, devices):
 
 def test_empty_name_is_system_default(monkeypatch):
     _patch_devices(monkeypatch, _DEVICES)
+    monkeypatch.setattr(output_devices, "wasapi_host_api_index", lambda: None)
+    assert output_devices.resolve_output_device("") == (None, True)
+
+
+def _patch_wasapi_default(monkeypatch, default):
+    monkeypatch.setattr(output_devices, "wasapi_host_api_index", lambda: 2)
+
+    def query_hostapis(idx):
+        assert idx == 2
+        if isinstance(default, Exception):
+            raise default
+        return {"name": "Windows WASAPI", "default_output_device": default}
+
+    monkeypatch.setattr(output_devices.sd, "query_hostapis", query_hostapis)
+
+
+def test_system_default_on_windows_is_the_wasapi_default(monkeypatch):
+    """PortAudio's own default on Windows is MME's: a deeper output
+    buffer than WASAPI on the same device, and no Exclusive Mode."""
+    _patch_wasapi_default(monkeypatch, 8)
+    assert output_devices.resolve_output_device("") == (8, True)
+
+
+def test_no_wasapi_default_keeps_portaudios_default(monkeypatch):
+    _patch_wasapi_default(monkeypatch, -1)  # no active output device
+    assert output_devices.resolve_output_device("") == (None, True)
+
+
+def test_wasapi_query_failure_keeps_portaudios_default(monkeypatch):
+    _patch_wasapi_default(monkeypatch, RuntimeError("PortAudio not initialized"))
     assert output_devices.resolve_output_device("") == (None, True)
 
 

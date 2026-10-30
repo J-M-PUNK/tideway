@@ -29,13 +29,15 @@ orjson>=3.12.0
 # validate a profile string in one call. The replacement is two lookups
 # — REAL_TARGET_MAP for aliases, the BrowserType enum for concrete
 # targets — and the guards moved with the pin. Every profile the app
-# ships (chrome131_android for Tidal, chrome/safari/firefox for AOTY)
-# was checked against 0.16 before bumping.
-curl-cffi>=0.16.1,<0.17
+# ships (chrome131_android for Tidal, chrome for AOTY) was checked
+# against 0.16 before bumping. AOTY additionally replays a Cloudflare
+# clearance cookie through this transport (app/aoty_clearance.py), so a
+# bump here wants a live AOTY check, not just the test suite.
+curl-cffi>=0.16.3,<0.17
 pillow>=12.3.0
 fastapi>=0.141.1
 uvicorn[standard]>=0.52.4
-sse-starlette>=3.4.8
+sse-starlette>=3.4.11
 # Packaged desktop app — pywebview wraps the web UI in a native window.
 # On Windows it requires WebView2 (preinstalled on Win11, auto-installs
 # on Win10 via the Evergreen bootstrapper). On macOS it uses WKWebView,
@@ -48,7 +50,7 @@ pywebview>=6.2.1
 # bit-perfect output.
 av>=18.1.0
 sounddevice>=0.5.6
-numpy>=2.5.2
+numpy>=2.5.3
 # scipy powers the PCM engine's 10-band parametric EQ. Biquad IIR
 # filtering in a Python loop can't keep up with the audio callback
 # at 48k; scipy.signal.sosfilt drops into C and comfortably runs
@@ -59,7 +61,7 @@ scipy>=1.18.1
 # matching with typo tolerance). The picker degrades gracefully
 # to substring search when this isn't installed, so the dep is
 # soft-required for the production app and hard-skipped in tests.
-rapidfuzz>=3.14.5
+rapidfuzz>=3.14.6
 # Global media-key listener (play-pause / next / prev work when the
 # window is backgrounded). Has platform-specific backends; pynput picks
 # the right one at import time.
@@ -108,7 +110,7 @@ dbus-next>=0.2.3; sys_platform == "linux"
 # the Linn / Naim side of the streamer market. Optional: if the
 # wheel fails to install, app/audio/upnp.py silently disables the
 # UPnP output path and the rest of the app keeps working.
-async-upnp-client>=0.48.1
+async-upnp-client>=0.48.2
 # Chromecast sender. Used by app/audio/cast.py for device discovery
 # (mDNS via zeroconf) and the Cast Application Framework control
 # channel. We hand the Cast device an HTTP URL serving Tideway's

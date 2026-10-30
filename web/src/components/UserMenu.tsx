@@ -18,7 +18,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { imageProxy } from "@/lib/utils";
+import { imageUrl } from "@/lib/utils";
 
 interface Props {
   username: string | null;
@@ -49,7 +49,7 @@ export function UserMenu({
   const navigate = useNavigate();
   const { set: setOffline } = useOfflineMode();
   const initial = (username || "?").trim().charAt(0).toUpperCase();
-  const imgSrc = avatar ? imageProxy(avatar) : undefined;
+  const imgSrc = avatar ? imageUrl(avatar) : undefined;
   const signedIn = username !== null;
 
   const handleSignIn = () => {

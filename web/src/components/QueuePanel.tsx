@@ -1,7 +1,7 @@
 import { ListMusic, Music, Play, Trash2, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/EmptyState";
-import { formatDuration, imageProxy } from "@/lib/utils";
+import { formatDuration, imageUrl } from "@/lib/utils";
 import { useIsDownloaded } from "@/hooks/useDownloadedSet";
 import { usePlayerActions, usePlayerMeta } from "@/hooks/PlayerContext";
 import { cn } from "@/lib/utils";
@@ -125,7 +125,7 @@ function QueueRow({
   dimmed?: boolean;
 }) {
   const actions = usePlayerActions();
-  const cover = imageProxy(track.album?.cover);
+  const cover = imageUrl(track.album?.cover);
   const downloaded = useIsDownloaded(track.id);
   return (
     <div

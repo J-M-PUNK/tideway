@@ -25,16 +25,22 @@ import {
   Loader2,
   LogOut,
   Moon,
+  MoreHorizontal,
   Music2,
   Palette,
+  Pencil,
   Plus,
   Power,
+  RefreshCw,
+  Save,
   Settings as SettingsIcon,
   Sun,
+  Trash2,
   X,
 } from "lucide-react";
 import { api } from "@/api/client";
 import type {
+  EqManualProfile,
   ManualEqConfig,
   ParametricBand,
   QualityOption,
@@ -56,6 +62,13 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { useToast } from "@/components/toast";
 import { useAudioOptions } from "@/hooks/useAudioOptions";
 import { useDebouncedSettingsPut } from "@/hooks/useDebouncedSettingsPut";
@@ -1587,6 +1600,12 @@ export function ParametricEqEditor({
   const [defaultBands, setDefaultBands] = useState<ParametricBand[]>([]);
   const [preamp, setPreamp] = useState<number | null>(null);
   const [hovered, setHovered] = useState<number | null>(null);
+  const [profiles, setProfiles] = useState<EqManualProfile[]>([]);
+  const [profilesMax, setProfilesMax] = useState(0);
+  // Which name dialog is open: saving a new profile, or renaming one.
+  const [nameDialog, setNameDialog] = useState<
+    { kind: "save" } | { kind: "rename"; profile: EqManualProfile } | null
+  >(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -1595,6 +1614,8 @@ export function ParametricEqEditor({
         const e = await api.player.eq();
         if (cancelled) return;
         setPresets(e.presets);
+        setProfiles(e.manual_profiles);
+        setProfilesMax(e.manual_profiles_max);
         setDefaultBands(e.default_bands);
         // Seed the default layout when the user has no saved bands
         // yet, so they get grabbable nodes instead of an empty graph.
@@ -1645,23 +1666,23 @@ export function ParametricEqEditor({
   // Memoized on [presets, bands] so hover-driven re-renders (which
   // fire at pointer rates) skip the presets × bands scan.
   const activePresetIdx = useMemo(() => {
-    for (const p of presets) {
-      if (p.bands.length !== bands.length) continue;
-      const same = p.bands.every((pb, i) => {
-        const b = bands[i];
-        return (
-          b &&
-          b.type === pb.type &&
-          b.enabled === pb.enabled &&
-          Math.abs(b.freq - pb.freq) < 0.5 &&
-          Math.abs(b.gain - pb.gain) < 0.05 &&
-          Math.abs(b.q - pb.q) < 0.01
-        );
-      });
-      if (same) return p.index;
-    }
-    return null;
+    const p = presets.find((p) => bandsMatch(p.bands, bands));
+    return p ? p.index : null;
   }, [presets, bands]);
+
+  // Same for saved profiles, which also carry a preamp. A profile
+  // that saved an empty curve is shown as the flat default layout
+  // (as Reset and the Flat preset are), so match against that.
+  // Editing any band after loading a profile drops the highlight,
+  // which is the honest signal that the curve has diverged from it.
+  const activeProfileId = useMemo(() => {
+    const p = profiles.find(
+      (p) =>
+        bandsMatch(p.bands.length ? p.bands : defaultBands, bands) &&
+        Math.abs((p.preamp ?? 0) - (preamp ?? 0)) < 0.05,
+    );
+    return p ? p.id : null;
+  }, [profiles, bands, preamp, defaultBands]);
 
   if (!config) return null;
 
@@ -1741,6 +1762,90 @@ export function ParametricEqEditor({
     }
   };
 
+  // Loading a profile is an ordinary curve edit: post its bands and
+  // preamp through the same setEq path every other change uses. An
+  // empty saved curve displays as the flat default layout, matching
+  // what Reset and the Flat preset show.
+  const loadProfile = async (p: EqManualProfile) => {
+    setHovered(null);
+    setBands(p.bands.length ? p.bands : defaultBands);
+    setPreamp(p.preamp);
+    try {
+      await api.player.setEq(p.bands, p.preamp);
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: "Couldn't load profile",
+        description: serverErrorDetail(err),
+      });
+    }
+  };
+
+  const saveProfile = async (name: string): Promise<string | null> => {
+    try {
+      const res = await api.player.createEqProfile(name, bands, preamp);
+      setProfiles(res.profiles);
+      toast.show({
+        kind: "success",
+        title: "Profile saved",
+        description: name,
+      });
+      return null;
+    } catch (err) {
+      return serverErrorDetail(err);
+    }
+  };
+
+  const renameProfile = async (
+    p: EqManualProfile,
+    name: string,
+  ): Promise<string | null> => {
+    try {
+      const res = await api.player.updateEqProfile(p.id, { name });
+      setProfiles(res.profiles);
+      return null;
+    } catch (err) {
+      return serverErrorDetail(err);
+    }
+  };
+
+  const overwriteProfile = async (p: EqManualProfile) => {
+    try {
+      const res = await api.player.updateEqProfile(p.id, { bands, preamp });
+      setProfiles(res.profiles);
+      toast.show({
+        kind: "success",
+        title: "Profile updated",
+        description: `"${p.name}" now matches the current curve.`,
+      });
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: "Couldn't update profile",
+        description: serverErrorDetail(err),
+      });
+    }
+  };
+
+  const deleteProfile = async (p: EqManualProfile) => {
+    if (
+      !window.confirm(
+        `Delete the EQ profile "${p.name}"? This can't be undone.`,
+      )
+    )
+      return;
+    try {
+      const res = await api.player.deleteEqProfile(p.id);
+      setProfiles(res.profiles);
+    } catch (err) {
+      toast.show({
+        kind: "error",
+        title: "Couldn't delete profile",
+        description: serverErrorDetail(err),
+      });
+    }
+  };
+
   return (
     <div className="flex flex-col gap-3">
       <div className="flex items-center justify-between">
@@ -1771,6 +1876,103 @@ export function ParametricEqEditor({
           />
         ))}
       </div>
+
+      <div className="flex items-center justify-between">
+        <div className="text-[10px] font-semibold uppercase tracking-wider text-muted-foreground">
+          My profiles
+        </div>
+        <Button
+          size="sm"
+          variant="outline"
+          onClick={() => setNameDialog({ kind: "save" })}
+          disabled={profiles.length >= profilesMax}
+          title={
+            profiles.length >= profilesMax
+              ? `You can save up to ${profilesMax} profiles`
+              : "Save the current curve as a profile"
+          }
+        >
+          <Save className="mr-1 h-3.5 w-3.5" />
+          Save current…
+        </Button>
+      </div>
+      {profiles.length === 0 ? (
+        <div className="rounded-md border border-dashed border-input px-3 py-3 text-center text-xs text-muted-foreground">
+          Save the current curve to switch back to it in one click — keep one
+          per pair of headphones, or one for late-night listening.
+        </div>
+      ) : (
+        <div className="flex gap-2 overflow-x-auto pb-1">
+          {profiles.map((p) => (
+            <div key={p.id} className="relative shrink-0">
+              <ParametricPresetCard
+                name={p.name}
+                bands={p.bands}
+                active={activeProfileId === p.id}
+                title={`Load profile "${p.name}"`}
+                onClick={() => void loadProfile(p)}
+              />
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <button
+                    type="button"
+                    aria-label={`Options for ${p.name}`}
+                    className="absolute right-0.5 top-0.5 rounded p-0.5 text-muted-foreground hover:bg-accent hover:text-foreground"
+                  >
+                    <MoreHorizontal className="h-3.5 w-3.5" />
+                  </button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuItem onSelect={() => void overwriteProfile(p)}>
+                    <RefreshCw className="mr-2 h-3.5 w-3.5" />
+                    Update to current curve
+                  </DropdownMenuItem>
+                  <DropdownMenuItem
+                    onSelect={() =>
+                      setNameDialog({ kind: "rename", profile: p })
+                    }
+                  >
+                    <Pencil className="mr-2 h-3.5 w-3.5" />
+                    Rename…
+                  </DropdownMenuItem>
+                  <DropdownMenuSeparator />
+                  <DropdownMenuItem
+                    onSelect={() => void deleteProfile(p)}
+                    className="text-destructive focus:text-destructive"
+                  >
+                    <Trash2 className="mr-2 h-3.5 w-3.5" />
+                    Delete
+                  </DropdownMenuItem>
+                </DropdownMenuContent>
+              </DropdownMenu>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <EqProfileNameDialog
+        open={nameDialog !== null}
+        onOpenChange={(open) => {
+          if (!open) setNameDialog(null);
+        }}
+        title={
+          nameDialog?.kind === "rename" ? "Rename profile" : "Save EQ profile"
+        }
+        description={
+          nameDialog?.kind === "rename"
+            ? undefined
+            : "Saves the bands and preamp you're hearing now."
+        }
+        initialName={
+          nameDialog?.kind === "rename" ? nameDialog.profile.name : ""
+        }
+        submitLabel={nameDialog?.kind === "rename" ? "Rename" : "Save"}
+        onSubmit={(name) =>
+          nameDialog?.kind === "rename"
+            ? renameProfile(nameDialog.profile, name)
+            : saveProfile(name)
+        }
+      />
 
       {/* When bypassed, dim the editor to signal the EQ isn't
           touching the audio right now — the bands are preserved. */}
@@ -2128,11 +2330,13 @@ function ParametricPresetCard({
   bands,
   active,
   onClick,
+  title,
 }: {
   name: string;
   bands: ParametricBand[];
   active: boolean;
   onClick: () => void;
+  title?: string;
 }) {
   const w = 84;
   const h = 30;
@@ -2164,7 +2368,8 @@ function ParametricPresetCard({
     <button
       type="button"
       onClick={onClick}
-      title={`Apply preset "${name}"`}
+      title={title ?? `Apply preset "${name}"`}
+      aria-pressed={active}
       className={cn(
         "flex shrink-0 flex-col items-center gap-1 rounded-md border px-2 py-1.5 transition-colors",
         active
@@ -2205,6 +2410,150 @@ function ParametricPresetCard({
         {name}
       </div>
     </button>
+  );
+}
+
+/**
+ * Whether two curves are the same to within what the band controls can
+ * express. Exact float equality would miss a curve that round-tripped
+ * through the server's JSON.
+ */
+function bandsMatch(a: ParametricBand[], b: ParametricBand[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((x, i) => {
+    const y = b[i];
+    return (
+      x.type === y.type &&
+      x.enabled === y.enabled &&
+      Math.abs(x.freq - y.freq) < 0.5 &&
+      Math.abs(x.gain - y.gain) < 0.05 &&
+      Math.abs(x.q - y.q) < 0.01
+    );
+  });
+}
+
+/**
+ * The human part of a failed request. The API client throws
+ * `"<status>: <body>"`, and FastAPI's body is `{"detail": "..."}` for
+ * the 400 / 404 / 409s the profile endpoints raise.
+ */
+function serverErrorDetail(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  const body = message.replace(/^\d{3}: /, "");
+  try {
+    const parsed: unknown = JSON.parse(body);
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      "detail" in parsed &&
+      typeof parsed.detail === "string"
+    ) {
+      return parsed.detail;
+    }
+  } catch (parseErr) {
+    // Not a JSON body (a proxy error page, a timeout): show it as is.
+    if (!(parseErr instanceof SyntaxError)) throw parseErr;
+  }
+  return message;
+}
+
+/**
+ * Name prompt for saving or renaming a manual EQ profile. `onSubmit`
+ * resolves to an error message to show inline (a duplicate name, say),
+ * or null on success, which closes the dialog.
+ */
+function EqProfileNameDialog({
+  open,
+  onOpenChange,
+  title,
+  description,
+  initialName,
+  submitLabel,
+  onSubmit,
+}: {
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  title: string;
+  description?: string;
+  initialName: string;
+  submitLabel: string;
+  onSubmit: (name: string) => Promise<string | null>;
+}) {
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent className="max-w-sm">
+        <DialogHeader>
+          <DialogTitle>{title}</DialogTitle>
+          {description && <DialogDescription>{description}</DialogDescription>}
+        </DialogHeader>
+        {/* DialogContent unmounts while closed, so the form's state
+            starts from initialName on every opening. */}
+        <EqProfileNameForm
+          initialName={initialName}
+          submitLabel={submitLabel}
+          onSubmit={onSubmit}
+          onDone={() => onOpenChange(false)}
+        />
+      </DialogContent>
+    </Dialog>
+  );
+}
+
+function EqProfileNameForm({
+  initialName,
+  submitLabel,
+  onSubmit,
+  onDone,
+}: {
+  initialName: string;
+  submitLabel: string;
+  onSubmit: (name: string) => Promise<string | null>;
+  onDone: () => void;
+}) {
+  const [name, setName] = useState(initialName);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const submit = async () => {
+    const trimmed = name.trim();
+    if (!trimmed || busy) return;
+    setBusy(true);
+    const err = await onSubmit(trimmed);
+    setBusy(false);
+    if (err) setError(err);
+    else onDone();
+  };
+
+  return (
+    <form
+      className="flex flex-col gap-3"
+      onSubmit={(e) => {
+        e.preventDefault();
+        void submit();
+      }}
+    >
+      <Input
+        autoFocus
+        value={name}
+        placeholder="Profile name"
+        aria-label="Profile name"
+        aria-invalid={error !== null}
+        onChange={(e) => {
+          setName(e.target.value);
+          setError(null);
+        }}
+      />
+      {error && <div className="text-xs text-destructive">{error}</div>}
+      <div className="flex justify-end gap-2">
+        <Button type="button" variant="outline" onClick={onDone}>
+          Cancel
+        </Button>
+        <Button type="submit" disabled={!name.trim() || busy}>
+          {busy && <Loader2 className="mr-1 h-3.5 w-3.5 animate-spin" />}
+          {submitLabel}
+        </Button>
+      </div>
+    </form>
   );
 }
 

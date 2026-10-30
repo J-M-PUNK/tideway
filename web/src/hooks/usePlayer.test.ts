@@ -340,7 +340,16 @@ describe("player SSE output changes", () => {
     class ReplayEventSource {
       static CLOSED = 2;
       static streams = new Map<string, ReplayEventSource>();
-      onmessage: ((event: { data: string }) => void) | null = null;
+      listener: ((event: { data: string }) => void) | null = null;
+      addEventListener(
+        _name: string,
+        listener: (event: { data: string }) => void,
+      ) {
+        if (_name === "player") this.listener = listener;
+      }
+      removeEventListener() {
+        this.listener = null;
+      }
       onerror: (() => void) | null = null;
       readyState = 1;
       close = vi.fn();
@@ -350,7 +359,7 @@ describe("player SSE output changes", () => {
       }
 
       emit(snapshot: PlayerSnapshot) {
-        this.onmessage?.({ data: JSON.stringify(snapshot) });
+        this.listener?.({ data: JSON.stringify(snapshot) });
       }
     }
 
@@ -393,7 +402,7 @@ describe("player SSE output changes", () => {
 
     try {
       await act(async () => root.render(createElement(Probe)));
-      const stream = ReplayEventSource.streams.get("/api/player/events");
+      const stream = ReplayEventSource.streams.get("/api/events");
       expect(stream).toBeDefined();
 
       act(() => stream!.emit(snapshot(400, 40000)));
@@ -438,14 +447,23 @@ describe("receiver queue advancement", () => {
       let emit: (snapshot: PlayerSnapshot) => void = () => {};
       class ReplayEventSource {
         static CLOSED = 2;
-        onmessage: ((event: { data: string }) => void) | null = null;
+        listener: ((event: { data: string }) => void) | null = null;
+        addEventListener(
+          _name: string,
+          listener: (event: { data: string }) => void,
+        ) {
+          if (_name === "player") this.listener = listener;
+        }
+        removeEventListener() {
+          this.listener = null;
+        }
         onerror = null;
         readyState = 1;
         close = vi.fn();
         constructor(url: string) {
-          if (url === "/api/player/events") {
+          if (url === "/api/events") {
             emit = (snapshot) =>
-              this.onmessage?.({ data: JSON.stringify(snapshot) });
+              this.listener?.({ data: JSON.stringify(snapshot) });
           }
         }
       }

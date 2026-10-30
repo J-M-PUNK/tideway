@@ -73,6 +73,9 @@ class ManifestCache:
         self._hits = 0
         self._misses = 0
         self._bytes = 0
+        # Keys some thread is resolving right now, each with an Event
+        # that's set when it finishes (see begin_fill).
+        self._filling: dict[tuple[str, Optional[str]], threading.Event] = {}
 
     def lookup(
         self, key: tuple[str, Optional[str]]
@@ -100,6 +103,33 @@ class ManifestCache:
                 return None
             self._hits += 1
             return list(urls), duration, info, dict(bytes_map), track_meta
+
+    def begin_fill(
+        self, key: tuple[str, Optional[str]]
+    ) -> Optional[threading.Event]:
+        """Claim the network resolve for `key` after a lookup miss.
+
+        Returns None when the caller now owns it; it must call
+        end_fill(key) once it's done, however it ends. Returns an Event
+        when another thread already owns it: wait on that, then look the
+        key up again instead of asking Tidal a second time. A hover
+        warm-up, the next-track preload and the click that follows
+        either of them all resolve the same track, and without this
+        each sent its own requests.
+        """
+        with self._lock:
+            pending = self._filling.get(key)
+            if pending is not None:
+                return pending
+            self._filling[key] = threading.Event()
+            return None
+
+    def end_fill(self, key: tuple[str, Optional[str]]) -> None:
+        """Release a claim taken with begin_fill and wake its waiters."""
+        with self._lock:
+            done = self._filling.pop(key, None)
+        if done is not None:
+            done.set()
 
     def store(
         self,

@@ -20,7 +20,7 @@ import { Input } from "@/components/ui/input";
 import { useToast } from "@/components/toast";
 import { EmptyState } from "@/components/EmptyState";
 import { Skeleton } from "@/components/Skeletons";
-import { imageProxy, cn } from "@/lib/utils";
+import { imageUrl, cn } from "@/lib/utils";
 
 /**
  * Playlist import hub. Two sources today:
@@ -812,7 +812,7 @@ function PlaylistPicker({ onPick }: { onPick: (p: SpotifyPlaylist) => void }) {
           <div className="h-14 w-14 shrink-0 overflow-hidden rounded-md bg-secondary">
             {p.image ? (
               <img
-                src={imageProxy(p.image) ?? p.image}
+                src={imageUrl(p.image) ?? p.image}
                 alt=""
                 className="h-full w-full object-cover"
                 loading="lazy"

@@ -4,7 +4,7 @@ import {
   usePlayerMeta,
   usePlayerTime,
 } from "./PlayerContext";
-import { imageProxy } from "@/lib/utils";
+import { imageUrl } from "@/lib/utils";
 
 /**
  * Bridges the player into the browser's MediaSession API so the OS exposes
@@ -146,7 +146,7 @@ export function useMediaSession() {
 
 function artworkSet(cover: string | null): MediaImage[] {
   if (!cover) return [];
-  const url = imageProxy(cover);
+  const url = imageUrl(cover);
   if (!url) return [];
   return [
     { src: url, sizes: "320x320", type: "image/jpeg" },

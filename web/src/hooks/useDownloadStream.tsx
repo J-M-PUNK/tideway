@@ -7,6 +7,7 @@ import {
   useRef,
   type ReactNode,
 } from "react";
+import { subscribeEvents } from "@/api/eventStream";
 
 export type DownloadEvent = { type: string; [key: string]: unknown };
 type Listener = (evt: DownloadEvent) => void;
@@ -18,12 +19,12 @@ interface StreamContextValue {
 const Ctx = createContext<StreamContextValue | null>(null);
 
 /**
- * One EventSource connection to /api/downloads/stream for the whole app.
+ * The download queue's events, from the app's shared event stream
+ * (see `@/api/eventStream`), fanned out to every consumer.
  *
- * Before this existed, both `useDownloads` and `useDownloadedSet` opened
- * independent EventSources, doubling server load and eating into the
- * browser's per-host HTTP/1.1 connection limit. Consumers subscribe to this
- * single broker and filter for the event types they care about.
+ * Both `useDownloads` and `useDownloadedSet` listen; they subscribe here
+ * and filter for the event types they care about. After any reconnect
+ * the first event is a `reset` snapshot of the whole queue.
  *
  * `subscribe` and the context value are stable so consumers including
  * `subscribe` in their effect deps don't thrash listeners on every render.
@@ -31,67 +32,28 @@ const Ctx = createContext<StreamContextValue | null>(null);
 export function DownloadStreamProvider({ children }: { children: ReactNode }) {
   const listenersRef = useRef<Set<Listener>>(new Set());
 
-  useEffect(() => {
-    let closed = false;
-    let es: EventSource | null = null;
-    let retryTimer: number | null = null;
-    // Exponential backoff capped at 30s. EventSource auto-reconnects on
-    // transport failure, but only while the server keeps replying 200 —
-    // a 401 (session expired) or a long outage pushes the browser into
-    // `readyState === CLOSED` and we have to rebuild the socket ourselves.
-    let backoffMs = 1000;
-
-    const handle = (evt: MessageEvent) => {
-      let payload: DownloadEvent;
-      try {
-        payload = JSON.parse(evt.data) as DownloadEvent;
-      } catch {
-        return;
-      }
-      if (!payload || typeof payload !== "object") return;
-      // Snapshot so a listener that unsubscribes during dispatch doesn't
-      // perturb the iteration.
-      for (const fn of Array.from(listenersRef.current)) {
+  useEffect(
+    () =>
+      subscribeEvents("download", (data) => {
+        let payload: DownloadEvent;
         try {
-          fn(payload);
+          payload = JSON.parse(data) as DownloadEvent;
         } catch {
-          /* one listener's bug shouldn't take down the others */
+          return;
         }
-      }
-    };
-
-    const connect = () => {
-      if (closed) return;
-      es = new EventSource("/api/downloads/stream");
-      es.addEventListener("download", handle as EventListener);
-      es.onopen = () => {
-        // Successful handshake — reset the backoff so the next failure
-        // starts from 1s again.
-        backoffMs = 1000;
-      };
-      es.onerror = () => {
-        if (closed) return;
-        // CLOSED means the browser gave up reconnecting. Tear down and
-        // schedule our own reconnect with backoff.
-        if (es && es.readyState === EventSource.CLOSED) {
-          es.close();
-          es = null;
-          retryTimer = window.setTimeout(connect, backoffMs);
-          backoffMs = Math.min(backoffMs * 2, 30000);
+        if (!payload || typeof payload !== "object") return;
+        // Snapshot so a listener that unsubscribes during dispatch doesn't
+        // perturb the iteration.
+        for (const fn of Array.from(listenersRef.current)) {
+          try {
+            fn(payload);
+          } catch {
+            /* one listener's bug shouldn't take down the others */
+          }
         }
-      };
-    };
-    connect();
-
-    return () => {
-      closed = true;
-      if (retryTimer) window.clearTimeout(retryTimer);
-      if (es) {
-        es.removeEventListener("download", handle as EventListener);
-        es.close();
-      }
-    };
-  }, []);
+      }),
+    [],
+  );
 
   const subscribe = useCallback<StreamContextValue["subscribe"]>((listener) => {
     listenersRef.current.add(listener);

@@ -55,6 +55,13 @@ AUTH_URL = "https://www.last.fm/api/auth/"
 _LASTFM_CONCURRENCY = 4
 _lastfm_api_semaphore = threading.BoundedSemaphore(_LASTFM_CONCURRENCY)
 
+# One pooled session for every call to the API. A bare requests.get
+# opens a new connection each time, and the TLS handshake to
+# ws.audioscrobbler.com is most of a call's cost: 130-420 ms fresh
+# against ~65 ms on a kept-alive connection. The default pool keeps 10
+# connections per host, more than the semaphore ever lets run at once.
+_HTTP = requests.Session()
+
 # --- Baked-in app credentials ------------------------------------------------
 #
 # Paste your Last.fm API credentials here ONCE, rebuild, and every launch
@@ -270,7 +277,7 @@ class LastFmClient:
                 "format": "json",
             }
             params["api_sig"] = _sign(params, secret)
-            resp = requests.get(API_ROOT, params=params, timeout=10)
+            resp = _HTTP.get(API_ROOT, params=params, timeout=10)
             resp.raise_for_status()
             token = resp.json().get("token")
             if not token:
@@ -294,7 +301,7 @@ class LastFmClient:
                 "format": "json",
             }
             params["api_sig"] = _sign(params, secret)
-            resp = requests.get(API_ROOT, params=params, timeout=10)
+            resp = _HTTP.get(API_ROOT, params=params, timeout=10)
             if not resp.ok:
                 # last.fm returns a human-readable error message in
                 # `message`; pass it through so the UI can show the
@@ -337,7 +344,7 @@ class LastFmClient:
             params["api_sig"] = _sign(params, secret)
         # Release the lock before the network hop so a slow last.fm
         # response doesn't block other threads (e.g. a settings write).
-        resp = requests.post(API_ROOT, data=params, timeout=10)
+        resp = _HTTP.post(API_ROOT, data=params, timeout=10)
         if not resp.ok:
             try:
                 data = resp.json()
@@ -377,7 +384,7 @@ class LastFmClient:
         params = {**params, "user": username, "api_key": api_key, "format": "json"}
         try:
             with _lastfm_api_semaphore:
-                resp = requests.get(API_ROOT, params=params, timeout=10)
+                resp = _HTTP.get(API_ROOT, params=params, timeout=10)
         except Exception as exc:
             print(
                 f"[lastfm] public GET network error: {exc!r}",
@@ -635,7 +642,7 @@ class LastFmClient:
         params = {**params, "api_key": api_key, "format": "json"}
         try:
             with _lastfm_api_semaphore:
-                resp = requests.get(API_ROOT, params=params, timeout=10)
+                resp = _HTTP.get(API_ROOT, params=params, timeout=10)
         except Exception as exc:
             print(
                 f"[lastfm] public GET network error: {exc!r}",
@@ -745,7 +752,7 @@ class LastFmClient:
             full["user"] = username
         try:
             with _lastfm_api_semaphore:
-                resp = requests.get(API_ROOT, params=full, timeout=10)
+                resp = _HTTP.get(API_ROOT, params=full, timeout=10)
         except Exception as exc:
             print(
                 f"[lastfm] _info_get network error: {exc!r}",
@@ -852,7 +859,7 @@ class LastFmClient:
             }
             try:
                 with _lastfm_api_semaphore:
-                    resp = requests.get(API_ROOT, params=params, timeout=10)
+                    resp = _HTTP.get(API_ROOT, params=params, timeout=10)
                 if not resp.ok:
                     return {"from": frm, "to": to, "count": 0}
                 data = resp.json() or {}
@@ -898,7 +905,7 @@ class LastFmClient:
         }
         try:
             with _lastfm_api_semaphore:
-                resp = requests.get(API_ROOT, params=params, timeout=10)
+                resp = _HTTP.get(API_ROOT, params=params, timeout=10)
         except Exception as exc:
             print(
                 f"[lastfm] get_recent_tracks network error: {exc!r}",

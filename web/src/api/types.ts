@@ -338,6 +338,17 @@ export interface ManualEqConfig {
   max_bands: number;
 }
 
+/** A manual EQ curve the user saved under a name. Loading one posts
+ *  its `bands` / `preamp` to POST /api/player/eq like any other edit;
+ *  the profile itself is only a stored copy. Not to be confused with
+ *  AutoEQ headphone profiles, which are bundled corrections. */
+export interface EqManualProfile {
+  id: string;
+  name: string;
+  bands: ParametricBand[];
+  preamp: number | null;
+}
+
 export interface Settings {
   output_dir: string;
   /** Where music videos land. Kept separate from output_dir so video
@@ -441,6 +452,9 @@ export interface Settings {
   eq_tilt_bass_db: number;
   /** High-shelf boost / cut at 8 kHz, layered after the profile bands. */
   eq_tilt_treble_db: number;
+  /** Saved manual EQ curves. Read-only here: managed through
+   *  /api/player/eq/manual-profiles, not PUT /api/settings. */
+  eq_manual_profiles: EqManualProfile[];
   /** Bauer-style crossfeed strength as a percent (0-100). 0 disables;
    *  20-40 is the typical taste range for hard-panned mixes on
    *  headphones. */

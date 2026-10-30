@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { PlayerSnapshot, StreamInfo, Track } from "@/api/types";
 import { api } from "@/api/client";
+import { subscribeEvents } from "@/api/eventStream";
 import { useContinuePlayingPref } from "./useContinuePlayingPref";
 import { useSleepTimer } from "./useSleepTimer";
 import { useUiPreferences, type StreamingQuality } from "./useUiPreferences";
@@ -496,7 +497,7 @@ export function usePlayer() {
   // Persist queue + prefs so a relaunch picks up where the user
   // left off. Owned by usePlayerPersistence — see that file's
   // docstring for the lifecycle-hook trio + backend-backstop story.
-  usePlayerPersistence(stateRef);
+  usePlayerPersistence(stateRef, qualityRef);
 
   // SSE subscription — backend pushes state changes + position updates.
   // `seq` is our monotonic clock so we can ignore out-of-order frames.
@@ -567,11 +568,6 @@ export function usePlayer() {
   const serverMutedAdopted = useRef(false);
 
   useEffect(() => {
-    const url = "/api/player/events";
-    let es: EventSource | null = null;
-    let cancelled = false;
-    let retryTimer: number | null = null;
-
     // Late-echo guard: drop snapshots whose track_id doesn't match
     // the track we last asked the backend to play. Happens during
     // track changes when the previous track's "playing" tail still
@@ -836,58 +832,30 @@ export function usePlayer() {
       triggerPreloadIfNeeded(snap);
     };
 
-    const connect = () => {
-      if (cancelled) return;
-      es = new EventSource(url);
-      es.onmessage = (event) => {
-        try {
-          const snap = JSON.parse(event.data) as PlayerSnapshot;
-          if (snap.output_id !== lastOutputRef.current) {
-            lastOutputRef.current = snap.output_id;
-            lastSeqRef.current = -1;
-            lastPositionRef.current = -1;
-            serverVolumeAdopted.current = false;
-            serverMutedAdopted.current = false;
-          }
-          // A newer seq always applies. A repeat seq still applies when
-          // only the position moved: seq is bumped from the audio
-          // callback, which stops in DLNA renderer-clock mode once the
-          // muted local stream ends — seq freezes while the renderer
-          // position keeps advancing, and a seq-only guard would freeze
-          // the UI clock. Out-of-order (older) seq frames are still
-          // dropped.
-          if (snap.seq < lastSeqRef.current) return;
-          if (
-            snap.seq === lastSeqRef.current &&
-            snap.position_ms === lastPositionRef.current
-          ) {
-            return;
-          }
-          lastSeqRef.current = snap.seq;
-          lastPositionRef.current = snap.position_ms;
-          applySnapshot(snap);
-        } catch {
-          /* malformed frame */
+    return subscribeEvents("player", (data) => {
+      try {
+        const snap = JSON.parse(data) as PlayerSnapshot;
+        if (snap.output_id !== lastOutputRef.current) {
+          lastOutputRef.current = snap.output_id;
+          lastSeqRef.current = -1;
+          lastPositionRef.current = -1;
+          serverVolumeAdopted.current = false;
+          serverMutedAdopted.current = false;
         }
-      };
-      es.onerror = () => {
-        // Browser auto-reconnects; if it closes us out entirely, try a
-        // manual reconnect after a short delay.
-        if (es && es.readyState === EventSource.CLOSED) {
-          es.close();
-          es = null;
-          if (cancelled) return;
-          retryTimer = window.setTimeout(connect, 1500);
+        if (snap.seq < lastSeqRef.current) return;
+        if (
+          snap.seq === lastSeqRef.current &&
+          snap.position_ms === lastPositionRef.current
+        ) {
+          return;
         }
-      };
-    };
-
-    connect();
-    return () => {
-      cancelled = true;
-      if (retryTimer !== null) window.clearTimeout(retryTimer);
-      if (es) es.close();
-    };
+        lastSeqRef.current = snap.seq;
+        lastPositionRef.current = snap.position_ms;
+        applySnapshot(snap);
+      } catch {
+        /* malformed frame */
+      }
+    });
   }, []);
 
   // macOS Now Playing metadata push. The backend's PlayerSnapshot has
@@ -1397,8 +1365,9 @@ export function usePlayer() {
   }, []);
 
   // Global media-key bridge. The backend's pynput listener publishes
-  // hotkey actions (play_pause / next / previous) to /api/hotkey/events
-  // — we subscribe once and map each onto the local hook action.
+  // hotkey actions (play_pause / next / previous) as `hotkey` events on
+  // the app's event stream — we subscribe once and map each onto the
+  // local hook action.
   // Queue advance logic stays here; the backend is just the courier.
   // Mirror the three actions into refs so the subscription effect is
   // install-once and never re-runs when the callbacks change identity.
@@ -1411,46 +1380,20 @@ export function usePlayer() {
     prevRef.current = prev;
   }, [toggle, next, prev]);
 
-  useEffect(() => {
-    let es: EventSource | null = null;
-    let cancelled = false;
-    let retryTimer: number | null = null;
-
-    const connect = () => {
-      if (cancelled) return;
-      es = new EventSource("/api/hotkey/events");
-      es.onmessage = (event) => {
+  useEffect(
+    () =>
+      subscribeEvents("hotkey", (data) => {
         try {
-          const { action } = JSON.parse(event.data) as { action?: string };
+          const { action } = JSON.parse(data) as { action?: string };
           if (action === "play_pause") toggleRef.current?.();
           else if (action === "next") nextRef.current?.();
           else if (action === "previous") prevRef.current?.();
         } catch {
           /* malformed frame */
         }
-      };
-      es.onerror = () => {
-        // Same pattern the /api/player/events subscription uses: if
-        // the browser decides the connection is truly closed (not
-        // just reconnecting), tear down and retry after a short
-        // delay. Keeps the listener alive across transient backend
-        // restarts without piling up dangling connections.
-        if (es && es.readyState === EventSource.CLOSED) {
-          es.close();
-          es = null;
-          if (cancelled) return;
-          retryTimer = window.setTimeout(connect, 1500);
-        }
-      };
-    };
-
-    connect();
-    return () => {
-      cancelled = true;
-      if (retryTimer !== null) window.clearTimeout(retryTimer);
-      if (es) es.close();
-    };
-  }, []);
+      }),
+    [],
+  );
 
   // Sleep-timer state machine. Owned by useSleepTimer; we hand it
   // the endOfTrackPendingRef so the "stop at end of track" mode

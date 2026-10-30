@@ -10,7 +10,7 @@ import { api } from "@/api/client";
 import { Grid, ViewMoreLink } from "@/components/Grid";
 import { GridSkeleton } from "@/components/Skeletons";
 import { PlayMediaButton } from "@/components/PlayMediaButton";
-import { cn, imageProxy } from "@/lib/utils";
+import { cn, imageUrl } from "@/lib/utils";
 
 /**
  * Two AOTY-backed rows on the Home page: the year's highest-user-rated
@@ -218,7 +218,7 @@ export function AotyCard({
   entry: AotyAlbum & { tidal_album: Album };
 }) {
   const album = entry.tidal_album;
-  const cover = imageProxy(album.cover);
+  const cover = imageUrl(album.cover);
   const artist = album.artists.map((a) => a.name).join(", ");
 
   return (

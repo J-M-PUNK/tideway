@@ -31,7 +31,7 @@ import { ViewMoreLink } from "@/components/Grid";
 import { useToast } from "@/components/toast";
 import { usePlayerActions } from "@/hooks/PlayerContext";
 import { useTidalArt } from "@/hooks/useTidalArt";
-import { cn, imageProxy } from "@/lib/utils";
+import { cn, imageUrl } from "@/lib/utils";
 
 /**
  * Last.fm-powered listening dashboard. Mirrors the shape of stats.fm /
@@ -161,7 +161,7 @@ function UserHeader({
   user: LastFmUserInfo | null;
   userFetched: boolean;
 }) {
-  const avatar = user?.image ? imageProxy(user.image) : undefined;
+  const avatar = user?.image ? imageUrl(user.image) : undefined;
   const initial = (user?.username || "?").trim().charAt(0).toUpperCase();
   const memberSince = user?.registered_at
     ? new Date(user.registered_at * 1000).toLocaleDateString(undefined, {
@@ -493,7 +493,7 @@ export function ArtistCard({
   const navigate = useNavigate();
   const toast = useToast();
   const tidalArt = useTidalArt("artist", artist.name);
-  const img = imageProxy(artist.image || tidalArt || undefined);
+  const img = imageUrl(artist.image || tidalArt || undefined);
 
   const onOpen = async () => {
     try {
@@ -575,7 +575,7 @@ export function AlbumCard({
   const navigate = useNavigate();
   const toast = useToast();
   const tidalArt = useTidalArt("album", album.name, album.artist);
-  const img = imageProxy(album.image || tidalArt || undefined);
+  const img = imageUrl(album.image || tidalArt || undefined);
 
   const onOpen = async () => {
     try {
@@ -662,7 +662,7 @@ export function TrackRow({
 }) {
   const play = usePlayTrack();
   const tidalArt = useTidalArt("track", track.name, track.artist);
-  const img = imageProxy(track.image || tidalArt || undefined);
+  const img = imageUrl(track.image || tidalArt || undefined);
   const onPlay = () => play(track.name, track.artist);
   return (
     <div
@@ -725,7 +725,7 @@ export function TrackRow({
 export function LovedRow({ row }: { row: LastFmLovedTrack }) {
   const play = usePlayTrack();
   const tidalArt = useTidalArt("track", row.name, row.artist);
-  const img = imageProxy(row.image || tidalArt || undefined);
+  const img = imageUrl(row.image || tidalArt || undefined);
   const onPlay = () => play(row.name, row.artist);
   return (
     <div

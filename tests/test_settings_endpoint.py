@@ -222,6 +222,10 @@ _FIELDS_MANAGED_ELSEWHERE: dict[str, str] = {
     "eq_bands": "/api/player/eq",
     "eq_parametric_bands": "/api/player/eq",
     "eq_preamp": "/api/player/eq",
+    # Saved manual curves — created, renamed and deleted through their
+    # own CRUD endpoints so ids are server-assigned and every curve is
+    # validated like a live one.
+    "eq_manual_profiles": "/api/player/eq/manual-profiles",
     # Output device — set via POST /api/player/output-device,
     # which has to coordinate with stream replacement.
     "audio_output_device": "/api/player/output-device",

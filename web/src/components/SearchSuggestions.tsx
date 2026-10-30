@@ -10,7 +10,7 @@ import type {
   Track,
 } from "@/api/types";
 import { useSearchHistory } from "@/hooks/useSearchHistory";
-import { cn, imageProxy } from "@/lib/utils";
+import { cn, imageUrl } from "@/lib/utils";
 
 /**
  * Inline typeahead dropdown that hangs under the NavBar's search
@@ -372,7 +372,7 @@ function SuggestionRow({
       >
         {cover ? (
           <img
-            src={imageProxy(cover)}
+            src={imageUrl(cover)}
             alt=""
             className="h-full w-full object-cover"
             loading="lazy"
