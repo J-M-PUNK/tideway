@@ -21,6 +21,8 @@ Two regressions this pins:
 from __future__ import annotations
 
 import asyncio
+import json
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -86,6 +88,15 @@ def test_new_seq_is_always_forwarded():
     assert server._should_forward_snapshot(6, 5, "playing") is True
 
 
+def test_output_switch_is_forwarded_even_when_clocks_coincide():
+    assert server._should_forward_snapshot(
+        5, 5, "paused", 0, 0, "receiver", None
+    ) is True
+    assert server._should_forward_snapshot(
+        5, 5, "paused", 0, 0, None, "receiver"
+    ) is True
+
+
 def test_repeat_seq_of_a_display_state_is_deduped():
     # Idle/paused/playing keepalive ticks with an unchanged seq stay off
     # the wire so we don't spam identical frames.
@@ -122,4 +133,61 @@ def test_repeat_seq_with_unchanged_position_is_deduped():
         )
         is False
     )
+
+
+@pytest.mark.parametrize('delivery', ['poll', 'callback'])
+def test_receiver_sse_builds_one_fresh_snapshot_per_delivery(monkeypatch, delivery):
+    async def check():
+        initial = {'state': 'playing', 'seq': 1, 'position_ms': 0, 'output_id': 'receiver'}
+        latest = {**initial, 'seq': 2, 'position_ms': 250}
+        snapshot = Mock(side_effect=[initial, latest])
+        player = Mock()
+        unsubscribe = Mock()
+        player.subscribe.return_value = unsubscribe
+        request = Mock()
+        request.is_disconnected = AsyncMock(return_value=False)
+        monkeypatch.setattr(server, '_require_local_access', lambda: None)
+        monkeypatch.setattr(server, '_native_player', lambda: player)
+        monkeypatch.setattr(server, '_tcr_active', lambda: True)
+        monkeypatch.setattr(server, '_tcr_snapshot', snapshot)
+        stream = server._player_events()
+        assert json.loads(await anext(stream)) == initial
+        if delivery == 'callback':
+            callback = player.subscribe.call_args.args[0]
+            callback(Mock(state='ended'))
+            # The audio-thread callback must not read the receiver state.
+            assert snapshot.call_count == 1
+        else:
+            async def timed_out(awaitable, timeout):
+                awaitable.close()
+                assert timeout == 0.25
+                raise asyncio.TimeoutError
+            monkeypatch.setattr(server.asyncio, 'wait_for', timed_out)
+        assert json.loads(await anext(stream)) == latest
+        assert snapshot.call_count == 2
+        await stream.aclose()
+        unsubscribe.assert_called_once()
+    asyncio.run(check())
+
+
+def test_local_sse_preserves_a_queued_terminal_edge(monkeypatch):
+    async def check():
+        initial = {'state': 'playing', 'seq': 1, 'position_ms': 0}
+        terminal = {'state': 'ended', 'seq': 2, 'position_ms': 1000}
+        local = Mock()
+        local.snapshot.return_value = initial
+        request = Mock()
+        request.is_disconnected = AsyncMock(return_value=False)
+        monkeypatch.setattr(server, '_require_local_access', lambda: None)
+        monkeypatch.setattr(server, '_native_player', lambda: local)
+        monkeypatch.setattr(server, '_tcr_active', lambda: False)
+        monkeypatch.setattr(server, '_snapshot_dict', lambda snap: snap)
+        stream = server._player_events()
+        await anext(stream)
+        local.subscribe.call_args.args[0](terminal)
+        local.snapshot.return_value = {'state': 'idle', 'seq': 3}
+        assert json.loads(await anext(stream)) == terminal
+        local.snapshot.assert_called_once()
+        await stream.aclose()
+    asyncio.run(check())
 

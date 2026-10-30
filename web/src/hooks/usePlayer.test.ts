@@ -6,6 +6,8 @@
  * the first track of a queue.
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { act, createElement } from "react";
+import { createRoot } from "react-dom/client";
 import { api } from "@/api/client";
 import {
   buildShuffleOrder,
@@ -15,9 +17,10 @@ import {
   shuffleOrderAfterInsert,
   shuffleOrderAfterRemove,
   shuffleTracks,
+  usePlayer,
 } from "./usePlayer";
 import type { PlayerState } from "./usePlayer";
-import type { Track } from "@/api/types";
+import type { PlayerSnapshot, Track } from "@/api/types";
 
 function _track(id: string, artistId = "a1"): Track {
   return {
@@ -330,4 +333,229 @@ describe("fetchRadioTakeover", () => {
     const res = await fetchRadioTakeover(_state({ queue: [], queueIndex: -1 }));
     expect(res).toBeNull();
   });
+});
+
+describe("player SSE output changes", () => {
+  it("accepts a new output's lower sequence and rejects stale frames on the same output", async () => {
+    class ReplayEventSource {
+      static CLOSED = 2;
+      static streams = new Map<string, ReplayEventSource>();
+      listener: ((event: { data: string }) => void) | null = null;
+      addEventListener(
+        _name: string,
+        listener: (event: { data: string }) => void,
+      ) {
+        if (_name === "player") this.listener = listener;
+      }
+      removeEventListener() {
+        this.listener = null;
+      }
+      onerror: (() => void) | null = null;
+      readyState = 1;
+      close = vi.fn();
+
+      constructor(url: string) {
+        ReplayEventSource.streams.set(url, this);
+      }
+
+      emit(snapshot: PlayerSnapshot) {
+        this.listener?.({ data: JSON.stringify(snapshot) });
+      }
+    }
+
+    vi.stubGlobal("EventSource", ReplayEventSource);
+    vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+    const storage = new Map<string, string>();
+    vi.stubGlobal("localStorage", {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => storage.set(key, value),
+      removeItem: (key: string) => storage.delete(key),
+    });
+    vi.spyOn(api.player, "preloadClear").mockResolvedValue({ ok: true });
+    vi.spyOn(api.nowPlayingState, "get").mockResolvedValue({ state: null });
+    vi.spyOn(api.settings, "get").mockRejectedValue(new Error("offline"));
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    let latest: ReturnType<typeof usePlayer> | undefined;
+    function Probe() {
+      latest = usePlayer();
+      return null;
+    }
+
+    const snapshot = (
+      seq: number,
+      position_ms: number,
+      output_id?: string,
+    ): PlayerSnapshot => ({
+      seq,
+      position_ms,
+      output_id,
+      state: "playing",
+      track_id: null,
+      duration_ms: 180000,
+      volume: 20,
+      muted: false,
+      error: null,
+      stream_info: null,
+    });
+
+    try {
+      await act(async () => root.render(createElement(Probe)));
+      const stream = ReplayEventSource.streams.get("/api/events");
+      expect(stream).toBeDefined();
+
+      act(() => stream!.emit(snapshot(400, 40000)));
+      expect(latest!.currentTime).toBe(40);
+      expect(latest!.volume).toBe(0.2);
+
+      // The WiiM owns a separate clock; its seq 3 follows local seq 400.
+      act(() =>
+        stream!.emit({ ...snapshot(3, 3000, "wiim"), volume: 40, muted: true }),
+      );
+      expect(latest!.currentTime).toBe(3);
+      expect(latest!.volume).toBe(0.4);
+      expect(latest!.muted).toBe(true);
+
+      act(() => stream!.emit(snapshot(2, 99000, "wiim")));
+      expect(latest!.currentTime).toBe(3);
+
+      // A position-only update with the same seq still advances the clock.
+      act(() => stream!.emit(snapshot(3, 3500, "wiim")));
+      expect(latest!.currentTime).toBe(3.5);
+
+      act(() => stream!.emit(snapshot(401, 41000)));
+      expect(latest!.currentTime).toBe(41);
+      expect(latest!.volume).toBe(0.2);
+      expect(latest!.muted).toBe(false);
+
+      act(() => stream!.emit(snapshot(400, 99000)));
+      expect(latest!.currentTime).toBe(41);
+    } finally {
+      act(() => root.unmount());
+      container.remove();
+      vi.restoreAllMocks();
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
+describe("receiver queue advancement", () => {
+  it.each(["session", "track", "ended", "pause"] as const)(
+    "advances only on track errors and completion (%s)",
+    async (scope) => {
+      let emit: (snapshot: PlayerSnapshot) => void = () => {};
+      class ReplayEventSource {
+        static CLOSED = 2;
+        listener: ((event: { data: string }) => void) | null = null;
+        addEventListener(
+          _name: string,
+          listener: (event: { data: string }) => void,
+        ) {
+          if (_name === "player") this.listener = listener;
+        }
+        removeEventListener() {
+          this.listener = null;
+        }
+        onerror = null;
+        readyState = 1;
+        close = vi.fn();
+        constructor(url: string) {
+          if (url === "/api/events") {
+            emit = (snapshot) =>
+              this.listener?.({ data: JSON.stringify(snapshot) });
+          }
+        }
+      }
+      vi.stubGlobal("EventSource", ReplayEventSource);
+      vi.stubGlobal("IS_REACT_ACT_ENVIRONMENT", true);
+      const storage = new Map<string, string>();
+      vi.stubGlobal("localStorage", {
+        getItem: (key: string) => storage.get(key) ?? null,
+        setItem: (key: string, value: string) => storage.set(key, value),
+        removeItem: (key: string) => storage.delete(key),
+      });
+      vi.stubGlobal(
+        "fetch",
+        vi.fn().mockResolvedValue({ ok: true, json: async () => ({}) }),
+      );
+      const paused: PlayerSnapshot = {
+        seq: 1,
+        output_id: "receiver",
+        state: "paused",
+        track_id: "1",
+        position_ms: 5000,
+        duration_ms: 180000,
+        volume: 20,
+        muted: false,
+        error: null,
+        stream_info: null,
+      };
+      const play = vi.spyOn(api.player, "playTrack").mockResolvedValue(paused);
+      vi.spyOn(api.player, "preloadClear").mockResolvedValue({ ok: true });
+      vi.spyOn(api.nowPlayingState, "get").mockResolvedValue({ state: null });
+      vi.spyOn(api.settings, "get").mockRejectedValue(new Error("offline"));
+      const container = document.createElement("div");
+      document.body.appendChild(container);
+      const root = createRoot(container);
+      let latest: ReturnType<typeof usePlayer> | undefined;
+      function Probe() {
+        latest = usePlayer();
+        return null;
+      }
+      try {
+        await act(async () => root.render(createElement(Probe)));
+        await act(async () =>
+          latest!.play(_track("1"), [_track("1"), _track("2"), _track("3")]),
+        );
+        await act(async () => emit(paused));
+        expect(latest!.playing).toBe(false);
+        play.mockClear();
+        if (scope === "ended") {
+          // Within-album advancement must work even with auto-radio off.
+          window.dispatchEvent(
+            new CustomEvent("tidal-settings-updated", {
+              detail: { continue_playing_after_queue_ends: false },
+            }),
+          );
+        }
+        const update: PlayerSnapshot = {
+          ...paused,
+          seq: 2,
+          state:
+            scope === "ended"
+              ? "ended"
+              : scope === "pause"
+                ? "paused"
+                : "error",
+          error:
+            scope === "session" || scope === "track" ? "Receiver error" : null,
+          error_scope: scope === "session" || scope === "track" ? scope : null,
+        };
+        await act(async () => emit(update));
+        if (scope === "session" || scope === "pause") {
+          expect(play).not.toHaveBeenCalled();
+          expect(latest!.track!.id).toBe("1");
+          expect(latest!.playing).toBe(false);
+          expect(latest!.error).toBe(
+            scope === "session" ? "Receiver error" : null,
+          );
+        } else {
+          expect(play).toHaveBeenCalledOnce();
+          expect(play.mock.calls[0][0]).toBe("2");
+          if (scope === "ended") {
+            await act(async () => emit(update));
+            await act(async () => emit({ ...update, seq: 3 }));
+            expect(play).toHaveBeenCalledOnce();
+            expect(latest!.queueIndex).toBe(1);
+          }
+        }
+      } finally {
+        act(() => root.unmount());
+        container.remove();
+        vi.restoreAllMocks();
+        vi.unstubAllGlobals();
+      }
+    },
+  );
 });

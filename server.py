@@ -1022,76 +1022,7 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             _native_player().set_external_output_active
         )
 
-        def _tcr_url_resolver(track_id: int) -> dict:
-            """Tidal track id → MediaInfo dict for `loadMediaInfo`.
-
-            Mirrors the OpenHome resolver above but produces the
-            shape `tidalConnect/mediaInfo.js` documents:
-            {itemId, mediaId, srcUrl, streamType, metadata}. Same
-            tidalapi path as the OpenHome resolver. Picks the
-            manifest's first URL as the stream URL and stamps
-            metadata for on-device display.
-
-            streamType: derived from the manifest's codec. Tidal's
-            FLAC paths come back as DASH; we only flag "FLAC" when
-            the codec string explicitly says so. Unknown codec ⇒
-            empty string and let the device infer."""
-            track = tidal.session.track(int(track_id))
-            stream = track.get_stream()
-            manifest = stream.get_stream_manifest()
-            urls = list(getattr(manifest, "urls", []) or [])
-            if not urls:
-                raise RuntimeError(
-                    f"track {track_id}: manifest has no URLs"
-                )
-            stream_url = urls[0]
-            artists_attr = getattr(track, "artists", None) or []
-            artists = [
-                {
-                    "id": int(getattr(a, "id", 0) or 0),
-                    "name": str(getattr(a, "name", "") or ""),
-                }
-                for a in artists_attr
-            ]
-            album = getattr(track, "album", None)
-            album_name = str(getattr(album, "name", "") or "") if album else ""
-            cover_id = getattr(album, "cover", None) if album else None
-            images: list[dict] = []
-            if cover_id:
-                base = (
-                    f"https://resources.tidal.com/images/"
-                    f"{str(cover_id).replace('-', '/')}"
-                )
-                images = [
-                    {"url": f"{base}/640x640.jpg", "width": 640, "height": 640},
-                    {"url": f"{base}/320x320.jpg", "width": 320, "height": 320},
-                ]
-            duration_s = int(getattr(track, "duration", 0) or 0)
-            codec = (
-                getattr(manifest, "codecs", None)
-                or getattr(manifest, "get_codecs", lambda: None)()
-                or ""
-            )
-            stream_type = (
-                "FLAC" if "flac" in str(codec).lower()
-                else str(codec).upper() if codec
-                else ""
-            )
-            return {
-                "itemId": str(track_id),
-                "mediaId": str(track_id),
-                "srcUrl": stream_url,
-                "streamType": stream_type,
-                "metadata": {
-                    "title": str(getattr(track, "name", "") or ""),
-                    "albumTitle": album_name,
-                    "artists": artists,
-                    "duration": duration_s,
-                    "images": images,
-                },
-            }
-
-        _tcr_mgr.set_track_url_resolver(_tcr_url_resolver)
+        _tcr_mgr.set_track_url_resolver(_tcr_track_queue)
     except Exception as exc:
         print(f"[tidal-connect-real] startup failed: {exc}", flush=True)
 
@@ -5709,14 +5640,15 @@ def _tc_active() -> bool:
 
 
 def _tcr_active() -> bool:
-    """True if a real Tidal Connect (WSS) session is open. Checked
-    BEFORE `_tc_active()` in every divert: real-TC supersedes the
-    OpenHome path per the migration plan in
-    private/features/tidal-connect-real-spec.md."""
+    """Route controls to the selected receiver, including a failed session.
+
+    A lost connection must report an error, not resume the local engine.
+    Explicit disconnect clears the selection.
+    """
     try:
         from app.audio.tidal_connect_real import get_manager
         mgr = get_manager()
-        return mgr is not None and mgr.is_active()
+        return mgr is not None and mgr.get_connection() is not None
     except Exception:
         return False
 
@@ -5737,33 +5669,89 @@ def _tcr_snapshot(track_id: Optional[str] = None) -> dict:
             "volume": 100,
             "muted": False,
             "error": None,
+            "error_scope": None,
             "seq": 0,
             "stream_info": None,
             "force_volume": False,
         }
     rs = mgr.remote_state()
-    # Map device's PLAYING / PAUSED / STOPPED / IDLE to the local
-    # player_state vocab (playing / paused / idle / ended). The
-    # frontend matches on "playing" / "paused" exactly; everything
-    # else collapses to "idle".
+    error = rs.get("error") or {}
+    media_id = str((rs.get("media_info") or {}).get("mediaId") or "") or None
+    position_ms = int(rs.get("position_ms") or 0)
+    duration_ms = int(rs.get("duration_ms") or 0)
+    # WiiM parks at PAUSED with progress at/past duration when its
+    # single-item cloud queue finishes. Report that receiver-confirmed
+    # boundary as ended so the frontend advances its album queue.
+    # Neither an ordinary pause nor an idle/lost session implies EOF.
     ps = rs.get("player_state", "IDLE")
-    state = (
-        "playing" if ps == "PLAYING"
-        else "paused" if ps == "PAUSED"
-        else "idle"
-    )
+    state = {"PLAYING": "playing", "PAUSED": "paused"}.get(ps, "idle")
+    if ps == "PAUSED" and media_id and duration_ms > 0 and position_ms >= duration_ms:
+        state = "ended"
+    error_message = None
+    if error:
+        if error.get("command") == "connectionLost":
+            error_message = "Connection to the Tidal Connect receiver was lost"
+        else:
+            error_message = f"Tidal Connect {error['command']} failed"
+            if error.get("code") is not None:
+                error_message += f" (code {error['code']})"
     return {
-        "state": state,
-        "track_id": track_id,
-        "position_ms": int(rs.get("position_ms") or 0),
-        "duration_ms": int(rs.get("duration_ms") or 0),
-        "volume": int(rs.get("volume") or 100),
+        "state": "error" if error else state,
+        "track_id": track_id or media_id,
+        "output_id": rs.get("device_id") or "tidal-connect",
+        "position_ms": position_ms,
+        "duration_ms": duration_ms,
+        "volume": int(rs.get("volume", 100)),
         "muted": bool(rs.get("muted")),
-        "error": None,
+        "error": error_message,
+        # Session/socket failures describe the receiver connection, not
+        # an unplayable track. Don't let Continue Playing skip the queue.
+        "error_scope": (
+            "track" if error.get("command") in
+            ("notifyPlaybackError", "notifyContentServerError") else
+            "session" if error else None
+        ),
         "seq": int(rs.get("seq") or 0),
         "stream_info": None,
         "force_volume": False,
     }
+
+
+def _tcr_track_queue(track_id: int, quality: Optional[str] = None) -> dict:
+    from app.audio.tidal_connect_queue import create_track_queue
+
+    effective = tidal.clamp_quality_to_subscription(quality or "hi_res_lossless")
+    wire_quality = {
+        "hi_res_lossless": "HI_RES_LOSSLESS", "high_lossless": "LOSSLESS",
+        "low_320k": "HIGH", "low_96k": "LOW",
+    }.get(effective, "LOSSLESS")
+    return create_track_queue(tidal.session, track_id, wire_quality)
+
+
+def _tcr_play_or_resume() -> None:
+    """Resume playback, rebuilding the queue if the receiver lost it."""
+    from app.audio.tidal_connect_real import get_manager
+
+    mgr = get_manager()
+    if mgr is None:
+        raise RuntimeError("Tidal Connect manager is unavailable")
+    persisted = now_playing_state.read_state() or {}
+    track_id = persisted.get("trackId")
+    if track_id is None:
+        track = persisted.get("track")
+        track_id = track.get("id") if isinstance(track, dict) else None
+    try:
+        track_id = int(track_id)
+    except (TypeError, ValueError):
+        track_id = None
+    mgr.resume(track_id)
+
+
+def _current_player_snapshot(snap=None) -> dict:
+    """Report the selected receiver, rather than the muted local engine."""
+    if _tcr_active():
+        return _tcr_snapshot()
+    return _snapshot_dict(snap if snap is not None else _native_player().snapshot())
 
 
 def _dlna_active() -> bool:
@@ -5874,7 +5862,7 @@ def player_state() -> dict:
     # player checks local_index first and only falls through to
     # Tidal when a track isn't on disk.
     _require_local_access()
-    return _snapshot_dict(_native_player().snapshot())
+    return _current_player_snapshot()
 
 
 @app.get("/api/now-playing/state")
@@ -6005,7 +5993,7 @@ def player_play_track(req: _PlayerLoadRequest) -> dict:
     if _tcr_active():
         from app.audio.tidal_connect_real import get_manager as _tcr_get
         try:
-            _tcr_get().load_track(int(req.track_id))  # type: ignore[union-attr]
+            _tcr_get().load_track(int(req.track_id), quality=req.quality)  # type: ignore[union-attr]
             _tcr_get().play()  # type: ignore[union-attr]
         except Exception as exc:
             raise HTTPException(
@@ -6270,9 +6258,8 @@ def player_dismiss_pause_reason() -> dict:
 def player_play() -> dict:
     _require_local_access()
     if _tcr_active():
-        from app.audio.tidal_connect_real import get_manager as _tcr_get
         try:
-            _tcr_get().play()  # type: ignore[union-attr]
+            _tcr_play_or_resume()
         except Exception as exc:
             raise HTTPException(
                 status_code=502, detail=f"Tidal Connect: {exc}"
@@ -6322,9 +6309,8 @@ def player_pause() -> dict:
 def player_resume() -> dict:
     _require_local_access()
     if _tcr_active():
-        from app.audio.tidal_connect_real import get_manager as _tcr_get
         try:
-            _tcr_get().play()  # type: ignore[union-attr]
+            _tcr_play_or_resume()
         except Exception as exc:
             raise HTTPException(
                 status_code=502, detail=f"Tidal Connect: {exc}"
@@ -6429,6 +6415,13 @@ def player_seek(req: _PlayerSeekRequest) -> dict:
 @app.post("/api/player/volume")
 def player_volume(req: _PlayerVolumeRequest) -> dict:
     _require_local_access()
+    if _tcr_active():
+        from app.audio.tidal_connect_real import get_manager
+        try:
+            get_manager().set_volume(req.volume)
+        except (RuntimeError, OSError, TimeoutError) as exc:
+            raise HTTPException(status_code=502, detail=f"Tidal Connect: {exc}") from exc
+        return _tcr_snapshot()
     snap = _native_player().set_volume(req.volume)
     # Persist the *applied* volume (set_volume clamps, and pins to
     # 100 under force_volume) so it survives a restart. Guarded so a
@@ -6443,6 +6436,13 @@ def player_volume(req: _PlayerVolumeRequest) -> dict:
 @app.post("/api/player/muted")
 def player_muted(req: _PlayerMutedRequest) -> dict:
     _require_local_access()
+    if _tcr_active():
+        from app.audio.tidal_connect_real import get_manager
+        try:
+            get_manager().set_mute(req.muted)
+        except (RuntimeError, OSError, TimeoutError) as exc:
+            raise HTTPException(status_code=502, detail=f"Tidal Connect: {exc}") from exc
+        return _tcr_snapshot()
     return _snapshot_dict(_native_player().set_muted(req.muted))
 
 
@@ -8017,6 +8017,8 @@ def _should_forward_snapshot(
     state: Optional[str],
     position_ms: Optional[int] = None,
     last_position: Optional[int] = None,
+    output_id: Optional[str] = None,
+    last_output_id: Optional[str] = None,
 ) -> bool:
     """Whether a polled snapshot should be sent, given what we already
     put on the wire.
@@ -8031,7 +8033,7 @@ def _should_forward_snapshot(
     frontend clock. The client's own monotonic seq guard makes repeat
     frames a no-op where they are not needed.
     """
-    if seq != last_seq:
+    if output_id != last_output_id or seq != last_seq:
         return True
     if position_ms is not None and position_ms != last_position:
         return True
@@ -8071,13 +8073,12 @@ async def _player_events() -> AsyncIterator[str]:
     at 1Hz when paused/idle.
     """
     player = _native_player()
-    queue: asyncio.Queue[Optional[dict]] = asyncio.Queue(maxsize=32)
+    queue: asyncio.Queue = asyncio.Queue(maxsize=32)
     loop = asyncio.get_running_loop()
 
     def _on_snapshot(snap) -> None:
-        payload = _snapshot_dict(snap)
         try:
-            loop.call_soon_threadsafe(_put_latest, queue, payload)
+            loop.call_soon_threadsafe(_put_latest, queue, snap)
         except RuntimeError:
             # Event loop already closed: the SSE connection is tearing
             # down and unsubscribe() is about to detach us. Nothing to
@@ -8089,18 +8090,21 @@ async def _player_events() -> AsyncIterator[str]:
     try:
         # Send the current state immediately so the client has a
         # snapshot without waiting for the first change event.
-        yield json.dumps(_snapshot_dict(player.snapshot()))
+        payload = _current_player_snapshot()
+        yield json.dumps(payload)
         last_seq = -1
         last_position: Optional[int] = None
+        last_output_id: Optional[str] = None
         while True:
-            active = player.snapshot().state == "playing"
+            active = payload["state"] == "playing"
             timeout = 0.25 if active else 1.0
             try:
-                payload = await asyncio.wait_for(queue.get(), timeout=timeout)
+                snap = await asyncio.wait_for(queue.get(), timeout=timeout)
+                if snap is None:
+                    return
             except asyncio.TimeoutError:
-                payload = _snapshot_dict(player.snapshot())
-            if payload is None:
-                return
+                snap = None
+            payload = _current_player_snapshot(snap)
             seq = payload.get("seq", 0)
             position_ms = payload.get("position_ms")
             if not _should_forward_snapshot(
@@ -8109,6 +8113,8 @@ async def _player_events() -> AsyncIterator[str]:
                 payload.get("state"),
                 position_ms,
                 last_position,
+                payload.get("output_id"),
+                last_output_id,
             ):
                 # Dedupe keepalive ticks while nothing actionable is
                 # pending. States the client must respond to
@@ -8117,6 +8123,7 @@ async def _player_events() -> AsyncIterator[str]:
                 continue
             last_seq = seq
             last_position = position_ms
+            last_output_id = payload.get("output_id")
             yield json.dumps(payload)
     finally:
         unsubscribe()
@@ -8195,9 +8202,8 @@ async def events(request: Request):
 
     async def _gen():
         try:
-            # Reconnect after 1 s rather than the browser's default 3 s
-            # when the server closes the stream (a broker desync, a
-            # backend restart): the player UI is frozen until it's back.
+
+            # Reconnect promptly if a source or the server closes the stream.
             yield "retry: 1000\n\n"
             while True:
                 if await request.is_disconnected():
@@ -8208,6 +8214,7 @@ async def events(request: Request):
                     )
                 except asyncio.TimeoutError:
                     yield ": keepalive\n\n"
+
                     continue
                 if data is None:
                     break
