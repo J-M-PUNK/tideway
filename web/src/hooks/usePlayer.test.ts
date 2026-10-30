@@ -564,13 +564,22 @@ it("follows native duplicate positions and synchronizes paused edits without pla
   let emit: (snapshot: PlayerSnapshot) => void = () => {};
   class ReceiverEvents {
     static CLOSED = 2;
-    onmessage: ((event: { data: string }) => void) | null = null;
+    listener: ((event: { data: string }) => void) | null = null;
+    addEventListener(
+      name: string,
+      listener: (event: { data: string }) => void,
+    ) {
+      if (name === "player") this.listener = listener;
+    }
+    removeEventListener() {
+      this.listener = null;
+    }
     onerror = null;
     readyState = 1;
     close = vi.fn();
     constructor(url: string) {
-      if (url === "/api/player/events")
-        emit = (s) => this.onmessage?.({ data: JSON.stringify(s) });
+      if (url === "/api/events")
+        emit = (s) => this.listener?.({ data: JSON.stringify(s) });
     }
   }
   vi.stubGlobal("EventSource", ReceiverEvents);
