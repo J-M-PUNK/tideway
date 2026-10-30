@@ -4,7 +4,7 @@ import type { Album } from "@/api/types";
 import { InlineHeart } from "@/components/MediaCard";
 import { PlayMediaButton } from "@/components/PlayMediaButton";
 import { ViewMoreLink } from "@/components/Grid";
-import { imageProxy } from "@/lib/utils";
+import { imageUrl } from "@/lib/utils";
 
 export type RecAlbum = Album & { reason?: string };
 
@@ -80,7 +80,7 @@ export function RecShelf({
 }
 
 function RecCard({ item }: { item: RecAlbum }) {
-  const cover = imageProxy(item.cover);
+  const cover = imageUrl(item.cover);
   const subtitle = item.artists?.map((a) => a.name).join(", ") ?? "";
   // Same hover-reveal contract as MediaCard: play (bottom-left) and like
   // (bottom-right) sit on the cover and fade in on hover / keyboard focus.

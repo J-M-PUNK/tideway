@@ -43,7 +43,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { VideoDownloadButton } from "@/components/VideoDownloadButton";
-import { cn, formatDuration, imageProxy } from "@/lib/utils";
+import { cn, formatDuration, imageUrl } from "@/lib/utils";
 
 /**
  * Full-screen music-video modal modeled after Tidal's desktop player.
@@ -463,7 +463,7 @@ export function VideoPlayerModal() {
   if (!current) return null;
 
   const poster = current.cover
-    ? (imageProxy(current.cover) ?? undefined)
+    ? (imageUrl(current.cover) ?? undefined)
     : undefined;
 
   // Single-branch layout — minimized vs full mode change the
@@ -965,9 +965,7 @@ function ControlButton({
 }
 
 function VideoInfo({ video }: { video: Video }) {
-  const cover = video.cover
-    ? (imageProxy(video.cover) ?? undefined)
-    : undefined;
+  const cover = video.cover ? (imageUrl(video.cover) ?? undefined) : undefined;
   return (
     <div className="flex w-[280px] min-w-0 shrink-0 items-center gap-3">
       {cover && (
@@ -1213,7 +1211,7 @@ function SimilarVideosPanel({
             <div className="h-12 w-20 shrink-0 overflow-hidden rounded bg-secondary">
               {v.cover ? (
                 <img
-                  src={imageProxy(v.cover) ?? ""}
+                  src={imageUrl(v.cover) ?? ""}
                   alt=""
                   className="h-full w-full object-cover"
                   loading="lazy"

@@ -10,7 +10,8 @@ import { createRoot, type Root } from "react-dom/client";
 /**
  * Interaction tests for the manual parametric EQ editor: it renders
  * bands from the server, add/remove mutate the list and persist via
- * setEq, and picking a preset applies the preset's bands.
+ * setEq, picking a preset applies the preset's bands, and saved
+ * manual profiles load through setEq and save through their endpoint.
  */
 
 const CONFIG = {
@@ -29,6 +30,9 @@ vi.mock("@/api/client", () => ({
       eq: vi.fn(),
       setEq: vi.fn(),
       setEqPreset: vi.fn(),
+      createEqProfile: vi.fn(),
+      updateEqProfile: vi.fn(),
+      deleteEqProfile: vi.fn(),
     },
   },
 }));
@@ -43,6 +47,9 @@ const { ParametricEqEditor } = await import("./SettingsPage");
 const eqMock = api.player.eq as ReturnType<typeof vi.fn>;
 const setEqMock = api.player.setEq as ReturnType<typeof vi.fn>;
 const setEqPresetMock = api.player.setEqPreset as ReturnType<typeof vi.fn>;
+const createEqProfileMock = api.player.createEqProfile as ReturnType<
+  typeof vi.fn
+>;
 
 function band(over: Record<string, unknown> = {}) {
   return { type: "PK", freq: 1000, gain: 3, q: 1, enabled: true, ...over };
@@ -55,6 +62,7 @@ beforeEach(() => {
   eqMock.mockReset();
   setEqMock.mockReset();
   setEqPresetMock.mockReset();
+  createEqProfileMock.mockReset();
   setEqMock.mockResolvedValue({
     ok: true,
     enabled: true,
@@ -99,6 +107,8 @@ describe("ParametricEqEditor", () => {
       preamp: null,
       config: CONFIG,
       default_bands: defaults,
+      manual_profiles: [],
+      manual_profiles_max: 50,
       presets: [],
     });
     await mount();
@@ -115,6 +125,8 @@ describe("ParametricEqEditor", () => {
       preamp: null,
       config: CONFIG,
       default_bands: [],
+      manual_profiles: [],
+      manual_profiles_max: 50,
       presets: [],
     });
     await mount();
@@ -130,6 +142,8 @@ describe("ParametricEqEditor", () => {
       preamp: null,
       config: CONFIG,
       default_bands: [],
+      manual_profiles: [],
+      manual_profiles_max: 50,
       presets: [],
     });
     await mount();
@@ -153,6 +167,8 @@ describe("ParametricEqEditor", () => {
       preamp: null,
       config: CONFIG,
       default_bands: [],
+      manual_profiles: [],
+      manual_profiles_max: 50,
       presets: [],
     });
     await mount();
@@ -177,6 +193,8 @@ describe("ParametricEqEditor", () => {
       preamp: null,
       config: CONFIG,
       default_bands: [],
+      manual_profiles: [],
+      manual_profiles_max: 50,
       presets: [{ index: 1, name: "Bass Boost", bands: presetBands }],
     });
     setEqPresetMock.mockResolvedValue({
@@ -208,6 +226,8 @@ describe("ParametricEqEditor", () => {
       preamp: null,
       config: CONFIG,
       default_bands: [],
+      manual_profiles: [],
+      manual_profiles_max: 50,
       presets: [],
     });
     await mount();
@@ -231,6 +251,8 @@ describe("ParametricEqEditor", () => {
       preamp: null,
       config: CONFIG,
       default_bands: [],
+      manual_profiles: [],
+      manual_profiles_max: 50,
       presets: [],
     });
     await mount({ bypassed: false, onToggleBypass });
@@ -243,5 +265,142 @@ describe("ParametricEqEditor", () => {
     });
 
     expect(onToggleBypass).toHaveBeenCalledTimes(1);
+  });
+
+  describe("manual profiles", () => {
+    const bass = {
+      id: "p1",
+      name: "Bass",
+      bands: [band({ type: "LSC", freq: 105, gain: 6, q: 0.7 })],
+      preamp: -3,
+    };
+
+    function stateWith(over: Record<string, unknown> = {}) {
+      return {
+        enabled: true,
+        bands: [band()],
+        preamp: null,
+        config: CONFIG,
+        default_bands: [],
+        presets: [],
+        manual_profiles: [bass],
+        manual_profiles_max: 50,
+        ...over,
+      };
+    }
+
+    const card = (name: string) =>
+      [...container.querySelectorAll("button")].find(
+        (b) => b.getAttribute("title") === `Load profile "${name}"`,
+      )!;
+
+    // Radix renders the dialog in a portal on document.body.
+    const dialogInput = () =>
+      document.body.querySelector<HTMLInputElement>(
+        'input[aria-label="Profile name"]',
+      );
+
+    async function typeName(value: string) {
+      const input = dialogInput()!;
+      const setValue = Object.getOwnPropertyDescriptor(
+        HTMLInputElement.prototype,
+        "value",
+      )!.set!;
+      await act(async () => {
+        setValue.call(input, value);
+        input.dispatchEvent(new Event("input", { bubbles: true }));
+      });
+    }
+
+    async function openSaveDialog() {
+      const saveBtn = [...container.querySelectorAll("button")].find((b) =>
+        b.textContent?.includes("Save current"),
+      )!;
+      await act(async () => {
+        saveBtn.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+    }
+
+    async function submitDialog() {
+      await act(async () => {
+        dialogInput()!
+          .form!.querySelector<HTMLButtonElement>('button[type="submit"]')!
+          .click();
+      });
+      await act(async () => {
+        await Promise.resolve();
+      });
+    }
+
+    it("loads a profile's curve through setEq", async () => {
+      eqMock.mockResolvedValue(stateWith());
+      await mount();
+
+      expect(card("Bass").getAttribute("aria-pressed")).toBe("false");
+      await act(async () => {
+        card("Bass").dispatchEvent(new MouseEvent("click", { bubbles: true }));
+      });
+
+      expect(setEqMock).toHaveBeenCalledWith(bass.bands, -3);
+      expect(card("Bass").getAttribute("aria-pressed")).toBe("true");
+    });
+
+    it("marks the profile that matches the curve on load", async () => {
+      eqMock.mockResolvedValue(stateWith({ bands: bass.bands, preamp: -3 }));
+      await mount();
+      expect(card("Bass").getAttribute("aria-pressed")).toBe("true");
+    });
+
+    it("does not mark a profile whose preamp differs", async () => {
+      eqMock.mockResolvedValue(stateWith({ bands: bass.bands, preamp: 0 }));
+      await mount();
+      expect(card("Bass").getAttribute("aria-pressed")).toBe("false");
+    });
+
+    it("saves the current curve under the typed name", async () => {
+      const saved = { id: "p2", name: "Mine", bands: [band()], preamp: null };
+      eqMock.mockResolvedValue(stateWith());
+      createEqProfileMock.mockResolvedValue({
+        profile: saved,
+        profiles: [bass, saved],
+      });
+      await mount();
+
+      await openSaveDialog();
+      await typeName("  Mine ");
+      await submitDialog();
+
+      expect(createEqProfileMock).toHaveBeenCalledWith("Mine", [band()], null);
+      expect(dialogInput()).toBeNull();
+      expect(card("Mine")).toBeTruthy();
+    });
+
+    it("keeps the dialog open with the server's reason on a clash", async () => {
+      eqMock.mockResolvedValue(stateWith());
+      createEqProfileMock.mockRejectedValue(
+        new Error(
+          '409: {"detail":"A profile named \\"Bass\\" already exists"}',
+        ),
+      );
+      await mount();
+
+      await openSaveDialog();
+      await typeName("bass");
+      await submitDialog();
+
+      expect(dialogInput()).not.toBeNull();
+      expect(document.body.textContent).toContain(
+        'A profile named "Bass" already exists',
+      );
+    });
+
+    it("disables saving at the server's cap", async () => {
+      eqMock.mockResolvedValue(stateWith({ manual_profiles_max: 1 }));
+      await mount();
+      const saveBtn = [...container.querySelectorAll("button")].find((b) =>
+        b.textContent?.includes("Save current"),
+      )!;
+      expect(saveBtn.disabled).toBe(true);
+    });
   });
 });

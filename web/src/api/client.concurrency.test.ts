@@ -85,6 +85,43 @@ describe("API request concurrency", () => {
     await expect(api.version()).resolves.toBeDefined();
   });
 
+  it("sends window actions without waiting for a slot", async () => {
+    // A drag only works while the mouse button is held, so it can't wait
+    // behind a busy page's data requests.
+    const { api, apiRequestsInFlight } = await import("./client");
+    const pending = Array.from({ length: 6 }, () => deferred());
+    let i = 0;
+    fetchMock.mockImplementation(() => pending[i++].promise);
+
+    const calls = Array.from({ length: 6 }, () =>
+      api.version().catch(() => {}),
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+
+    fetchMock.mockResolvedValue(ok());
+    const actions = [
+      ["/api/_internal/window/start_drag", api.window.startDrag()],
+      ["/api/_internal/window/start_resize", api.window.startResize("left")],
+      ["/api/_internal/window/minimize", api.window.minimize()],
+      ["/api/_internal/window/maximize", api.window.maximize()],
+      ["/api/_internal/window/close", api.window.close()],
+    ] as const;
+    await Promise.all(actions.map(([, p]) => p));
+
+    for (const [path] of actions) {
+      expect(fetchMock).toHaveBeenCalledWith(
+        path,
+        expect.objectContaining({ method: "POST", priority: "high" }),
+      );
+    }
+    expect(apiRequestsInFlight()).toBe(4);
+
+    pending.forEach((p) => p.resolve(ok()));
+    await Promise.all(calls);
+  });
+
   it("reports how many requests hold a slot", async () => {
     const { api, apiRequestsInFlight } = await import("./client");
     expect(apiRequestsInFlight()).toBe(0);

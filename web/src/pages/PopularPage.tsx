@@ -16,7 +16,7 @@ import { Skeleton, TrackListSkeleton } from "@/components/Skeletons";
 import { useToast } from "@/components/toast";
 import { preseedSpotifyPlaycounts } from "@/hooks/useSpotifyEnrichment";
 import { TrackList } from "@/components/TrackList";
-import { cn, imageProxy } from "@/lib/utils";
+import { cn, imageUrl } from "@/lib/utils";
 
 /**
  * Global popularity page powered by Last.fm's `chart.*` endpoints.
@@ -184,7 +184,7 @@ function ArtistChartCard({
 }) {
   const navigate = useNavigate();
   const toast = useToast();
-  const img = imageProxy(artist.image || artist.tidal_picture || undefined);
+  const img = imageUrl(artist.image || artist.tidal_picture || undefined);
 
   const onClick = async () => {
     // The id is resolved server-side with the page. Only fall back to an

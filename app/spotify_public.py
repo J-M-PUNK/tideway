@@ -45,6 +45,7 @@ import re
 import sqlite3
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional
 
@@ -105,7 +106,45 @@ def _ensure_client() -> tuple[Any, Any]:
         _tls_client = CurlSpotifyClient(auto_retries=2)
         _song_mod = Song(client=_tls_client)
         _artist_mod = Artist(client=_tls_client)
+        _cache_operation_hashes(_song_mod.base)
+        _cache_operation_hashes(_artist_mod.base)
         return _song_mod, _artist_mod
+
+
+def _cache_operation_hashes(base: Any) -> None:
+    """Make `base.part_hash` look each GraphQL operation up once.
+
+    spotapi finds an operation's sha256 hash by splitting `raw_hashes`
+    on the operation name, every call. `raw_hashes` is every Spotify
+    web-player JS bundle concatenated, 7-10 million characters, so each
+    GraphQL request paid a 6-13 ms `str.split` that holds the GIL from
+    start to finish. A page's worth of playcount lookups makes dozens of
+    them, all competing with the audio callback for the GIL. There are
+    only a handful of operation names, and the hashes only change if
+    spotapi refetches the bundles, so each lookup is cached against the
+    `raw_hashes` string it was read from.
+
+    The first lookup is also what downloads the bundles, and spotapi
+    builds `raw_hashes` in place: it assigns the main bundle, then
+    appends ~75 chunks one request at a time. The playcount batch makes
+    its first lookups from five threads at once, so without the lock
+    every thread downloaded the whole set, and the ones that read
+    `raw_hashes` half-built found no `searchDesktop` hash, raised
+    IndexError, and had their track cached as having no playcount."""
+    lookup = base.part_hash
+    found: dict[str, tuple[Any, str]] = {}
+    lock = threading.Lock()
+
+    def part_hash(name: str) -> str:
+        with lock:
+            hit = found.get(name)
+            if hit is not None and hit[0] is base.raw_hashes:
+                return hit[1]
+            value = lookup(name)
+            found[name] = (base.raw_hashes, value)
+            return value
+
+    base.part_hash = part_hash
 
 
 # ---------------------------------------------------------------------------
@@ -398,7 +437,7 @@ def _resolve_artist_via_name_match(
         ic = (isrc or "").strip().upper()
         if not ic:
             continue
-        for tid, _name in _search_track_candidates(f"isrc:{ic}"):
+        for tid, _name, _artist in _search_track_candidates(f"isrc:{ic}"):
             try:
                 payload = _song_info(tid)
             except Exception as exc:
@@ -963,10 +1002,13 @@ def _safe_int(v: object) -> Optional[int]:
         return None
 
 
-def _search_track_candidates(query: str) -> list[tuple[str, str]]:
+def _search_track_candidates(
+    query: str,
+) -> list[tuple[str, str, Optional[str]]]:
     """Run a Spotify GraphQL track search and return
-    `[(track_id, display_name), ...]` for hits whose URI is a
-    spotify:track:. Errors are logged and swallowed — callers
+    `[(track_id, display_name, primary_artist_name), ...]` for hits
+    whose URI is a spotify:track:. The artist is None when the result
+    doesn't carry one. Errors are logged and swallowed — callers
     treat an empty list as "search produced nothing useful".
 
     Limit is 50 (was 5). For tracks that exist in multiple Spotify
@@ -978,7 +1020,7 @@ def _search_track_candidates(query: str) -> list[tuple[str, str]]:
     title/artist matches and picks the highest playcount among those,
     so widening the candidate list directly raises ceiling on what
     we can find without making the lookup any less accurate. The
-    pre-filter on `name.lower() == wanted_title` gates the expensive
+    pre-filters on title and primary artist gate the expensive
     per-candidate `_song_info` calls so wider lookups don't blow up
     cost.
     """
@@ -995,13 +1037,17 @@ def _search_track_candidates(query: str) -> list[tuple[str, str]]:
         .get("items")
         or []
     )
-    out: list[tuple[str, str]] = []
+    out: list[tuple[str, str, Optional[str]]] = []
     for entry in items:
         item = (entry.get("item") or {}).get("data") or {}
         uri = item.get("uri") or ""
         if not uri.startswith("spotify:track:"):
             continue
-        out.append((uri.split(":")[-1], str(item.get("name") or "")))
+        artists = (item.get("artists") or {}).get("items") or []
+        primary = (artists[0].get("profile") or {}).get("name") if artists else None
+        out.append(
+            (uri.split(":")[-1], str(item.get("name") or ""), primary or None)
+        )
     return out
 
 
@@ -1064,6 +1110,38 @@ def _track_primary_artist_name(payload: Mapping[str, Any]) -> str:
     )
 
 
+# getTrack calls made while resolving a canonical track run here. A hit
+# that has been reissued on dozens of compilations leaves that many
+# candidates with the right title and artist, each needing its own
+# ~0.3 s getTrack for its playcount: Cardi B's "I Like It" has 55, which
+# took 20 s one after another. The pool is shared by every resolution
+# so a batch of tracks resolving at once can't multiply how many
+# requests are in flight to Spotify.
+_GET_TRACK_POOL = ThreadPoolExecutor(
+    max_workers=8, thread_name_prefix="spotify-gettrack"
+)
+
+# The `<artist> <title>` search of a canonical-track resolution runs
+# here while the resolving thread runs the `isrc:` search. Each is a
+# limit-50 search, ~1 MB and ~1.3 s, and neither depends on the other,
+# so running them one after the other doubled every track's lookup.
+# Sized to the playcount batch's five workers so a full batch runs both
+# searches for every track at once, and shared for the same reason as
+# the getTrack pool: concurrent batches queue here rather than adding
+# more searches in flight to Spotify.
+_SEARCH_POOL = ThreadPoolExecutor(
+    max_workers=5, thread_name_prefix="spotify-search"
+)
+
+
+def _song_info_or_none(spotify_track_id: str) -> Optional[Mapping[str, Any]]:
+    try:
+        return _song_info(spotify_track_id)
+    except Exception as exc:
+        log.warning("spotify getTrack failed for %s: %s", spotify_track_id, exc)
+        return None
+
+
 def _resolve_canonical_track(
     isrc: str, title: str, artist: str
 ) -> tuple[Optional[int], Optional[str]]:
@@ -1090,15 +1168,25 @@ def _resolve_canonical_track(
     # Insertion-ordered dedupe across both searches. The ISRC pass
     # often produces zero or one candidate; the title pass covers
     # reissues with unrelated ISRCs.
-    candidates: dict[str, str] = {}
-    for tid, name in _search_track_candidates(f"isrc:{isrc}"):
-        candidates.setdefault(tid, name)
-    for tid, name in _search_track_candidates(f"{artist} {title}"):
-        candidates.setdefault(tid, name)
+    candidates: dict[str, tuple[str, Optional[str]]] = {}
+    title_search = _SEARCH_POOL.submit(
+        _search_track_candidates, f"{artist} {title}"
+    )
+    for tid, name, primary in _search_track_candidates(f"isrc:{isrc}"):
+        candidates.setdefault(tid, (name, primary))
+    for tid, name, primary in title_search.result():
+        candidates.setdefault(tid, (name, primary))
 
-    best_pc = -1
-    best_id: Optional[str] = None
-    for tid, name in candidates.items():
+    eligible: list[str] = []
+    for tid, (name, primary) in candidates.items():
+        # Search results carry each track's artists, so a same-titled
+        # track by someone else can be dropped here instead of after a
+        # getTrack round trip. Bad Bunny's "DtMF" sent six candidates
+        # through getTrack to keep one; with this it sends that one and
+        # gets the same playcount. When the result has no artist,
+        # getTrack's check below still decides.
+        if primary is not None and primary.strip().lower() != wanted_artist:
+            continue
         # Title check at the search-result level — getTrack doesn't
         # always echo the same display name verbatim, and we want
         # to skip "Thriller (Live)" / "Thriller - Remastered" before
@@ -1115,10 +1203,13 @@ def _resolve_canonical_track(
         # the rejection on alt-versions.
         if not _track_titles_match(name, wanted_title):
             continue
-        try:
-            payload = _song_info(tid)
-        except Exception as exc:
-            log.warning("spotify getTrack failed for %s: %s", tid, exc)
+        eligible.append(tid)
+
+    best_pc = -1
+    best_id: Optional[str] = None
+    payloads = _GET_TRACK_POOL.map(_song_info_or_none, eligible)
+    for tid, payload in zip(eligible, payloads):
+        if payload is None:
             continue
         if _track_primary_artist_name(payload).strip().lower() != wanted_artist:
             continue

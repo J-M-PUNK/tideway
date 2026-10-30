@@ -8,7 +8,7 @@ import {
 } from "@/hooks/PlayerContext";
 import { Button } from "@/components/ui/button";
 import { EmptyState } from "@/components/EmptyState";
-import { cn, imageProxy } from "@/lib/utils";
+import { cn, imageUrl } from "@/lib/utils";
 
 /**
  * Right-side lyrics panel. Fetches lyrics when the current track changes;
@@ -74,7 +74,7 @@ export function LyricsPanel({
             <div className="h-12 w-12 shrink-0 overflow-hidden rounded bg-secondary">
               {track.album?.cover ? (
                 <img
-                  src={imageProxy(track.album.cover)}
+                  src={imageUrl(track.album.cover)}
                   alt=""
                   className="h-full w-full object-cover"
                 />

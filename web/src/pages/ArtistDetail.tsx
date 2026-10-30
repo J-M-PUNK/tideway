@@ -23,7 +23,7 @@ import {
   TrackListSkeleton,
 } from "@/components/Skeletons";
 import { VideoCard } from "@/components/VideoCard";
-import { imageProxy } from "@/lib/utils";
+import { imageUrl } from "@/lib/utils";
 
 export function ArtistDetail({ onDownload }: { onDownload: OnDownload }) {
   const { id = "" } = useParams();
@@ -269,7 +269,7 @@ function LikedSummaryCard({
     .join(" · ");
 
   const cover = albums[0]?.cover ?? tracks[0]?.album?.cover ?? null;
-  const coverUrl = cover ? imageProxy(cover) : null;
+  const coverUrl = cover ? imageUrl(cover) : null;
 
   return (
     <Link

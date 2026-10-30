@@ -4,7 +4,7 @@ import {
   usePlayerMeta,
   usePlayerTime,
 } from "@/hooks/PlayerContext";
-import { formatDuration, imageProxy } from "@/lib/utils";
+import { formatDuration, imageUrl } from "@/lib/utils";
 import { StreamQualityBadge } from "@/components/StreamQualityBadge";
 import { cn } from "@/lib/utils";
 
@@ -14,7 +14,7 @@ import { cn } from "@/lib/utils";
  * whatever the user is working on.
  *
  * Both the main window and the mini-player subscribe to the same
- * /api/player/events SSE stream and POST to the same transport
+ * player events (on /api/events) and POST to the same transport
  * endpoints, so playback is coherent across both surfaces without
  * any explicit sync. Stopping in one stops both, skipping in one
  * skips both, etc.
@@ -37,7 +37,7 @@ export function MiniPlayerPage() {
     );
   }
 
-  const cover = imageProxy(track.album?.cover);
+  const cover = imageUrl(track.album?.cover);
   const pct = duration > 0 ? (currentTime / duration) * 100 : 0;
   const artists = track.artists.map((a) => a.name).join(", ");
 

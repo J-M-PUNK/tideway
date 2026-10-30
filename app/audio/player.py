@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import faulthandler
 import logging
+import math
 import os
 import queue
 import sys
@@ -39,10 +40,10 @@ from dataclasses import dataclass
 from typing import Callable, Optional, Union
 
 import numpy as np
-import requests
 import sounddevice as sd  # type: ignore
 import tidalapi
 
+from app.http import STREAM_SESSION
 from app.audio.decoder import Decoder
 from app.audio.crossfade import mix_crossfade_block
 from app.audio.crossfeed import Crossfeed
@@ -63,6 +64,7 @@ from app.audio.replaygain import (
 )
 from app.audio.output_devices import list_output_devices, resolve_output_device
 from app.audio.segment_reader import SegmentReader
+from app.audio.win_com import ensure_com_initialized
 
 # Optional audio output taps. Imported at module load (not lazily
 # from inside the audio callback) because Python's `import` statement
@@ -376,6 +378,11 @@ class PCMPlayer:
         # the current track ends; consumed in-place by the audio
         # callback at end-of-track.
         self._preload: Optional[_Preload] = None
+        # Bumped whenever a preload being built must not be installed:
+        # an explicit drop (stop, a different next track) or a load.
+        # preload() builds outside _pipeline_lock and only installs if
+        # this hasn't moved since it started.
+        self._preload_gen = 0
 
         # Set by _try_gapless_swap() when the audio callback
         # transitions to a new track while UPnP passthrough is active.
@@ -726,22 +733,25 @@ class PCMPlayer:
         #      decoder thread runs against a fresh queue, then we
         #      atomically swap references the way `_adopt_preload_locked`
         #      does for a real preload — the OutputStream stays open
-        #      across the swap, so we never race the OS releasing the
-        #      audio device. This is critical on Windows audio devices
-        #      with slow `IAudioClient::Release` (USB DACs are the
-        #      canonical case: their second `stream.start()` after a
-        #      `close()` fails with a `WdmSyncIoctl` IOCTL error, the
-        #      player flips to state=error, and the frontend's
-        #      auto-advance burns through the queue at ~200 ms / track).
+        #      across the swap, so the track change costs no stream
+        #      reopen at all. (This path was first added for a USB DAC
+        #      whose reopened stream failed to start with a
+        #      `WdmSyncIoctl` error; that turned out to be a WASAPI
+        #      start on a thread without COM, fixed in _start_stream,
+        #      not the reopen itself.) When the new decoder's format
+        #      doesn't fit the active stream, (A) still adopts the
+        #      pipeline it built and replaces only the stream; that
+        #      close + reopen can't be avoided when the format changes.
         #
         #  (B) **Full teardown + fresh open** when no stream is open yet
-        #      (cold start, after a stop), the device id changed, or the
-        #      new decoder's format doesn't fit the active stream. This
-        #      is the original slow path and the race-prone one — but
-        #      it only fires in cases where we genuinely have to close
-        #      and reopen.
+        #      (cold start, after a stop). This is the original slow
+        #      path; it only fires when there is no stream to keep.
         self._dbg(f"load SLOW PATH: full teardown + fresh resolve for {track_id}")
         self._pending_upnp_notify = False
+        # A preload still building was chosen for the track we're
+        # leaving; it must not land as this new track's next.
+        with self._lock:
+            self._preload_gen += 1
         load_t0 = time.monotonic()
 
         # Snapshot the active stream's format so we can decide whether
@@ -775,9 +785,47 @@ class PCMPlayer:
                 and synthetic.sd_dtype == active_dtype
                 and synthetic.channels == active_channels
             )
-            if rate_matches:
-                # Path (A): atomic swap, keep stream open. Mirrors
-                # `_adopt_preload_locked`'s same-rate branch.
+            # Path (A): adopt the pipeline we just built. When its
+            # format matches the open stream, the stream stays open
+            # across the swap. When it doesn't (usually a 16-bit track
+            # after a 24-bit one at the mixer rate, or the reverse),
+            # only the stream is replaced: this used to discard the
+            # pipeline and rebuild the same one from scratch in path
+            # (B), paying the resolve and the decoder init twice
+            # (`teardown=~800ms` and then `decoder_init=~300ms` in the
+            # load perf line, on every bit-depth change).
+            outgoing_stream = None
+            if not rate_matches:
+                self._dbg(
+                    f"load: format change "
+                    f"({active_rate}/{active_dtype}/{active_channels} -> "
+                    f"{synthetic.sample_rate}/{synthetic.sd_dtype}/"
+                    f"{synthetic.channels}); reopening the stream"
+                )
+                with self._lock:
+                    outgoing_stream = self._stream
+                    self._stream = None
+                    # Muzzle the finished_callback that abort() fires,
+                    # as set_output_device does. Unmuzzled it reads the
+                    # stream ending as device loss, or bridges onto the
+                    # stale preload we're about to drop.
+                    self._replacing_stream = True
+            try:
+                if outgoing_stream is not None:
+                    # abort() over stop(): same reason as _teardown —
+                    # stop() drains the device buffer first.
+                    try:
+                        outgoing_stream.abort()
+                    except Exception:
+                        pass
+                    try:
+                        outgoing_stream.close()
+                    except Exception:
+                        pass
+                    # The callback can no longer fire, so a crossfade
+                    # caught mid-window can be cancelled, as _teardown
+                    # did when this case went through path (B).
+                    self._abort_crossfade()
                 with self._lock:
                     old_thread = self._decoder_thread
                     old_stop_flag = self._stop_flag
@@ -793,84 +841,54 @@ class PCMPlayer:
                     self._paused = False
                     self._seeking = False
                     self._last_error = None
+                    if outgoing_stream is not None:
+                        # After the swap: _open_output_stream configures
+                        # whichever decoder is current. The new
+                        # decoder's thread is already running, so its
+                        # output rate must not change under it; it was
+                        # built against the open stream's rate (the
+                        # mixer rate), which is what this asks for
+                        # again, so set_target_rate is a no-op.
+                        self._open_output_stream(
+                            synthetic.sample_rate,
+                            synthetic.channels,
+                            synthetic.sd_dtype,
+                        )
                     # Same contract as the original slow path: load()
                     # leaves us in "paused"; caller's play() flips to
-                    # "playing".
+                    # "playing" (and starts a reopened stream).
                     self._transition("paused")
+            finally:
+                if outgoing_stream is not None:
+                    with self._lock:
+                        self._replacing_stream = False
 
-                # Outside the lock: clean up old refs without holding it
-                # while we wait on a thread join.
-                if old_stop_flag is not None:
-                    old_stop_flag.set()
-                if old_decoder is not None:
-                    try:
-                        old_decoder.cancel_source()
-                    except Exception:
-                        pass
-                if old_thread is not None and old_thread.is_alive():
-                    old_thread.join(timeout=0.5)
-                if old_decoder is not None:
-                    try:
-                        old_decoder.close()
-                    except Exception:
-                        pass
-                # Stale preload: stop its thread and close its decoder
-                # so we don't leak. cancel_source aborts any in-flight
-                # HTTP fetch so the join returns promptly.
-                if stale_preload is not None:
-                    stale_preload.stop_flag.set()
-                    try:
-                        stale_preload.decoder.cancel_source()
-                    except Exception:
-                        pass
-                    if stale_preload.thread.is_alive():
-                        stale_preload.thread.join(timeout=0.5)
-                    try:
-                        stale_preload.decoder.close()
-                    except Exception:
-                        pass
+            # The old pipeline and any stale preload are detached
+            # now; neither is on the audible path, so release them
+            # without making this click wait for their threads.
+            self._retire_pipeline(old_stop_flag, old_decoder, old_thread)
+            self._retire_preload(stale_preload)
 
-                _perf = (
-                    f"[perf] load track={track_id} "
-                    f"total={(time.monotonic() - load_t0) * 1000.0:.0f}ms "
-                    f"build={(t_built - load_t0) * 1000.0:.0f}ms "
-                    f"swap={(time.monotonic() - t_built) * 1000.0:.0f}ms "
-                    f"(gapless: kept stream open)"
+            _perf = (
+                f"[perf] load track={track_id} "
+                f"total={(time.monotonic() - load_t0) * 1000.0:.0f}ms "
+                f"build={(t_built - load_t0) * 1000.0:.0f}ms "
+                f"swap={(time.monotonic() - t_built) * 1000.0:.0f}ms "
+                + (
+                    "(gapless: kept stream open)"
+                    if outgoing_stream is None
+                    else "(format change: reopened stream)"
                 )
-                print(_perf, file=sys.stderr, flush=True)
-                # Also persist: a Finder-launched .app discards stderr,
-                # so without this the slow-start breakdown is lost.
-                audio_log.info(_perf)
-                self._emit()
-                return self.snapshot()
-            else:
-                # Format mismatch — the synthetic pipeline's decoder
-                # can't feed the active stream. Tear it down and fall
-                # through to path (B), which closes the old stream and
-                # opens a new one at the new format. The close+open
-                # race can still fire here, but format-change track
-                # changes are far rarer than format-match ones.
-                self._dbg(
-                    f"load slow path: format mismatch "
-                    f"({synthetic.sample_rate}/{synthetic.sd_dtype}/"
-                    f"{synthetic.channels} vs active "
-                    f"{active_rate}/{active_dtype}/{active_channels}); "
-                    f"discarding synthetic pipeline"
-                )
-                synthetic.stop_flag.set()
-                try:
-                    synthetic.decoder.cancel_source()
-                except Exception:
-                    pass
-                if synthetic.thread.is_alive():
-                    synthetic.thread.join(timeout=0.5)
-                try:
-                    synthetic.decoder.close()
-                except Exception:
-                    pass
+            )
+            print(_perf, file=sys.stderr, flush=True)
+            # Also persist: a Finder-launched .app discards stderr,
+            # so without this the slow-start breakdown is lost.
+            audio_log.info(_perf)
+            self._emit()
+            return self.snapshot()
 
-        # Path (B): no active stream (or format mismatch fell through).
-        # Full teardown + fresh open at the new decoder's native rate.
+        # Path (B): no active stream. Full teardown + fresh open at the
+        # new decoder's native rate.
         self._teardown()
         t_teardown = time.monotonic()
         with self._lock:
@@ -1042,7 +1060,7 @@ class PCMPlayer:
                 self._paused = False
                 try:
                     if not stream.active:
-                        stream.start()
+                        self._start_stream(stream)
                 except Exception as exc:
                     log.exception("stream.start failed")
                     self._last_error = str(exc)
@@ -1249,9 +1267,15 @@ class PCMPlayer:
         # bit-crushed audio. set_target_rate flips the new decoder
         # into the same flt-at-target_rate config the old one had,
         # or no-ops in the passthrough case (exclusive mode, where
-        # stream rate == source rate).
+        # stream rate == source rate). A float32 stream at the source
+        # rate (shared mode, see _float_output_for) needs float output
+        # from the new decoder too, or its int samples would be read as
+        # float32 the same way.
         if self._stream_sample_rate:
-            new_decoder.set_target_rate(self._stream_sample_rate)
+            new_decoder.set_target_rate(
+                self._stream_sample_rate,
+                float_output=self._stream_sd_dtype == "float32",
+            )
         t_decoder_init = time.monotonic()
         # For local files the new container starts at t=0; tell it
         # to seek forward to the precise target. For DASH we already
@@ -1416,31 +1440,44 @@ class PCMPlayer:
             # Different track (or no preload) — tear down any stale
             # one before we build the new one.
             self._drop_preload()
+            with self._lock:
+                gen = self._preload_gen
 
-            try:
-                source_spec, duration_s, stream_info, prefetched_bytes, track_meta = (
-                    self._resolve_source(
-                        track_id, quality, set_current_meta=False
-                    )
+        # The resolve and the decoder init are network round-trips —
+        # several hundred ms together. They run outside _pipeline_lock
+        # so a click doesn't queue behind them: the frontend fires
+        # this ten seconds into every track, and a load() arriving in
+        # that window used to wait out the whole preload before it
+        # could start its own. What they produce is installed below
+        # only if nothing has superseded this request meanwhile.
+        try:
+            source_spec, duration_s, stream_info, prefetched_bytes, track_meta = (
+                self._resolve_source(
+                    track_id, quality, set_current_meta=False
                 )
-            except Exception as exc:
-                log.exception("preload resolve failed for %s", track_id)
-                return {"ok": False, "error": str(exc)}
+            )
+        except Exception as exc:
+            log.exception("preload resolve failed for %s", track_id)
+            return {"ok": False, "error": str(exc)}
 
-            # While casting, do NOT open a second TIDAL reader for the
-            # next track. TIDAL closes the session when two tracks are
-            # open, so the next bounded file is pre-downloaded (serialized
-            # after the current track's TIDAL reader is released) and then
-            # pre-staged on the renderer via SetNextAVTransportURI so it
-            # advances on its own at the boundary. This is the path being
-            # re-tested against UAPP 7.1.2.8 (7.1.1.4 crashed in
-            # HTTPStreamProvider::cleanUp on the SetNext action).
-            if (
-                _upnp_manager is not None
-                and isinstance(source_spec, list)
-                and _upnp_manager.is_active()
-                and _upnp_manager.is_gapless()
-            ):
+        # While casting, do NOT open a second TIDAL reader for the
+        # next track. TIDAL closes the session when two tracks are
+        # open, so the next bounded file is pre-downloaded (serialized
+        # after the current track's TIDAL reader is released) and then
+        # pre-staged on the renderer via SetNextAVTransportURI so it
+        # advances on its own at the boundary. This is the path being
+        # re-tested against UAPP 7.1.2.8 (7.1.1.4 crashed in
+        # HTTPStreamProvider::cleanUp on the SetNext action). The
+        # staging stays serialized with the rest of the pipeline.
+        if (
+            _upnp_manager is not None
+            and isinstance(source_spec, list)
+            and _upnp_manager.is_active()
+            and _upnp_manager.is_gapless()
+        ):
+            with self._pipeline_lock:
+                if not self._preload_still_wanted(gen, track_id):
+                    return {"ok": False, "superseded": True}
                 staged = False
                 try:
                     staged = _upnp_manager.set_next_track(
@@ -1474,14 +1511,20 @@ class PCMPlayer:
                             track_meta=track_meta,
                             cast=True,
                         )
-                return {"ok": True, "cached": False, "cast": True}
+            return {"ok": True, "cached": False, "cast": True}
 
-            try:
-                source = _build_source(source_spec, prefetched=prefetched_bytes)
-                decoder = Decoder(source)
-            except Exception as exc:
-                log.exception("preload resolve failed for %s", track_id)
-                return {"ok": False, "error": str(exc)}
+        try:
+            source = _build_source(source_spec, prefetched=prefetched_bytes)
+            decoder = Decoder(source)
+        except Exception as exc:
+            log.exception("preload resolve failed for %s", track_id)
+            return {"ok": False, "error": str(exc)}
+
+        with self._pipeline_lock:
+            if not self._preload_still_wanted(gen, track_id):
+                self._dbg(f"preload superseded while building track={track_id}")
+                decoder.close()
+                return {"ok": False, "superseded": True}
 
             # Configure the preload's output rate to match the active
             # stream so the gapless splice works for any source-rate
@@ -1491,9 +1534,14 @@ class PCMPlayer:
             # exclusive mode we keep the preload at its own source
             # rate; if it doesn't match the active stream, the adopt
             # path reopens the stream (same ~50 ms gap as before).
+            # Read now, not before the build: the stream may have been
+            # reopened in a new format while we were on the network.
             current_stream_rate = self._stream_sample_rate
             if not self._exclusive_mode and current_stream_rate:
-                decoder.set_target_rate(current_stream_rate)
+                decoder.set_target_rate(
+                    current_stream_rate,
+                    float_output=self._float_output_for(False),
+                )
 
             q: queue.Queue[Optional[np.ndarray]] = queue.Queue(
                 maxsize=_PCM_QUEUE_MAX
@@ -1570,6 +1618,18 @@ class PCMPlayer:
                 "dtype": pre.sd_dtype,
             }
 
+    def _preload_still_wanted(self, gen: int, track_id: str) -> bool:
+        """Whether a preload that started at generation `gen` may still
+        be installed. Call with _pipeline_lock held.
+
+        Not if anything bumped the generation since (a drop, a newer
+        preload, a load), and not if `track_id` became the current
+        track meanwhile: the user clicked the track that was being
+        preloaded and load() built it itself, so installing it as the
+        next track would replay it at the end of itself."""
+        with self._lock:
+            return gen == self._preload_gen and self._current_track_id != track_id
+
     def _build_load_pipeline(
         self,
         track_id: str,
@@ -1626,7 +1686,9 @@ class PCMPlayer:
         # there — if it ends up differing from the active stream's,
         # the caller falls through to the full teardown path.
         if match_rate is not None and not self._exclusive_mode:
-            decoder.set_target_rate(int(match_rate))
+            decoder.set_target_rate(
+                int(match_rate), float_output=self._float_output_for(False)
+            )
 
         q: "queue.Queue[Optional[np.ndarray]]" = queue.Queue(
             maxsize=_PCM_QUEUE_MAX
@@ -1672,28 +1734,11 @@ class PCMPlayer:
             with self._lock:
                 pre = self._preload
                 self._preload = None
+                self._preload_gen += 1
             if pre is None:
                 return
             print(f"[pcm] drop preload track={pre.track_id}", flush=True)
-            if getattr(pre, "cast", False) is True:
-                # Metadata-only cast record: nothing to stop or close.
-                return
-            pre.stop_flag.set()
-            # Abort any in-flight HTTP fetch on the preload's decoder
-            # so its thread exits promptly instead of waiting out the
-            # rest of a 150-300 ms segment download. Drop-preload
-            # fires on every track change while a preload is buffering;
-            # without this, a fast skip stalls behind the dead preload.
-            try:
-                pre.decoder.cancel_source()
-            except Exception:
-                pass
-            if pre.thread.is_alive():
-                pre.thread.join(timeout=2.0)
-            try:
-                pre.decoder.close()
-            except Exception:
-                pass
+            self._retire_preload(pre)
 
     def set_volume(self, volume: int) -> PlayerSnapshot:
         volume = max(0, min(100, int(volume)))
@@ -2127,7 +2172,7 @@ class PCMPlayer:
                     self._callback_carry = None
                     self._open_output_stream(sample_rate, channels, sd_dtype)
                 try:
-                    self._stream.start()
+                    self._start_stream(self._stream)
                 except Exception:
                     log.exception("set_output_device: stream start failed")
             finally:
@@ -2178,7 +2223,7 @@ class PCMPlayer:
                     self._callback_carry = None
                     self._open_output_stream(sample_rate, channels, sd_dtype)
                 try:
-                    self._stream.start()
+                    self._start_stream(self._stream)
                 except Exception:
                     log.exception("set_exclusive_mode: stream start failed")
             finally:
@@ -2245,6 +2290,44 @@ class PCMPlayer:
                 decoder.close()
             except Exception:
                 pass
+
+    def _retire_pipeline(self, stop_flag, decoder, thread) -> None:
+        """Stop a pipeline that is no longer the player's and release
+        it in the background.
+
+        For a track change, never for seek: the old thread must own a
+        queue the audio callback no longer reads, because it may push
+        one more chunk before it notices the stop flag. Seek reuses the
+        live queue, which is why `_restart_decoder_at` joins inline.
+
+        Joining inline here is what made a track change wait: a
+        producer that is ahead of playback sits in `pcm_queue.put`
+        with a 0.5 s timeout and only sees the stop flag when that
+        expires, so the join cost up to half a second per pipeline on
+        every click (`swap=~450ms` in the load perf line). Stopping is
+        immediate: the flag is set, and cancel_source() aborts an
+        in-flight segment fetch, which also releases the TIDAL reader
+        right away (TIDAL drops the session with two tracks open).
+        Only the join + close wait, on the disposer thread."""
+        if stop_flag is not None:
+            stop_flag.set()
+        if decoder is not None:
+            decoder.cancel_source()
+        if thread is not None or decoder is not None:
+            threading.Thread(
+                target=self._dispose_pipeline_async,
+                args=(thread, decoder),
+                daemon=True,
+                name="pcm-dispose",
+            ).start()
+
+    def _retire_preload(self, pre: Optional["_Preload"]) -> None:
+        """`_retire_pipeline` for a preload (or the synthetic preload a
+        gapless load builds). A cast preload is a metadata-only record
+        with no thread or decoder, so there's nothing to release."""
+        if pre is None or getattr(pre, "cast", False) is True:
+            return
+        self._retire_pipeline(pre.stop_flag, pre.decoder, pre.thread)
 
     def _teardown(self) -> None:
         """Stop the pipeline fully. State transitions to idle BEFORE
@@ -2439,36 +2522,36 @@ class PCMPlayer:
             except Exception:
                 pass
 
-        # Cache hit path: skip the two parallel Tidal round-trips
-        # (track metadata + playbackinfo) plus the local manifest
-        # parse when a recent prefetch or play already resolved this
-        # (track_id, quality) pair. 3-minute TTL stays well inside
-        # Tidal's signed-URL expiry window.
         cache_key = (track_id, quality)
         t0 = time.monotonic()
-        cached_urls_info = self._manifest_cache.lookup(cache_key)
-        if cached_urls_info is not None:
-            urls, duration, info, bytes_map, track_meta = cached_urls_info
-            # Cache HIT must refresh the UPnP metadata for playback too
-            # — the miss path does this inside _resolve_uncached, but a
-            # hit used to leave _current_track_meta pointing at the
-            # previous track, so the renderer was told the wrong
-            # artist/song at session start (and on every replay, since
-            # cold-start prefetch makes the first play a hit). Guarded
-            # by set_current_meta so speculative prefetch doesn't clobber
-            # it.
-            if track_meta is not None and set_current_meta:
-                self._current_track_meta = track_meta
-            print(
-                f"[perf] resolve track={track_id} quality={quality} "
-                f"cache=HIT elapsed={(time.monotonic() - t0) * 1000.0:.0f}ms "
-                f"prefetched_segments={len(bytes_map)}",
-                file=sys.stderr,
-                flush=True,
+        joined = False
+        while True:
+            hit = self._cached_source(
+                cache_key, t0, set_current_meta, joined=joined
             )
-            return (list(urls), duration, info, bytes_map, track_meta)
+            if hit is not None:
+                return hit
+            in_flight = self._manifest_cache.begin_fill(cache_key)
+            if in_flight is None:
+                break
+            # Another thread is already asking Tidal for this exact
+            # track at this quality: typically the hover warm-up for the
+            # row just clicked, or the preload of the track just skipped
+            # to. Its answer lands in the cache, so wait for it rather
+            # than paying a second, parallel resolve. If it failed, the
+            # loop finds the cache still empty and resolves here. The
+            # owner's own resolve is bounded by _RESOLVE_TIMEOUT_S, and
+            # so is this wait.
+            in_flight.wait(timeout=_RESOLVE_TIMEOUT_S)
+            joined = True
 
         try:
+            # A fill can complete between the miss above and our claim.
+            hit = self._cached_source(
+                cache_key, t0, set_current_meta, joined=joined
+            )
+            if hit is not None:
+                return hit
             return self._resolve_uncached(
                 session, track_id, quality, cache_key, t0,
                 set_current_meta=set_current_meta,
@@ -2503,6 +2586,53 @@ class PCMPlayer:
                     "back in."
                 ) from exc
             raise
+        finally:
+            self._manifest_cache.end_fill(cache_key)
+
+    def _cached_source(
+        self,
+        cache_key: tuple,
+        t0: float,
+        set_current_meta: bool,
+        *,
+        joined: bool,
+    ) -> Optional[
+        tuple[list[str], Optional[float], StreamInfo, dict[int, bytes], Optional[dict]]
+    ]:
+        """The cache-hit half of _resolve_source, or None on a miss.
+
+        Skips the two parallel Tidal round-trips (track metadata +
+        playbackinfo) plus the local manifest parse when a recent
+        prefetch or play already resolved this (track_id, quality)
+        pair. 3-minute TTL stays well inside Tidal's signed-URL expiry
+        window. `joined` marks a hit that came from waiting on another
+        thread's resolve, so the perf line doesn't pass the wait off as
+        a plain cache hit.
+        """
+        cached_urls_info = self._manifest_cache.lookup(cache_key)
+        if cached_urls_info is None:
+            return None
+        urls, duration, info, bytes_map, track_meta = cached_urls_info
+        # Cache HIT must refresh the UPnP metadata for playback too
+        # — the miss path does this inside _resolve_uncached, but a
+        # hit used to leave _current_track_meta pointing at the
+        # previous track, so the renderer was told the wrong
+        # artist/song at session start (and on every replay, since
+        # cold-start prefetch makes the first play a hit). Guarded
+        # by set_current_meta so speculative prefetch doesn't clobber
+        # it.
+        if track_meta is not None and set_current_meta:
+            self._current_track_meta = track_meta
+        track_id, quality = cache_key
+        print(
+            f"[perf] resolve track={track_id} quality={quality} "
+            f"cache={'JOINED' if joined else 'HIT'} "
+            f"elapsed={(time.monotonic() - t0) * 1000.0:.0f}ms "
+            f"prefetched_segments={len(bytes_map)}",
+            file=sys.stderr,
+            flush=True,
+        )
+        return (list(urls), duration, info, bytes_map, track_meta)
 
     def _resolve_uncached(
         self,
@@ -2715,7 +2845,9 @@ class PCMPlayer:
 
         def _fetch(i: int) -> Optional[tuple[int, bytes]]:
             try:
-                r = requests.get(urls[i], timeout=30)
+                # The playback reader's pool, so warming a track also
+                # leaves a live CDN connection for the click to reuse.
+                r = STREAM_SESSION.get(urls[i], timeout=30)
                 r.raise_for_status()
                 return i, r.content
             except Exception as exc:
@@ -2740,6 +2872,15 @@ class PCMPlayer:
                 file=sys.stderr,
                 flush=True,
             )
+
+    @staticmethod
+    def _start_stream(stream) -> None:
+        """Start an output stream from whichever thread is asking.
+        Every stream start goes through here: WASAPI needs COM on the
+        starting thread, and these run on HTTP workers, the bridge and
+        recovery threads (see app/audio/win_com.py)."""
+        ensure_com_initialized()
+        stream.start()
 
     def _open_output_stream(self, sample_rate: int, channels: int, dtype: str) -> None:
         # If the user picked a specific output device, resolve its
@@ -2777,7 +2918,10 @@ class PCMPlayer:
                 target_rate = decoder.sample_rate
             else:
                 target_rate = self._query_device_mixer_rate(device, decoder.sample_rate)
-            decoder.set_target_rate(target_rate)
+            decoder.set_target_rate(
+                target_rate,
+                float_output=self._float_output_for(self._exclusive_mode),
+            )
             sample_rate = decoder.output_sample_rate
             dtype = decoder.sounddevice_dtype
             channels = decoder.channels
@@ -2829,6 +2973,9 @@ class PCMPlayer:
             # output. _output_latency_for honours the device's own deeper
             # latency when it has one, so BT gets the buffer it needs.
             latency=self._output_latency_for(device),
+            # Fewer, larger callbacks so sustained GIL contention can't
+            # starve the stream; see _CALLBACK_BLOCK_TARGET_S.
+            blocksize=self._callback_block_frames(sample_rate),
         )
         if extra_settings is not None:
             stream_kwargs["extra_settings"] = extra_settings
@@ -2852,11 +2999,17 @@ class PCMPlayer:
                     fallback_rate = self._query_device_mixer_rate(
                         device, decoder.sample_rate
                     )
-                    decoder.set_target_rate(fallback_rate)
+                    decoder.set_target_rate(
+                        fallback_rate,
+                        float_output=self._float_output_for(False),
+                    )
                     stream_kwargs["samplerate"] = decoder.output_sample_rate
                     stream_kwargs["dtype"] = decoder.sounddevice_dtype
                     sample_rate = decoder.output_sample_rate
                     channels = decoder.channels
+                    stream_kwargs["blocksize"] = self._callback_block_frames(
+                        sample_rate
+                    )
                 self._stream = sd.OutputStream(**stream_kwargs)
             else:
                 raise
@@ -2888,7 +3041,8 @@ class PCMPlayer:
         print(
             f"[audio] stream open: device={device} rate={sample_rate}Hz "
             f"channels={channels} dtype={dtype!r} hostapi={ha_name!r} "
-            f"exclusive={self._exclusive_mode}",
+            f"exclusive={self._exclusive_mode} "
+            f"block={stream_kwargs['blocksize']}",
             file=sys.stderr,
             flush=True,
         )
@@ -2958,6 +3112,53 @@ class PCMPlayer:
     # realtime callback needs to ride out GIL/CPU contention on wired,
     # low-latency devices — see the long note in _open_output_stream.
     _OUTPUT_LATENCY_FLOOR_S = 0.1
+
+    # How much audio one callback delivers. The latency floor above
+    # absorbs a single long stall, but it does nothing for sustained
+    # contention, because what decides that is how often the callback
+    # has to win the GIL. Left to PortAudio, the callback runs once per
+    # device period (10 ms on WASAPI shared), and each run must
+    # reacquire the GIL before it copies a sample. With two or three
+    # request threads running Python, that handoff averages more than
+    # 10 ms (on Windows the waiter's timed wait rounds up to the 15.6 ms
+    # system timer tick), so the callback falls further behind every
+    # period and WASAPI plays silence in the gaps. PortAudio does not
+    # flag those as underflows, so output_underruns stays 0 while half
+    # the audio is missing. Measured against the real player on WASAPI
+    # shared: with two busy threads, 10 ms callbacks delivered 72% of
+    # the audio and 46 ms callbacks 99.9%; with three, 51% vs 95%. The
+    # cost is about one block of added latency on pause / volume / seek
+    # (~110 ms -> ~150 ms total).
+    _CALLBACK_BLOCK_TARGET_S = 0.045
+
+    @staticmethod
+    def _callback_block_frames(sample_rate: int) -> int:
+        """Frames per audio callback for `sample_rate`: the power of two
+        nearest _CALLBACK_BLOCK_TARGET_S (2048 at 44.1 / 48 kHz, 4096 at
+        88.2 / 96 kHz, 8192 at 176.4 / 192 kHz)."""
+        target = max(1.0, sample_rate * PCMPlayer._CALLBACK_BLOCK_TARGET_S)
+        return 1 << round(math.log2(target))
+
+    @staticmethod
+    def _float_output_for(exclusive: bool) -> bool:
+        """Whether decoders feeding a stream should emit float32 even at
+        the source rate.
+
+        True for shared-mode streams on Windows and macOS. WASAPI's and
+        CoreAudio's mixers run in float32, so integer output buys no
+        bit-perfectness there: PortAudio converts it to float32 in C,
+        exactly, before the mixer sees it. What integer output does cost
+        is in the realtime callback. Its volume / ReplayGain / EQ stage
+        then casts int -> float -> int, and numpy releases the GIL during
+        those casts, so every callback has to win the GIL back from
+        whatever request thread took it. With three busy threads that
+        stage took 12 ms median and 118 ms worst case per 46 ms block;
+        on float32 it runs in place in about 10 us under the same load.
+
+        Exclusive mode keeps the source format, which is its point.
+        Linux is left alone: PortAudio can reach an ALSA hw device
+        directly there, where integer output can still matter."""
+        return not exclusive and sys.platform in ("win32", "darwin")
 
     @staticmethod
     def _output_latency_for(device: Optional[int]) -> float:
@@ -3726,33 +3927,9 @@ class PCMPlayer:
         self._last_error = None
         self._seq += 1
 
-        # Outside the lock (well — RLock held; cleanup stays
-        # short): signal + close the old pipeline's resources.
-        old_stop_flag.set()
-        # Cancel the old decoder's source BEFORE joining. Same
-        # reasoning as _teardown / _restart_decoder_at: stop_flag
-        # only gets checked between PCM frames, and the old thread
-        # is very often mid-HTTP-fetch on a track change. Closing
-        # the source aborts the in-flight read so the join returns
-        # in milliseconds instead of waiting the segment out.
-        if old_decoder is not None:
-            try:
-                old_decoder.cancel_source()
-            except Exception:
-                pass
-        if old_thread is not None and old_thread.is_alive():
-            # Short bounded join: gives the thread a chance to
-            # notice the stop flag and release its PyAV container
-            # + SegmentReader session. If it's blocked in network
-            # I/O past the timeout we give up (it's a daemon and
-            # won't prevent process exit), but we've tried rather
-            # than dropping the ref and guaranteeing a ~30s leak.
-            old_thread.join(timeout=0.5)
-        if old_decoder is not None:
-            try:
-                old_decoder.close()
-            except Exception:
-                pass
+        # The old pipeline is detached; release it without holding the
+        # lock for its thread to unwind.
+        self._retire_pipeline(old_stop_flag, old_decoder, old_thread)
         if old_stream is not None:
             # abort() over stop() — same reason as _teardown above:
             # stop() drains the buffer and stalls the cross-rate
@@ -3771,7 +3948,7 @@ class PCMPlayer:
                 pre.sample_rate, pre.channels, pre.sd_dtype
             )
             try:
-                self._stream.start()
+                self._start_stream(self._stream)
             except Exception as exc:
                 log.exception("adopt_preload: stream.start failed")
                 self._last_error = str(exc)
@@ -4440,7 +4617,7 @@ class PCMPlayer:
                     self._open_output_stream(
                         sample_rate, channels, sd_dtype
                     )
-                self._stream.start()
+                self._start_stream(self._stream)
                 if device_gone:
                     log.info(
                         "device-recovery: original device id=%r gone; "
@@ -4476,7 +4653,7 @@ class PCMPlayer:
                     self._open_output_stream(
                         sample_rate, channels, sd_dtype
                     )
-                self._stream.start()
+                self._start_stream(self._stream)
                 log.info(
                     "device-recovery: reopened on system default "
                     "(rate=%d, channels=%d)",
@@ -4594,7 +4771,7 @@ class PCMPlayer:
                 )
                 self._transition("playing")
             try:
-                self._stream.start()
+                self._start_stream(self._stream)
             except Exception:
                 log.exception("bridge: stream.start failed")
                 with self._lock:

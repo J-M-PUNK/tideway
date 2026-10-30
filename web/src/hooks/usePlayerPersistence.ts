@@ -1,6 +1,7 @@
 import { useEffect, type MutableRefObject } from "react";
 import { api } from "@/api/client";
 import type { Track } from "@/api/types";
+import type { StreamingQuality } from "@/hooks/useUiPreferences";
 import type { PlayerState, RepeatMode } from "./usePlayer";
 
 const PERSIST_KEY = "tideway:player";
@@ -35,6 +36,11 @@ export interface PersistedState {
    *  lose the now-playing on reopen, since the queue-based restore
    *  path requires queueIndex >= 0. */
   track: Track | null;
+  /** The streaming quality the restore will load `trackId` at. The
+   *  backend's cold-start prefetch reads this off its copy of the
+   *  snapshot: the manifest cache is keyed on (track, quality), so
+   *  warming the track at any other quality is a miss on relaunch. */
+  quality: StreamingQuality;
 }
 
 /** Read the localStorage snapshot. Returns an empty object on miss
@@ -129,6 +135,7 @@ export function pickRestoreFromPersisted(
  */
 export function usePlayerPersistence(
   stateRef: MutableRefObject<PlayerState>,
+  qualityRef: MutableRefObject<StreamingQuality>,
 ): void {
   useEffect(() => {
     const flush = () => {
@@ -150,6 +157,7 @@ export function usePlayerPersistence(
         repeat: s.repeat,
         trackId: s.track?.id ?? null,
         track: s.track,
+        quality: qualityRef.current,
       };
       try {
         localStorage.setItem(PERSIST_KEY, JSON.stringify(snapshot));
@@ -173,5 +181,5 @@ export function usePlayerPersistence(
       window.removeEventListener("pagehide", flush);
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
-  }, [stateRef]);
+  }, [stateRef, qualityRef]);
 }
