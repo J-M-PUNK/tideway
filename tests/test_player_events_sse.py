@@ -150,9 +150,8 @@ def test_receiver_sse_builds_one_fresh_snapshot_per_delivery(monkeypatch, delive
         monkeypatch.setattr(server, '_native_player', lambda: player)
         monkeypatch.setattr(server, '_tcr_active', lambda: True)
         monkeypatch.setattr(server, '_tcr_snapshot', snapshot)
-        response = await server.player_events(request)
-        stream = response.body_iterator
-        assert json.loads((await anext(stream))[6:]) == initial
+        stream = server._player_events()
+        assert json.loads(await anext(stream)) == initial
         if delivery == 'callback':
             callback = player.subscribe.call_args.args[0]
             callback(Mock(state='ended'))
@@ -164,7 +163,7 @@ def test_receiver_sse_builds_one_fresh_snapshot_per_delivery(monkeypatch, delive
                 assert timeout == 0.25
                 raise asyncio.TimeoutError
             monkeypatch.setattr(server.asyncio, 'wait_for', timed_out)
-        assert json.loads((await anext(stream))[6:]) == latest
+        assert json.loads(await anext(stream)) == latest
         assert snapshot.call_count == 2
         await stream.aclose()
         unsubscribe.assert_called_once()
@@ -183,12 +182,11 @@ def test_local_sse_preserves_a_queued_terminal_edge(monkeypatch):
         monkeypatch.setattr(server, '_native_player', lambda: local)
         monkeypatch.setattr(server, '_tcr_active', lambda: False)
         monkeypatch.setattr(server, '_snapshot_dict', lambda snap: snap)
-        response = await server.player_events(request)
-        stream = response.body_iterator
+        stream = server._player_events()
         await anext(stream)
         local.subscribe.call_args.args[0](terminal)
         local.snapshot.return_value = {'state': 'idle', 'seq': 3}
-        assert json.loads((await anext(stream))[6:]) == terminal
+        assert json.loads(await anext(stream)) == terminal
         local.snapshot.assert_called_once()
         await stream.aclose()
     asyncio.run(check())
