@@ -184,7 +184,7 @@ def create_playback_queue(
         "autoplay": autoplay,
         "position": max(0, int(position_ms)),
         "queueInfo": {
-            "queueId": queue_id, "repeatMode": {"off": "OFF", "all": "ALL", "one": "SINGLE"}[repeat], "shuffled": False,
+            "queueId": queue_id, "repeatMode": {"off": "OFF", "all": "ALL", "one": "ONE"}[repeat], "shuffled": False,
             "maxBeforeSize": 10, "maxAfterSize": 10,
         },
         "currentMediaInfo": _media_info(track, track_id, item_ids[start_index]),
