@@ -171,10 +171,9 @@ def test_request_id_increments_per_send():
 
 
 def test_set_repeat_mode_uses_string_enum():
-    """The desktop client's RepeatMode is a string enum: OFF / ALL
-    / SINGLE. We forward whatever the caller passes; this test
-    just confirms the field name and that the value is sent
-    verbatim."""
+    """The TIDAL Connect RepeatMode is a string enum: OFF / ALL /
+    ONE. We forward whatever the caller passes; this test just
+    confirms the field name and that the value is sent verbatim."""
     conn, fake = _make_connection_with_fake_socket()
     loop, task = _drive_send(conn.set_repeat_mode("ALL"))
     try:
@@ -812,6 +811,14 @@ def test_paused_queue_edit_refreshes_without_play_or_reload():
     conn.play.assert_not_awaited()
     conn.load_cloud_queue.assert_not_awaited()
     assert manager.remote_state()['queue_has_next'] is True
+
+
+def test_repeat_one_uses_protocol_enum():
+    from dataclasses import replace
+    manager, conn, ctx, _, _ = _receiver_queue_manager()
+    manager.update_queue(replace(ctx, repeat='one', token='edited'))
+    conn.set_repeat_mode.assert_awaited_once_with('ONE')
+    conn.play.assert_not_awaited()
 
 
 def test_failed_queue_load_restores_previous_ownership():

@@ -79,7 +79,7 @@ def test_receiver_queue_preserves_duplicate_positions_and_repeat():
     queue = create_playback_queue(s, [123, 456, 123], 2, 'LOSSLESS', 'one', False, 9000)
     assert queue.item_ids == ('first', 'second', 'third')
     assert queue.payload['currentMediaInfo']['itemId'] == 'third'
-    assert queue.payload['queueInfo']['repeatMode'] == 'SINGLE'
+    assert queue.payload['queueInfo']['repeatMode'] == 'ONE'
     assert queue.payload['autoplay'] is False
     assert queue.payload['position'] == 9000
     assert json.loads(s.request.basic_request.call_args.kwargs['data'])['repeat_mode'] == 'one'

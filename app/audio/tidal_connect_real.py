@@ -526,8 +526,8 @@ class TidalConnectConnection:
         return await self._send({"command": "setMute", "mute": bool(mute)})
 
     async def set_repeat_mode(self, mode: str) -> dict:
-        # mode is "OFF" / "ALL" / "SINGLE" per the desktop client's
-        # RepeatMode enum.
+        # mode is "OFF" / "ALL" / "ONE" per the TIDAL Connect
+        # RepeatMode enum. Receivers ignore "SINGLE" silently.
         return await self._send({"command": "setRepeatMode", "repeatMode": mode})
 
     async def set_shuffle(self, shuffle: bool) -> dict:
@@ -1084,7 +1084,7 @@ class TidalConnectRealManager:
             self._store_queue(context_at_receiver, edited)
             if old.repeat != context.repeat or old.stop_after_current != context.stop_after_current:
                 repeat = "off" if context.stop_after_current else context.repeat
-                await self._connection.set_repeat_mode({"off": "OFF", "all": "ALL", "one": "SINGLE"}[repeat])
+                await self._connection.set_repeat_mode({"off": "OFF", "all": "ALL", "one": "ONE"}[repeat])
             await self._connection.refresh_queue(edited.payload["queueInfo"]["queueId"])
             return {"updated": True}
 
