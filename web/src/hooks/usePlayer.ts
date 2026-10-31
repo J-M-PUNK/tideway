@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { PlayerSnapshot, StreamInfo, Track } from "@/api/types";
+import type {
+  PlayerQueue,
+  PlayerSnapshot,
+  StreamInfo,
+  Track,
+} from "@/api/types";
 import { api } from "@/api/client";
 import { subscribeEvents } from "@/api/eventStream";
 import { useContinuePlayingPref } from "./useContinuePlayingPref";
@@ -502,6 +507,7 @@ export function usePlayer() {
   // SSE subscription — backend pushes state changes + position updates.
   // `seq` is our monotonic clock so we can ignore out-of-order frames.
   const lastSeqRef = useRef(-1);
+  const lastOutputRef = useRef<string | undefined>(undefined);
   // Last position we applied, so a frame with an unchanged seq can still
   // update the clock when only the position moved. seq is bumped from
   // the audio callback, which stops in DLNA renderer-clock mode once the
@@ -509,12 +515,63 @@ export function usePlayer() {
   // renderer position keeps advancing.
   const lastPositionRef = useRef(-1);
   const expectedTrackIdRef = useRef<string | null>(null);
+  const intendedQueuePositionRef = useRef<{
+    queue: Track[];
+    index: number;
+  } | null>(null);
   // When `expectedTrackIdRef` last changed, so the late-echo guard can
   // be time-bounded (see isLateEcho): a mismatched snapshot is only a
   // late echo for a short window after an optimistic change.
   const expectedSeenRef = useRef<string | null>(null);
   const expectedSeenAtRef = useRef(0);
   const endOfTrackPendingRef = useRef(false);
+  const { sleepRemaining, setSleepTimer, clearSleepTimer } =
+    useSleepTimer(endOfTrackPendingRef);
+  const receiverQueueRef = useRef(false);
+  const queueContextRef = useRef<{ key: string; token: string } | null>(null);
+  const queueSentRef = useRef<string | null>(null);
+  const queueCommandsRef = useRef<Promise<unknown>>(Promise.resolve());
+  const queueCommand = useCallback(
+    <T>(command: () => Promise<T>): Promise<T> => {
+      // Include failed commands in the ordering without preventing the
+      // user's next command from running; each caller handles its error.
+      const next = queueCommandsRef.current.then(command, command);
+      queueCommandsRef.current = next;
+      return next;
+    },
+    [],
+  );
+  const queueContext = useCallback(
+    (s: PlayerState): PlayerQueue | undefined => {
+      if (
+        s.queueIndex < 0 ||
+        !s.queue.length ||
+        s.queue.some((t) => !/^\d+$/.test(t.id))
+      )
+        return;
+      const track_ids = s.queue.map((t) => t.id);
+      const order = s.shuffle
+        ? resolveShuffleOrder(s)
+        : s.queue.map((_, i) => i);
+      const fields = {
+        track_ids,
+        order,
+        repeat: s.repeat,
+        quality: qualityRef.current,
+        stop_after_current: endOfTrackPendingRef.current,
+      };
+      const key = JSON.stringify(fields);
+      if (queueContextRef.current?.key !== key) {
+        queueContextRef.current = { key, token: crypto.randomUUID() };
+      }
+      return {
+        ...fields,
+        index: s.queueIndex,
+        token: queueContextRef.current.token,
+      };
+    },
+    [],
+  );
   // Set to true while an `endOfQueueAdvance` is awaiting the
   // Artist Radio fetch. Stops a second "ended" SSE event from
   // re-entering the takeover concurrently — the network call to
@@ -531,7 +588,7 @@ export function usePlayer() {
   // advanceRef is set by a later effect so the SSE "ended" handler can
   // call pickNextIndex against the freshest state without reinstalling
   // the subscription every queue change.
-  const advanceRef = useRef<() => void>(() => {});
+  const advanceRef = useRef<(snapshot?: PlayerSnapshot) => void>(() => {});
   // The track id we last asked the backend to preload, so we don't
   // fire /api/player/preload once per position tick.
   //
@@ -619,23 +676,41 @@ export function usePlayer() {
     // the in-flight window the bar shows the previous track.
     const syncTrackFromQueueOrApi = (snap: PlayerSnapshot) => {
       const cur = stateRef.current;
+      const receiverIndex =
+        snap.queue_owner === "receiver" &&
+        (queueContextRef.current === null ||
+          snap.queue_token === queueContextRef.current.token) &&
+        snap.queue_index != null &&
+        cur.queue[snap.queue_index]?.id === snap.track_id
+          ? snap.queue_index
+          : null;
       const trackOutOfSync =
         snap.track_id !== null &&
         snap.state !== "idle" &&
         snap.state !== "ended" &&
-        (!cur.track || cur.track.id !== snap.track_id);
+        (!cur.track ||
+          cur.track.id !== snap.track_id ||
+          (receiverIndex !== null && receiverIndex !== cur.queueIndex));
       if (!trackOutOfSync || !snap.track_id) return;
       const id = snap.track_id;
-      const queueIdx = cur.queue.findIndex((q) => q.id === id);
+      const queueIdx = receiverIndex ?? cur.queue.findIndex((q) => q.id === id);
       if (queueIdx >= 0) {
         // Path 1: queue has it. Sync state.track from queue.
         expectedTrackIdRef.current = id;
+        intendedQueuePositionRef.current = {
+          queue: cur.queue,
+          index: queueIdx,
+        };
         setState((s) => {
           // Re-check inside the reducer: another setState may have
           // already synced track (e.g. playAtIndex's optimistic
           // update commits between the outer check and here).
-          if (s.track?.id === id) return s;
-          const idx = s.queue.findIndex((q) => q.id === id);
+          if (
+            s.track?.id === id &&
+            (receiverIndex === null || s.queueIndex === receiverIndex)
+          )
+            return s;
+          const idx = receiverIndex ?? s.queue.findIndex((q) => q.id === id);
           if (idx < 0) return s;
           return { ...s, track: s.queue[idx], queueIndex: idx };
         });
@@ -749,6 +824,7 @@ export function usePlayer() {
     // buffer is freed as soon as the swap completes or the queue
     // changes.
     const triggerPreloadIfNeeded = (snap: PlayerSnapshot) => {
+      if (snap.queue_owner === "receiver") return;
       if (snap.state !== "playing" || snap.track_id === null) {
         return;
       }
@@ -798,6 +874,7 @@ export function usePlayer() {
     };
 
     const applySnapshot = (snap: PlayerSnapshot) => {
+      receiverQueueRef.current = snap.queue_owner === "receiver";
       const late = isLateEcho(snap);
       if (late) return;
       // A fresh load (or a stop) tears down the backend pipeline and
@@ -815,13 +892,18 @@ export function usePlayer() {
       // Advance triggers fire AFTER the state setState so any
       // ended-branch UI ticks land before the next track's
       // optimistic update overwrites them.
-      if (snap.state === "ended") advanceRef.current();
+      if (snap.state === "ended") advanceRef.current(snap);
       // Skip past tracks the backend can't play. Without this,
       // autoplay halts the moment radio hands us a region-locked
       // or otherwise unstreamable id. The expected-track guard
       // (isLateEcho) naturally dedupes repeat error frames for the
       // same track, so we only advance once per failure.
-      if (snap.state === "error" && continuePlayingRef.current) {
+      if (
+        snap.state === "error" &&
+        snap.error_scope !== "session" &&
+        snap.queue_owner !== "receiver" &&
+        continuePlayingRef.current
+      ) {
         advanceRef.current();
       }
       triggerPreloadIfNeeded(snap);
@@ -830,13 +912,13 @@ export function usePlayer() {
     return subscribeEvents("player", (data) => {
       try {
         const snap = JSON.parse(data) as PlayerSnapshot;
-        // A newer seq always applies. A repeat seq still applies when
-        // only the position moved: seq is bumped from the audio
-        // callback, which stops in DLNA renderer-clock mode once the
-        // muted local stream ends — seq freezes while the renderer
-        // position keeps advancing, and a seq-only guard would freeze
-        // the UI clock. Out-of-order (older) seq frames are still
-        // dropped.
+        if (snap.output_id !== lastOutputRef.current) {
+          lastOutputRef.current = snap.output_id;
+          lastSeqRef.current = -1;
+          lastPositionRef.current = -1;
+          serverVolumeAdopted.current = false;
+          serverMutedAdopted.current = false;
+        }
         if (snap.seq < lastSeqRef.current) return;
         if (
           snap.seq === lastSeqRef.current &&
@@ -996,7 +1078,21 @@ export function usePlayer() {
       if (index < 0 || index >= resolvedQueue.length) return;
       const track = resolvedQueue[index];
       expectedTrackIdRef.current = track.id;
+      intendedQueuePositionRef.current = { queue: resolvedQueue, index };
       endOfTrackPendingRef.current = false;
+      const shuffleOrder = shuffleOrderForLoad(
+        stateRef.current,
+        resolvedQueue,
+        index,
+        !!queueOverride,
+      );
+      const context = queueContext({
+        ...stateRef.current,
+        queue: resolvedQueue,
+        queueIndex: index,
+        shuffleOrder,
+      });
+      if (context) queueSentRef.current = context.token;
       setState((s) => {
         const queue = queueOverride ?? s.queue;
         if (index < 0 || index >= queue.length) return s;
@@ -1016,7 +1112,7 @@ export function usePlayer() {
           error: null,
           currentTime: 0,
           duration: track.duration ?? 0,
-          shuffleOrder: shuffleOrderForLoad(s, queue, index, !!queueOverride),
+          shuffleOrder,
           source:
             sourceOverride !== undefined
               ? sourceOverride
@@ -1036,7 +1132,11 @@ export function usePlayer() {
           // Single round-trip for load+play — saves ~20-40ms of await
           // gap between two HTTP calls and lets the backend start priming
           // the decoder immediately after set_media, where the delay lives.
-          await api.player.playTrack(track.id, qualityRef.current);
+          await queueCommand(() =>
+            context
+              ? api.player.playTrack(track.id, qualityRef.current, context)
+              : api.player.playTrack(track.id, qualityRef.current),
+          );
         } catch (err) {
           setState((cur) => ({
             ...cur,
@@ -1047,7 +1147,7 @@ export function usePlayer() {
         }
       })();
     },
-    [],
+    [queueCommand, queueContext],
   );
 
   // Load a queue position into the backend without auto-playing —
@@ -1064,7 +1164,21 @@ export function usePlayer() {
       if (index < 0 || index >= resolvedQueue.length) return;
       const track = resolvedQueue[index];
       expectedTrackIdRef.current = track.id;
+      intendedQueuePositionRef.current = { queue: resolvedQueue, index };
       endOfTrackPendingRef.current = false;
+      const shuffleOrder = shuffleOrderForLoad(
+        stateRef.current,
+        resolvedQueue,
+        index,
+        !!queueOverride,
+      );
+      const context = queueContext({
+        ...stateRef.current,
+        queue: resolvedQueue,
+        queueIndex: index,
+        shuffleOrder,
+      });
+      if (context) queueSentRef.current = context.token;
       setState((s) => {
         const queue = queueOverride ?? s.queue;
         if (index < 0 || index >= queue.length) return s;
@@ -1078,7 +1192,7 @@ export function usePlayer() {
           error: null,
           currentTime: 0,
           duration: track.duration ?? 0,
-          shuffleOrder: shuffleOrderForLoad(s, queue, index, !!queueOverride),
+          shuffleOrder,
           source:
             sourceOverride !== undefined
               ? sourceOverride
@@ -1092,7 +1206,11 @@ export function usePlayer() {
       // StrictMode dev double-invoke fix as playAtIndex.
       void (async () => {
         try {
-          await api.player.load(track.id, qualityRef.current);
+          await queueCommand(() =>
+            context
+              ? api.player.load(track.id, qualityRef.current, context)
+              : api.player.load(track.id, qualityRef.current),
+          );
         } catch (err) {
           setState((cur) => ({
             ...cur,
@@ -1103,7 +1221,7 @@ export function usePlayer() {
         }
       })();
     },
-    [],
+    [queueCommand, queueContext],
   );
 
   // Behavior tree for "queue is over, where do we go?". Shared by
@@ -1178,19 +1296,33 @@ export function usePlayer() {
   );
 
   useEffect(() => {
-    advanceRef.current = () => {
+    advanceRef.current = (snapshot) => {
       if (endOfTrackPendingRef.current) {
-        endOfTrackPendingRef.current = false;
+        clearSleepTimer();
         return;
       }
-      const n = pickNextIndex(stateRef.current, true);
+      const current = stateRef.current;
+      const index =
+        snapshot?.queue_owner === "receiver" &&
+        (queueContextRef.current === null ||
+          snapshot.queue_token === queueContextRef.current.token) &&
+        snapshot.queue_index != null &&
+        current.queue[snapshot.queue_index]?.id === snapshot.track_id
+          ? snapshot.queue_index
+          : current.queueIndex;
+      const finished = {
+        ...current,
+        queueIndex: index,
+        track: current.queue[index] ?? current.track,
+      };
+      const n = pickNextIndex(finished, true);
       if (n !== null) {
         playAtIndex(n);
         return;
       }
-      void endOfQueueAdvance(stateRef.current);
+      void endOfQueueAdvance(finished);
     };
-  }, [playAtIndex, endOfQueueAdvance]);
+  }, [playAtIndex, endOfQueueAdvance, clearSleepTimer]);
 
   const play = useCallback(
     (track: Track, contextTracks?: Track[], source?: PlaySource | null) => {
@@ -1227,9 +1359,15 @@ export function usePlayer() {
     // what-we-just-asked-for; resolve it back to an index here.
     const s = stateRef.current;
     const intendedId = expectedTrackIdRef.current;
-    const intendedIdx = intendedId
-      ? s.queue.findIndex((t) => t.id === intendedId)
-      : -1;
+    const intended = intendedQueuePositionRef.current;
+    const intendedIdx =
+      intended?.queue === s.queue && s.queue[intended.index]?.id === intendedId
+        ? intended.index
+        : intendedId === s.track?.id
+          ? s.queueIndex
+          : intendedId
+            ? s.queue.findIndex((t) => t.id === intendedId)
+            : -1;
     const fromIdx = intendedIdx >= 0 ? intendedIdx : s.queueIndex;
     const n = pickNextIndex({ ...s, queueIndex: fromIdx });
     if (n !== null) {
@@ -1255,9 +1393,15 @@ export function usePlayer() {
     // Same stale-stateRef guard as `next`; see comment there.
     const s = stateRef.current;
     const intendedId = expectedTrackIdRef.current;
-    const intendedIdx = intendedId
-      ? s.queue.findIndex((t) => t.id === intendedId)
-      : -1;
+    const intended = intendedQueuePositionRef.current;
+    const intendedIdx =
+      intended?.queue === s.queue && s.queue[intended.index]?.id === intendedId
+        ? intended.index
+        : intendedId === s.track?.id
+          ? s.queueIndex
+          : intendedId
+            ? s.queue.findIndex((t) => t.id === intendedId)
+            : -1;
     const fromIdx = intendedIdx >= 0 ? intendedIdx : s.queueIndex;
     const p = pickPrevIndex({ ...s, queueIndex: fromIdx });
     // Restart-and-return when:
@@ -1390,11 +1534,33 @@ export function usePlayer() {
     [],
   );
 
-  // Sleep-timer state machine. Owned by useSleepTimer; we hand it
-  // the endOfTrackPendingRef so the "stop at end of track" mode
-  // can flip the flag advanceRef checks.
-  const { sleepRemaining, setSleepTimer, clearSleepTimer } =
-    useSleepTimer(endOfTrackPendingRef);
+  useEffect(() => {
+    if (!receiverQueueRef.current) return;
+    const context = queueContext(stateRef.current);
+    if (!context || context.token === queueSentRef.current) return;
+    queueSentRef.current = context.token;
+    void queueCommand(() => {
+      // A newer edit or explicit Play supersedes an unsent edit.
+      if (queueContextRef.current?.token !== context.token)
+        return Promise.resolve();
+      return api.player.queue(context).then(() => {});
+    }).catch((err: unknown) => {
+      setState((s) => ({
+        ...s,
+        error: err instanceof Error ? err.message : String(err),
+      }));
+    });
+  }, [
+    state.queue,
+    state.queueIndex,
+    state.shuffle,
+    state.shuffleOrder,
+    state.repeat,
+    sleepRemaining,
+    streamingQuality,
+    queueCommand,
+    queueContext,
+  ]);
 
   // Append to the end of the queue. Always appends — duplicates pass
   // through so a user who queues the same track twice gets two

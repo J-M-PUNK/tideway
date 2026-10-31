@@ -86,6 +86,15 @@ def test_new_seq_is_always_forwarded():
     assert server._should_forward_snapshot(6, 5, "playing") is True
 
 
+def test_output_switch_is_forwarded_even_when_clocks_coincide():
+    assert server._should_forward_snapshot(
+        5, 5, "paused", 0, 0, "receiver", None
+    ) is True
+    assert server._should_forward_snapshot(
+        5, 5, "paused", 0, 0, None, "receiver"
+    ) is True
+
+
 def test_repeat_seq_of_a_display_state_is_deduped():
     # Idle/paused/playing keepalive ticks with an unchanged seq stay off
     # the wire so we don't spam identical frames.
