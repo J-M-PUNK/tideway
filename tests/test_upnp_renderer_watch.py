@@ -405,6 +405,29 @@ def test_fire_renderer_ended_records_sticky_consumed_track_id():
     assert session.renderer_consumed_track_id == "tid-n1"
 
 
+def test_evidence_free_fire_clears_stale_consumed_track_id():
+    """A generation that ends with no consumption evidence must not keep
+    the previous advance's sticky id. That id now equals the current
+    track, so the player's duplicate-fire guard treats the real end as a
+    duplicate and never emits `ended`. At the end of an album nothing new
+    is staged to clear it, which is exactly when the client needs the
+    edge (Artist Radio / repeat)."""
+    session = _session(_FakeAV())
+    session.renderer_watch_gen = 4
+    # Stale evidence from the advance into the track that is now ending.
+    session.renderer_consumed_track_id = "tid-current"
+    session.renderer_consumed_next = True
+    mgr = _manager(session)
+    fired = threading.Event()
+    mgr._renderer_ended_callback = lambda: fired.set()
+
+    mgr._fire_renderer_ended(session, 4, "deadline", consumed=False)
+
+    assert fired.is_set()
+    assert session.renderer_consumed_track_id is None
+    assert session.renderer_consumed_next is False
+
+
 def test_position_end_with_staged_uri_records_consumption_evidence():
     """Position reaching the track's real end while a next URI is staged
     means the renderer is at/into the boundary and advances. The

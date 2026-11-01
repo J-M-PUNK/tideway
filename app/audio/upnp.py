@@ -1484,6 +1484,19 @@ class UpnpManager:
                 session.renderer_consumed_track_id = (
                     session.renderer_next_track_id
                 )
+            else:
+                # No consumption evidence for THIS generation's end.
+                # Any sticky id still set belongs to the previous
+                # advance and now equals the current track, so leaving
+                # it there makes the player's duplicate-fire guard
+                # (`consumed == current_track_id`) swallow this `ended`
+                # and the client never advances. That is the end-of-album
+                # case: nothing new is staged, so no fresh next clears
+                # the evidence, and Artist Radio never starts. The
+                # evidence has already served its purpose (the announce
+                # for this track happened when it started).
+                session.renderer_consumed_next = False
+                session.renderer_consumed_track_id = None
         self._set_renderer_clock_active(True)
         print(
             f"[upnp] renderer reached end; firing advance "
