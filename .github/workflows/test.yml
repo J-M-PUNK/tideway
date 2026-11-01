@@ -47,7 +47,14 @@ jobs:
   # here moves both jobs together.
   # -------------------------------------------------------------------
   backend:
-    runs-on: ubuntu-latest
+    # ubuntu-latest moved to 26.04, whose libportaudio2 initialises a
+    # PulseAudio host API and aborts Pa_Initialize when no sound server
+    # is running (the runner has none). That fails at
+    # `import sounddevice` during test collection, before a single test
+    # runs. Pin to 24.04, where the import works, until the 26.04
+    # migration is handled deliberately (a null-sink sound server, or
+    # not requiring an audio host API for the suite).
+    runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
