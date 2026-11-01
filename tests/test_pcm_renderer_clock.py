@@ -6,7 +6,8 @@ watchdog has confirmed the renderer reports its own position, the muted
 desktop decoder must not advance the queue on its earlier EOF. Instead
 ``on_renderer_track_ended`` (called by the watchdog at the renderer's
 real boundary) emits `ended` so the frontend advances, keeping the
-preload and 'playing' state so the follow-up play_track(next) adopts it.
+preload and parking in ``ended`` so the SSE keeps re-advertising the
+edge until the follow-up play_track(next) adopts the pre-staged file.
 
 These pin the gate, the EOF handling in renderer-clock mode, and the
 ended/playing emit contract.
@@ -177,7 +178,12 @@ def test_eof_keeps_cast_preload_even_without_clock(monkeypatch):
 # ---------------------------------------------------------------------
 
 
-def test_on_renderer_track_ended_emits_ended_then_stays_playing(monkeypatch):
+def test_on_renderer_track_ended_parks_ended_for_retry(monkeypatch):
+    """The `ended` edge drives the client's advance, so the state must
+    stay parked: `_should_forward_snapshot` re-advertises client-action
+    states on every poll, which is the retry for a client that missed
+    the single edge. Flipping back to `playing` (the old behaviour)
+    silently disabled that recovery and stranded playback."""
     p = _player()
     monkeypatch.setattr(player_mod, "_upnp_manager", _FakeUpnp(True, True))
     p._state = "playing"
@@ -187,7 +193,41 @@ def test_on_renderer_track_ended_emits_ended_then_stays_playing(monkeypatch):
     p.on_renderer_track_ended()
 
     assert seen == ["ended"]
-    assert p._state == "playing"
+    assert p._state == "ended"
+
+
+def test_on_renderer_track_ended_keeps_cast_preload_and_parks(monkeypatch):
+    """No consumption evidence: keep the pre-staged cast preload for the
+    client's play_track(next) to adopt, and park in `ended` so a missed
+    edge is re-advertised."""
+    p = _player()
+    monkeypatch.setattr(player_mod, "_upnp_manager", _FakeUpnp(True, True))
+    p._state = "playing"
+    p._current_track_id = "N0"
+    pre = _cast_preload("N1")
+    p._preload = pre
+    seen = []
+    p.subscribe(lambda snap: seen.append((snap.state, snap.track_id)))
+
+    p.on_renderer_track_ended()
+
+    assert seen == [("ended", "N0")]
+    assert p._state == "ended"
+    assert p._preload is pre
+
+
+def test_snapshot_pins_position_to_end_while_parked(monkeypatch):
+    """Repeated `ended` snapshots must be identical apart from nothing:
+    a moving position would defeat the client's (seq, position) dedupe
+    and could fire a second advance while the first is still loading."""
+    p = _player()
+    monkeypatch.setattr(player_mod, "_upnp_manager", _FakeUpnp(True, True))
+    p._state = "ended"
+    p._current_duration_ms = 289_000
+    p._samples_emitted = 12_345
+    p._stream_sample_rate = 44_100
+
+    assert p.snapshot().position_ms == 289_000
 
 
 def test_on_renderer_track_ended_noop_without_clock(monkeypatch):
@@ -278,8 +318,29 @@ def test_cast_adopt_requires_consumption_evidence(monkeypatch):
 
     assert p._current_track_id == "N0"
     assert p._preload is pre
-    assert p._state == "playing"
+    assert p._state == "ended"
     assert seen == ["ended"]
+
+
+def test_load_adopts_cast_preload_while_parked_ended(monkeypatch):
+    """The client's delayed/retried play_track(next) must still take
+    Path 0b: adopt the pre-staged file and resume the renderer instead
+    of tearing the session down. This is why `ended` is allowed through
+    the Path 0b state gate for cast preloads only."""
+    p = _player()
+    fake = _FakeUpnp(True, True)
+    monkeypatch.setattr(player_mod, "_upnp_manager", fake)
+    p._state = "ended"
+    p._current_track_id = "N0"
+    p._preload = _cast_preload("N1")
+
+    snap = p.load("N1")
+
+    assert snap.state == "playing"
+    assert snap.track_id == "N1"
+    assert p._preload is None
+    assert fake.started, "the pre-staged file must be promoted"
+    assert fake.started[-1]["track_id"] == "N1"
 
 
 def test_cast_adopt_noop_when_consumed_differs_from_preload(monkeypatch):

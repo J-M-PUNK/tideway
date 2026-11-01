@@ -715,7 +715,19 @@ class PCMPlayer:
                 pre is not None
                 and pre.track_id == track_id
                 and (quality is None or pre.quality == quality)
-                and self._state in ("playing", "paused", "loading")
+                and (
+                    self._state in ("playing", "paused", "loading")
+                    # A renderer-clock `ended` stays parked until the
+                    # client advances (see on_renderer_track_ended), so
+                    # the follow-up play_track must still adopt the
+                    # pre-staged cast file rather than fall into a full
+                    # teardown. Local (non-cast) preloads keep the
+                    # previous state gate unchanged.
+                    or (
+                        self._state == "ended"
+                        and getattr(pre, "cast", False) is True
+                    )
+                )
             ):
                 self._dbg(
                     f"load Path 0b: adopting preload track={track_id} "
@@ -2245,7 +2257,16 @@ class PCMPlayer:
                     renderer_ms = _upnp_manager.renderer_position_ms()
                 except Exception:
                     renderer_ms = None
-            if renderer_ms is not None:
+            if self._state == "ended" and self._renderer_clock_active():
+                # Parked renderer-clock end: report the end position
+                # consistently. The renderer probe goes stale ~3 s after
+                # the watchdog stops and the fallback to the local sample
+                # count lands a little later; that one-off jump would look
+                # like a new state to the client's (seq, position) dedupe
+                # and could fire a second advance while the first is
+                # still loading.
+                pos_ms = self._current_duration_ms
+            elif renderer_ms is not None:
                 pos_ms = renderer_ms
             elif self._stream_sample_rate and self._samples_emitted > 0:
                 pos_ms = int(
@@ -4253,15 +4274,23 @@ class PCMPlayer:
                     return
                 # Cast preload but no positive evidence: keep it for the
                 # frontend's play_track(next) to adopt; the announce path
-                # handles the actual switch.
-                self._state = "playing"
-                self._seq += 1
+                # handles the actual switch. Stay parked in `ended`: the
+                # SSE re-advertises client-action states on every poll,
+                # so a client that missed this single frame still sees it
+                # and advances. Flipping back to `playing` here used to
+                # defeat that retry, stranding playback at end-of-track
+                # whenever the client lost the edge (backpressure, a
+                # reconnect gap) — the "song ended and didn't advance"
+                # hang. `load()` Path 0b accepts `ended` so the follow-up
+                # play_track still adopts this preload instead of a slow
+                # teardown.
                 return
             if pre is not None:
                 self._adopt_preload_locked(pre)
                 return
-            self._state = "playing"
-            self._seq += 1
+            # No preload to adopt: the frontend's play_track(next) will
+            # do the full load. Park in `ended` for the same retry
+            # reason as above — the state clears when that load starts.
 
     def _try_gapless_swap(self) -> bool:
         """Called from the audio callback when the current queue is
