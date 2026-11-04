@@ -1058,9 +1058,22 @@ class TrackFileSource:
     """
 
     def __init__(self, source, track_id: int = 0, *, tempdir=None, done_event=None,
-                 start_s: float = 0.0) -> None:
+                 start_s: float = 0.0, tidal_track_id: Optional[str] = None,
+                 source_quality: Optional[str] = None) -> None:
         self._source = source
         self.track_id = track_id
+        # TIDAL identity of the track this file holds. `track_id` above
+        # is the ?ts= address of the served file and changes every time
+        # the same track is rebuilt; this one is stable, which is what
+        # lets UpnpManager reuse an already-demuxed file when the user
+        # stops and replays the same track.
+        self.tidal_track_id = (
+            str(tidal_track_id) if tidal_track_id is not None else None
+        )
+        # Resolved-stream signature (codec/bit depth/sample rate/tier).
+        # Reuse must not cross a quality change: the bounded file is a
+        # snapshot of the exact stream that was demuxed.
+        self.source_quality = source_quality
         self.total_size = 0
         self.failed = False
         self.ready = threading.Event()
@@ -1085,6 +1098,10 @@ class TrackFileSource:
     @property
     def path(self) -> Optional[str]:
         return self._path
+
+    @property
+    def start_s(self) -> float:
+        return self._start_s
 
     def start(self) -> None:
         self._thread = threading.Thread(

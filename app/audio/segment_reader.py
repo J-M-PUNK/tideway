@@ -46,10 +46,20 @@ class SegmentReader(io.RawIOBase):
         self,
         urls: list[str],
         prefetched: Optional[dict[int, bytes]] = None,
+        read_ahead_depth: int = 1,
     ):
         if not urls:
             raise ValueError("SegmentReader: empty url list")
         self._urls = list(urls)
+        # How many segments past the one being consumed to fetch ahead.
+        # One is right for playback (hide a single round-trip, keep at
+        # most two requests in flight for the track). Bulk consumers
+        # that need the whole track on disk before serving it — the
+        # bounded DLNA TrackFileSource — can ask for a deeper window so
+        # their fill is bounded by bandwidth instead of per-segment
+        # RTT. Order is always preserved: the extra futures are only
+        # consumed in index order.
+        self._read_ahead_depth = max(1, int(read_ahead_depth))
         self._next_segment_idx = 0
         # Bytes we've fetched so far, flat. Grows as segments arrive.
         self._buf = bytearray()
@@ -71,10 +81,11 @@ class SegmentReader(io.RawIOBase):
         # close() can preempt a fetch in progress without waiting on
         # the main read lock (which the fetching thread is holding).
         self._response_lock = threading.Lock()
-        # The next segment, downloading while libav reads this one:
-        # (segment index, future of its bytes, or of None if the
-        # reader closed mid-download).
-        self._ahead: Optional[tuple[int, Future]] = None
+        # Segments downloading while libav reads the current one:
+        # index -> future of its bytes (or None if the reader closed
+        # mid-download). With the default depth this holds at most one
+        # entry; bulk fillers keep a deeper window.
+        self._ahead: dict[int, Future] = {}
         # Byte-level prefetch fast path: if the caller hands us
         # pre-downloaded bytes for segment 0, 1, ..., N in order,
         # seed the buffer with them and advance _next_segment_idx
@@ -102,12 +113,19 @@ class SegmentReader(io.RawIOBase):
         # unless prefetch already seeded it. av.open needs the first
         # media segment straight after the init segment, so start that
         # one first and let the two download side by side: the start of
-        # a track then costs one round-trip instead of two.
+        # a track then costs one round-trip instead of two. A deeper
+        # window starts that whole window at once and then consumes it
+        # in order.
         if not seeded_any:
-            self._start_read_ahead(1)
+            if self._read_ahead_depth == 1:
+                # Historical shape: fetch the init segment inline and
+                # let the first media segment download beside it.
+                self._submit_ahead(1)
+            else:
+                self._fill_read_ahead()
             self._fetch_next_segment()
         else:
-            self._start_read_ahead(self._next_segment_idx)
+            self._fill_read_ahead()
 
     # --- io.RawIOBase interface ------------------------------------
 
@@ -245,13 +263,12 @@ class SegmentReader(io.RawIOBase):
             self._next_segment_idx = len(self._urls)
             return
         idx = self._next_segment_idx
-        ahead = self._ahead
-        if ahead is not None and ahead[0] == idx:
+        ahead = self._ahead.pop(idx, None)
+        if ahead is not None:
             # Already downloading (or done) on the read-ahead pool. A
             # failed download re-raises here, exactly as an inline
             # fetch would have.
-            self._ahead = None
-            data = ahead[1].result()
+            data = ahead.result()
         else:
             # The init segment, fetched while the read-ahead holds the
             # first media segment — leave that one running.
@@ -264,18 +281,37 @@ class SegmentReader(io.RawIOBase):
             return
         self._buf.extend(data)
         self._next_segment_idx += 1
-        self._start_read_ahead(self._next_segment_idx)
+        self._fill_read_ahead()
 
-    def _start_read_ahead(self, idx: int) -> None:
-        """Start downloading segment `idx` in the background, so it's
-        already here (or close) when libav asks for it. One segment
-        ahead and no more: that hides each segment's round-trip behind
-        the one being decoded, which is the same single-request
-        overlap the downloader uses, and keeps this reader to at most
-        two concurrent requests for its track."""
-        if self._closed or self._ahead is not None or idx >= len(self._urls):
+    def _fill_read_ahead(self) -> None:
+        """Keep up to `_read_ahead_depth` upcoming segments in flight.
+
+        Consumption is always in index order (`_fetch_next_segment`
+        pops the exact `_next_segment_idx`), so the deeper window only
+        changes how many downloads overlap, never their order."""
+        if self._closed:
             return
-        self._ahead = (idx, _READ_AHEAD_POOL.submit(self._download, idx))
+        start = self._next_segment_idx
+        limit = min(len(self._urls), start + self._read_ahead_depth)
+        for idx in range(start, limit):
+            self._submit_ahead(idx)
+        # Futures below the read head have already been consumed; drop
+        # any stale entry so the dict tracks only the live window.
+        for idx in [i for i in self._ahead if i < start]:
+            del self._ahead[idx]
+
+    def _submit_ahead(self, idx: int) -> None:
+        """Start downloading segment `idx` in the background, if it is
+        not already in flight. Default depth one keeps this reader to
+        at most two concurrent requests for its track; deeper windows
+        are for bulk fillers (see `read_ahead_depth`)."""
+        if (
+            self._closed
+            or idx in self._ahead
+            or idx >= len(self._urls)
+        ):
+            return
+        self._ahead[idx] = _READ_AHEAD_POOL.submit(self._download, idx)
 
     def _download(self, idx: int) -> Optional[bytes]:
         """GET segment `idx`. Returns None if close() lands first.

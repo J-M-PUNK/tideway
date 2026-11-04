@@ -694,6 +694,9 @@ class PCMPlayer:
                                 prefetched=None,
                                 metadata=self._current_track_meta,
                                 track_id=self._current_track_id,
+                                quality=_source_quality_key(
+                                    self._current_stream_info
+                                ),
                             )
                         except Exception as exc:  # noqa: BLE001 - passthrough is optional
                             print(
@@ -914,6 +917,7 @@ class PCMPlayer:
                             prefetched=prefetched_bytes,
                             metadata=track_meta,
                             track_id=track_id,
+                            quality=_source_quality_key(stream_info),
                         )
                 except Exception as exc:  # noqa: BLE001 - passthrough is optional
                     print(
@@ -1174,6 +1178,9 @@ class PCMPlayer:
                                 start_s=target_s,
                                 track_id=self._current_track_id,
                                 restart=True,
+                                quality=_source_quality_key(
+                                    self._current_stream_info
+                                ),
                             )
                             # The re-announce cleared the renderer's next
                             # and closed its bounded file. Drop the cast
@@ -1670,6 +1677,7 @@ class PCMPlayer:
                         prefetched=prefetched_bytes,
                         metadata=track_meta,
                         track_id=track_id,
+                        quality=_source_quality_key(stream_info),
                     )
             except Exception as exc:  # noqa: BLE001 - passthrough is optional
                 print(
@@ -1781,6 +1789,19 @@ class PCMPlayer:
         """Return the active track's metadata dict, or None."""
         with self._lock:
             return self._current_track_meta
+
+    def get_current_track_identity(
+        self,
+    ) -> tuple[Optional[str], Optional[str]]:
+        """Return `(TIDAL track id, resolved stream signature)`.
+
+        Used by the DLNA manager to annotate the bounded file it builds
+        on connect with the same identity later loads use, so that file
+        is eligible for stop→replay reuse."""
+        with self._lock:
+            track_id = self._current_track_id
+            info = self._current_stream_info
+        return track_id, _source_quality_key(info)
 
     def get_preloaded_source(
         self,
@@ -3875,6 +3896,9 @@ class PCMPlayer:
                         prefetched=None,
                         metadata=pre.track_meta or self._current_track_meta,
                         track_id=pre.track_id,
+                        quality=_source_quality_key(
+                            getattr(pre, "stream_info", None)
+                        ),
                     )
                 except Exception as exc:  # noqa: BLE001 - passthrough is optional
                     print(
@@ -3915,6 +3939,9 @@ class PCMPlayer:
                     prefetched=None,
                     metadata=getattr(pre, "track_meta", None) or self._current_track_meta,
                     track_id=getattr(pre, "track_id", None),
+                    quality=_source_quality_key(
+                        getattr(pre, "stream_info", None)
+                    ),
                 )
             except Exception as exc:  # noqa: BLE001 - passthrough is optional
                 print(
@@ -4759,6 +4786,9 @@ class PCMPlayer:
                             prefetched=None,
                             metadata=getattr(pre, "track_meta", None) or self._current_track_meta,
                             track_id=getattr(pre, "track_id", None),
+                            quality=_source_quality_key(
+                                getattr(pre, "stream_info", None)
+                            ),
                         )
                     except Exception as exc:  # noqa: BLE001 - passthrough is optional
                         print(
@@ -4952,6 +4982,28 @@ def _normalize_codec(raw: object) -> Optional[str]:
     if "vorbis" in s:
         return "vorbis"
     return s
+
+
+def _source_quality_key(info: Optional[StreamInfo]) -> Optional[str]:
+    """Stable signature of the resolved stream for bounded-file reuse.
+
+    Two loads of the same track at different quality tiers must not
+    share the demuxed FLAC file (the file is a snapshot of one exact
+    stream). `audio_quality` alone is not enough: the same tier can
+    resolve to a different bit depth / sample rate for a different
+    master. None means "unknown" and disables reuse.
+    """
+    if info is None:
+        return None
+    parts = (
+        info.codec,
+        info.bit_depth,
+        info.sample_rate_hz,
+        info.audio_quality,
+    )
+    if all(p is None for p in parts):
+        return None
+    return "|".join("" if p is None else str(p) for p in parts)
 
 
 def _build_source(

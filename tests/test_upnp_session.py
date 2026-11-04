@@ -1192,3 +1192,75 @@ class TestSsdpSearchSocket:
         t.join()
         assert "http://192.168.0.205:16500/desc.xml" in locs
         assert bound is False
+
+
+def test_start_passthrough_reuses_ready_bounded_file(
+    mock_soap, mock_http_server, monkeypatch,
+):
+    """Stop→replay of the same track keeps the demuxed file instead of
+    rebuilding it (the whole-track demux is the multi-second start
+    pause). The renderer still gets a fresh announce."""
+    mgr = UpnpManager()
+    device = _device_record()
+    mgr._devices = {device.id: device}
+    monkeypatch.setattr(
+        "app.audio.upnp.fetch_device",
+        lambda location, **_kw: _openhome_device(),
+    )
+
+    built = []
+
+    class _StubTrackSource:
+        def __init__(self, *a, **k):
+            self.ready = threading.Event()
+            self.ready.set()
+            self.failed = False
+            self.path = "/tmp/stub.flac"
+            self.track_id = k.get("track_id", 0)
+            self.tidal_track_id = k.get("tidal_track_id")
+            self.source_quality = k.get("source_quality")
+            self.start_s = k.get("start_s", 0.0)
+            self.source_released = threading.Event()
+            self.source_released.set()
+            built.append(self)
+
+        def start(self):
+            pass
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("app.audio.upnp.TrackFileSource", _StubTrackSource)
+    monkeypatch.setattr(
+        "app.audio.segment_reader.SegmentReader", lambda *a, **k: object()
+    )
+    monkeypatch.setattr(mgr, "_arm_renderer_watch", lambda *a, **k: None)
+    announced = []
+    monkeypatch.setattr(
+        mgr, "_announce_track", lambda *a, **k: announced.append(a)
+    )
+    mgr.set_source_provider(lambda: ["http://192.168.1.9/seg0"])
+    mgr.set_metadata_provider(lambda: {"title": "T"})
+
+    mgr.connect(device.id, gapless=False)
+    built_before = len(built)
+
+    # connect() built the current track's file; the player annotates
+    # it once it knows the resolved track/quality identity.
+    first = mgr._session.http_server.track_source
+    assert first is not None
+    first.tidal_track_id = "T1"
+    first.source_quality = "flac|16|44100|LOSSLESS"
+
+    announced.clear()
+    # New signed URLs for the same track, same quality/offset.
+    mgr.start_passthrough(
+        ["http://192.168.1.9/seg0?sig=2"],
+        metadata={"title": "T"},
+        track_id="T1",
+        quality="flac|16|44100|LOSSLESS",
+    )
+
+    assert len(built) == built_before
+    assert mgr._session.http_server.track_source is first
+    assert announced

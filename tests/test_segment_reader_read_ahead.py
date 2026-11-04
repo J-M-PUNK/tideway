@@ -4,8 +4,9 @@ A track's first audio waits on the init segment and then the first
 media segment. These pin the two things that keep that short: the
 two download side by side rather than one after the other, and a new
 reader (the next track, a seek) reuses the pooled CDN connection
-instead of paying a fresh handshake. They also pin the limit — never
-more than one segment downloading ahead of the one being read — and
+instead of paying a fresh handshake. They also pin the playback
+limit — never more than one segment downloading ahead of the one
+being read — the explicit deeper window bulk fillers opt into, and
 that close() still aborts everything in flight.
 """
 from __future__ import annotations
@@ -137,7 +138,8 @@ def test_close_aborts_a_read_ahead_in_flight(server):
     reader = SegmentReader(_urls(server, 4))
     reader.read(SEGMENT_BYTES)  # init only; seg1 is downloading ahead
     ahead = reader._ahead  # type: ignore[attr-defined]
-    assert ahead is not None and ahead[0] == 1
+    assert 1 in ahead
+    seg1 = ahead[1]
 
     t0 = time.monotonic()
     reader.close()
@@ -145,5 +147,30 @@ def test_close_aborts_a_read_ahead_in_flight(server):
     assert time.monotonic() - t0 < 0.1
     # ...which drops whatever it gets instead of handing bytes back
     # for a closed reader.
-    assert ahead[1].result(timeout=3.0) is None
+    assert seg1.result(timeout=3.0) is None
     assert reader.read(SEGMENT_BYTES) == b""
+
+
+def test_deep_read_ahead_keeps_a_bounded_window_in_order(server):
+    """Bulk fillers (bounded DLNA files) ask for a deeper window.
+
+    The window is bounded, the segments are still consumed in order,
+    and each is fetched exactly once.
+    """
+    server.delay = 0.3
+    reader = SegmentReader(_urls(server, 9), read_ahead_depth=4)
+    reader.read(SEGMENT_BYTES)  # init; fills 1..4 while we're here
+    assert sorted(reader._ahead) == [1, 2, 3, 4]  # type: ignore[attr-defined]
+
+    out = bytearray()
+    while True:
+        chunk = reader.read(SEGMENT_BYTES)
+        if not chunk:
+            break
+        out.extend(chunk)
+    reader.close()
+
+    assert bytes(out).startswith(b"/seg1")
+    assert out[-SEGMENT_BYTES:].startswith(b"/seg8")
+    assert server.max_in_flight <= 4
+    assert len(server.client_ports) == 9
