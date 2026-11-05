@@ -29,7 +29,7 @@ class _FakeTrackSource:
         if ready:
             self.ready.set()
         self.failed = False
-        self.path = "/tmp/fake.flac"
+        self.path = __file__
         self.closed = False
 
     def close(self) -> None:
@@ -640,6 +640,14 @@ def test_bounded_source_reusable_matches_identity():
 
 def test_bounded_source_reusable_requires_ready_file():
     prev = _ReusableSource(ready=False)
+    assert not _bounded_source_reusable(
+        prev, track_id="T1", quality="flac|16|44100|LOSSLESS", start_s=0.0
+    )
+
+
+def test_bounded_source_reusable_requires_file_on_disk(tmp_path):
+    prev = _ReusableSource()
+    prev.path = str(tmp_path / "gone.flac")
     assert not _bounded_source_reusable(
         prev, track_id="T1", quality="flac|16|44100|LOSSLESS", start_s=0.0
     )

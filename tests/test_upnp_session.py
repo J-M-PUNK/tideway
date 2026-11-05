@@ -563,7 +563,7 @@ class TestConnect:
                 self.ready = threading.Event()
                 self.ready.set()
                 self.failed = False
-                self.path = "/tmp/stub.flac"
+                self.path = __file__
                 self.track_id = k.get("track_id", 0)
                 self.source_released = threading.Event()
                 self.source_released.set()
@@ -625,7 +625,7 @@ class TestConnect:
                 self.ready = threading.Event()
                 self.ready.set()
                 self.failed = False
-                self.path = "/tmp/stub.flac"
+                self.path = __file__
                 self.track_id = k.get("track_id", 0)
                 self.source_released = threading.Event()
                 self.source_released.set()
@@ -1028,7 +1028,7 @@ def test_start_passthrough_restart_bypasses_same_source_guard(
             self.ready = threading.Event()
             self.ready.set()
             self.failed = False
-            self.path = "/tmp/stub.flac"
+            self.path = __file__
             self.track_id = k.get("track_id", 0)
             self.source_released = threading.Event()
             self.source_released.set()
@@ -1215,7 +1215,7 @@ def test_start_passthrough_reuses_ready_bounded_file(
             self.ready = threading.Event()
             self.ready.set()
             self.failed = False
-            self.path = "/tmp/stub.flac"
+            self.path = __file__
             self.track_id = k.get("track_id", 0)
             self.tidal_track_id = k.get("tidal_track_id")
             self.source_quality = k.get("source_quality")
@@ -1251,6 +1251,7 @@ def test_start_passthrough_reuses_ready_bounded_file(
     assert first is not None
     first.tidal_track_id = "T1"
     first.source_quality = "flac|16|44100|LOSSLESS"
+    old_ts = first.track_id
 
     announced.clear()
     # New signed URLs for the same track, same quality/offset.
@@ -1264,3 +1265,7 @@ def test_start_passthrough_reuses_ready_bounded_file(
     assert len(built) == built_before
     assert mgr._session.http_server.track_source is first
     assert announced
+    # The renderer ignores an unchanged URI, so reuse must renumber the
+    # file's ?ts= and announce under the new one.
+    assert first.track_id != old_ts
+    assert announced[0][3] == first.track_id

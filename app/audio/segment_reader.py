@@ -30,7 +30,7 @@ from app.http import STREAM_SESSION
 # libav commonly asks for 32KB at a time. Segments are ~2-3MB each,
 # so one segment covers many reads. We fetch one segment per
 # cache-miss and append to a rolling bytes buffer, with the segment
-# after it already downloading (see _start_read_ahead).
+# after it already downloading (see _fill_read_ahead).
 
 # Runs the one-segment read-ahead for every live reader: the playing
 # track's decoder, a buffering preload, a seek's fresh reader, a DLNA

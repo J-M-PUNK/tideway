@@ -431,6 +431,11 @@ def _bounded_source_reusable(
     ready = getattr(prev, "ready", None)
     if ready is None or not ready.is_set() or getattr(prev, "failed", False):
         return False
+    # close() unlinks the file but leaves `ready` set, so a source that
+    # was torn down still looks servable by the flags alone.
+    prev_path = getattr(prev, "path", None)
+    if not prev_path or not os.path.exists(prev_path):
+        return False
     prev_tid = getattr(prev, "tidal_track_id", None)
     if prev_tid is None or str(prev_tid) != str(track_id):
         return False
@@ -1249,7 +1254,12 @@ class UpnpManager:
                         pre_loaded.close()
                     except Exception:
                         pass
-                _track_ts = prev.track_id
+                # UAPP ignores a SetAVTransportURI whose URI it has
+                # already seen, so re-announcing under the old ?ts=
+                # leaves a scrub-back-to-0:00 playing on. Renumber the
+                # reused file before announcing; the handler matches
+                # requests against track_id, so the file still serves.
+                prev.track_id = _track_ts
                 with session.passthrough_lock:
                     session.buffer.set_track_id(_track_ts)
                 http_server.track_source = prev
