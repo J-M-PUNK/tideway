@@ -368,7 +368,8 @@ On macOS, download `Tideway-<version>.dmg`, double-click it, and
 drag the `Tideway` app into `/Applications`. Apple Silicon only:
 the binary is arm64-native and won't launch on Intel Macs. This
 has been the case since the earliest signed release; the README
-just hadn't called it out before.
+just hadn't called it out before. It needs macOS 15 (Sequoia) or
+later, which every Apple Silicon Mac can install.
 
 On Windows, download `Tideway-setup-<version>.exe` and run it. The
 installer drops the app under your user profile, registers a Start

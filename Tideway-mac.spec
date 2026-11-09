@@ -211,5 +211,14 @@ app = BUNDLE(
         "CFBundleVersion": APP_VERSION,
         # Required by pywebview's WKWebView backend on modern macOS.
         "NSHighResolutionCapable": True,
+        # The oldest macOS this build runs on. pip picks each library's
+        # build for the release runner's macOS, so this has to cover
+        # what the runner pulls in: on macos-15, orjson comes as a
+        # macOS 15 build. The release job runs
+        # scripts/check_macos_min_version.py against this value and
+        # fails if anything in the bundle needs more. Declaring it also
+        # makes Finder say the app needs a newer macOS, rather than the
+        # app failing to start.
+        "LSMinimumSystemVersion": "15.0",
     },
 )
