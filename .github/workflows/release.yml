@@ -28,7 +28,12 @@ jobs:
   # README tells them to right-click → Open.
   # -------------------------------------------------------------------
   build-macos:
-    runs-on: macos-14
+    # GitHub retired the macos-14 image: since November 2026 the job is
+    # cancelled before its first step with "The configuration
+    # 'macos-14-arm64-us-default' is not supported". Keep this on the
+    # oldest macOS image GitHub provides, because building on a newer
+    # one can pull in library builds that refuse to run on older Macs.
+    runs-on: macos-15
     steps:
       - uses: actions/checkout@v7
         with:
