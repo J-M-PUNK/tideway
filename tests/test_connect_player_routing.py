@@ -48,6 +48,41 @@ def test_receiver_error_is_reported_without_details(receiver):
     assert snap['state'] == 'error'
     assert snap['error'] == 'Tidal Connect play failed (code 1002)'
 
+
+@pytest.mark.parametrize('command,expected', [
+    ('connectionLost', 'Connection to the Tidal Connect receiver was lost'),
+    ('notifySessionError', 'Tidal Connect notifySessionError failed'),
+])
+def test_receiver_errors_without_codes_have_no_none_placeholder(receiver, command, expected):
+    receiver.remote_state.return_value['error'] = {'command': command, 'code': None}
+    assert server.player_state()['error'] == expected
+
+
+@pytest.mark.parametrize('quality', ['low_96k', 'low_320k', 'high_lossless', 'hi_res_lossless'])
+def test_play_track_passes_the_selected_quality_to_receiver(receiver, quality):
+    server.player_play_track(server._PlayerLoadRequest(track_id='123', quality=quality))
+    receiver.load_track.assert_called_once_with(123, quality=quality)
+
+
+@pytest.mark.parametrize('requested,effective,wire', [
+    ('low_96k', 'low_96k', 'LOW'),
+    ('low_320k', 'low_320k', 'HIGH'),
+    ('high_lossless', 'high_lossless', 'LOSSLESS'),
+    ('hi_res_lossless', 'hi_res_lossless', 'HI_RES_LOSSLESS'),
+    ('hi_res_lossless', 'high_lossless', 'LOSSLESS'),
+    (None, 'low_320k', 'HIGH'),
+])
+def test_single_track_queue_uses_subscription_clamped_quality(monkeypatch, requested, effective, wire):
+    from app.audio import tidal_connect_queue
+
+    clamp = Mock(return_value=effective)
+    create = Mock(return_value={'fixture': 'queue'})
+    monkeypatch.setattr(server.tidal, 'clamp_quality_to_subscription', clamp)
+    monkeypatch.setattr(tidal_connect_queue, 'create_track_queue', create)
+    assert server._tcr_track_queue(123, requested) == {'fixture': 'queue'}
+    clamp.assert_called_once_with(requested or 'hi_res_lossless')
+    create.assert_called_once_with(server.tidal.session, 123, wire)
+
 def test_dead_receiver_selection_does_not_fall_back_to_local(receiver, monkeypatch):
     receiver.is_active.return_value = False
     receiver.remote_state.return_value.update(error={'command':'connection','code':None})
