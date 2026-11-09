@@ -15,7 +15,11 @@ import time
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from app.audio.upnp import UpnpManager, _SessionState
+from app.audio.upnp import (
+    UpnpManager,
+    _SessionState,
+    _bounded_source_reusable,
+)
 
 
 class _FakeTrackSource:
@@ -25,7 +29,7 @@ class _FakeTrackSource:
         if ready:
             self.ready.set()
         self.failed = False
-        self.path = "/tmp/fake.flac"
+        self.path = __file__
         self.closed = False
 
     def close(self) -> None:
@@ -605,3 +609,72 @@ def test_pause_no_rebind_when_first_call_succeeds():
 
     assert av.pause.call_count == 1
     assert rebinds == []
+
+
+class _ReusableSource(_FakeTrackSource):
+    def __init__(
+        self,
+        *,
+        track_id: int = 7,
+        tidal_track_id: str = "T1",
+        source_quality: str = "flac|16|44100|LOSSLESS",
+        start_s: float = 0.0,
+        ready: bool = True,
+    ) -> None:
+        super().__init__(track_id=track_id, ready=ready)
+        self.tidal_track_id = tidal_track_id
+        self.source_quality = source_quality
+        self.start_s = start_s
+        self.source_released = threading.Event()
+
+
+def test_bounded_source_reusable_matches_identity():
+    prev = _ReusableSource()
+    assert _bounded_source_reusable(
+        prev,
+        track_id="T1",
+        quality="flac|16|44100|LOSSLESS",
+        start_s=0.0,
+    )
+
+
+def test_bounded_source_reusable_requires_ready_file():
+    prev = _ReusableSource(ready=False)
+    assert not _bounded_source_reusable(
+        prev, track_id="T1", quality="flac|16|44100|LOSSLESS", start_s=0.0
+    )
+
+
+def test_bounded_source_reusable_requires_file_on_disk(tmp_path):
+    prev = _ReusableSource()
+    prev.path = str(tmp_path / "gone.flac")
+    assert not _bounded_source_reusable(
+        prev, track_id="T1", quality="flac|16|44100|LOSSLESS", start_s=0.0
+    )
+
+
+def test_bounded_source_reusable_refuses_quality_change():
+    prev = _ReusableSource()
+    assert not _bounded_source_reusable(
+        prev,
+        track_id="T1",
+        quality="flac|24|96000|HI_RES_LOSSLESS",
+        start_s=0.0,
+    )
+
+
+def test_bounded_source_reusable_refuses_unknown_quality():
+    prev = _ReusableSource(source_quality=None)
+    assert not _bounded_source_reusable(
+        prev, track_id="T1", quality=None, start_s=0.0
+    )
+
+
+def test_bounded_source_reusable_refuses_different_offset():
+    prev = _ReusableSource()
+    assert not _bounded_source_reusable(
+        prev,
+        track_id="T1",
+        quality="flac|16|44100|LOSSLESS",
+        start_s=30.0,
+    )

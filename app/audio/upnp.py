@@ -352,6 +352,14 @@ _TRACK_DEMUX_WAIT_S = 90.0
 # slow download doesn't spuriously skip the pre-stage.
 _NEXT_SOURCE_RELEASE_WAIT_S = 120.0
 
+# Segment read-ahead depth for the bounded per-track files. Playback
+# readers keep the default of one (at most two requests in flight for
+# their track); a bounded file is a bulk fill — the whole track must be
+# on disk before the renderer may GET it — so a deeper window makes the
+# fill bandwidth-bound instead of per-segment-RTT-bound. Order is still
+# strict: the demuxer consumes the window in index order.
+_BOUNDED_FILL_READ_AHEAD = 4
+
 
 # Do not pre-stage the next track on the renderer until the current one
 # is within this many seconds of its end. Issue #354 hardware bring-up:
@@ -400,6 +408,45 @@ _RENDERER_EOS_MARGIN_S = 20.0
 # promoting a pre-staged track (UAPP does), which would otherwise fire an
 # early advance and cut the track.
 _RENDERER_EOS_WALL_TOLERANCE_S = 3.0
+
+
+def _bounded_source_reusable(
+    prev,
+    *,
+    track_id: Optional[str],
+    quality: Optional[str],
+    start_s: float,
+) -> bool:
+    """Whether an already-demuxed bounded file can serve this load.
+
+    Identity is (TIDAL track id, resolved stream signature, trim
+    offset). The ?ts= address is deliberately not part of it — that
+    changes on every rebuild of the same track. A missing track id or
+    an unknown quality on either side means "don't risk it": rebuild,
+    because serving a file demuxed from a different stream tier would
+    play the wrong quality while the UI claims the new one.
+    """
+    if prev is None or track_id is None or quality is None:
+        return False
+    ready = getattr(prev, "ready", None)
+    if ready is None or not ready.is_set() or getattr(prev, "failed", False):
+        return False
+    # close() unlinks the file but leaves `ready` set, so a source that
+    # was torn down still looks servable by the flags alone.
+    prev_path = getattr(prev, "path", None)
+    if not prev_path or not os.path.exists(prev_path):
+        return False
+    prev_tid = getattr(prev, "tidal_track_id", None)
+    if prev_tid is None or str(prev_tid) != str(track_id):
+        return False
+    if getattr(prev, "source_quality", None) != quality:
+        return False
+    try:
+        prev_start = float(getattr(prev, "start_s", 0.0) or 0.0)
+        wanted_start = max(0.0, float(start_s))
+    except (TypeError, ValueError):
+        return False
+    return abs(prev_start - wanted_start) < 1e-6
 
 
 def _same_track_uri(current: str, staged: str) -> bool:
@@ -593,6 +640,16 @@ class UpnpManager:
         # to notify the renderer on track changes via SetAVTransportURI.
         self._metadata_provider: Optional[Callable[[], Optional[dict]]] = None
 
+        # Track-identity provider: returns (TIDAL track id, resolved
+        # stream signature) for the current track, or (None, None).
+        # connect() passes this through so the first bounded file it
+        # builds is annotated with the same identity later loads use;
+        # without it the track playing at connect time would be the one
+        # file that can never be reused on stop→replay.
+        self._track_identity_provider: Optional[
+            Callable[[], tuple[Optional[str], Optional[str]]]
+        ] = None
+
         # Position provider: returns the desktop decoder's current
         # playback position in seconds, or None. Consulted when the
         # session is established so the bounded file served to the
@@ -782,6 +839,20 @@ class UpnpManager:
         SetAVTransportURI + Play."""
         self._metadata_provider = callback
 
+    def set_track_identity_provider(
+        self,
+        callback: Optional[
+            Callable[[], tuple[Optional[str], Optional[str]]]
+        ],
+    ) -> None:
+        """Register a callback returning the current track's
+        `(TIDAL track id, resolved stream signature)`.
+
+        connect() uses it so the bounded file built for a track that was
+        already playing is annotated with the same identity later loads
+        carry, making it eligible for stop→replay reuse."""
+        self._track_identity_provider = callback
+
     def set_position_provider(
         self, callback: Optional[Callable[[], Optional[float]]]
     ) -> None:
@@ -951,6 +1022,7 @@ class UpnpManager:
         self, source, prefetched=None, metadata=None,
         *, wait_for_ready: bool = False, start_s: float = 0.0,
         track_id: Optional[str] = None, restart: bool = False,
+        quality: Optional[str] = None,
     ) -> None:
         """Start bit-perfect FLAC passthrough for the current track.
 
@@ -977,6 +1049,11 @@ class UpnpManager:
                       track/URLs are served but from a new offset, and the
                       re-announce (SetAVTransportURI) is what moves the
                       renderer and clears its stale NextURI.
+            quality: resolved-stream signature (codec/bit depth/sample
+                      rate/tier). Together with `track_id` and `start_s`
+                      it decides whether an already-demuxed bounded file
+                      can be reused instead of rebuilt (stop/replay, or
+                      a seek back to a position we still hold).
         """
         with self._session_lock:
             session = self._session
@@ -1023,10 +1100,24 @@ class UpnpManager:
                 pass
 
         # Build SegmentReader from URLs (network/parse work — off-lock).
+        # The bounded path fills a whole track to disk before serving
+        # it, so give it a deeper read-ahead window; live-encoder
+        # sessions keep the one-ahead default.
+        _bounded = (
+            http_server is not None
+            and getattr(http_server, "dlna", False)
+        )
         try:
             from app.audio.segment_reader import SegmentReader
-            if isinstance(source, (list, tuple)):
-                reader = SegmentReader(source, prefetched=prefetched)
+            _owns_reader = isinstance(source, (list, tuple))
+            if _owns_reader:
+                reader = SegmentReader(
+                    source,
+                    prefetched=prefetched,
+                    read_ahead_depth=(
+                        _BOUNDED_FILL_READ_AHEAD if _bounded else 1
+                    ),
+                )
             else:
                 reader = source
         except Exception as exc:
@@ -1099,13 +1190,44 @@ class UpnpManager:
                 (track_id is not None and pre_track_id == track_id)
                 or pre_urls == _source_urls
             )
+            # Reuse the file already demuxing/served for this exact
+            # track. Re-announcing the current track, or seeking back to
+            # an offset we still hold, currently rebuilds the whole track
+            # (which on a long track is the multi-second "start" pause).
+            # Keep the completed file instead; the announce below still
+            # re-sends SetAVTransportURI, so the renderer restarts
+            # cleanly.
+            _reuse_prev = (
+                not _promote
+                and _bounded_source_reusable(
+                    prev,
+                    track_id=track_id,
+                    quality=quality,
+                    start_s=start_s,
+                )
+            )
             if _promote:
                 promoted = True
+                # We built a reader (and its read-ahead fetches) from
+                # the fresh URLs but serve the pre-staged file instead;
+                # abort those fetches so they don't waste bandwidth.
+                if _owns_reader:
+                    try:
+                        reader.close()
+                    except Exception:
+                        pass
                 if prev is not None and prev is not pre_loaded:
                     try:
                         prev.close()
                     except Exception:
                         pass
+                # Annotate the promoted file so a later stop/replay can
+                # reuse it too (pre-staging doesn't carry the resolved
+                # quality).
+                if track_id is not None:
+                    pre_loaded.tidal_track_id = str(track_id)
+                if quality is not None:
+                    pre_loaded.source_quality = quality
                 # Reuse the pre-staged ts instead of renumbering it. The
                 # renderer fetched (or is fetching) this file under the
                 # ?ts= sent in SetNextAVTransportURI; giving it a new id
@@ -1117,6 +1239,37 @@ class UpnpManager:
                 http_server.track_source = pre_loaded
                 http_server.next_track_source = None
                 track_source = pre_loaded
+            elif _reuse_prev:
+                if _owns_reader:
+                    try:
+                        reader.close()
+                    except Exception:
+                        pass
+                if pre_loaded is not None and pre_loaded is not prev:
+                    log.debug(
+                        "upnp: pre-staged file not promoted (urls differ); "
+                        "dropping it"
+                    )
+                    try:
+                        pre_loaded.close()
+                    except Exception:
+                        pass
+                # UAPP ignores a SetAVTransportURI whose URI it has
+                # already seen, so re-announcing under the old ?ts=
+                # leaves a scrub-back-to-0:00 playing on. Renumber the
+                # reused file before announcing; the handler matches
+                # requests against track_id, so the file still serves.
+                prev.track_id = _track_ts
+                with session.passthrough_lock:
+                    session.buffer.set_track_id(_track_ts)
+                http_server.track_source = prev
+                http_server.next_track_source = None
+                track_source = prev
+                print(
+                    f"[upnp] reusing bounded file track={track_id} "
+                    f"start_s={start_s:.2f}",
+                    flush=True,
+                )
             else:
                 if pre_loaded is not None:
                     log.debug(
@@ -1143,6 +1296,8 @@ class UpnpManager:
                     track_id=_track_ts,
                     done_event=None,
                     start_s=start_s,
+                    tidal_track_id=track_id,
+                    source_quality=quality,
                 )
                 http_server.track_source = track_source
                 track_source.start()
@@ -1713,7 +1868,11 @@ class UpnpManager:
         try:
             from app.audio.segment_reader import SegmentReader
             import time as _time
-            reader = SegmentReader(list(_src), prefetched=prefetched or {})
+            reader = SegmentReader(
+                list(_src),
+                prefetched=prefetched or {},
+                read_ahead_depth=_BOUNDED_FILL_READ_AHEAD,
+            )
             # Unique ts so the pre-staged file is addressable under its
             # own ?ts= while the current track still occupies the stream
             # URL. On promotion this same id becomes the current ts, so
@@ -1721,6 +1880,7 @@ class UpnpManager:
             ts = TrackFileSource(
                 source=reader,
                 track_id=int(_time.monotonic() * 1_000_000),
+                tidal_track_id=_tid,
             )
         except Exception as exc:
             print(
@@ -2450,8 +2610,19 @@ class UpnpManager:
                 # renderer returning UPnP 716) therefore propagates here
                 # and tears down, instead of a false "connected" with no
                 # audio.
+                track_id: Optional[str] = None
+                quality: Optional[str] = None
+                if self._track_identity_provider is not None:
+                    try:
+                        track_id, quality = self._track_identity_provider()
+                    except Exception as exc:  # noqa: BLE001
+                        log.debug("upnp: identity provider raised: %r", exc)
                 self.start_passthrough(
-                    urls, wait_for_ready=True, start_s=self._resume_offset_s()
+                    urls,
+                    wait_for_ready=True,
+                    start_s=self._resume_offset_s(),
+                    track_id=track_id,
+                    quality=quality,
                 )
             else:
                 av.set_av_transport_uri(session.stream_url, didl)

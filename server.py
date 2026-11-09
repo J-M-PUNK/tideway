@@ -1112,6 +1112,9 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         _upnp_manager.set_metadata_provider(
             _native_player().get_current_track_metadata
         )
+        _upnp_manager.set_track_identity_provider(
+            _native_player().get_current_track_identity
+        )
         _upnp_manager.set_position_provider(
             _native_player().get_current_position_s
         )
