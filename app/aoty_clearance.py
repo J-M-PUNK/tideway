@@ -131,6 +131,19 @@ _clearance: Optional[Clearance] = None
 # short `_state_lock` that guards the cached value.
 _solve_lock = threading.Lock()
 
+# How long a failed solve stands before anyone opens another window.
+# A solve that fails has run its full 90 seconds, and every request
+# that drew a challenge meanwhile is queued on `_solve_lock` behind it.
+# Without this, each of them then ran its own 90 second solve against
+# the same wall, so the AOTY rows on Home hung for minutes and often
+# never loaded. Matches `_BLOCK_WINDOW_SEC` in aoty.py, the time the
+# Home page shows its "unavailable" notice, so the rows stay quiet for
+# exactly as long as the notice says they will.
+_FAILED_SOLVE_HOLD_SEC = 600.0
+# Monotonic time of the last solve that produced no clearance, or None.
+# Guarded by `_state_lock`.
+_failed_at: Optional[float] = None
+
 
 def register_solver(fn: Solver) -> None:
     """Install the challenge solver. Called once by `desktop.py` after
@@ -183,8 +196,13 @@ def refresh(stale: Optional[Clearance] = None, *, probe_url: str) -> Optional[Cl
     thread already replaced it while this one waited on the solve lock,
     that newer value is returned without solving again — which is what
     keeps a burst of 403s from queueing up a burst of windows.
+
+    For the same reason in the other direction, it returns None without
+    solving while a recent solve has failed (`_FAILED_SOLVE_HOLD_SEC`):
+    the requests queued behind a failed solve must not each go on to
+    open a window of their own.
     """
-    global _clearance
+    global _clearance, _failed_at
 
     with _solver_lock:
         solver = _solver
@@ -202,6 +220,10 @@ def refresh(stale: Optional[Clearance] = None, *, probe_url: str) -> Optional[Cl
         # one waited, and that result is what this caller wanted.
         if current is not None and current is not stale:
             return current
+        with _state_lock:
+            failed_at = _failed_at
+        if failed_at is not None and time.monotonic() - failed_at < _FAILED_SOLVE_HOLD_SEC:
+            return None
 
         rejected = stale.cookies.get("cf_clearance") if stale else None
         try:
@@ -216,14 +238,16 @@ def refresh(stale: Optional[Clearance] = None, *, probe_url: str) -> Optional[Cl
                 f"stay empty until the next attempt",
                 flush=True,
             )
-            return None
+            result = None
 
-        if not result:
-            return None
-        cookies, user_agent = result
+        cookies, user_agent = result or ({}, "")
         if not cookies or not cookies.get("cf_clearance") or not user_agent:
-            # The window loaded something, but not a cleared page. No
-            # point caching a jar with no clearance in it.
+            # No clearance came back: the challenge never cleared, the
+            # solver raised, or the window loaded something that wasn't
+            # a cleared page. Record it so the requests queued behind
+            # this one give up rather than solving again.
+            with _state_lock:
+                _failed_at = time.monotonic()
             return None
 
         fresh = Clearance(
@@ -233,6 +257,7 @@ def refresh(stale: Optional[Clearance] = None, *, probe_url: str) -> Optional[Cl
         )
         with _state_lock:
             _clearance = fresh
+            _failed_at = None
         print(
             f"[aoty] obtained Cloudflare clearance via the app's webview "
             f"({len(cookies)} cookies)",
@@ -243,9 +268,10 @@ def refresh(stale: Optional[Clearance] = None, *, probe_url: str) -> Optional[Cl
 
 def reset_for_tests() -> None:
     """Drop solver + cached clearance. Test-support only."""
-    global _solver, _clearance
+    global _solver, _clearance, _failed_at
     with _solver_lock:
         _solver = None
     _solver_ready.clear()
     with _state_lock:
         _clearance = None
+        _failed_at = None
