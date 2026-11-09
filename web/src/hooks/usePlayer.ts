@@ -502,6 +502,7 @@ export function usePlayer() {
   // SSE subscription — backend pushes state changes + position updates.
   // `seq` is our monotonic clock so we can ignore out-of-order frames.
   const lastSeqRef = useRef(-1);
+  const lastOutputRef = useRef<string | undefined>(undefined);
   // Last position we applied, so a frame with an unchanged seq can still
   // update the clock when only the position moved. seq is bumped from
   // the audio callback, which stops in DLNA renderer-clock mode once the
@@ -821,7 +822,11 @@ export function usePlayer() {
       // or otherwise unstreamable id. The expected-track guard
       // (isLateEcho) naturally dedupes repeat error frames for the
       // same track, so we only advance once per failure.
-      if (snap.state === "error" && continuePlayingRef.current) {
+      if (
+        snap.state === "error" &&
+        snap.error_scope !== "session" &&
+        continuePlayingRef.current
+      ) {
         advanceRef.current();
       }
       triggerPreloadIfNeeded(snap);
@@ -830,13 +835,13 @@ export function usePlayer() {
     return subscribeEvents("player", (data) => {
       try {
         const snap = JSON.parse(data) as PlayerSnapshot;
-        // A newer seq always applies. A repeat seq still applies when
-        // only the position moved: seq is bumped from the audio
-        // callback, which stops in DLNA renderer-clock mode once the
-        // muted local stream ends — seq freezes while the renderer
-        // position keeps advancing, and a seq-only guard would freeze
-        // the UI clock. Out-of-order (older) seq frames are still
-        // dropped.
+        if (snap.output_id !== lastOutputRef.current) {
+          lastOutputRef.current = snap.output_id;
+          lastSeqRef.current = -1;
+          lastPositionRef.current = -1;
+          serverVolumeAdopted.current = false;
+          serverMutedAdopted.current = false;
+        }
         if (snap.seq < lastSeqRef.current) return;
         if (
           snap.seq === lastSeqRef.current &&

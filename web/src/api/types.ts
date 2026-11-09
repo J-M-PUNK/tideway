@@ -160,6 +160,8 @@ export interface StreamInfo {
 }
 
 export interface PlayerSnapshot {
+  /** Receiver identity; sequence numbers belong to this output. */
+  output_id?: string;
   state: "idle" | "loading" | "playing" | "paused" | "ended" | "error";
   track_id: string | null;
   position_ms: number;
@@ -167,6 +169,8 @@ export interface PlayerSnapshot {
   volume: number;
   muted: boolean;
   error: string | null;
+  /** Whether an error applies to the current track or the receiver session. */
+  error_scope?: "track" | "session" | null;
   seq: number;
   /** What's actually audible. Null when the player is idle or still
    *  loading; the UI hides the badge in that case. */
