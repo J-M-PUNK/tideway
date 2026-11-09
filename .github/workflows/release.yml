@@ -93,6 +93,14 @@ jobs:
             echo "OK: found $count file(s) matching $pat"
           done
 
+      - name: Verify the bundle runs on its declared macOS
+        # pip picks each library's build for this runner's macOS, so a
+        # runner upgrade can quietly raise the macOS the app needs
+        # (v1.39.0 picked up a macOS-15-only orjson this way). Fail
+        # here if anything in the bundle needs more than the
+        # LSMinimumSystemVersion set in Tideway-mac.spec.
+        run: python scripts/check_macos_min_version.py dist/Tideway.app
+
       - name: Build DMG
         # DMG is the canonical macOS install format — Finder mounts
         # the image, shows the drag-to-Applications window, users
