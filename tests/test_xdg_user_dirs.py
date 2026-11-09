@@ -10,8 +10,8 @@ import sys
 from pathlib import Path
 
 from app.settings import (
-    _default_output_dir,
-    _default_videos_dir,
+    _platform_output_dir,
+    _platform_videos_dir,
     _migrate_default_paths,
     _xdg_user_dir,
     Settings,
@@ -74,14 +74,14 @@ def test_default_dirs_follow_user_dirs_config(monkeypatch, tmp_path):
         tmp_path / ".config",
         'XDG_MUSIC_DIR="$HOME/Música"\nXDG_VIDEOS_DIR="$HOME/Vídeos"\n',
     )
-    assert _default_output_dir() == str(tmp_path / "Música" / "Tidal")
-    assert _default_videos_dir() == str(tmp_path / "Vídeos" / "Tidal")
+    assert _platform_output_dir() == str(tmp_path / "Música" / "Tidal")
+    assert _platform_videos_dir() == str(tmp_path / "Vídeos" / "Tidal")
 
 
 def test_default_dirs_without_config_keep_conventional_names(monkeypatch, tmp_path):
     _linux(monkeypatch, tmp_path)
-    assert _default_output_dir() == str(tmp_path / "Music" / "Tidal")
-    assert _default_videos_dir() == str(tmp_path / "Videos" / "Tidal")
+    assert _platform_output_dir() == str(tmp_path / "Music" / "Tidal")
+    assert _platform_videos_dir() == str(tmp_path / "Videos" / "Tidal")
 
 
 def test_migration_moves_old_default_to_xdg_dir(monkeypatch, tmp_path):

@@ -19,50 +19,57 @@ _REPO_ROOT = Path(__file__).resolve().parent.parent
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-_DATA_DIR = pytest.StashKey[Path]()
+_SCRATCH_ROOT = pytest.StashKey[Path]()
 
 
 def pytest_configure(config):
-    """Point user_data_dir() at a scratch dir for the whole run.
+    """Point the app's state and download folders at a scratch dir.
 
     The app resolves its state paths when a module is imported
     (audio.log's handler in app/audio/player.py, perf.log's in
     server.py, the settings file, the Tidal session, the download
-    queue), and test modules import that code during collection, so
-    this has to happen before collection rather than in a fixture.
-    Without it every run loaded the developer's own settings and Tidal
-    session, appended fake underflows, load stalls and HTTP 429
-    refreshes to their audio.log, where they read as real faults, and
-    the logout test deleted their saved download queue.
+    queue), and server.py builds its Settings at import too, and test
+    modules import that code during collection, so this has to happen
+    before collection rather than in a fixture. Without it every run
+    loaded the developer's own settings and Tidal session, appended
+    fake underflows, load stalls and HTTP 429 refreshes to their
+    audio.log, where they read as real faults, and the logout test
+    deleted their saved download queue. Every TestClient startup also
+    deleted `*.part` files under settings.output_dir and scanned it, so
+    each run walked the developer's real music folder close to a
+    hundred times and could delete the partial file of a download the
+    installed app had in flight.
 
     A hook rather than module-level code because two test modules
     import this file as `tests.conftest`, which runs its body a second
     time and would point the run at a second directory halfway through
     collection.
     """
-    data_dir = Path(tempfile.mkdtemp(prefix="tideway-tests-"))
-    config.stash[_DATA_DIR] = data_dir
-    os.environ["TIDEWAY_DATA_DIR"] = str(data_dir)
+    root = Path(tempfile.mkdtemp(prefix="tideway-tests-"))
+    config.stash[_SCRATCH_ROOT] = root
+    os.environ["TIDEWAY_DATA_DIR"] = str(root / "data")
+    os.environ["TIDEWAY_OUTPUT_DIR"] = str(root / "output")
+    os.environ["TIDEWAY_VIDEOS_DIR"] = str(root / "videos")
 
 
 def pytest_unconfigure(config):
-    """Delete the scratch data dir once the run is over.
+    """Delete the scratch dir once the run is over.
 
     audio.log and perf.log stay open on their RotatingFileHandlers for
     the life of the process, and Windows will not delete an open file,
-    so close every handler writing into the dir first. TIDEWAY_DATA_DIR
-    stays set on purpose: anything still running after this recreates
-    the scratch dir rather than reaching the real one.
+    so close every handler writing into the dir first. The overrides
+    stay set on purpose: anything still running after this recreates
+    the scratch paths rather than reaching the real ones.
     """
-    data_dir = config.stash[_DATA_DIR]
+    root = config.stash[_SCRATCH_ROOT]
     for logger in list(logging.Logger.manager.loggerDict.values()):
         for handler in list(getattr(logger, "handlers", ())):
             if isinstance(handler, logging.FileHandler) and Path(
                 handler.baseFilename
-            ).is_relative_to(data_dir):
+            ).is_relative_to(root):
                 logger.removeHandler(handler)
                 handler.close()
-    shutil.rmtree(data_dir)
+    shutil.rmtree(root)
 
 
 @pytest.fixture(autouse=True)
