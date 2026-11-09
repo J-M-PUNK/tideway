@@ -38,12 +38,7 @@ export function AotyHomeSection() {
   const { data: status } = useApi(() => api.aoty.status(), []);
   return (
     <div>
-      {status?.blocked && (
-        <AotyBlockedNotice
-          issuesUrl={status.issues_url}
-          canSolve={status.can_solve}
-        />
-      )}
+      {status?.blocked && <AotyBlockedNotice canSolve={status.can_solve} />}
       <AotyRow
         title="New album releases"
         fetch={() =>
@@ -67,20 +62,17 @@ export function AotyHomeSection() {
  * triage — same visible symptom whether the scraper is broken or AOTY
  * happens to have nothing for the week.
  *
- * Two wordings, because there are two causes and only one of them is
- * worth a bug report. `canSolve` false means there's no webview to run
- * Cloudflare's challenge in — a dev server or `--browser` mode, where
- * empty rows are expected and an issue would be noise. `canSolve` true
- * means we had an engine and still couldn't get through, which is the
- * case a maintainer wants to hear about.
+ * Two wordings for the two causes. `canSolve` false means there's no
+ * webview to run Cloudflare's challenge in — a dev server or
+ * `--browser` mode, where empty rows are expected. `canSolve` true
+ * means we had an engine and still couldn't get through. Since
+ * November 2026 that is AOTY asking for a human click and then
+ * rejecting the embedded browser regardless, which no bug report can
+ * fix, so the notice explains it rather than asking for one. The
+ * startup prewarm retries on every launch, so the rows return by
+ * themselves if AOTY lifts the check.
  */
-function AotyBlockedNotice({
-  issuesUrl,
-  canSolve,
-}: {
-  issuesUrl: string;
-  canSolve: boolean;
-}) {
+function AotyBlockedNotice({ canSolve }: { canSolve: boolean }) {
   return (
     <div className="mt-8 flex items-start gap-3 rounded-md border border-amber-500/40 bg-amber-500/5 p-4 text-sm">
       <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0 text-amber-500" />
@@ -88,17 +80,9 @@ function AotyBlockedNotice({
         <p className="font-semibold">Album of the Year rows unavailable</p>
         {canSolve ? (
           <p className="mt-1 text-muted-foreground">
-            AlbumOfTheYear.org is serving an anti-bot challenge we couldn't get
-            past. This sometimes clears on its own — if it doesn't, please{" "}
-            <a
-              href={issuesUrl}
-              target="_blank"
-              rel="noreferrer"
-              className="underline underline-offset-2 hover:text-foreground"
-            >
-              open a GitHub issue
-            </a>
-            .
+            AlbumOfTheYear.org is asking visitors to prove they're human, and it
+            doesn't accept Tideway's built-in browser. If the site lifts that
+            check, these rows come back the next time you open Tideway.
           </p>
         ) : (
           <p className="mt-1 text-muted-foreground">
