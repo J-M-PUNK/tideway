@@ -69,7 +69,7 @@
     "eslint-plugin-react-hooks": "^7.1.1",
     "eslint-plugin-react-refresh": "^0.5.7",
     "globals": "^17.13.0",
-    "happy-dom": "^20.11.13",
+    "happy-dom": "^21.0.4",
     "htmlhint": "^1.9.2",
     "husky": "^9.1.7",
     "lint-staged": "^17.6.0",
