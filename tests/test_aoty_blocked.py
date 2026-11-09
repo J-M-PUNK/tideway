@@ -42,6 +42,15 @@ def _reset_block_state():
     aoty_clearance.reset_for_tests()
 
 
+@pytest.fixture(autouse=True)
+def _as_background_solver():
+    # These tests cover the solve path, which only the startup prewarm
+    # may take (`solving_allowed()`); a request serving the UI never
+    # solves. Run them as the prewarm does.
+    with aoty_clearance.solving_allowed():
+        yield
+
+
 def test_cf_challenge_sets_blocked_flag():
     with patch("app.aoty.cffi_requests.get") as get:
         get.return_value = _FakeResponse(

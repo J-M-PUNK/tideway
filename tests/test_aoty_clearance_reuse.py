@@ -46,6 +46,15 @@ def _reset():
     aoty_clearance.reset_for_tests()
 
 
+@pytest.fixture(autouse=True)
+def _as_background_solver():
+    # These tests cover the solve path, which only the startup prewarm
+    # may take (`solving_allowed()`); a request serving the UI never
+    # solves. Run them as the prewarm does.
+    with aoty_clearance.solving_allowed():
+        yield
+
+
 def _install(token: str, *, age_sec: float) -> aoty_clearance.Clearance:
     """Seed a held clearance that was obtained `age_sec` ago."""
     clearance = aoty_clearance.Clearance(

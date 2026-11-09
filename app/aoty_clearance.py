@@ -58,13 +58,22 @@ engine to drive and no clearance is possible. `aoty.py` then behaves
 exactly as it did before: the fetch fails, the block flag is set, and
 the Home page renders its "AOTY is blocking us" notice. Degraded, but
 honest.
+
+Only background work may solve. A solve runs for up to 90 seconds, and
+since November 2026 AOTY's challenge wants a human click and then
+rejects the embedded browser anyway, so a Home request that waited on
+one sat for most of that time to show the "unavailable" notice. The
+startup prewarm runs inside `solving_allowed()`; everything else uses
+a clearance the prewarm already earned, or fails straight away.
 """
 from __future__ import annotations
 
+import contextvars
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Callable, Iterator, Optional
 
 # The solver takes the URL to load and the `cf_clearance` value that
 # was just rejected (None on a first solve), and returns the cookie jar
@@ -144,6 +153,29 @@ _FAILED_SOLVE_HOLD_SEC = 600.0
 # Guarded by `_state_lock`.
 _failed_at: Optional[float] = None
 
+# Whether the code running now may start, or wait on, a solve. Off by
+# default, so a request serving the UI never does; the startup prewarm
+# turns it on with `solving_allowed()`. A context variable rather than
+# a parameter because the solve is reached through every AOTY listing
+# function, and only the prewarm's calls differ.
+_may_solve: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "aoty_may_solve", default=False
+)
+
+
+@contextmanager
+def solving_allowed() -> Iterator[None]:
+    """Let AOTY fetches inside this block solve the challenge.
+
+    For background work only (the startup prewarm). A request a user is
+    waiting on must never sit through a solve; see the module docstring.
+    """
+    token = _may_solve.set(True)
+    try:
+        yield
+    finally:
+        _may_solve.reset(token)
+
 
 def register_solver(fn: Solver) -> None:
     """Install the challenge solver. Called once by `desktop.py` after
@@ -201,12 +233,23 @@ def refresh(stale: Optional[Clearance] = None, *, probe_url: str) -> Optional[Cl
     solving while a recent solve has failed (`_FAILED_SOLVE_HOLD_SEC`):
     the requests queued behind a failed solve must not each go on to
     open a window of their own.
+
+    Outside `solving_allowed()` it never solves or waits: it returns a
+    clearance the background solve has already replaced `stale` with,
+    or None.
     """
     global _clearance, _failed_at
 
     with _solver_lock:
         solver = _solver
     if solver is None:
+        return None
+
+    if not _may_solve.get():
+        with _state_lock:
+            current = _clearance
+        if current is not None and current is not stale:
+            return current
         return None
 
     with _solve_lock:
