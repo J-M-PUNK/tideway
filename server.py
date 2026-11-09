@@ -1182,11 +1182,15 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
             # out silently under `run.sh` / `--browser`, where no solver
             # ever registers and the rows stay empty by design.
             aoty_clearance.wait_for_solver(60.0)
-            year = datetime.now().year
-            listing_top = aoty_module.top_albums_of_year(year, limit=30)
-            aoty_resolver.resolve_listing(listing_top)
-            listing_new = aoty_module.recent_releases(limit=60)
-            aoty_resolver.resolve_listing(listing_new)
+            # The only place allowed to solve: the Home rows never wait
+            # on a solve, they use the clearance this earns or show the
+            # "unavailable" notice at once.
+            with aoty_clearance.solving_allowed():
+                year = datetime.now().year
+                listing_top = aoty_module.top_albums_of_year(year, limit=30)
+                aoty_resolver.resolve_listing(listing_top)
+                listing_new = aoty_module.recent_releases(limit=60)
+                aoty_resolver.resolve_listing(listing_new)
         except Exception:
             # Best-effort. If pre-warm fails the user just pays
             # the cost on first navigation, same as today.

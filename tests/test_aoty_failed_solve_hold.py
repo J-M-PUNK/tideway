@@ -45,6 +45,15 @@ def _reset():
     aoty_clearance.reset_for_tests()
 
 
+@pytest.fixture(autouse=True)
+def _as_background_solver():
+    # These tests cover the solve path, which only the startup prewarm
+    # may take (`solving_allowed()`); a request serving the UI never
+    # solves. Run them as the prewarm does.
+    with aoty_clearance.solving_allowed():
+        yield
+
+
 def test_requests_queued_behind_a_failed_solve_do_not_solve_again():
     solves = []
     all_challenged = threading.Barrier(3, timeout=5)
@@ -64,11 +73,13 @@ def test_requests_queued_behind_a_failed_solve_do_not_solve_again():
             all_challenged.wait()
         return _Challenge()
 
+    def prewarm_fetch():
+        # New threads don't inherit the context variable.
+        with aoty_clearance.solving_allowed():
+            results.append(aoty._fetch(URL))
+
     with patch("app.aoty.cffi_requests.get", side_effect=challenged_get):
-        threads = [
-            threading.Thread(target=lambda: results.append(aoty._fetch(URL)))
-            for _ in range(3)
-        ]
+        threads = [threading.Thread(target=prewarm_fetch) for _ in range(3)]
         started = time.monotonic()
         for t in threads:
             t.start()
