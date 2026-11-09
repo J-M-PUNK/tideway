@@ -651,7 +651,7 @@ scripts/build_dmg.sh
 ```
 
 The DMG lands at `dist/Tideway-<version>.dmg`. Users drag the
-`.app` into Applications and launch. The CI builds on macOS 14
+`.app` into Applications and launch. The CI builds on macOS 15
 (Apple Silicon), so the DMG produced by the release workflow is
 arm64. Intel Mac builds aren't part of the release pipeline today.
 
