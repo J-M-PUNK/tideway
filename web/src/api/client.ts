@@ -35,6 +35,7 @@ import type {
   ManualEqConfig,
   ParametricBand,
   PlayerSnapshot,
+  PlayerQueue,
   Playlist,
   PlaylistFolder,
   PlaylistDetail,
@@ -1168,19 +1169,24 @@ export const api = {
   player: {
     available: () => req<{ available: boolean }>("/api/player/available"),
     state: () => req<PlayerSnapshot>("/api/player/state"),
-    load: (trackId: string, quality?: string) =>
+    load: (trackId: string, quality?: string, queue?: PlayerQueue) =>
       req<PlayerSnapshot>("/api/player/load", {
         method: "POST",
-        body: JSON.stringify({ track_id: trackId, quality }),
+        body: JSON.stringify({ track_id: trackId, quality, queue }),
       }),
     /** Combined load + play in one call. Saves a network round-trip
      *  for auto-advance and keeps set_media + play back-to-back
      *  under the same backend lock so the decoder starts priming
      *  as soon as possible. */
-    playTrack: (trackId: string, quality?: string) =>
+    playTrack: (trackId: string, quality?: string, queue?: PlayerQueue) =>
       req<PlayerSnapshot>("/api/player/play_track", {
         method: "POST",
-        body: JSON.stringify({ track_id: trackId, quality }),
+        body: JSON.stringify({ track_id: trackId, quality, queue }),
+      }),
+    queue: (queue: PlayerQueue) =>
+      req<{ updated: boolean }>("/api/player/queue", {
+        method: "POST",
+        body: JSON.stringify(queue),
       }),
     /** Pre-resolve the next track's manifest so auto-advance skips
      *  the network fetch. Fire-and-forget — a failed preload just
