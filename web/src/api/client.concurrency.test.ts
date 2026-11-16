@@ -122,6 +122,37 @@ describe("API request concurrency", () => {
     await Promise.all(calls);
   });
 
+  it("installs an update and quits without waiting for a slot", async () => {
+    // On 1.39.0 the Album of the Year rows held every slot for minutes,
+    // so Install never reached the backend; a queued quit would leave
+    // the old app running under the installer.
+    const { api, apiRequestsInFlight } = await import("./client");
+    const pending = Array.from({ length: 6 }, () => deferred());
+    let i = 0;
+    fetchMock.mockImplementation(() => pending[i++].promise);
+
+    const calls = Array.from({ length: 6 }, () =>
+      api.version().catch(() => {}),
+    );
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(fetchMock).toHaveBeenCalledTimes(4);
+
+    fetchMock.mockResolvedValue(ok());
+    await Promise.all([api.updateInstall(), api.quitApp()]);
+
+    for (const path of ["/api/update/install", "/api/_internal/quit"]) {
+      expect(fetchMock).toHaveBeenCalledWith(
+        path,
+        expect.objectContaining({ method: "POST", priority: "high" }),
+      );
+    }
+    expect(apiRequestsInFlight()).toBe(4);
+
+    pending.forEach((p) => p.resolve(ok()));
+    await Promise.all(calls);
+  });
+
   it("reports how many requests hold a slot", async () => {
     const { api, apiRequestsInFlight } = await import("./client");
     expect(apiRequestsInFlight()).toBe(0);
