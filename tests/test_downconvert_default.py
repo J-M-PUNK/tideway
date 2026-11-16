@@ -1,11 +1,10 @@
-"""Hi-res downconvert is on by default (fresh installs only).
+"""Hi-res downconvert is off by default (fresh installs only).
 
-A downloaded file that plays on the device it was downloaded for is a
-better starting point than one that is bit-exact and silent there —
-old iPods running Rockbox and most legacy DAPs cannot decode 24-bit or
-high-sample-rate FLAC in real time. Wanting the hi-res master is the
-more deliberate choice of the two, so it is the one that takes a
-click.
+Someone who picks Max quality expects the Max file. From 1.33.0 to
+1.41.0 this was on by default, so MAX downloads quietly came out as
+16-bit / 44.1 kHz and a user reported hi-res downloads as broken
+(#490). Converting for an old player that can't decode hi-res is the
+deliberate choice, so it is the one that takes a click.
 
 The scope matters and is easy to get wrong: `save_settings` writes
 every field, so any existing settings.json already pins this value.
@@ -19,8 +18,8 @@ import json
 from app.settings import Settings, load_settings, save_settings
 
 
-def test_default_is_on():
-    assert Settings().downconvert_hires_downloads is True
+def test_default_is_off():
+    assert Settings().downconvert_hires_downloads is False
 
 
 def test_an_existing_off_choice_survives(tmp_path, monkeypatch):
@@ -52,15 +51,15 @@ def test_an_existing_on_choice_survives(tmp_path, monkeypatch):
 def test_a_settings_file_predating_the_field_gets_the_new_default(
     tmp_path, monkeypatch
 ):
-    """An install old enough to have no key for this takes the default,
-    which is the only case the change is meant to reach."""
+    """An install with no key for this takes the default, which is the
+    only case the change is meant to reach."""
     import app.settings as settings_mod
 
     path = tmp_path / "settings.json"
     path.write_text(json.dumps({"download_lyrics": True}), encoding="utf-8")
     monkeypatch.setattr(settings_mod, "SETTINGS_FILE", path)
 
-    assert load_settings().downconvert_hires_downloads is True
+    assert load_settings().downconvert_hires_downloads is False
 
 
 def test_the_value_round_trips_through_a_save(tmp_path, monkeypatch):

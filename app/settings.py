@@ -135,16 +135,16 @@ class Settings:
     # the resample is high quality and the bit-depth reduction uses
     # TPDF dither.
     #
-    # On by default: a file that plays everywhere is the better
-    # starting point than one that is bit-exact and silent on the
-    # device it was downloaded for. Anyone who wants the hi-res
-    # master turns it off, which is the more deliberate choice of the
-    # two.
+    # Off by default: someone who picks Max quality expects the Max
+    # file. With this on by default (1.33.0 to 1.41.0), MAX downloads
+    # quietly came out as 16-bit / 44.1 kHz and read as broken (#490).
+    # Converting for an old player is the deliberate choice, so it is
+    # the one that takes a click.
     #
     # Only affects installs with no stored value — save_settings
     # writes every field, so an existing settings.json already pins
     # this either way and keeps whatever the user has.
-    downconvert_hires_downloads: bool = True
+    downconvert_hires_downloads: bool = False
     # Resolution of the album cover art embedded in downloads and
     # written as cover.jpg. One of "640", "1280", or "origin" (the
     # 3000x3000 master). Default "1280" — a 4x-area upgrade over the
