@@ -1,12 +1,13 @@
-"""Auto-start on login — per-user, no admin required.
+r"""Auto-start on login — per-user, no admin required.
 
 - **macOS**: `LaunchAgent` plist in `~/Library/LaunchAgents/`. Loaded
   via `launchctl load`. Agents in that dir run in the user's session
   at login. No code signing / SMAppService dance — that would require
   a helper bundle and entitlements we don't ship.
-- **Windows**: a value in `HKEY_CURRENT_USER\Software\Microsoft\Windows\
-  CurrentVersion\Run`. Standard per-user autostart path, unaffected
-  by UAC, works in both signed and unsigned builds.
+- **Windows**: a value under
+  `HKEY_CURRENT_USER\Software\Microsoft\Windows\CurrentVersion\Run`.
+  Standard per-user autostart path, unaffected by UAC, works in both
+  signed and unsigned builds.
 - **Linux**: an XDG autostart `.desktop` file in `~/.config/autostart/`.
   Respected by GNOME / KDE / XFCE / etc.
 
