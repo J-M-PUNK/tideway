@@ -36,6 +36,21 @@ def stub_auth(monkeypatch):
     import server
 
     monkeypatch.setattr(server, "_require_auth", lambda: None)
+    # mix_detail reads its tracks from Tidal's mixes/{id}/items; keep
+    # these cache tests off the network with an empty mix.
+    monkeypatch.setattr(
+        server.tidal.session.request,
+        "request",
+        lambda *a, **k: _JsonResponse({"items": [], "totalNumberOfItems": 0}),
+    )
+
+
+class _JsonResponse:
+    def __init__(self, payload):
+        self._payload = payload
+
+    def json(self):
+        return self._payload
 
 
 # ---------------------------------------------------------------------------
