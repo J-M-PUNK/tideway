@@ -5,6 +5,7 @@ import type { OnDownload } from "@/api/download";
 import { useApi } from "@/hooks/useApi";
 import { queryKeys } from "@/api/queryKeys";
 import { useTrackPrefetch } from "@/hooks/useTrackPrefetch";
+import { useSpotifyTrackPlaycountBatch } from "@/hooks/useSpotifyEnrichment";
 import { AddToLibraryButton } from "@/components/AddToLibraryButton";
 import { CollectionOverflowMenu } from "@/components/CollectionOverflowMenu";
 import { DetailHero } from "@/components/DetailHero";
@@ -35,6 +36,9 @@ export function MixDetail({ onDownload }: { onDownload: OnDownload }) {
     if (mix?.tracks?.length)
       prefetchMany(mix.tracks.slice(0, 10).map((t) => t.id));
   }, [mix, prefetchMany]);
+  // One batched request for the mix's Spotify playcounts, the same as
+  // the album page, instead of a request per TrackList row.
+  useSpotifyTrackPlaycountBatch(mix?.tracks);
 
   if (loading) {
     return (
@@ -92,6 +96,7 @@ export function MixDetail({ onDownload }: { onDownload: OnDownload }) {
         <TrackList
           tracks={mix.tracks}
           onDownload={onDownload}
+          showPlaycount
           source={{ type: "MIX", id: mix.id }}
         />
       </div>

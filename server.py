@@ -10380,16 +10380,7 @@ def mix_detail(mix_id: str) -> dict:
         mix = tidal.session.mix(mix_id)
     except Exception as exc:
         raise HTTPException(status_code=404, detail=str(exc))
-    try:
-        items = list(mix.items())
-    except Exception:
-        items = []
-    tracks = [
-        track_to_dict(t)
-        for t in filter_ai_tracks(
-            [it for it in items if type(it).__name__ == "Track"]
-        )
-    ]
+    tracks = [track_to_dict(t) for t in filter_ai_tracks(_mix_tracks(mix_id, mix))]
     result = {
         "kind": "mix",
         "id": mix_id,
@@ -10400,6 +10391,63 @@ def mix_detail(mix_id: str) -> dict:
     }
     _store_detail_cache(cache_key, result)
     return result
+
+
+def _mix_tracks(mix_id: str, mix) -> list:
+    """A mix's tracks, in order, with their ISRCs.
+
+    tidalapi builds a Mix from Tidal's `pages/mix`, whose track entries
+    leave out `isrc`, so every mix track came back with none and the
+    page had nothing to look Spotify playcounts up by. Tidal's
+    `mixes/{id}/items` returns the same tracks with full metadata, ISRC
+    included, so the tracks come from there; the mix's title and cover
+    still come from `mix`.
+
+    Falls back to `mix.items()` when the raw fetch fails (auth expired,
+    rate limit, network drop): the tracks are complete apart from ISRCs,
+    so the page still loads and plays, just without playcounts.
+    """
+    out: list = []
+    page_size = 100
+    offset = 0
+    while True:
+        try:
+            resp = tidal.session.request.request(
+                "GET",
+                f"mixes/{mix_id}/items",
+                params={"limit": page_size, "offset": offset},
+            )
+            payload = resp.json()
+        except Exception as exc:
+            print(
+                f"[mix] items fetch failed for {mix_id}: {exc!r}; "
+                "using the page's tracks, which have no ISRCs",
+                flush=True,
+            )
+            try:
+                items = list(mix.items())
+            except Exception:
+                items = []
+            return [it for it in items if type(it).__name__ == "Track"]
+
+        items = payload.get("items") or []
+        if not items:
+            break
+        for entry in items:
+            if (entry or {}).get("type") != "track":
+                continue
+            raw = entry.get("item")
+            if not raw:
+                continue
+            try:
+                out.append(tidal.session.parse_track(raw))
+            except Exception as exc:  # noqa: BLE001 — skip one bad row, keep the mix
+                print(f"[mix] skipped an unparseable track in {mix_id}: {exc!r}", flush=True)
+        offset += len(items)
+        total = payload.get("totalNumberOfItems")
+        if total is None or offset >= int(total):
+            break
+    return out
 
 
 def _fetch_playlist_items_with_added_at(
