@@ -150,6 +150,83 @@ def _ask_existing_to_focus() -> None:
         pass
 
 
+# Single-instance lock, held for the life of the process. The OS drops
+# it when the process exits, crash included, so a stale lock can't
+# outlive its owner and block the next launch.
+_instance_lock_file = None
+
+# How long a launch that lost the lock waits for the winner to come up
+# (or to go away) before giving up. Covers a cold start and the 10 s
+# exit watchdog of an instance that is shutting down.
+_INSTANCE_WAIT_SEC = 60.0
+_INSTANCE_POLL_SEC = 0.25
+
+
+def _try_instance_lock() -> bool:
+    """Take the single-instance lock without blocking. True if held.
+
+    The health probe alone can't serialize launches: several started
+    within the same second (a few clicks on the shortcut) all probe
+    before any of them has a server up, all see nothing, and all start
+    — seven windows over one backend, where the update installer then
+    can't replace a running exe. Taking an exclusive OS lock is atomic,
+    so exactly one of them wins.
+    """
+    global _instance_lock_file
+    if _instance_lock_file is not None:
+        return True
+    from app.paths import user_data_dir
+
+    f = open(user_data_dir() / "instance.lock", "a+b")
+    try:
+        if sys.platform == "win32":
+            import msvcrt
+
+            f.seek(0)
+            msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        f.close()
+        return False
+    _instance_lock_file = f
+    return True
+
+
+def _claim_instance() -> str:
+    """Decide whether this launch starts the app.
+
+    Returns "start" when this process holds the lock and nothing else is
+    serving, "deferred" when another instance is (it has been asked to
+    focus its window), and "stuck" when another launch holds the lock
+    but never came up within `_INSTANCE_WAIT_SEC`.
+
+    A launch that loses the lock keeps polling both ways out: the winner
+    answering /api/health (focus it and exit), or the lock coming free
+    (the holder quit or crashed, so this launch takes over). The second
+    is what lets a relaunch during the old instance's shutdown start
+    normally instead of focusing a window that is about to close.
+    """
+    deadline = time.monotonic() + _INSTANCE_WAIT_SEC
+    while True:
+        if _try_instance_lock():
+            # Holding the lock rules out every instance that takes it,
+            # but not one from a build older than the lock that is
+            # still serving on the port.
+            if _probe_existing_instance():
+                _ask_existing_to_focus()
+                return "deferred"
+            return "start"
+        if _probe_existing_instance():
+            _ask_existing_to_focus()
+            return "deferred"
+        if time.monotonic() >= deadline:
+            return "stuck"
+        time.sleep(_INSTANCE_POLL_SEC)
+
+
 def _child_env() -> dict:
     """Environment for spawning system binaries from a frozen build.
 
@@ -686,11 +763,21 @@ def main(argv: Optional[list[str]] = None) -> int:
         )
         return 1
 
-    # Single-instance guard: if /api/health responds, a sibling is
-    # already up. Ask it to focus and exit quietly.
-    if _probe_existing_instance():
-        _ask_existing_to_focus()
+    # Single-instance guard: one launch takes the instance lock and
+    # starts; any other launch focuses it and exits (see _claim_instance).
+    claim = _claim_instance()
+    if claim == "deferred":
         return 0
+    if claim == "stuck":
+        print(
+            "[desktop] another Tideway launch holds the instance lock but "
+            f"never came up within {_INSTANCE_WAIT_SEC:.0f}s. If no "
+            "Tideway window is open, end any Tideway processes in Task "
+            "Manager / Activity Monitor and start it again.",
+            file=sys.stderr,
+            flush=True,
+        )
+        return 1
 
     server = _run_uvicorn_in_thread()
 
