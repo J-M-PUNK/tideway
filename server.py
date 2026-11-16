@@ -6020,7 +6020,9 @@ def player_load(req: _PlayerLoadRequest) -> dict:
             if req.queue is not None:
                 get_manager().load_queue(_tcr_queue_context(req))
             else:
-                get_manager().load_track(int(req.track_id), autoplay=False)
+                get_manager().load_track(
+                    int(req.track_id), quality=req.quality, autoplay=False
+                )
         except HTTPException:
             raise
         except Exception as exc:

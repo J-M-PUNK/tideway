@@ -64,6 +64,14 @@ def test_play_track_passes_the_selected_quality_to_receiver(receiver, quality):
     receiver.load_track.assert_called_once_with(123, quality=quality)
 
 
+@pytest.mark.parametrize('quality', ['low_96k', 'high_lossless', 'hi_res_lossless'])
+def test_paused_load_passes_the_selected_quality_to_receiver(receiver, quality):
+    # Loading a track paused (no queue context) used to drop the quality,
+    # so the receiver fell back to the subscription's best tier.
+    server.player_load(server._PlayerLoadRequest(track_id='123', quality=quality))
+    receiver.load_track.assert_called_once_with(123, quality=quality, autoplay=False)
+
+
 @pytest.mark.parametrize('requested,effective,wire', [
     ('low_96k', 'low_96k', 'LOW'),
     ('low_320k', 'low_320k', 'HIGH'),
