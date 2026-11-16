@@ -91,7 +91,7 @@ jobs:
           flatpak install --user -y --no-deps flathub \
             org.gnome.Platform//49 \
             org.gnome.Sdk//49 \
-            org.freedesktop.Sdk.Extension.node20//25.08
+            org.freedesktop.Sdk.Extension.node24//25.08
 
       - name: Regenerate python3-requirements.json for this build
         # Regenerated into the working tree and never committed, the

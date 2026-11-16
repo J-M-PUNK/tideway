@@ -685,7 +685,7 @@ flatpak remote-add --user --if-not-exists \
   flathub https://flathub.org/repo/flathub.flatpakrepo
 flatpak install --user -y flathub \
   org.gnome.Platform//49 org.gnome.Sdk//49 \
-  org.freedesktop.Sdk.Extension.node20//25.08
+  org.freedesktop.Sdk.Extension.node24//25.08
 
 # Build
 flatpak-builder --user --ccache --force-clean \

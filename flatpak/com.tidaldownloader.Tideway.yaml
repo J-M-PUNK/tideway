@@ -16,7 +16,7 @@ sdk: org.gnome.Sdk
 sdk-extensions:
   # Node only exists in the build sandbox to produce web/dist; it
   # is not part of the runtime the app ships against.
-  - org.freedesktop.Sdk.Extension.node20
+  - org.freedesktop.Sdk.Extension.node24
 command: tideway
 
 # flatpak-builder auto-runs `appstream-compose` against our metainfo
@@ -85,11 +85,11 @@ modules:
 
   - name: tideway
     buildsystem: simple
-    # Node extension is mounted under /usr/lib/sdk/node20/bin. The
+    # Node extension is mounted under /usr/lib/sdk/node24/bin. The
     # build sandbox has no network; npm reads from the offline cache
     # laid down by flatpak-node-generator under flatpak-node/.
     build-options:
-      append-path: /usr/lib/sdk/node20/bin
+      append-path: /usr/lib/sdk/node24/bin
       env:
         XDG_CACHE_HOME: /run/build/tideway/flatpak-node/cache
         npm_config_cache: /run/build/tideway/flatpak-node/npm-cache

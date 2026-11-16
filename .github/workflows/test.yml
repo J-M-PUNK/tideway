@@ -38,7 +38,7 @@ concurrency:
 # CI passes on a Python that doesn't match what we ship).
 env:
   PYTHON_VERSION: "3.12"
-  NODE_VERSION: "20"
+  NODE_VERSION: "24"
 
 jobs:
   # -------------------------------------------------------------------
