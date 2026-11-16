@@ -183,6 +183,41 @@ def _patched_get_item(self, json_obj):
 
 
 _tidal_page.SimpleList.get_item = _patched_get_item
+# Tidal now names each daily mix in its `description` ("Contemporary
+# Indie Pop and Bedroom Dream Pop"), which is what its own app shows,
+# while `title` stays the generic "My Mix 1". tidalapi's mix parsers
+# don't read `description`, so keep it on the object for
+# _mix_display_name.
+import tidalapi.mix as _tidal_mix
+def _mix_description_text(raw) -> Optional[str]:
+    """The text of a mix's `description`. The v1 mix endpoints send a
+    plain string; the v2 home feed sends {"text": ..., "color": ...}."""
+    if isinstance(raw, dict):
+        raw = raw.get("text")
+    return raw if isinstance(raw, str) else None
+def _keep_mix_description(cls):
+    orig = cls.parse
+    def parse(self, json_obj):
+        result = orig(self, json_obj)
+        desc = _mix_description_text(
+            json_obj.get("description") if isinstance(json_obj, dict) else None
+        )
+        # tidalapi's parse returns a copy of the object rather than self,
+        # so set it on what the caller actually receives.
+        for obj in (self, result):
+            if obj is not None:
+                obj.description = desc
+        return result
+    cls.parse = parse
+_keep_mix_description(_tidal_mix.Mix)
+_keep_mix_description(_tidal_mix.MixV2)
+
+
+def _mix_display_name(title: Optional[str], description: Optional[str]) -> str:
+    """The name Tidal's app shows for a mix: its descriptive name when
+    Tidal sends one, else the plain title (My Daily Discovery, My New
+    Arrivals and older mixes have no description)."""
+    return (description or "").strip() or (title or "")
 
 
 tidal = TidalClient()
@@ -10384,7 +10419,9 @@ def mix_detail(mix_id: str) -> dict:
     result = {
         "kind": "mix",
         "id": mix_id,
-        "name": getattr(mix, "title", None) or "",
+        "name": _mix_display_name(
+            getattr(mix, "title", None), getattr(mix, "description", None)
+        ),
         "subtitle": getattr(mix, "sub_title", None) or "",
         "cover": _first(lambda: mix.image(640)) or _first(lambda: mix.image(480)),
         "tracks": tracks,
@@ -11781,7 +11818,10 @@ def _serialize_page_item(item) -> Optional[dict]:
             return {
                 "kind": "mix",
                 "id": str(getattr(item, "id", "") or ""),
-                "name": getattr(item, "title", None) or getattr(item, "name", "") or "",
+                "name": _mix_display_name(
+                    getattr(item, "title", None) or getattr(item, "name", "") or "",
+                    getattr(item, "description", None),
+                ),
                 "subtitle": getattr(item, "sub_title", None) or "",
                 "cover": _first(lambda: item.image(640)) or _first(lambda: item.image(480)),
             }
@@ -12074,11 +12114,12 @@ def _raw_mix_to_item(data: dict) -> Optional[dict]:
     title_info = data.get("titleTextInfo") if isinstance(data.get("titleTextInfo"), dict) else {}
     subtitle_info = data.get("subtitleTextInfo") if isinstance(data.get("subtitleTextInfo"), dict) else {}
     inner_type = (data.get("type") or "").upper()
-    name = (
+    name = _mix_display_name(
         data.get("title")
         or title_info.get("text")
         or _MIX_TYPE_LABELS.get(inner_type)
-        or "Mix"
+        or "Mix",
+        _mix_description_text(data.get("description")),
     )
     subtitle = (
         data.get("subTitle")
