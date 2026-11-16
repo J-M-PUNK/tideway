@@ -138,7 +138,7 @@ it.
 The manifest pins `org.gnome.Platform//49` (freedesktop 25.08 base,
 Python 3.13). The original scaffold used 47, which went EOL on
 2025-10-15. The bump is mechanical: change the runtime-version,
-re-pull `org.freedesktop.Sdk.Extension.node20//25.08`, regenerate
+re-pull `org.freedesktop.Sdk.Extension.node24//25.08`, regenerate
 `python3-requirements.json` with `--runtime org.gnome.Sdk//49` so
 wheel selection matches the new runtime's Python ABI, rebuild.
 

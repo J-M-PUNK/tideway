@@ -18,7 +18,7 @@ on:
 # release runner agree on what they're testing against.
 env:
   PYTHON_VERSION: "3.12"
-  NODE_VERSION: "20"
+  NODE_VERSION: "24"
 
 jobs:
   # -------------------------------------------------------------------
@@ -358,7 +358,7 @@ jobs:
           flatpak install --user -y --no-deps flathub \
             org.gnome.Platform//49 \
             org.gnome.Sdk//49 \
-            org.freedesktop.Sdk.Extension.node20//25.08
+            org.freedesktop.Sdk.Extension.node24//25.08
 
       - name: Check whether GPG signing is configured
         id: gpg_check
