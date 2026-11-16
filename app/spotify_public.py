@@ -64,6 +64,14 @@ _STATS_TTL_SEC = 7 * 24 * 3600
 # instead of sitting dark for a full week.
 _NULL_TTL_SEC = 24 * 3600
 
+
+class _LookupFailed(Exception):
+    """Spotify couldn't be asked: the request itself failed (network,
+    rate limit, transport). Distinct from Spotify answering "no match",
+    which is real data and is cached as a miss. A failure must not be:
+    caching it left every track on the page blank for a day after one
+    bad minute of connectivity."""
+
 # SpotAPI loads a bunch of unused deps at import time (pymongo, redis,
 # etc.) so we keep it lazy — a bare `from app.spotify_public import …`
 # at server startup shouldn't pay for it.
@@ -327,7 +335,12 @@ def playcount_by_isrc(isrc: str) -> Optional[int]:
         if is_zeroish and age < _NULL_TTL_SEC:
             return int(pc_cached) if pc_cached is not None else None
 
-    track_id = _isrc_to_spotify_track(isrc)
+    try:
+        track_id = _isrc_to_spotify_track(isrc)
+    except _LookupFailed:
+        # Spotify couldn't be reached; leave the cache alone so the
+        # next view asks again instead of reading a day-long miss.
+        return None
     if not track_id:
         _write_track_playcount(isrc, None)
         return None
@@ -437,7 +450,12 @@ def _resolve_artist_via_name_match(
         ic = (isrc or "").strip().upper()
         if not ic:
             continue
-        for tid, _name, _artist in _search_track_candidates(f"isrc:{ic}"):
+        try:
+            hits = _search_track_candidates(f"isrc:{ic}")
+        except _LookupFailed:
+            # Try the next sample ISRC, as before this search could raise.
+            continue
+        for tid, _name, _artist in hits:
             try:
                 payload = _song_info(tid)
             except Exception as exc:
@@ -775,9 +793,10 @@ def _isrc_to_spotify_track(isrc: str) -> Optional[str]:
     highest. The getTrack calls are bounded by the search's limit=5
     and only happen once per ISRC (result cached forever).
 
-    Successful resolutions cache permanently. Misses are cached for
-    a day, so a failed lookup (rate limit, transient network, schema
-    drift) doesn't leave the track blank for a week.
+    Successful resolutions cache permanently. A search that Spotify
+    answers with no usable hit is cached as a miss for a day. A search
+    that can't be made at all (network, rate limit) raises
+    `_LookupFailed` and caches nothing, so the next view retries.
     """
     with _db_lock:
         conn = _db()
@@ -802,7 +821,7 @@ def _isrc_to_spotify_track(isrc: str) -> Optional[str]:
         res = song.query_songs(f"isrc:{isrc}", limit=5)
     except Exception as exc:
         log.warning("spotify isrc search failed for %s: %s", isrc, exc)
-        return None
+        raise _LookupFailed(f"isrc search for {isrc}") from exc
 
     items = (
         (res.get("data") or {})
@@ -889,7 +908,10 @@ def _tidal_to_spotify_artist(
         # Stale negative — fall through and retry.
 
     # Chain: ISRC → Spotify track → primary artist on that track.
-    spotify_track_id = _isrc_to_spotify_track(sample_isrc or "")
+    try:
+        spotify_track_id = _isrc_to_spotify_track(sample_isrc or "")
+    except _LookupFailed:
+        spotify_track_id = None
     spotify_artist_id: Optional[str] = None
     if spotify_track_id:
         try:
@@ -1008,8 +1030,10 @@ def _search_track_candidates(
     """Run a Spotify GraphQL track search and return
     `[(track_id, display_name, primary_artist_name), ...]` for hits
     whose URI is a spotify:track:. The artist is None when the result
-    doesn't carry one. Errors are logged and swallowed — callers
-    treat an empty list as "search produced nothing useful".
+    doesn't carry one. An empty list means Spotify answered with no
+    usable hits; a search that couldn't be made at all raises
+    `_LookupFailed`, so callers don't cache a network failure as a
+    miss.
 
     Limit is 50 (was 5). For tracks that exist in multiple Spotify
     entries (album version, single release, lyric video, alt master,
@@ -1029,7 +1053,7 @@ def _search_track_candidates(
         res = song.query_songs(query, limit=50)
     except Exception as exc:
         log.warning("spotify track search failed for %r: %s", query, exc)
-        return []
+        raise _LookupFailed(f"track search for {query!r}") from exc
     items = (
         (res.get("data") or {})
         .get("searchV2", {})
@@ -1144,7 +1168,7 @@ def _song_info_or_none(spotify_track_id: str) -> Optional[Mapping[str, Any]]:
 
 def _resolve_canonical_track(
     isrc: str, title: str, artist: str
-) -> tuple[Optional[int], Optional[str]]:
+) -> tuple[Optional[int], Optional[str], bool]:
     """Find the highest-playcount Spotify track that has the right
     title and primary artist, considering BOTH an `isrc:` search and
     a `<artist> <title>` search.
@@ -1157,25 +1181,37 @@ def _resolve_canonical_track(
     keeps us from picking a same-titled track by a different artist
     (Adele's "Hello" vs Lionel Richie's "Hello").
 
-    Returns `(playcount, spotify_track_id)` or `(None, None)` when
-    nothing matches.
+    Returns `(playcount, spotify_track_id, complete)`. Playcount and id
+    are None when nothing matches. `complete` is False when part of the
+    lookup couldn't be made (a search or a candidate's getTrack failed):
+    the answer may then be missing the canonical, higher-playcount
+    version, or be a miss that is really a network failure, so the
+    caller must not cache it.
     """
     wanted_title = (title or "").strip().lower()
     wanted_artist = (artist or "").strip().lower()
     if not wanted_title or not wanted_artist:
-        return None, None
+        return None, None, True
 
     # Insertion-ordered dedupe across both searches. The ISRC pass
     # often produces zero or one candidate; the title pass covers
     # reissues with unrelated ISRCs.
+    complete = True
     candidates: dict[str, tuple[str, Optional[str]]] = {}
     title_search = _SEARCH_POOL.submit(
         _search_track_candidates, f"{artist} {title}"
     )
-    for tid, name, primary in _search_track_candidates(f"isrc:{isrc}"):
-        candidates.setdefault(tid, (name, primary))
-    for tid, name, primary in title_search.result():
-        candidates.setdefault(tid, (name, primary))
+    for search in (
+        lambda: _search_track_candidates(f"isrc:{isrc}"),
+        title_search.result,
+    ):
+        try:
+            hits = search()
+        except _LookupFailed:
+            complete = False
+            continue
+        for tid, name, primary in hits:
+            candidates.setdefault(tid, (name, primary))
 
     eligible: list[str] = []
     for tid, (name, primary) in candidates.items():
@@ -1210,6 +1246,9 @@ def _resolve_canonical_track(
     payloads = _GET_TRACK_POOL.map(_song_info_or_none, eligible)
     for tid, payload in zip(eligible, payloads):
         if payload is None:
+            # A matching candidate we couldn't read: it may have been
+            # the canonical one.
+            complete = False
             continue
         if _track_primary_artist_name(payload).strip().lower() != wanted_artist:
             continue
@@ -1224,8 +1263,8 @@ def _resolve_canonical_track(
             best_id = tid
 
     if best_id is None or best_pc <= 0:
-        return None, None
-    return best_pc, best_id
+        return None, None, complete
+    return best_pc, best_id, complete
 
 
 def playcount_with_fallback(
@@ -1273,7 +1312,12 @@ def playcount_with_fallback(
         # No metadata = no canonical search; fall back to ISRC-only.
         return playcount_by_isrc(isrc)
 
-    pc, track_id = _resolve_canonical_track(isrc, title, artist)
+    pc, track_id, complete = _resolve_canonical_track(isrc, title, artist)
+    if not complete:
+        # Part of the lookup failed. Show what we found, but cache
+        # nothing: a partial answer may be a reissue's lower number, and
+        # a miss may be the network, not Spotify. The next view retries.
+        return pc
     now_s = int(time.time())
     if pc is not None and track_id:
         # Cache the canonical playcount AND map the original ISRC to
