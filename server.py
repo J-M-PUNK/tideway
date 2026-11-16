@@ -189,12 +189,19 @@ _tidal_page.SimpleList.get_item = _patched_get_item
 # don't read `description`, so keep it on the object for
 # _mix_display_name.
 import tidalapi.mix as _tidal_mix
+def _mix_description_text(raw) -> Optional[str]:
+    """The text of a mix's `description`. The v1 mix endpoints send a
+    plain string; the v2 home feed sends {"text": ..., "color": ...}."""
+    if isinstance(raw, dict):
+        raw = raw.get("text")
+    return raw if isinstance(raw, str) else None
 def _keep_mix_description(cls):
     orig = cls.parse
     def parse(self, json_obj):
         result = orig(self, json_obj)
-        desc = json_obj.get("description") if isinstance(json_obj, dict) else None
-        desc = desc if isinstance(desc, str) else None
+        desc = _mix_description_text(
+            json_obj.get("description") if isinstance(json_obj, dict) else None
+        )
         # tidalapi's parse returns a copy of the object rather than self,
         # so set it on what the caller actually receives.
         for obj in (self, result):
@@ -12062,7 +12069,7 @@ def _raw_mix_to_item(data: dict) -> Optional[dict]:
         or title_info.get("text")
         or _MIX_TYPE_LABELS.get(inner_type)
         or "Mix",
-        data.get("description") if isinstance(data.get("description"), str) else None,
+        _mix_description_text(data.get("description")),
     )
     subtitle = (
         data.get("subTitle")

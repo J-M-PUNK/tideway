@@ -26,8 +26,13 @@ def test_parsers_keep_the_description():
             return copy.copy(self)
 
     server._keep_mix_description(Stub)
+    # v1 mix endpoints send a plain string.
     m = Stub().parse({"title": "My Mix 5", "description": "Japanese City Pop and Fusion"})
     assert m.description == "Japanese City Pop and Fusion"
+    # The v2 home feed sends an object.
+    m = Stub().parse({"title": "My Mix 1", "description": {
+        "text": "Contemporary Indie Pop and Bedroom Dream Pop", "color": None}})
+    assert m.description == "Contemporary Indie Pop and Bedroom Dream Pop"
     assert Stub().parse({"title": "My New Arrivals"}).description is None
     # Both of tidalapi's mix classes are wrapped.
     assert tidal_mix.Mix.parse.__name__ == tidal_mix.MixV2.parse.__name__ == "parse"
@@ -36,6 +41,28 @@ def test_parsers_keep_the_description():
 def test_raw_entry_uses_the_description():
     item = server._raw_entry_to_item({"type": "MIX", "data": {
         "id": "m1", "titleTextInfo": {"text": "My Mix 1"},
-        "description": "Contemporary Indie Pop and Bedroom Dream Pop",
+        "description": {"text": "Contemporary Indie Pop and Bedroom Dream Pop", "color": None},
     }})
     assert item["name"] == "Contemporary Indie Pop and Bedroom Dream Pop"
+
+
+def _images():
+    return [
+        {"size": size, "url": f"https://images.tidal.com/{size}", "width": w, "height": w}
+        for size, w in (("SMALL", 320), ("MEDIUM", 640), ("LARGE", 1500))
+    ]
+
+
+def test_real_home_feed_mix_entry():
+    # Shape of a "My Mix" entry from the v2 home feed, trimmed.
+    data = {
+        "id": "0024d84b3b8f526bae2328bc855f80", "type": "DAILY_MIX",
+        "titleTextInfo": {"text": "My Mix 1", "color": "#FFFFFF"},
+        "subtitleTextInfo": {"text": "Tiffany Day, beabadoobee and more", "color": None},
+        "shortSubtitleTextInfo": {"text": "Tiffany Day, beabadoobee", "color": None},
+        "description": {"text": "Contemporary Indie Pop and Bedroom Dream Pop", "color": None},
+        "mixImages": _images(), "detailMixImages": _images(),
+        "artists": [], "mixNumber": 1, "updated": 1794815938491,
+    }
+    mix = server.tidal.session.parse_v2_mix(data)
+    assert server._serialize_page_item(mix)["name"] == "Contemporary Indie Pop and Bedroom Dream Pop"
