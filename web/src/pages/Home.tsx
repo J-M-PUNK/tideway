@@ -222,6 +222,28 @@ export function filterHomeRows(page: TidalPage): {
 // ---------------------------------------------------------------------------
 const COMPACT_VISIBLE_COUNT = 9;
 
+// Tidal's home feed sends only a short preview for some rows (five
+// tracks for "Recommended new tracks") and points at the full list
+// through viewAllPath; its own app shows the full list. Keep the
+// preview's order, then top the row up from the full list, skipping
+// anything the preview already has. Exported for Home.test.ts.
+export function fillCompactItems(
+  preview: PageItem[],
+  full: PageItem[],
+  max: number,
+): PageItem[] {
+  const out = preview.slice(0, max);
+  const seen = new Set(out.map((it, i) => `${it.kind}-${pillId(it, i)}`));
+  for (const it of full) {
+    if (out.length >= max) break;
+    const key = `${it.kind}-${pillId(it, -1)}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(it);
+  }
+  return out;
+}
+
 function CompactRow({
   category,
   onDownload,
@@ -229,20 +251,38 @@ function CompactRow({
   category: PageCategory;
   onDownload: OnDownload;
 }) {
-  const items = category.items.slice(0, COMPACT_VISIBLE_COUNT);
+  const viewAllPath = category.viewAllPath;
+  const needsFill =
+    !!viewAllPath && category.items.length < COMPACT_VISIBLE_COUNT;
+  // Same request and cache key as the View more page, so following the
+  // link afterwards opens from cache.
+  const { data: full } = useApi(
+    () => api.pagePath(viewAllPath ?? ""),
+    [viewAllPath],
+    {
+      cacheKey: viewAllPath ? queryKeys.pagePath(viewAllPath) : undefined,
+      skip: !needsFill,
+    },
+  );
+  const items =
+    needsFill && full
+      ? fillCompactItems(
+          category.items,
+          full.categories.flatMap((c) => c.items),
+          COMPACT_VISIBLE_COUNT,
+        )
+      : category.items.slice(0, COMPACT_VISIBLE_COUNT);
   if (items.length === 0) return null;
   // View more routes to the dedicated drill-down page Tidal emits for
-  // this row, matching the card rows' SectionHeader behaviour.
-  const hasMore =
-    category.items.length > COMPACT_VISIBLE_COUNT && !!category.viewAllPath;
+  // this row, matching the card rows' SectionHeader behaviour. Show it
+  // whenever Tidal sent one: a short preview is exactly when the rest
+  // of the list lives there.
   return (
     <div className="mb-10">
       <div className="mb-4 flex items-baseline justify-between gap-4">
         <h2 className="text-xl font-bold tracking-tight">{category.title}</h2>
-        {hasMore && category.viewAllPath && (
-          <ViewMoreLink
-            to={`/browse/${encodeURIComponent(category.viewAllPath)}`}
-          />
+        {viewAllPath && (
+          <ViewMoreLink to={`/browse/${encodeURIComponent(viewAllPath)}`} />
         )}
       </div>
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
