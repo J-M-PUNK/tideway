@@ -170,6 +170,20 @@ function windowAction<T>(path: string, init?: RequestInit): Promise<T> {
   return sendRequest<T>(path, { method: "POST", priority: "high", ...init });
 }
 
+/** Install an update or quit the app, without waiting for an API slot.
+ *
+ *  Both are one-off clicks the user is waiting on, and the update flow
+ *  calls them back to back: download and launch the installer, then
+ *  quit so the old app is out of the installer's way. Queued behind a
+ *  page whose requests hang (the Album of the Year rows on 1.39.0
+ *  held their slots for minutes), Install never reached the backend,
+ *  and a quit that waits leaves the old app running under the
+ *  installer. Neither can crowd out page data: one is a single
+ *  download, the other ends the app. */
+function appAction<T>(path: string): Promise<T> {
+  return sendRequest<T>(path, { method: "POST", priority: "high" });
+}
+
 async function sendRequest<T>(
   path: string,
   init?: RequestInit,
@@ -312,9 +326,7 @@ export const api = {
    *  running outside the desktop launcher (e.g. plain browser dev
    *  mode) — the UI should hide the Quit entry in that case. */
   quitApp: () =>
-    req<{ ok: boolean; reason?: string }>("/api/_internal/quit", {
-      method: "POST",
-    }),
+    appAction<{ ok: boolean; reason?: string }>("/api/_internal/quit"),
   /** Spawn the compact always-on-top mini-player window. Returns
    *  {ok: false} in plain-browser dev mode. */
   openMiniPlayer: () =>
@@ -676,9 +688,8 @@ export const api = {
    *  and open it. Caller should quit the app shortly after so the old
    *  bundle is out of the way when the user runs the installer. */
   updateInstall: () =>
-    req<{ ok: boolean; downloaded_to: string | null; reason?: string }>(
+    appAction<{ ok: boolean; downloaded_to: string | null; reason?: string }>(
       "/api/update/install",
-      { method: "POST" },
     ),
   /** Write a diagnostic snapshot to ~/Downloads. Backed by an
    *  unauthenticated endpoint so the user can capture state even
