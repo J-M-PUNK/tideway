@@ -230,7 +230,7 @@
             "name": "python3-fastapi",
             "buildsystem": "simple",
             "build-commands": [
-                "pip3 install --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"fastapi>=0.161.1\" --no-build-isolation"
+                "pip3 install --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"fastapi>=0.162.7\" --no-build-isolation"
             ],
             "sources": [
                 {
@@ -418,7 +418,7 @@
             "name": "python3-sse-starlette",
             "buildsystem": "simple",
             "build-commands": [
-                "pip3 install --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"sse-starlette>=3.4.11\" --no-build-isolation"
+                "pip3 install --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"sse-starlette>=3.6.0\" --no-build-isolation"
             ],
             "sources": [
                 {
@@ -481,7 +481,7 @@
             "name": "python3-av",
             "buildsystem": "simple",
             "build-commands": [
-                "pip3 install --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"av>=18.1.0\" --no-build-isolation"
+                "pip3 install --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"av>=19.0.2\" --no-build-isolation"
             ],
             "sources": [
                 {
@@ -541,7 +541,7 @@
             "name": "python3-numpy",
             "buildsystem": "simple",
             "build-commands": [
-                "pip3 install --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"numpy>=2.5.3\" --no-build-isolation"
+                "pip3 install --verbose --exists-action=i --no-index --find-links=\"file://${PWD}\" --prefix=${FLATPAK_DEST} \"numpy>=2.5.4\" --no-build-isolation"
             ],
             "sources": [
                 {
