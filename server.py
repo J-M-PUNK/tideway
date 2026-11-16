@@ -194,7 +194,12 @@ def _keep_mix_description(cls):
     def parse(self, json_obj):
         result = orig(self, json_obj)
         desc = json_obj.get("description") if isinstance(json_obj, dict) else None
-        self.description = desc if isinstance(desc, str) else None
+        desc = desc if isinstance(desc, str) else None
+        # tidalapi's parse returns a copy of the object rather than self,
+        # so set it on what the caller actually receives.
+        for obj in (self, result):
+            if obj is not None:
+                obj.description = desc
         return result
     cls.parse = parse
 _keep_mix_description(_tidal_mix.Mix)

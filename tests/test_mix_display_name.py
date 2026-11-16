@@ -5,6 +5,8 @@ Tidal now gives each daily mix a descriptive name in `description`
 "My Mix 1" in `title`. Tidal's app shows the description; Tideway
 showed the title because tidalapi's parsers drop `description`.
 """
+import copy
+
 import tidalapi.mix as tidal_mix
 
 import server
@@ -19,8 +21,9 @@ def test_display_name_prefers_the_description():
 def test_parsers_keep_the_description():
     class Stub:
         def parse(self, json_obj):
+            # Like tidalapi's Mix/MixV2.parse: fill in self, return a copy.
             self.title = json_obj["title"]
-            return self
+            return copy.copy(self)
 
     server._keep_mix_description(Stub)
     m = Stub().parse({"title": "My Mix 5", "description": "Japanese City Pop and Fusion"})
