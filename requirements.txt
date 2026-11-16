@@ -87,7 +87,16 @@ pynput>=1.8.2
 # which uses curl-cffi (already in this requirements file for
 # tidalapi). pip will still pull tls_client in transitively because
 # it's a hard dep of spotapi, but the runtime never loads its DLL.
-spotapi>=1.2.8
+# Capped below 2: spotapi 2.0 (2026-11) is a rewrite on a different
+# HTTP client, and app.spotify_curl_session and app.spotify_public are
+# built on 1.x internals (BaseClient, spotapi.http.data.Response, the
+# tls_client transport hook). Moving to 2.x means porting those, not
+# lifting this cap.
+spotapi>=1.2.8,<2
+# HTML parsing for the Album of the Year scraper (app/aoty.py). It used
+# to arrive only as a spotapi 1.x dependency, so declare it directly:
+# when spotapi 2.0 dropped it, fresh installs could not import server.
+beautifulsoup4>=4.15.0
 # macOS Now Playing integration. Without claiming the system's
 # "active media player" role via MPNowPlayingInfoCenter and
 # MPRemoteCommandCenter, media keys (Cmd-F8, hardware play/pause
