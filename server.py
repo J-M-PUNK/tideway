@@ -4709,6 +4709,13 @@ def _aoty_listing_genres(listing: list[dict]) -> list[dict]:
     )
 
 
+def _aoty_pending(items: list[dict]) -> bool:
+    """True when a page came back empty only because a Cloudflare solve
+    is still running. The Home rows read it to keep their loading state
+    and fetch again once the solve finishes (see /api/aoty/status)."""
+    return not items and aoty_clearance.is_solving()
+
+
 def _aoty_page(listing: list[dict], offset: int, limit: int) -> tuple[list[dict], bool]:
     """Resolve ONE page of an AOTY listing to Tidal. The full listing is
     cheap and cached; resolving is the slow part, so we only resolve the
@@ -4739,7 +4746,7 @@ def aoty_top_of_year(
     else:
         listing = aoty_module.top_albums_of_year(y, limit=_AOTY_LISTING_MAX)
     items, has_more = _aoty_page(listing, offset, limit)
-    out: dict = {"items": items, "has_more": has_more}
+    out: dict = {"items": items, "has_more": has_more, "pending": _aoty_pending(items)}
     if offset == 0 and not genre:
         out["genres"] = _aoty_listing_genres(listing)
     return out
@@ -4748,11 +4755,11 @@ def aoty_top_of_year(
 @app.get("/api/aoty/recent-releases")
 def aoty_recent_releases(offset: int = 0, limit: int = 18) -> dict:
     """One page of AOTY's recent releases, each decorated with a Tidal
-    album dict under `tidal_album`. Returns `{items, has_more}`."""
+    album dict under `tidal_album`. Returns `{items, has_more, pending}`."""
     _require_auth()
     listing = aoty_module.recent_releases(limit=_AOTY_LISTING_MAX)
     items, has_more = _aoty_page(listing, offset, limit)
-    return {"items": items, "has_more": has_more}
+    return {"items": items, "has_more": has_more, "pending": _aoty_pending(items)}
 
 
 @app.get("/api/aoty/genres")
@@ -4768,11 +4775,11 @@ def aoty_genres() -> list[dict]:
 def aoty_genre_releases(genre: str, offset: int = 0, limit: int = 18) -> dict:
     """One page of recent albums for one AOTY genre (the "Recent {Genre}
     Albums" section of /genre/{slug}/), each decorated with a Tidal album
-    dict under `tidal_album`. Returns `{items, has_more}`."""
+    dict under `tidal_album`. Returns `{items, has_more, pending}`."""
     _require_auth()
     listing = aoty_module.recent_releases_by_genre(genre, limit=_AOTY_LISTING_MAX)
     items, has_more = _aoty_page(listing, offset, limit)
-    return {"items": items, "has_more": has_more}
+    return {"items": items, "has_more": has_more, "pending": _aoty_pending(items)}
 
 
 @app.get("/api/aoty/status")
@@ -4784,6 +4791,10 @@ def aoty_status() -> dict:
     Home page reads this so the AOTY rows explain themselves instead
     of silently disappearing.
 
+    `solving` is True while a clearance solve is running. `blocked` is
+    never True at the same time: until the solve finishes, nothing is
+    known to be blocked, and the rows wait for it instead.
+
     `can_solve` says whether a browser engine is available to clear
     the challenge at all. It separates the two very different reasons
     the rows can be empty: running outside the desktop shell (dev
@@ -4793,8 +4804,12 @@ def aoty_status() -> dict:
     about a dev-mode limitation would just generate noise.
     """
     _require_auth()
+    solving = aoty_clearance.is_solving()
     return {
-        "blocked": aoty_module.is_scraper_blocked(),
+        "blocked": not solving and (
+            aoty_module.is_scraper_blocked() or aoty_clearance.solve_failed_recently()
+        ),
+        "solving": solving,
         "can_solve": aoty_clearance.solver_available(),
         "issues_url": aoty_module.ISSUE_TRACKER_URL,
     }
@@ -13120,12 +13135,13 @@ def _aoty_genre_slug_map() -> dict:
                 n = (n or "").strip()
                 if n and s:
                     mapping.setdefault(n.lower(), (s, n))
-    with _genre_map_lock:
-        _genre_map_cache["at"] = time.monotonic()
-        _genre_map_cache["map"] = mapping
-    # Persist only a map we actually built. Writing an empty one would
-    # cache an AOTY outage for a day.
+    # Keep only a map we actually built, in memory and on disk. An empty
+    # one means AOTY didn't answer, and holding it would leave every
+    # For You genre row empty for a day after AOTY came back.
     if mapping:
+        with _genre_map_lock:
+            _genre_map_cache["at"] = time.monotonic()
+            _genre_map_cache["map"] = mapping
         lastfm_disk_cache.set(_GENRE_MAP_DISK_KEY, mapping)
     return mapping
 

@@ -686,11 +686,23 @@ export interface AotyGenre {
 
 /** One page of an AOTY listing. `genres` is only present on the first
  *  page of a paginated top-of-year request (the drill-down's picker
- *  options). `has_more` drives infinite scroll. */
+ *  options). `has_more` drives infinite scroll. `pending` is true when
+ *  the page is empty only because a Cloudflare solve is still running;
+ *  fetch again once `AotyStatus.solving` goes false. */
 export interface AotyPage {
   items: AotyAlbum[];
   has_more: boolean;
+  pending?: boolean;
   genres?: AotyGenre[];
+}
+
+/** Scraper health from /api/aoty/status. `solving` and `blocked` are
+ *  never both true: while a solve runs nothing is known to be blocked. */
+export interface AotyStatus {
+  blocked: boolean;
+  solving: boolean;
+  can_solve: boolean;
+  issues_url: string;
 }
 
 export interface LastFmLovedTrack {

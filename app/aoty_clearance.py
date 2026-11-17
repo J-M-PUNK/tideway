@@ -59,12 +59,22 @@ exactly as it did before: the fetch fails, the block flag is set, and
 the Home page renders its "AOTY is blocking us" notice. Degraded, but
 honest.
 
-Only background work may solve. A solve runs for up to 90 seconds, and
-since November 2026 AOTY's challenge wants a human click and then
-rejects the embedded browser anyway, so a Home request that waited on
-one sat for most of that time to show the "unavailable" notice. The
-startup prewarm runs inside `solving_allowed()`; everything else uses
-a clearance the prewarm already earned, or fails straight away.
+Only background work may solve. A solve runs for up to 90 seconds, so
+a Home request that waited on one could sit there for most of a
+minute. The startup prewarm solves inside `solving_allowed()`. Any
+other request that finds no usable clearance starts one solve on a
+background thread (`refresh()` does this) and returns at once; it does
+not wait. `is_solving()` tells callers a solve is under way, so they
+can show the rows as still loading instead of as blocked.
+
+That background solve is what lets the rows recover without a
+restart. Before it, only the startup prewarm could solve, so once its
+clearance expired, or if its one attempt failed, AOTY stayed empty
+until Tideway was relaunched. Through most of November 2026 every
+solve failed anyway, because AOTY wanted a human click and then
+rejected the embedded browser. By mid-November a hidden WebView2
+window cleared the challenge on its own again, in 4-22 s, and the
+missing re-solve became the reason the rows were empty.
 """
 from __future__ import annotations
 
@@ -162,6 +172,12 @@ _may_solve: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "aoty_may_solve", default=False
 )
 
+# True from the moment a background solve is started until it finishes.
+# Set before its thread starts, so a caller that triggers one sees
+# `is_solving()` as soon as `refresh()` returns. Guarded by
+# `_state_lock`.
+_background_solving = False
+
 
 @contextmanager
 def solving_allowed() -> Iterator[None]:
@@ -205,6 +221,48 @@ def wait_for_solver(timeout_sec: float) -> bool:
     return _solver_ready.wait(timeout_sec)
 
 
+def is_solving() -> bool:
+    """True while a solve is running: the startup prewarm's, or one a
+    request started in the background. Callers use it to tell "still
+    working on it" apart from "tried and failed"."""
+    with _state_lock:
+        if _background_solving:
+            return True
+    return _solve_lock.locked()
+
+
+def solve_failed_recently() -> bool:
+    """True when the last solve produced no clearance and the
+    `_FAILED_SOLVE_HOLD_SEC` hold after it is still running, so no new
+    solve will start until it ends."""
+    with _state_lock:
+        failed_at = _failed_at
+    return failed_at is not None and time.monotonic() - failed_at < _FAILED_SOLVE_HOLD_SEC
+
+
+def _start_background_solve(stale: Optional[Clearance], probe_url: str) -> None:
+    """Start one solve on a daemon thread, unless one is already running
+    or a recent one failed (`_FAILED_SOLVE_HOLD_SEC`)."""
+    global _background_solving
+    with _state_lock:
+        if _background_solving:
+            return
+        if _failed_at is not None and time.monotonic() - _failed_at < _FAILED_SOLVE_HOLD_SEC:
+            return
+        _background_solving = True
+
+    def run() -> None:
+        global _background_solving
+        try:
+            with solving_allowed():
+                refresh(stale, probe_url=probe_url)
+        finally:
+            with _state_lock:
+                _background_solving = False
+
+    threading.Thread(target=run, name="aoty-clearance", daemon=True).start()
+
+
 def get() -> Optional[Clearance]:
     """Whatever clearance we hold, or None if we hold none.
 
@@ -235,8 +293,9 @@ def refresh(stale: Optional[Clearance] = None, *, probe_url: str) -> Optional[Cl
     open a window of their own.
 
     Outside `solving_allowed()` it never solves or waits: it returns a
-    clearance the background solve has already replaced `stale` with,
-    or None.
+    clearance that has already replaced `stale`, or else starts a solve
+    on a background thread and returns None. `is_solving()` is True from
+    then until that solve finishes.
     """
     global _clearance, _failed_at
 
@@ -250,6 +309,7 @@ def refresh(stale: Optional[Clearance] = None, *, probe_url: str) -> Optional[Cl
             current = _clearance
         if current is not None and current is not stale:
             return current
+        _start_background_solve(stale, probe_url)
         return None
 
     with _solve_lock:
@@ -311,10 +371,11 @@ def refresh(stale: Optional[Clearance] = None, *, probe_url: str) -> Optional[Cl
 
 def reset_for_tests() -> None:
     """Drop solver + cached clearance. Test-support only."""
-    global _solver, _clearance, _failed_at
+    global _solver, _clearance, _failed_at, _background_solving
     with _solver_lock:
         _solver = None
     _solver_ready.clear()
     with _state_lock:
         _clearance = None
         _failed_at = None
+        _background_solving = False

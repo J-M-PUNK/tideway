@@ -1192,3 +1192,23 @@ def test_manifest_every_row_has_view_more(stub_auth, monkeypatch):
     monkeypatch.setattr(server.lastfm, "status", lambda: {"connected": True})
     out = server.recommendations_manifest()
     assert all(s.get("view_more") for s in out["sections"])
+
+
+def test_an_empty_genre_slug_map_is_not_kept(monkeypatch):
+    """AOTY unreachable gives an empty map. Keeping it pinned every For
+    You genre row empty for a day after AOTY came back."""
+    import server
+    from app import lastfm_disk_cache
+
+    # Memory only: the disk layer already refused to store an empty map.
+    monkeypatch.setattr(lastfm_disk_cache, "get", lambda key, ttl: None)
+    monkeypatch.setattr(lastfm_disk_cache, "set", lambda key, value: None)
+    monkeypatch.setattr(server.aoty_module, "genre_index", lambda: [])
+    monkeypatch.setattr(server.aoty_module, "top_albums_of_year", lambda year, limit=100: [])
+    assert server._aoty_genre_slug_map() == {}
+
+    monkeypatch.setattr(
+        server.aoty_module, "genre_index",
+        lambda: [{"slug": "6-electronic", "name": "Electronic"}],
+    )
+    assert server._aoty_genre_slug_map()["electronic"] == ("6-electronic", "Electronic")
