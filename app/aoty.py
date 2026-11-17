@@ -624,12 +624,20 @@ def _fetch(url: str) -> Optional[str]:
 def _note_challenge(url: str) -> None:
     """Record a challenge we could not clear, and say why.
 
+    Not while a solve is running. The request that drew this challenge
+    may itself have just started one (see `aoty_clearance.refresh`), and
+    until it finishes we don't know that we're blocked. Marking it here
+    put the Home notice up during every startup solve that went on to
+    succeed.
+
     Two distinct causes, and the distinction is the whole point of the
     message: either there is no browser engine to drive (a dev run or
     the `--browser` fallback, where this is expected), or there is one
     and the challenge still didn't clear (which is the case that wants
     a human).
     """
+    if aoty_clearance.is_solving():
+        return
     _mark_blocked()
     # High-signal: the "AOTY rows are empty and here's why" message
     # future-you wants in the dev console without grepping a logfile.

@@ -1,7 +1,7 @@
-import { useMemo } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { AlertTriangle, Heart, Music, Star } from "lucide-react";
-import type { AotyAlbum, Album } from "@/api/types";
+import type { AotyAlbum, AotyPage, Album } from "@/api/types";
 import { useApi } from "@/hooks/useApi";
 import { useColumnCount } from "@/hooks/useColumnCount";
 import { useFavorites } from "@/hooks/useFavorites";
@@ -31,29 +31,74 @@ import { cn, imageUrl } from "@/lib/utils";
  */
 export function AotyHomeSection() {
   const year = useMemo(() => new Date().getFullYear(), []);
+  // Bumped when a Cloudflare solve finishes, so the rows and the status
+  // fetch again and show what the solve made possible.
+  const [generation, setGeneration] = useState(0);
+  // Set when a row comes back `pending`.
+  const [waiting, setWaiting] = useState(false);
+  const onPending = useCallback(() => setWaiting(true), []);
   // Scraper status. When AOTY's Cloudflare challenge can't be cleared
   // the rows render nothing (silent-by-design); the notice below tells
   // the user that's why, and `can_solve` picks which of the two
   // reasons it explains.
-  const { data: status } = useApi(() => api.aoty.status(), []);
+  const { data: status } = useApi(() => api.aoty.status(), [generation]);
+  // A solve is running: a row came back `pending`, or the status says
+  // so. The rows keep their skeletons and the notice stays down until
+  // it finishes.
+  const solving = waiting || (status?.solving ?? false);
+  useEffect(() => {
+    if (!solving) return;
+    let cancelled = false;
+    let timer: number | undefined;
+    const done = () => {
+      setWaiting(false);
+      setGeneration((g) => g + 1);
+    };
+    const check = () => {
+      api.aoty.status().then(
+        (s) => {
+          if (cancelled) return;
+          if (s.solving) timer = window.setTimeout(check, SOLVE_POLL_MS);
+          else done();
+        },
+        () => {
+          if (!cancelled) done();
+        },
+      );
+    };
+    timer = window.setTimeout(check, SOLVE_POLL_MS);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [solving]);
   return (
     <div>
-      {status?.blocked && <AotyBlockedNotice canSolve={status.can_solve} />}
+      {status?.blocked && !solving && (
+        <AotyBlockedNotice canSolve={status.can_solve} />
+      )}
       <AotyRow
         title="New album releases"
-        fetch={() =>
-          api.aoty.recentReleases({ limit: 30 }).then((p) => p.items)
-        }
+        fetch={() => api.aoty.recentReleases({ limit: 30 })}
         viewMoreTo="/aoty/new-releases"
+        generation={generation}
+        onPending={onPending}
       />
       <AotyRow
         title={`Top albums of ${year}`}
-        fetch={() => api.aoty.topOfYear({ limit: 30 }).then((p) => p.items)}
+        fetch={() => api.aoty.topOfYear({ limit: 30 })}
         viewMoreTo="/aoty/top-of-year"
+        generation={generation}
+        onPending={onPending}
       />
     </div>
   );
 }
+
+/** How often the Home rows ask whether a Cloudflare solve has finished.
+ *  A solve takes roughly 5-25 s, so this keeps the wait after it short
+ *  without hammering the local server. */
+const SOLVE_POLL_MS = 3000;
 
 /**
  * Shown above the AOTY rows when albumoftheyear.org is serving a
@@ -65,12 +110,12 @@ export function AotyHomeSection() {
  * Two wordings for the two causes. `canSolve` false means there's no
  * webview to run Cloudflare's challenge in — a dev server or
  * `--browser` mode, where empty rows are expected. `canSolve` true
- * means we had an engine and still couldn't get through. Since
- * November 2026 that is AOTY asking for a human click and then
+ * means we had an engine and the solve still failed. Through most of
+ * November 2026 that was AOTY asking for a human click and then
  * rejecting the embedded browser regardless, which no bug report can
- * fix, so the notice explains it rather than asking for one. The
- * startup prewarm retries on every launch, so the rows return by
- * themselves if AOTY lifts the check.
+ * fix, so the notice explains it rather than asking for one. A failed
+ * solve is retried by the next AOTY request after a ten-minute hold,
+ * so the rows come back by themselves when the check clears.
  */
 function AotyBlockedNotice({ canSolve }: { canSolve: boolean }) {
   return (
@@ -80,9 +125,9 @@ function AotyBlockedNotice({ canSolve }: { canSolve: boolean }) {
         <p className="font-semibold">Album of the Year rows unavailable</p>
         {canSolve ? (
           <p className="mt-1 text-muted-foreground">
-            AlbumOfTheYear.org is asking visitors to prove they're human, and it
-            doesn't accept Tideway's built-in browser. If the site lifts that
-            check, these rows come back the next time you open Tideway.
+            AlbumOfTheYear.org&apos;s check that visitors are human didn&apos;t
+            let Tideway&apos;s built-in browser through. Tideway tries again in
+            a few minutes, and these rows come back once it gets through.
           </p>
         ) : (
           <p className="mt-1 text-muted-foreground">
@@ -100,18 +145,26 @@ function AotyRow({
   title,
   fetch,
   viewMoreTo,
+  generation,
+  onPending,
 }: {
   title: string;
-  fetch: () => Promise<AotyAlbum[]>;
+  fetch: () => Promise<AotyPage>;
   viewMoreTo: string;
+  generation: number;
+  onPending: () => void;
 }) {
   const cols = useColumnCount();
-  const { data, loading, error } = useApi(fetch, []);
+  const { data, loading, error } = useApi(fetch, [generation]);
+  const pending = data?.pending ?? false;
+  useEffect(() => {
+    if (pending) onPending();
+  }, [pending, onPending]);
 
   // Silent failure mode — Home stays usable. The user sees an empty
   // chart cycle, not a bright red error block.
   if (error) return null;
-  if (loading) {
+  if (loading || pending) {
     return (
       <div>
         <SectionHeader title={title} viewMoreTo={null} />
@@ -120,7 +173,7 @@ function AotyRow({
     );
   }
 
-  const playable = (data ?? []).filter(
+  const playable = (data?.items ?? []).filter(
     (e): e is AotyAlbum & { tidal_album: Album } => e.tidal_album !== null,
   );
   if (playable.length === 0) return null;

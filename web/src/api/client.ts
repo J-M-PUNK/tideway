@@ -27,6 +27,7 @@ import type {
   LastFmWeeklyScrobble,
   AotyGenre,
   AotyPage,
+  AotyStatus,
   LocalFile,
   LocalVideo,
   Lyrics,
@@ -574,14 +575,11 @@ export const api = {
         { timeoutMs: AOTY_TIMEOUT_MS },
       );
     },
-    /** Scraper health. `blocked` is true when AOTY has recently
-     *  served us a Cloudflare challenge instead of HTML — the
-     *  Home page reads this to render a "report on GitHub" notice
-     *  rather than silently hiding the AOTY rows. */
-    status: () =>
-      req<{ blocked: boolean; can_solve: boolean; issues_url: string }>(
-        `/api/aoty/status`,
-      ),
+    /** Scraper health. `blocked` is true when AOTY served a
+     *  Cloudflare challenge we couldn't clear, which the Home page
+     *  explains in a notice rather than silently hiding the rows.
+     *  `solving` is true while a clearance solve is running. */
+    status: () => req<AotyStatus>(`/api/aoty/status`),
   },
   spotify: {
     /** Spotify's global play count for a recording identified by
