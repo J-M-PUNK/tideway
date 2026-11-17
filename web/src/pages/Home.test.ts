@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import type { PageCategory, PageItem, TidalPage } from "@/api/types";
-import { fillCompactItems, filterHomeRows } from "./Home";
+import { filterHomeRows } from "./Home";
+import { fillRowItems } from "@/lib/pageRowItems";
 
 /**
  * Home's row filter is an allowlist, so a row is excluded simply by not
@@ -151,7 +152,7 @@ describe("filterHomeRows", () => {
   });
 });
 
-describe("fillCompactItems", () => {
+describe("fillRowItems", () => {
   // Tidal's home feed sends five "Recommended new tracks" and a
   // viewAllPath to the full list (200 tracks); the row shows nine.
   const ids = (xs: PageItem[]) => xs.map((x) => ("id" in x ? x.id : "?"));
@@ -161,7 +162,7 @@ describe("fillCompactItems", () => {
     const full = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k"].map(
       (id) => item("track", id),
     );
-    expect(ids(fillCompactItems(preview, full, 9))).toEqual([
+    expect(ids(fillRowItems(preview, full, 9))).toEqual([
       "a",
       "b",
       "c",
@@ -177,7 +178,7 @@ describe("fillCompactItems", () => {
   it("skips what the preview already has, wherever it sits in the full list", () => {
     const preview = [item("track", "x"), item("track", "y")];
     const full = ["p", "x", "q", "y", "r"].map((id) => item("track", id));
-    expect(ids(fillCompactItems(preview, full, 9))).toEqual([
+    expect(ids(fillRowItems(preview, full, 9))).toEqual([
       "x",
       "y",
       "p",
@@ -188,7 +189,7 @@ describe("fillCompactItems", () => {
 
   it("caps at max and returns the preview when the full list is empty", () => {
     const preview = ["a", "b", "c"].map((id) => item("track", id));
-    expect(ids(fillCompactItems(preview, [], 9))).toEqual(["a", "b", "c"]);
-    expect(fillCompactItems(preview, [], 2)).toHaveLength(2);
+    expect(ids(fillRowItems(preview, [], 9))).toEqual(["a", "b", "c"]);
+    expect(fillRowItems(preview, [], 2)).toHaveLength(2);
   });
 });

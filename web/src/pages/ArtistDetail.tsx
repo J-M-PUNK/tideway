@@ -6,7 +6,7 @@ import type { Album, Artist, Playlist, Track, Video } from "@/api/types";
 import type { OnDownload } from "@/api/download";
 import { useApi } from "@/hooks/useApi";
 import { queryKeys } from "@/api/queryKeys";
-import { useColumnCount } from "@/hooks/useColumnCount";
+import { useCardColumns } from "@/hooks/useCardColumns";
 import { useLikedByArtist } from "@/hooks/useLikedByArtist";
 import { useSpotifyTrackPlaycountBatch } from "@/hooks/useSpotifyEnrichment";
 import { useVideoPlayer } from "@/hooks/useVideoPlayer";
@@ -305,7 +305,7 @@ function LikedSummaryCard({
 
 /**
  * One artist-page section (Albums, EPs/Singles, Appears on, similar
- * artists) — single row of cards at the current breakpoint with a
+ * artists) — the single row of cards that fits its width, with a
  * "View more" link that lands on the dedicated section page. Matches
  * the one-row + view-more convention used on Home, Album, Stats.
  */
@@ -324,18 +324,18 @@ function MediaRow<T extends Album | Artist | Playlist>({
   viewMoreTo?: string;
   onDownload?: OnDownload;
 }) {
-  const cols = useColumnCount();
+  const [rowRef, cols] = useCardColumns();
   const visible = useMemo(() => items.slice(0, cols), [items, cols]);
   if (items.length === 0) return null;
   const hasMore = !!viewMoreTo && items.length > cols;
 
   return (
-    <div>
+    <div ref={rowRef}>
       <div className="mb-4 mt-8 flex items-baseline justify-between gap-4">
         <h2 className="text-2xl font-bold tracking-tight">{title}</h2>
         {hasMore && <ViewMoreLink to={viewMoreTo!} />}
       </div>
-      <Grid>
+      <Grid columns={cols}>
         {visible.map((item) => (
           <MediaCard key={item.id} item={item} onDownload={onDownload} />
         ))}
@@ -344,8 +344,12 @@ function MediaRow<T extends Album | Artist | Playlist>({
   );
 }
 
+/** Video thumbnails are wide, so they get a wider minimum than album
+ *  cards. */
+const VIDEO_CARD_MIN_WIDTH_PX = 240;
+
 /**
- * Videos row — single row capped at the current breakpoint with a
+ * Videos row — the single row that fits its width, with a
  * "View more" link. Cards are wider-than-tall thumbnails; clicking
  * opens the shared video modal since there's no per-video detail page.
  */
@@ -356,23 +360,23 @@ function VideoRow({
   videos: Video[];
   viewMoreTo: string;
 }) {
-  const cols = useColumnCount();
+  const [rowRef, cols] = useCardColumns(VIDEO_CARD_MIN_WIDTH_PX);
   const { open } = useVideoPlayer();
   const visible = videos.slice(0, cols);
   const hasMore = videos.length > cols;
   return (
-    <div>
+    <div ref={rowRef}>
       <div className="mb-4 mt-8 flex items-baseline justify-between gap-4">
         <h2 className="flex items-center gap-2 text-2xl font-bold tracking-tight">
           <VideoIcon className="h-6 w-6" /> Videos
         </h2>
         {hasMore && <ViewMoreLink to={viewMoreTo} />}
       </div>
-      <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
+      <Grid columns={cols}>
         {visible.map((v) => (
           <VideoCard key={v.id} video={v} onPlay={() => open(v, videos)} />
         ))}
-      </div>
+      </Grid>
     </div>
   );
 }

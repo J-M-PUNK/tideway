@@ -13,7 +13,7 @@ import { MediaCard } from "@/components/MediaCard";
 import { TopHitCard } from "@/components/TopHitCard";
 import { TrackList } from "@/components/TrackList";
 import { EmptyState } from "@/components/EmptyState";
-import { useColumnCount } from "@/hooks/useColumnCount";
+import { useCardColumns } from "@/hooks/useCardColumns";
 import {
   FormatFilter,
   type AudioFormat,
@@ -75,7 +75,6 @@ export function Search({ onDownload }: { onDownload: OnDownload }) {
   const q = params.get("q") ?? "";
   const filter = asFilter(params.get("tab"));
   const [format, setFormat] = useState<AudioFormat>("all");
-  const cols = useColumnCount();
 
   // Debounce the query so a fresh keystroke doesn't fire its own
   // request — wait 300 ms after typing stops, then search. The
@@ -291,7 +290,6 @@ export function Search({ onDownload }: { onDownload: OnDownload }) {
         <MediaRow
           title="Artists"
           items={results.artists}
-          cols={cols}
           viewMoreTo={tabUrl(q, "artists")}
         />
       )}
@@ -310,7 +308,6 @@ export function Search({ onDownload }: { onDownload: OnDownload }) {
         <MediaRow
           title="Albums"
           items={filteredAlbums}
-          cols={cols}
           viewMoreTo={tabUrl(q, "albums")}
           onDownload={onDownload}
         />
@@ -330,7 +327,6 @@ export function Search({ onDownload }: { onDownload: OnDownload }) {
         <MediaRow
           title="Playlists"
           items={results.playlists}
-          cols={cols}
           viewMoreTo={tabUrl(q, "playlists")}
           onDownload={onDownload}
         />
@@ -409,25 +405,24 @@ function RecentSearches({
 function MediaRow<T extends Album | Artist | Playlist>({
   title,
   items,
-  cols,
   viewMoreTo,
   onDownload,
 }: {
   title: string;
   items: T[];
-  cols: number;
   viewMoreTo: string;
   onDownload?: OnDownload;
 }) {
+  const [rowRef, cols] = useCardColumns();
   const visible = items.slice(0, cols);
   const hasMore = items.length > cols;
   return (
-    <div>
+    <div ref={rowRef}>
       <div className="mb-4 mt-8 flex items-baseline justify-between gap-4">
         <h2 className="text-2xl font-bold tracking-tight">{title}</h2>
         {hasMore && <ViewMoreLink to={viewMoreTo} />}
       </div>
-      <Grid>
+      <Grid columns={cols}>
         {visible.map((item) => (
           <MediaCard key={item.id} item={item} onDownload={onDownload} />
         ))}

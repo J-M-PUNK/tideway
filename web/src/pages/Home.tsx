@@ -22,6 +22,7 @@ import {
 } from "@/components/ui/dropdown-menu";
 import { useToast } from "@/components/toast";
 import { imageUrl } from "@/lib/utils";
+import { fillRowItems, pageItemId } from "@/lib/pageRowItems";
 import type {
   Album,
   Artist,
@@ -222,28 +223,6 @@ export function filterHomeRows(page: TidalPage): {
 // ---------------------------------------------------------------------------
 const COMPACT_VISIBLE_COUNT = 9;
 
-// Tidal's home feed sends only a short preview for some rows (five
-// tracks for "Recommended new tracks") and points at the full list
-// through viewAllPath; its own app shows the full list. Keep the
-// preview's order, then top the row up from the full list, skipping
-// anything the preview already has. Exported for Home.test.ts.
-export function fillCompactItems(
-  preview: PageItem[],
-  full: PageItem[],
-  max: number,
-): PageItem[] {
-  const out = preview.slice(0, max);
-  const seen = new Set(out.map((it, i) => `${it.kind}-${pillId(it, i)}`));
-  for (const it of full) {
-    if (out.length >= max) break;
-    const key = `${it.kind}-${pillId(it, -1)}`;
-    if (seen.has(key)) continue;
-    seen.add(key);
-    out.push(it);
-  }
-  return out;
-}
-
 function CompactRow({
   category,
   onDownload,
@@ -266,7 +245,7 @@ function CompactRow({
   );
   const items =
     needsFill && full
-      ? fillCompactItems(
+      ? fillRowItems(
           category.items,
           full.categories.flatMap((c) => c.items),
           COMPACT_VISIBLE_COUNT,
@@ -288,7 +267,7 @@ function CompactRow({
       <div className="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
         {items.map((item, i) => (
           <CompactPill
-            key={`${item.kind}-${pillId(item, i)}`}
+            key={`${item.kind}-${pageItemId(item, i)}`}
             item={item}
             rowTracks={rowTracks(items)}
             onDownload={onDownload}
@@ -304,12 +283,6 @@ function CompactRow({
 // that track and sets next/prev to walk the rest of the row's tracks.
 function rowTracks(items: PageItem[]): Track[] {
   return items.filter((it): it is Track => it.kind === "track");
-}
-
-function pillId(item: PageItem, fallback: number): string {
-  if ("id" in item) return String(item.id);
-  if (item.kind === "pagelink") return item.path;
-  return String(fallback);
 }
 
 const PILL_CLASS =

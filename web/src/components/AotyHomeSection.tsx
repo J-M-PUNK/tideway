@@ -3,7 +3,7 @@ import { Link } from "react-router-dom";
 import { AlertTriangle, Heart, Music, Star } from "lucide-react";
 import type { AotyAlbum, AotyPage, Album } from "@/api/types";
 import { useApi } from "@/hooks/useApi";
-import { useColumnCount } from "@/hooks/useColumnCount";
+import { useCardColumns } from "@/hooks/useCardColumns";
 import { useFavorites } from "@/hooks/useFavorites";
 import { useHeartPop } from "@/components/HeartButton";
 import { api } from "@/api/client";
@@ -19,8 +19,8 @@ import { cn, imageUrl } from "@/lib/utils";
  * empty-or-errored rows render nothing at all (the section is purely
  * additive — Home stays usable if AOTY is down).
  *
- * Each row caps to one row of cards at the current viewport width (via
- * useColumnCount) and links to a drill-down page (/aoty/top-of-year,
+ * Each row caps to the cards that fit in one row of its own width (via
+ * useCardColumns) and links to a drill-down page (/aoty/top-of-year,
  * /aoty/new-releases) for the full grid. Same pattern the rest of the
  * app uses for "Albums" / "EPs & Singles" / "Appears on" rows on the
  * artist page.
@@ -154,7 +154,7 @@ function AotyRow({
   generation: number;
   onPending: () => void;
 }) {
-  const cols = useColumnCount();
+  const [rowRef, cols] = useCardColumns();
   const { data, loading, error } = useApi(fetch, [generation]);
   const pending = data?.pending ?? false;
   useEffect(() => {
@@ -166,9 +166,9 @@ function AotyRow({
   if (error) return null;
   if (loading || pending) {
     return (
-      <div>
+      <div ref={rowRef}>
         <SectionHeader title={title} viewMoreTo={null} />
-        <GridSkeleton count={cols} />
+        <GridSkeleton count={cols} columns={cols} />
       </div>
     );
   }
@@ -182,9 +182,9 @@ function AotyRow({
   const hasMore = playable.length > cols;
 
   return (
-    <div>
+    <div ref={rowRef}>
       <SectionHeader title={title} viewMoreTo={hasMore ? viewMoreTo : null} />
-      <Grid>
+      <Grid columns={cols}>
         {visible.map((entry) => (
           <AotyCard key={entry.tidal_album.id} entry={entry} />
         ))}

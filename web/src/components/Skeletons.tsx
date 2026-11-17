@@ -1,4 +1,5 @@
 import { cn } from "@/lib/utils";
+import { Grid } from "@/components/Grid";
 
 /**
  * Loading-state placeholder. Uses the gradient-shimmer animation
@@ -22,13 +23,21 @@ export function CardSkeleton() {
   );
 }
 
-export function GridSkeleton({ count = 12 }: { count?: number }) {
+export function GridSkeleton({
+  count = 12,
+  columns,
+}: {
+  count?: number;
+  /** Lay out exactly this many columns, as the single-row section the
+   *  skeleton stands in for will. */
+  columns?: number;
+}) {
   return (
-    <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6 min-[1920px]:grid-cols-7 min-[2400px]:grid-cols-8">
+    <Grid columns={columns}>
       {Array.from({ length: count }, (_, i) => (
         <CardSkeleton key={i} />
       ))}
-    </div>
+    </Grid>
   );
 }
 

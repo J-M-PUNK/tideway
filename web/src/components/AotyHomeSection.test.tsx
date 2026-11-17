@@ -56,6 +56,12 @@ let root: Root;
 
 beforeEach(() => {
   vi.useFakeTimers();
+  // The rows size themselves from their measured width (useCardColumns),
+  // and happy-dom does no layout, so give every element a desktop-ish
+  // width or each row would fit zero cards.
+  vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({
+    width: 1200,
+  } as DOMRect);
   container = document.createElement("div");
   document.body.appendChild(container);
   root = createRoot(container);
