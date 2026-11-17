@@ -13135,12 +13135,13 @@ def _aoty_genre_slug_map() -> dict:
                 n = (n or "").strip()
                 if n and s:
                     mapping.setdefault(n.lower(), (s, n))
-    with _genre_map_lock:
-        _genre_map_cache["at"] = time.monotonic()
-        _genre_map_cache["map"] = mapping
-    # Persist only a map we actually built. Writing an empty one would
-    # cache an AOTY outage for a day.
+    # Keep only a map we actually built, in memory and on disk. An empty
+    # one means AOTY didn't answer, and holding it would leave every
+    # For You genre row empty for a day after AOTY came back.
     if mapping:
+        with _genre_map_lock:
+            _genre_map_cache["at"] = time.monotonic()
+            _genre_map_cache["map"] = mapping
         lastfm_disk_cache.set(_GENRE_MAP_DISK_KEY, mapping)
     return mapping
 
