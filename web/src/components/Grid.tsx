@@ -1,17 +1,26 @@
 import type { PropsWithChildren } from "react";
 import { Link } from "react-router-dom";
 import { ChevronRight } from "lucide-react";
+import { cardGridTemplate } from "@/hooks/useCardColumns";
 
-export function Grid({ children }: PropsWithChildren) {
-  // Column count grows with viewport width so wide displays show more
-  // cards rather than fewer huge ones. The tiers above 2xl (1536px)
-  // matter for 1920p, 1440p widescreens, and 4K monitors where the
-  // default cap of 6 cols left each card around 400px wide.
-  // Keep in lockstep with `useColumnCount` — single-row sections slice
-  // their data by that hook, and the slice has to match what the CSS
-  // grid will actually render or trailing cards wrap to a phantom row.
+/**
+ * Card grid. Cards keep to a fixed size range and a wider space fits
+ * more of them, rather than the same number stretched wider.
+ *
+ * Pass `columns` from `useCardColumns` in a single-row section: the
+ * section slices its items to that count and the grid lays out exactly
+ * that many columns, so nothing can wrap to a second row. Without it,
+ * the browser fits as many columns as the width allows.
+ */
+export function Grid({
+  children,
+  columns,
+}: PropsWithChildren<{ columns?: number }>) {
   return (
-    <div className="grid grid-cols-2 gap-4 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6 min-[1920px]:grid-cols-7 min-[2400px]:grid-cols-8">
+    <div
+      className="grid gap-4"
+      style={{ gridTemplateColumns: cardGridTemplate(columns) }}
+    >
       {children}
     </div>
   );

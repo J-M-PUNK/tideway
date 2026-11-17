@@ -18,11 +18,15 @@ import type {
 import type { OnDownload } from "@/api/download";
 import { useFavorites } from "@/hooks/useFavorites";
 import { useHeartPop } from "@/components/HeartButton";
-import { ViewMoreLink } from "@/components/Grid";
+import { Grid, ViewMoreLink } from "@/components/Grid";
 import { MediaCard } from "@/components/MediaCard";
 import { PlayMediaButton } from "@/components/PlayMediaButton";
 import { TrackList } from "@/components/TrackList";
-import { useColumnCount } from "@/hooks/useColumnCount";
+import { useCardColumns } from "@/hooks/useCardColumns";
+import { useApi } from "@/hooks/useApi";
+import { api } from "@/api/client";
+import { queryKeys } from "@/api/queryKeys";
+import { fillRowItems } from "@/lib/pageRowItems";
 import { usePlayerActions, usePlayerMeta } from "@/hooks/PlayerContext";
 import { cn, imageUrl } from "@/lib/utils";
 
@@ -110,7 +114,28 @@ function Section({
   forceSingleRow?: boolean;
 }) {
   const { type, title, subtitle, items, context, viewAllPath } = category;
-  const columnCount = useColumnCount();
+  const [rowRef, columns] = useCardColumns();
+
+  // "Because you liked X" rows (context present) and any row with a
+  // viewAll get capped to a single row of cards — the rest live behind
+  // the "View more" link in the header. Everything else keeps the
+  // full responsive grid. Home passes forceSingleRow so scanning all
+  // sections is quick; the only cost is some rows lose their "view
+  // more" affordance when Tidal didn't send a viewAllPath for them.
+  const singleRow = forceSingleRow || Boolean(context || viewAllPath);
+  // A wide window fits more cards than Tidal's preview of the row
+  // holds. Top the row up from its view-all list, the same request and
+  // cache key the View more page uses.
+  const needsFill =
+    singleRow && !!viewAllPath && columns > 0 && items.length < columns;
+  const { data: full } = useApi(
+    () => api.pagePath(viewAllPath ?? ""),
+    [viewAllPath],
+    {
+      cacheKey: viewAllPath ? queryKeys.pagePath(viewAllPath) : undefined,
+      skip: !needsFill,
+    },
+  );
 
   if (type === "TrackList") {
     return (
@@ -137,37 +162,33 @@ function Section({
     return (
       <div>
         {title && <SectionHeader title={title} subtitle={subtitle} />}
-        <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 min-[1920px]:grid-cols-7 min-[2400px]:grid-cols-8">
+        <Grid>
           {links.map((l) => (
             <PageLinkTile key={l.path} link={l} />
           ))}
-        </div>
+        </Grid>
       </div>
     );
   }
 
-  // "Because you liked X" rows (context present) and any row with a
-  // viewAll get capped to a single row of cards — the rest live behind
-  // the "View more" link in the header. Everything else keeps the
-  // full responsive grid. Home passes forceSingleRow so scanning all
-  // sections is quick; the only cost is some rows lose their "view
-  // more" affordance when Tidal didn't send a viewAllPath for them.
-  const singleRow = forceSingleRow || Boolean(context || viewAllPath);
-  // Cap single rows at whichever is smaller: the row-cap or the actual
-  // visible column count. The cap matches the maximum useColumnCount
-  // produces (8 at 2400px+) so wide displays render a full row of
-  // cards rather than padding empty space. Without the columnCount
-  // floor a narrower viewport renders e.g. 4 cards then an orphaned
-  // 5th on a partial second row.
-  const ROW_CAP = 8;
-  const visible = singleRow
-    ? items.slice(0, Math.min(ROW_CAP, columnCount))
-    : items;
+  // A single row shows exactly as many cards as fit, laid out in
+  // exactly that many columns, so it can never wrap. When even the
+  // topped-up row is shorter, the cards keep their size and leave the
+  // rest of the row empty rather than stretching to fill it.
+  const rowItems =
+    needsFill && full
+      ? fillRowItems(
+          items,
+          full.categories.flatMap((c) => c.items),
+          columns,
+        )
+      : items;
+  const visible = singleRow ? rowItems.slice(0, columns) : items;
   // Track rows need a shared playback context: clicking one track's
   // cover should play it with the row's other tracks queued up.
-  const rowTracks = items.filter((i): i is Track => i.kind === "track");
+  const rowTracks = rowItems.filter((i): i is Track => i.kind === "track");
   return (
-    <div>
+    <div ref={rowRef}>
       {title && (
         <SectionHeader
           title={title}
@@ -176,29 +197,7 @@ function Section({
           viewAllPath={viewAllPath}
         />
       )}
-      <div
-        className={cn(
-          "grid gap-4",
-          singleRow
-            ? "grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 min-[1920px]:grid-cols-7 min-[2400px]:grid-cols-8"
-            : "grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5 2xl:grid-cols-6 min-[1920px]:grid-cols-7 min-[2400px]:grid-cols-8",
-        )}
-        // When a single-row section has fewer items than the
-        // breakpoint's column count (Custom mixes typically returns
-        // 5-6 items but the breakpoint goes up to 8), the trailing
-        // grid columns sit empty and the row looks like it's only
-        // half-filling the container. Override to a tight N-column
-        // grid so the cards expand to fill the available width.
-        // Capped at columnCount so wider breakpoints still respect
-        // the responsive sizing chain.
-        style={
-          singleRow && visible.length > 0 && visible.length < columnCount
-            ? {
-                gridTemplateColumns: `repeat(${visible.length}, minmax(0, 1fr))`,
-              }
-            : undefined
-        }
-      >
+      <Grid columns={singleRow ? columns : undefined}>
         {visible.map((it, idx) => (
           <PageItemCard
             key={`${it.kind}-${itemKey(it)}-${idx}`}
@@ -207,7 +206,7 @@ function Section({
             rowTracks={rowTracks}
           />
         ))}
-      </div>
+      </Grid>
     </div>
   );
 }

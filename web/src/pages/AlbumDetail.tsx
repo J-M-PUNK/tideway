@@ -18,7 +18,8 @@ import { ShuffleButton } from "@/components/ShuffleButton";
 import { PlayAllButton } from "@/components/PlayAllButton";
 import { TrackList } from "@/components/TrackList";
 import { ErrorView } from "@/components/ErrorView";
-import { SectionHeader, ViewMoreLink } from "@/components/Grid";
+import { Grid, SectionHeader, ViewMoreLink } from "@/components/Grid";
+import { useCardColumns } from "@/hooks/useCardColumns";
 import { MediaCard } from "@/components/MediaCard";
 import { HeroSkeleton, TrackListSkeleton } from "@/components/Skeletons";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
@@ -27,7 +28,7 @@ import {
   useSpotifyAlbumTotalPlays,
   useSpotifyTrackPlaycountBatch,
 } from "@/hooks/useSpotifyEnrichment";
-import { cn, formatDuration, imageUrl } from "@/lib/utils";
+import { formatDuration, imageUrl } from "@/lib/utils";
 
 export function AlbumDetail({ onDownload }: { onDownload: OnDownload }) {
   const { id = "" } = useParams();
@@ -291,44 +292,21 @@ function SingleRowSection({
   items: (Album | Artist)[];
   onDownload: OnDownload;
 }) {
+  const [rowRef, cols] = useCardColumns();
   return (
-    <div className="mb-10">
+    <div ref={rowRef} className="mb-10">
       <div className="mb-4 flex items-baseline justify-between gap-4">
         <h2 className="text-xl font-bold tracking-tight">{title}</h2>
         {viewAllHref && <ViewMoreLink to={viewAllHref} />}
       </div>
-      <div className="grid gap-4 grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 2xl:grid-cols-6 min-[1920px]:grid-cols-7 min-[2400px]:grid-cols-8">
-        {items.slice(0, 6).map((it, i) => (
-          // Hide items past the current breakpoint's column count so
-          // the section is always exactly one row — previously the
-          // grid wrapped 6 items onto 2 rows at lg (5 cols) with 1
-          // orphan item on row 2. Column counts: base=2, sm=3, md=4,
-          // lg=5, 2xl=6, matched by the responsive hide/show classes
-          // on each item.
-          <div key={it.id} className={cn(ROW_ITEM_VISIBILITY[i], "min-w-0")}>
-            <MediaCard item={it} onDownload={onDownload} />
-          </div>
+      <Grid columns={cols}>
+        {items.slice(0, cols).map((it) => (
+          <MediaCard key={it.id} item={it} onDownload={onDownload} />
         ))}
-      </div>
+      </Grid>
     </div>
   );
 }
-
-// Per-index visibility so each item appears only at breakpoints
-// where the grid has enough columns to fit it on the first row.
-//   i=0,1: always visible (base has 2 cols)
-//   i=2: sm and above (3 cols)
-//   i=3: md and above   (4 cols)
-//   i=4: lg and above   (5 cols)
-//   i=5: 2xl and above  (6 cols)
-const ROW_ITEM_VISIBILITY = [
-  "",
-  "",
-  "hidden sm:block",
-  "hidden md:block",
-  "hidden lg:block",
-  "hidden 2xl:block",
-];
 
 /**
  * Footer under the tracklist — release date, track count, runtime,
