@@ -60,9 +60,16 @@ sounddevice audio engine behind a single pywebview window.
 ## What's inside
 
 **Playback.** Audio plays through a pipeline built on PyAV for
-decode and sounddevice for output. Tracks hit the OS audio API at
-their native sample rate and bit depth. There is no resampling and
-no hidden software mixer. Transitions between tracks at the same
+decode and sounddevice for output. Tideway itself never resamples:
+it opens the output at each track's native sample rate and bit
+depth. By default it shares the device with other apps, so the
+operating system's mixer still sits in the path. Turn on
+**Exclusive Mode** in Settings under Playback to take the device for
+Tideway alone. On Windows that opens WASAPI in exclusive mode, and on
+macOS it switches the device to the track's rate and refuses to play
+rather than let CoreAudio resample. **Force Volume** pins the
+software volume at 100% so your DAC or amplifier does the
+attenuating. Transitions between tracks at the same
 sample rate splice at the PCM sample boundary, so they are truly
 gapless. Transitions that change sample rate reopen the output
 stream and bridge across roughly fifty milliseconds, which is the
@@ -94,15 +101,17 @@ into different DACs each apply their own correction
 automatically. See [docs/eq-and-autoeq.md](docs/eq-and-autoeq.md)
 for the full guide.
 
-Three more optional stages sit in Settings under Playback, all off
-by default so the path stays bit-perfect until you reach for them.
+More optional stages sit in Settings under Playback, all off by
+default so the path stays bit-perfect until you reach for them.
 **Crossfeed** bleeds a little of each channel into the opposite ear
 through a Bauer-style 700 Hz split, which pulls hard-panned mixes
 out of the middle of your skull and closer to a speaker soundstage.
 **ReplayGain** loudness leveling smooths the volume jumps between
 tracks using the EBU R128 numbers Tidal already ships and that
 downloaded files carry in their tags, with per-track and per-album
-modes. A **Signal Path** readout shows exactly what is happening to
+modes. **Crossfade** blends one track into the next over up to twelve
+seconds on automatic advances; skipping a track still cuts straight
+over. A **Signal Path** readout shows exactly what is happening to
 the audio right now, from source bit depth and sample rate through
 each active stage to the output device, so you can confirm a stream
 really is bit-perfect.
@@ -115,12 +124,13 @@ really is bit-perfect.
 
 The output device picker lists every USB DAC,
 Bluetooth sink, and builtin option the OS exposes, plus Chromecast
-targets, Tidal Connect renderers, and UPnP/DLNA devices discovered
-on the LAN. You can switch between any of them mid playback. The
-DLNA path covers WiiM, newer Bluesound, Cambridge, NAD, most
-network AVRs, and a long tail of cheaper Hi-Fi network bridges.
-See [docs/dlna-renderer.md](docs/dlna-renderer.md) for the
-DLNA-side details. Global media keys for play, pause, next, and previous
+targets, Tidal Connect renderers, and UPnP/DLNA and OpenHome devices
+discovered on the LAN. You can switch between any of them mid
+playback. Albums play gaplessly on Tidal Connect receivers, which are
+handed the whole queue. The DLNA path covers WiiM, newer Bluesound,
+Cambridge, NAD, most network AVRs, and a long tail of cheaper Hi-Fi
+network bridges. See [docs/dlna-renderer.md](docs/dlna-renderer.md)
+for the DLNA-side details. Global media keys for play, pause, next, and previous
 work even when the window is minimized. There is an opt-in desktop
 notification on every track change. On Linux, Tideway registers as
 an MPRIS player on the session bus, so GNOME and KDE media widgets,
@@ -128,9 +138,20 @@ the lock screen, and `playerctl` can see the current track and
 drive playback. On macOS the same job is done through the native
 Now Playing integration in Control Center.
 
-**Browsing and library.** Search, a unified Charts page (Popular,
-Top, Rising, and New Releases as tabs), and dedicated album,
-artist, playlist, and mix pages are all there. The Home page also
+Around the player: synced lyrics that follow the song when Tidal has
+them, a full-screen view, a compact always-on-top mini player, and a
+sleep timer. When the queue runs out, playback carries on into a radio
+mix built from the last track's artist (you can turn that off). When
+you start playing on another device signed in to the same Tidal
+account, Tideway pauses, the way the official apps hand playback over.
+
+**Browsing and library.** Search, a Popular page built from Last.fm's
+global charts (Artists and Tracks tabs), and dedicated album, artist,
+playlist, and mix pages are all there. Feed lists new releases from
+the artists you follow, For You recommends albums from your own
+listening (see [How For You works](#how-for-you-works)), History shows
+what you've played, and Collections lets you group saved albums into
+folders that live on this computer. The Home page also
 surfaces two AlbumOfTheYear-backed discovery rows, a top-of-year
 highlight reel and a new-releases row, so you can find music that
 isn't already in heavy rotation. Both open into full pages where
@@ -187,7 +208,10 @@ inside an MP4, so Tideway remuxes it into a native `.flac` file.
 Low and Medium are lossy AAC and download as `.m4a`, which is the
 standard AAC container, not a deprecated format. Music videos
 download as well. Everything runs through a concurrent queue that
-you can tune. Metadata and artwork are embedded with mutagen. Any track you have downloaded
+you can tune, with an optional speed limit. Metadata and artwork are
+embedded with mutagen, with the cover size up to Tidal's full
+3000×3000 master. Lyrics are written into each file's tags, plus a
+time-coded `.lrc` file alongside it when Tidal has synced lyrics. Any track you have downloaded
 plays straight from disk without touching the Tidal streaming
 path. A filename template, toggles for per-album and per-playlist
 folders, and a skip-existing option cover the common download
@@ -209,7 +233,9 @@ a dedicated page that reads tags directly off disk. Music groups
 by album (or by artist, or sorted by date added), and videos sit
 on their own tab. Tracks play locally without round-tripping
 through Tidal's streaming endpoints, so they keep working offline
-and don't count toward any per-day stream cap.
+and don't count toward any per-day stream cap. **Offline mode** in
+Settings hides everything that needs Tidal, so you can play and
+manage your downloads without signing in.
 
 ![On this device, music](assets/screenshots/local-music.png)
 
@@ -224,20 +250,18 @@ all mirror across.
 **Video.** Music videos play through native HLS, powered by hls.js
 with a CORS proxy that keeps things working inside the Chromium
 based WebView the packaged app uses. Picture in picture,
-fullscreen, a quality picker, and subtitle toggles are all
-supported.
+fullscreen, and a quality picker are all supported.
 
 **Tidal attribution.** Every track you play fires a playback
 session event at Tidal's event producer bus, in the exact wire
 format the official tidal-sdk-web uses. That means plays credit
-the artist and surface in your Tidal Recently Played. There is a
-diagnostic panel under Settings that shows the outgoing events and
-the status Tidal returned for each one.
+the artist and surface in your Tidal Recently Played.
 
 **Updates.** On launch the app checks GitHub Releases. When a
 newer version is available a banner surfaces across the top of the
-UI, and clicking Install downloads the right asset for your OS and
-runs it.
+UI, and clicking Install downloads the right asset for your OS,
+checks its signature against the project's release key, and only
+then runs it.
 
 ## How For You works
 
@@ -347,8 +371,11 @@ to a Tidal one for 30 days. A first ever load is therefore slower than
 later ones, and does a lot of catalogue lookups.
 
 AOTY is scraped rather than read through an API, since it does not offer
-one. Requests can be rate limited, in which case rows come back shorter
-than usual or drop out entirely until the limit clears.
+one. The site sits behind Cloudflare's visitor check, which Tideway
+clears in a hidden window of its built-in browser, the same way a
+visitor's browser would. While that runs the rows show as loading. If
+the check won't clear, Home says the AOTY rows are unavailable and
+Tideway tries again a few minutes later.
 
 ## Support
 
@@ -456,8 +483,8 @@ and React.lazy splitting each route into its own chunk. Realtime
 updates flow over Server Sent Events, both for player state and
 for download progress.
 
-The desktop shell is pywebview, which uses WKWebView on macOS and
-WebView2 on Windows. Global media keys are delivered by pynput.
+The desktop shell is pywebview, which uses WKWebView on macOS,
+WebView2 on Windows, and WebKitGTK on Linux. Global media keys are delivered by pynput.
 
 ## Run it from source
 
@@ -516,9 +543,13 @@ or the Qt fallback via pip: `pip install qtpy PySide6`. Without
 either, `desktop.py` falls back to opening Tideway in your default
 browser and prints these same instructions.
 
-On first launch, click **Login with Tidal**. The login uses PKCE.
-Paste the redirect URL back into the app and Tideway exchanges it
-for a session that's entitled for hi-res streaming. The session
+On first launch, click **Open Tidal login**. Tidal's sign-in page
+opens in a window of its own, and when you finish, Tideway picks up
+the result and exchanges it for a PKCE session that's entitled for
+hi-res streaming. In browser dev mode, where there's no app window,
+you paste the URL Tidal lands on back into the app instead. A
+device-code sign-in (enter a short code on Tidal's site) is offered too,
+but only PKCE sessions can stream and download Max. The session
 and every other piece of app data live in the per-user data
 directory. On macOS that's
 `~/Library/Application Support/Tideway`. On Windows it's
@@ -541,7 +572,10 @@ run.sh              one command dev launcher
 Tideway-mac.spec    PyInstaller spec for macOS
 Tideway-win.spec    PyInstaller spec for Windows
 flatpak/            Flatpak manifest + generated deps for Linux
-scripts/            build helpers: icons, DMG, Inno Setup .iss
+scripts/            build and release helpers: icons, DMG, Inno
+                    Setup .iss, preflight checks, release signing
+docs/               feature guides and release / signing docs
+assets/             app icons and README screenshots
 tests/              pytest suite
 .github/workflows/  CI (test.yml) and release pipeline (release.yml)
 ```
@@ -556,7 +590,9 @@ Your settings live in `settings.json` in the per-user data
 directory. You can edit everything from the Settings page inside
 the app. Your last volume and the window's size and position are
 remembered there too, so a relaunch comes back the way you left
-it.
+it. Tideway can start when you log in (Settings, Launch on login),
+and only one copy runs at a time: opening it again brings the
+existing window forward.
 
 Spotify enrichment works anonymously out of the box and needs no
 login. The Spotify importer is different. It needs a Spotify
@@ -602,8 +638,8 @@ which are compiled for the local baseline, and create the venv
 with `--system-site-packages` so they're picked up.
 
 **Network audio output is mostly there, with caveats.**
-Chromecast, Tidal Connect, and UPnP/DLNA all ship in the output
-device picker.
+Chromecast, Tidal Connect, UPnP/DLNA, and OpenHome all ship in the
+output device picker.
 
 The DLNA path in particular has not been bench-tested against
 real renderers. The unit tests cover the SOAP wrappers, session
@@ -611,8 +647,7 @@ lifecycle, and audio plumbing, but device-side behaviour (does
 your specific WiiM accept the FLAC stream, does pause respond
 fast, does the device cleanly disconnect when you switch) is
 unverified. If you hit a renderer that misbehaves, please file a
-GitHub issue with the device's manufacturer and model and any
-log output from the diagnostic panel.
+GitHub issue with the device's manufacturer and model.
 
 **Play reporting to Tidal Recently Played is best effort.** Every
 play fires a `playback_session` event at Tidal's event producer
@@ -620,9 +655,7 @@ bus in the exact wire format the official SDK uses, and the bus
 accepts the event. Whether it surfaces in Recently Played on the
 official Tidal app depends on whether the play_log consumer
 accepts events from our client id. Sometimes it does and
-sometimes it does not. The Settings page has a diagnostic panel
-that shows every event we send along with the status Tidal
-returned for it.
+sometimes it does not.
 
 **The builds are not code signed.** First launch will trigger a
 Gatekeeper warning on macOS and a SmartScreen warning on Windows.
@@ -708,8 +741,11 @@ The app hits the GitHub Releases API at `/api/update-check` once
 per launch and caches the result for an hour. When a newer tag is
 out a banner surfaces across the top of the UI. Clicking **Install
 now** downloads the correct asset for the user's OS and architecture
-from the latest release, opens it, and quits the app so the installer
-can replace the bundle.
+from the latest release, verifies its minisign signature against the
+public key built into the app, opens it, and quits the app so the
+installer can replace the bundle. An asset without a valid
+`.minisig` sidecar is refused, so a release has to be signed before
+it's published. See [docs/release-signing.md](docs/release-signing.md).
 
 The release asset names must match these patterns:
 
@@ -725,8 +761,9 @@ sandbox and points the user at `flatpak update` instead of trying
 to install a bundle the running app can't replace.
 
 Cutting a release is a tag push, not a manual `gh release create`.
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the full release flow:
-deploy branch, preflight, tag, draft release review, publish.
+See [docs/release-workflow.md](docs/release-workflow.md) for the full
+release flow: deploy branch, preflight, tag, sign the installers,
+draft release review, publish.
 
 ## Contributing
 
