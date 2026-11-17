@@ -87,10 +87,11 @@ class _FakeAlbum:
     """Minimal stand-in for a Tidal Album object. Only exposes the
     attributes `resolve_listing` reads via getattr."""
 
-    def __init__(self, name: str, artist: str, id_: str = "ID"):
+    def __init__(self, name: str, artist: str, id_: str = "ID", year=None):
         self.id = id_
         self.name = name
         self.artists = [_FakeArtist(artist)]
+        self.year = year
 
 
 class _FakeArtist:
@@ -314,3 +315,49 @@ def test_serialize_exception_yields_none(stub_server):
             [{"artist": "X", "title": "Y"}]
         )
     assert out[0]["tidal_album"] is None
+
+
+def test_a_new_ep_is_not_matched_to_the_old_album_it_is_named_after(stub_server):
+    """Reported: Top Albums of 2026 showed Stevie Wonder's 1976 "Songs
+    in the Key of Life" for AOTY's 2026 "Songs in the Key of Life (The
+    EP)". The old matcher dropped "(The EP)" as an edition tag, and
+    Tidal ranks the famous album first. Tidal's search results for that
+    query, in Tidal's order."""
+    stub_server.search_results = {
+        "albums": [
+            _FakeAlbum("Songs In The Key Of Life", "Stevie Wonder", id_="1976", year=1976),
+            _FakeAlbum(
+                "Songs In The Key Of Life - The EP", "Stevie Wonder", id_="EP", year=2026
+            ),
+        ]
+    }
+    out = aoty_resolver.resolve_listing([{
+        "artist": "Stevie Wonder",
+        "title": "Songs in the Key of Life (The EP)",
+        "release_date": "September 28, 2026",
+    }])
+    assert out[0]["tidal_album"]["id"] == "EP"
+
+
+def test_an_older_album_with_the_same_title_is_rejected(stub_server):
+    """Even an exact title and artist is the wrong record when it came
+    out decades before the one AOTY listed."""
+    stub_server.search_results = {
+        "albums": [_FakeAlbum("Self Titled", "Band", id_="OLD", year=1999)]
+    }
+    out = aoty_resolver.resolve_listing([{
+        "artist": "Band", "title": "Self Titled", "release_date": "March 6, 2026",
+    }])
+    assert out[0]["tidal_album"] is None
+
+
+def test_a_later_reissue_is_still_accepted(stub_server):
+    """Tidal often carries a newer pressing of an older record; only an
+    earlier date rules a match out."""
+    stub_server.search_results = {
+        "albums": [_FakeAlbum("Record", "Band", id_="REISSUE", year=2026)]
+    }
+    out = aoty_resolver.resolve_listing([{
+        "artist": "Band", "title": "Record", "release_date": "June 1, 2025",
+    }])
+    assert out[0]["tidal_album"]["id"] == "REISSUE"

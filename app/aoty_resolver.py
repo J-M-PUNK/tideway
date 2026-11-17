@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import logging
 from concurrent.futures import ThreadPoolExecutor
+from typing import Optional
 
 log = logging.getLogger(__name__)
 
@@ -32,8 +33,11 @@ _RESOLVE_TTL_SEC = 86400.0 * 30
 # Bumped when the matching rules change, so entries resolved under the
 # old rules are not served from a 30-day cache. v2 stopped falling back
 # to Tidal's top search hit; without a bump, every album already
-# mis-resolved under v1 would stay wrong for a month.
-_RESOLVE_CACHE_VERSION = "v2"
+# mis-resolved under v1 would stay wrong for a month. v3 stopped
+# discarding real subtitles and added the release-year check, which
+# would otherwise leave Stevie Wonder's 1976 "Songs in the Key of Life"
+# cached as 2026's "Songs in the Key of Life (The EP)".
+_RESOLVE_CACHE_VERSION = "v3"
 
 # How close a Tidal album title has to be to AOTY's before we believe
 # it is the same record. Titles differ in punctuation, capitalisation,
@@ -44,16 +48,44 @@ _TITLE_MATCH_MIN = 88.0
 _ARTIST_MATCH_MIN = 80.0
 
 
+# Words that mark a trailing bracket or " - " suffix as an edition tag
+# rather than part of the title: "(Deluxe Edition)", "- Remastered
+# 2011", "[Expanded]". Anything else in brackets is kept, because it is
+# usually the title itself: "Songs in the Key of Life (The EP)" is a
+# 2026 EP, and dropping "(The EP)" matched it to the 1976 album.
+_EDITION_WORDS = (
+    r"deluxe|edition|remaster|expanded|anniversary|bonus|explicit|clean"
+    r"|version|reissue|special|mono|stereo"
+)
+
+
 def _norm(text: str) -> str:
-    """Lowercase, strip a trailing bracketed edition tag and collapse
-    whitespace. "Big Fish Theory (Deluxe Edition)" and "big fish
-    theory" should compare equal."""
+    """Lowercase, drop a trailing edition tag, and treat brackets and
+    dashes as spaces. "Big Fish Theory (Deluxe Edition)" and "big fish
+    theory" compare equal, and so do "Songs in the Key of Life (The
+    EP)" and Tidal's "Songs In The Key Of Life - The EP"."""
     import re
 
     t = (text or "").strip().lower()
-    t = re.sub(r"[\(\[][^)\]]*[)\]]\s*$", "", t).strip()
+    t = re.sub(
+        rf"\s*(?:[\(\[][^)\]]*(?:{_EDITION_WORDS})[^)\]]*[)\]]"
+        rf"|\s-\s[^-]*(?:{_EDITION_WORDS}).*)\s*$",
+        "",
+        t,
+    ).strip()
+    t = re.sub(r"[\(\)\[\]]|\s-\s", " ", t)
     t = re.sub(r"\s+", " ", t)
-    return t
+    return t.strip()
+
+
+def _year(value) -> Optional[int]:
+    """The four-digit year in an AOTY date label ("September 28, 2026")
+    or a Tidal release date, or None when there isn't one. AOTY's
+    this-week cards say only "Sep 28 · EP"."""
+    import re
+
+    m = re.search(r"\b(19|20)\d{2}\b", str(value or ""))
+    return int(m.group(0)) if m else None
 
 
 def _similar(a: str, b: str) -> float:
@@ -64,7 +96,9 @@ def _similar(a: str, b: str) -> float:
     return float(fuzz.ratio(_norm(a), _norm(b)))
 
 
-def _is_plausible_match(album, want_artist: str, want_title: str) -> bool:
+def _is_plausible_match(
+    album, want_artist: str, want_title: str, want_year: Optional[int] = None
+) -> bool:
     """Whether a Tidal search hit is actually the album AOTY listed.
 
     Tidal's search returns *something* for almost any query. Asking it
@@ -82,6 +116,17 @@ def _is_plausible_match(album, want_artist: str, want_title: str) -> bool:
     name = getattr(album, "name", "") or ""
     if _similar(name, want_title) < _TITLE_MATCH_MIN:
         return False
+    # An album released well before the one AOTY listed is a different
+    # record with a similar name: the original of an anniversary EP, or
+    # an older album that shares a title. A year of slack covers
+    # pre-releases and date differences between the two catalogs.
+    # Later is fine: Tidal often carries a reissue of an older record.
+    if want_year is not None:
+        have_year = _year(getattr(album, "year", None)) or _year(
+            getattr(album, "release_date", None)
+        )
+        if have_year is not None and have_year < want_year - 1:
+            return False
     names = [
         getattr(ar, "name", "") or ""
         for ar in (getattr(album, "artists", None) or [])
@@ -162,6 +207,7 @@ def resolve_listing(listing: list[dict]) -> list[dict]:
         # the Year, standing in for an album by Denzel Curry.
         wt = title.lower()
         wa = artist.lower()
+        want_year = _year(entry.get("release_date"))
         exact = next(
             (
                 a for a in albums
@@ -170,13 +216,21 @@ def resolve_listing(listing: list[dict]) -> list[dict]:
                     getattr(ar, "name", "").lower() == wa
                     for ar in (getattr(a, "artists", None) or [])
                 )
+                and _is_plausible_match(a, artist, title, want_year)
             ),
             None,
         )
         if exact is None:
-            exact = next(
-                (a for a in albums if _is_plausible_match(a, artist, title)),
-                None,
+            # The closest title among the plausible hits, not the first
+            # one: Tidal ranks the famous 1976 album above the 2026 EP
+            # that shares its name.
+            plausible = [
+                a for a in albums if _is_plausible_match(a, artist, title, want_year)
+            ]
+            exact = max(
+                plausible,
+                key=lambda a: _similar(getattr(a, "name", "") or "", title),
+                default=None,
             )
         if exact is None:
             # Nothing on Tidal we can stand behind. A row one album
