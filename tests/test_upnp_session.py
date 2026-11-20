@@ -237,18 +237,25 @@ class TestDiscoveryScan:
       </device>
     </root>"""
 
-    def _scan(self, monkeypatch, locations):
-        from tests.sonos_fixtures import SONOS_DEVICE_XML, SONOS_LOCATION
+    def _scan(self, monkeypatch, locations, *, extra=None, topology=None):
+        """Run a scan over `locations`. `extra` maps further LOCATIONs to
+        description bodies; `topology` is the ZoneGroupState document
+        any Sonos answers with (None = the query is refused)."""
+        from tests.sonos_fixtures import (
+            SONOS_DEVICE_XML, SONOS_LOCATION, soap_response,
+        )
 
         bodies = {
             SONOS_LOCATION: SONOS_DEVICE_XML,
             self.FLAT_LOCATION: self.FLAT_XML,
+            **(extra or {}),
         }
         fetched: list[tuple[str, float]] = []
 
         class _Resp:
-            def __init__(self, body):
+            def __init__(self, body, status_code=200):
                 self.text = body
+                self.status_code = status_code
 
             def raise_for_status(self):
                 pass
@@ -259,7 +266,15 @@ class TestDiscoveryScan:
                 raise requests.ConnectionError(f"refused: {url}")
             return _Resp(bodies[url])
 
+        def _fake_post(url, data=None, headers=None, timeout=10.0):
+            if topology is None or not url.endswith("/ZoneGroupTopology/Control"):
+                raise requests.ConnectionError(f"refused: {url}")
+            return _Resp(soap_response(
+                "GetZoneGroupState", {"ZoneGroupState": topology},
+            ))
+
         monkeypatch.setattr(requests, "get", _fake_get)
+        monkeypatch.setattr(requests, "post", _fake_post)
         monkeypatch.setattr(
             upnp, "_collect_ssdp_locations",
             lambda timeout, lan_ip: (set(locations), True),
@@ -304,9 +319,81 @@ class TestDiscoveryScan:
 
     def test_fetch_timeout_fits_inside_refresh_slack(self):
         """refresh() waits the SSDP window plus 5s. The concurrent
-        fetch phase must finish inside that slack or the whole scan is
-        discarded."""
-        assert upnp._DESCRIPTOR_FETCH_TIMEOUT_S < 5.0
+        fetch phase and the topology query after it must finish inside
+        that slack or the whole scan is discarded."""
+        assert (
+            upnp._DESCRIPTOR_FETCH_TIMEOUT_S + upnp._TOPOLOGY_TIMEOUT_S
+        ) < 5.0
+
+    def _household(self):
+        from tests.sonos_fixtures import (
+            sonos_device_xml, sonos_location, zone_group_state,
+        )
+
+        extra = {
+            sonos_location("192.168.1.61"): sonos_device_xml(
+                "uuid:RINCON_K", "Kitchen", "192.168.1.61",
+            ),
+            sonos_location("192.168.1.62"): sonos_device_xml(
+                "uuid:RINCON_LR_R", "Living Room", "192.168.1.62",
+            ),
+            sonos_location("192.168.1.63"): sonos_device_xml(
+                "uuid:RINCON_O", "Office", "192.168.1.63",
+            ),
+        }
+        topology = zone_group_state([
+            ("RINCON_000E58AABBCC01400", [
+                ("RINCON_000E58AABBCC01400", "192.168.1.60", "Living Room", False),
+                ("RINCON_LR_R", "192.168.1.62", "Living Room", True),
+                ("RINCON_K", "192.168.1.61", "Kitchen", False),
+            ]),
+            ("RINCON_O", [("RINCON_O", "192.168.1.63", "Office", False)]),
+        ])
+        return extra, topology
+
+    def test_sonos_groups_collapse_to_coordinators(self, monkeypatch):
+        """Living Room (coordinator) + Kitchen + the hidden right half of
+        the Living Room pair are one group; Office is its own. The picker
+        gets one entry per group, addressed to the coordinator."""
+        from tests.sonos_fixtures import SONOS_LOCATION, sonos_location
+
+        extra, topology = self._household()
+        devices, _ = self._scan(
+            monkeypatch, [SONOS_LOCATION, *extra], extra=extra, topology=topology,
+        )
+        by_name = {d.name: d for d in devices}
+        assert sorted(by_name) == ["Living Room + Kitchen", "Office"]
+        assert by_name["Living Room + Kitchen"].location == SONOS_LOCATION
+        assert by_name["Living Room + Kitchen"].id == (
+            "uuid:RINCON_000E58AABBCC01400"
+        )
+        assert by_name["Office"].location == sonos_location("192.168.1.63")
+
+    def test_group_listed_when_only_a_member_answered(self, monkeypatch):
+        from tests.sonos_fixtures import SONOS_LOCATION, sonos_location
+
+        extra, topology = self._household()
+        kitchen = sonos_location("192.168.1.61")
+        devices, _ = self._scan(
+            monkeypatch, [kitchen], extra=extra, topology=topology,
+        )
+        assert [(d.name, d.location, d.id) for d in devices] == [(
+            "Living Room + Kitchen",
+            SONOS_LOCATION,
+            "uuid:RINCON_000E58AABBCC01400",
+        )]
+
+    def test_topology_failure_lists_players_by_room(self, monkeypatch):
+        """Degraded but honest: without the topology every visible
+        player is listed under its room name."""
+        from tests.sonos_fixtures import SONOS_LOCATION, sonos_location
+
+        extra, _ = self._household()
+        office = sonos_location("192.168.1.63")
+        devices, _ = self._scan(
+            monkeypatch, [SONOS_LOCATION, office], extra=extra, topology=None,
+        )
+        assert sorted(d.name for d in devices) == ["Living Room", "Office"]
 
 
 # ---------------------------------------------------------------------
@@ -471,12 +558,15 @@ class TestConnect:
 
         mgr.connect(device.id)
 
-        assert [c["action"] for c in mock_soap] == [
-            "SetAVTransportURI", "Play",
+        # Connect also asks the root for the group topology; the
+        # transport handshake is what has to reach the embedded device.
+        transport = [
+            c for c in mock_soap if c["action"] != "GetZoneGroupState"
         ]
+        assert [c["action"] for c in transport] == ["SetAVTransportURI", "Play"]
         assert all(
             c["url"].endswith("/MediaRenderer/AVTransport/Control")
-            for c in mock_soap
+            for c in transport
         )
 
     def test_connect_rejects_device_without_avtransport(
@@ -1546,3 +1636,70 @@ class TestFormatCeiling:
         assert mgr._session.format_ceiling is upnp._SONOS_CEILING
         assert mgr._session._passthrough_source_urls == tuple(self.CAPPED_URLS)
         assert readers and all(r == self.CAPPED_URLS for r in readers)
+
+
+class TestSonosGroupConnect:
+    def test_connect_to_group_member_drives_coordinator(
+        self, mock_http_server, monkeypatch,
+    ):
+        """The Kitchen player was picked, but it is now grouped under the
+        Living Room. Only the coordinator accepts transport commands, so
+        the handshake must go to the Living Room player."""
+        from tests.sonos_fixtures import (
+            SONOS_LOCATION, soap_response, sonos_device_xml, sonos_location,
+            zone_group_state,
+        )
+        from app.audio.openhome import parse_device_description
+
+        kitchen_loc = sonos_location("192.168.1.61")
+        trees = {
+            kitchen_loc: parse_device_description(
+                sonos_device_xml("uuid:RINCON_K", "Kitchen", "192.168.1.61"),
+                kitchen_loc,
+            ),
+            SONOS_LOCATION: parse_device_description(
+                sonos_device_xml(), SONOS_LOCATION,
+            ),
+        }
+        monkeypatch.setattr(
+            "app.audio.upnp.fetch_device",
+            lambda location, **_kw: trees[location],
+        )
+        topology = zone_group_state([
+            ("RINCON_000E58AABBCC01400", [
+                ("RINCON_000E58AABBCC01400", "192.168.1.60", "Living Room", False),
+                ("RINCON_K", "192.168.1.61", "Kitchen", False),
+            ]),
+        ])
+        posted: list[tuple[str, str]] = []
+
+        class _Resp:
+            def __init__(self, body):
+                self.text = body
+                self.status_code = 200
+
+        def _fake_post(url, data=None, headers=None, timeout=10.0):
+            action = (headers or {}).get("SOAPAction", "").strip('"').split("#")[-1]
+            posted.append((url, action))
+            out = {"ZoneGroupState": topology} if action == "GetZoneGroupState" else {}
+            return _Resp(soap_response(action, out))
+
+        monkeypatch.setattr(requests, "post", _fake_post)
+
+        mgr = UpnpManager()
+        kitchen = UpnpDevice(
+            id="uuid:RINCON_K", name="Kitchen", manufacturer="Sonos, Inc.",
+            model="Sonos One", location=kitchen_loc,
+            service_types=trees[kitchen_loc].all_service_types(),
+            has_avtransport=True,
+        )
+        mgr._devices = {kitchen.id: kitchen}
+
+        mgr.connect(kitchen.id)
+
+        transport = [(u, a) for u, a in posted if a != "GetZoneGroupState"]
+        assert [a for _u, a in transport] == ["SetAVTransportURI", "Play"]
+        assert all(u.startswith("http://192.168.1.60:1400/") for u, _a in transport)
+        assert mgr._session.device.id == "uuid:RINCON_000E58AABBCC01400"
+        assert mgr._session.device.name == "Kitchen"
+        mgr.disconnect()

@@ -81,15 +81,23 @@ from app.audio.openhome import (
     build_didl_lite,
     fetch_device,
 )
+from app.audio.sonos_topology import (
+    ZoneGroup,
+    fetch_zone_groups,
+    group_of,
+    udn_to_uuid,
+)
 
 log = logging.getLogger(__name__)
 
 # Per-descriptor HTTP timeout during discovery. Every LOCATION from the
 # SSDP window is fetched concurrently, so this bounds the whole fetch
-# phase, and it has to stay under refresh()'s 5s of slack past the SSDP
-# window: if the phase overran, refresh() would time out and drop every
-# device, including the ones that had already answered.
+# phase. It and the Sonos topology query that follows it have to fit,
+# together, in refresh()'s 5s of slack past the SSDP window: if they
+# overran, refresh() would time out and drop every device, including
+# the ones that had already answered.
 _DESCRIPTOR_FETCH_TIMEOUT_S = 3.0
+_TOPOLOGY_TIMEOUT_S = 1.5
 
 
 # SSDP discovery uses our own sockets rather than async-upnp-client's
@@ -599,10 +607,14 @@ _SONOS_CEILING = _FormatCeiling(
 )
 
 
+def _is_zoneplayer(tree: OpenHomeDevice) -> bool:
+    return tree.device_type.startswith(_ZONEPLAYER_DEVICE_TYPE_PREFIX)
+
+
 def _format_ceiling(tree: OpenHomeDevice) -> Optional[_FormatCeiling]:
     """Ceiling for the renderer whose description is `tree`, or None
     when it takes whatever TIDAL serves."""
-    if tree.device_type.startswith(_ZONEPLAYER_DEVICE_TYPE_PREFIX):
+    if _is_zoneplayer(tree):
         return _SONOS_CEILING
     return None
 
@@ -2279,6 +2291,55 @@ class UpnpManager:
             flush=True,
         )
 
+    def _sonos_coordinator(
+        self, device: UpnpDevice, tree: OpenHomeDevice,
+    ) -> Tuple[UpnpDevice, OpenHomeDevice]:
+        """Return the record and description of the player that
+        coordinates `device`'s Sonos group, or the inputs unchanged when
+        it is its own coordinator or the topology can't be read.
+
+        The picker already lists coordinators, but grouping can change
+        in the Sonos app between the scan and the click; a member that
+        has since joined another group would fault on SetAVTransportURI.
+        """
+        groups = _household_groups(tree)
+        if groups is None:
+            return device, tree
+        uuid = udn_to_uuid(tree.udn)
+        group = group_of(groups, uuid)
+        coordinator = group.coordinator if group is not None else None
+        if (
+            coordinator is None
+            or coordinator.uuid == uuid
+            or not coordinator.location
+        ):
+            return device, tree
+        try:
+            coordinator_tree = fetch_device(coordinator.location)
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"{device.name} is grouped under another Sonos player, "
+                f"and its description at {coordinator.location} "
+                f"could not be fetched: {exc}"
+            ) from exc
+        print(
+            f"[upnp] {device.name}: sending to group coordinator "
+            f"{coordinator.zone_name or coordinator.uuid}",
+            flush=True,
+        )
+        return (
+            UpnpDevice(
+                id=f"uuid:{coordinator.uuid}",
+                name=device.name,
+                manufacturer=device.manufacturer,
+                model=device.model,
+                location=coordinator.location,
+                service_types=device.service_types,
+                has_avtransport=True,
+            ),
+            coordinator_tree,
+        )
+
     def _rebind_session_renderer(self, session: "_SessionState") -> bool:
         """Re-point the session's controllers after the renderer's control
         endpoint has gone away.
@@ -2671,6 +2732,11 @@ class UpnpManager:
                 f"failed to fetch device description from "
                 f"{device.location}: {exc}"
             ) from exc
+
+        if _is_zoneplayer(openhome_device):
+            device, openhome_device = self._sonos_coordinator(
+                device, openhome_device,
+            )
 
         renderer, av, rc = _renderer_controllers(openhome_device)
         if renderer is None or av is None:
@@ -3167,7 +3233,7 @@ class UpnpManager:
             return_exceptions=True,
         )
 
-        devices: dict[str, UpnpDevice] = {}
+        renderers: list[tuple[str, OpenHomeDevice]] = []
         failed = 0
         for location, result in zip(ordered, results):
             if isinstance(result, BaseException):
@@ -3178,9 +3244,17 @@ class UpnpManager:
                 failed += 1
                 log.debug("upnp: descriptor %s failed: %r", location, result)
                 continue
-            entry = _renderer_entry(result, location)
-            if entry is not None:
-                devices[entry.id] = entry
+            if _filter_dlna_renderer(result.all_service_types()):
+                renderers.append((location, result))
+
+        sonos = [tree for _loc, tree in renderers if _is_zoneplayer(tree)]
+        groups = (
+            await loop.run_in_executor(None, _household_groups, sonos[0])
+            if sonos else None
+        )
+        devices: dict[str, UpnpDevice] = {}
+        for entry in _picker_entries(renderers, groups):
+            devices[entry.id] = entry
 
         print(
             f"[upnp] scan: {len(ordered)} descriptor(s), "
@@ -3208,23 +3282,100 @@ def _fetch_description(location: str) -> OpenHomeDevice:
 
 
 def _renderer_entry(
-    tree: OpenHomeDevice, location: str,
+    tree: OpenHomeDevice, location: str, *, name: Optional[str] = None,
 ) -> Optional[UpnpDevice]:
     """Picker record for a parsed description, or None when nothing in
     the device tree exposes AVTransport (OpenHome-only devices are
-    tidal_connect's to list)."""
+    tidal_connect's to list).
+
+    A Sonos's friendlyName is "<ip> - <model> - RINCON_..."; the room
+    the user named it lives in `<roomName>`, so that wins when present.
+    """
     service_types = tree.all_service_types()
     if not _filter_dlna_renderer(service_types):
         return None
     return UpnpDevice(
         id=tree.udn or location,
-        name=tree.friendly_name or tree.model_name or "DLNA renderer",
+        name=(
+            name
+            or tree.room_name
+            or tree.friendly_name
+            or tree.model_name
+            or "DLNA renderer"
+        ),
         manufacturer=tree.manufacturer,
         model=tree.model_name,
         location=location,
         service_types=service_types,
         has_avtransport=True,
     )
+
+
+def _household_groups(
+    tree: OpenHomeDevice,
+) -> Optional[tuple[ZoneGroup, ...]]:
+    """Sonos topology via the player described by `tree`, or None when
+    the query fails. Without it the picker lists each visible Sonos
+    player on its own (group members included, which then refuse
+    playback with a SOAP fault), so the failure is printed."""
+    try:
+        return fetch_zone_groups(tree, timeout=_TOPOLOGY_TIMEOUT_S)
+    except (RuntimeError, OpenHomeSOAPError, ValueError) as exc:
+        print(f"[upnp] sonos topology unavailable: {exc}", flush=True)
+        return None
+
+
+def _picker_entries(
+    renderers: list[tuple[str, OpenHomeDevice]],
+    groups: Optional[tuple[ZoneGroup, ...]],
+) -> List[UpnpDevice]:
+    """Picker records for the discovered renderers.
+
+    Non-Sonos renderers map one to one. With the Sonos topology known,
+    Sonos players collapse to one record per zone group, addressed to
+    the group's coordinator (the only player that accepts transport
+    commands) and named after its rooms. Group members and the hidden
+    halves of stereo pairs / home-theatre sets drop out. A group whose
+    coordinator didn't answer SSDP is still listed when one of its
+    members did, using the coordinator's Location from the topology.
+    """
+    entries: List[UpnpDevice] = []
+    listed_groups: set[str] = set()
+    for location, tree in renderers:
+        if not _is_zoneplayer(tree) or groups is None:
+            entry = _renderer_entry(tree, location)
+            if entry is not None:
+                entries.append(entry)
+            continue
+        group = group_of(groups, udn_to_uuid(tree.udn))
+        if group is None:
+            entry = _renderer_entry(tree, location)
+            if entry is not None:
+                entries.append(entry)
+            continue
+        if group.coordinator_uuid in listed_groups:
+            continue
+        coordinator = group.coordinator
+        if coordinator is None or not coordinator.location:
+            continue
+        listed_groups.add(group.coordinator_uuid)
+        entry = _renderer_entry(
+            tree, location, name=group.display_name() or None,
+        )
+        if entry is None:
+            continue
+        if coordinator.uuid != udn_to_uuid(tree.udn):
+            entry = UpnpDevice(
+                id=f"uuid:{coordinator.uuid}",
+                name=entry.name,
+                manufacturer=entry.manufacturer,
+                model=entry.model,
+                location=coordinator.location,
+                service_types=entry.service_types,
+                has_avtransport=True,
+            )
+        entries.append(entry)
+    return entries
 
 
 # Module-level singleton, eagerly constructed at first import. Same
