@@ -40,7 +40,7 @@ def player(monkeypatch):
         decoders.append(d)
         return d
 
-    monkeypatch.setattr(player_mod, "_build_source", lambda spec, prefetched=None: object())
+    monkeypatch.setattr(player_mod, "_build_source", lambda spec, prefetched=None, refresh_urls=None: object())
     monkeypatch.setattr(player_mod, "Decoder", make_decoder)
     p.decoders = decoders  # type: ignore[attr-defined]
     return p

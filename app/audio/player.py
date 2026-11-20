@@ -366,6 +366,10 @@ class PCMPlayer:
         # the filesystem path. `None` when no track is loaded.
         self._source_urls: Optional[list[str]] = None
         self._source_path: Optional[str] = None
+        # The quality `_source_urls` was requested at, so a mid-track
+        # segment failure (or a seek on stale links) can re-resolve the
+        # same file. See _url_refresher.
+        self._source_quality: Optional[str] = None
         self._current_track_meta: Optional[dict] = None
 
         # Sounddevice dtype the current OutputStream opened with.
@@ -853,6 +857,7 @@ class PCMPlayer:
                     self._swap_pipeline_to(synthetic)
                     self._source_urls = synthetic.source_urls
                     self._source_path = synthetic.source_path
+                    self._source_quality = synthetic.quality
                     self._paused = False
                     self._seeking = False
                     self._last_error = None
@@ -939,7 +944,8 @@ class PCMPlayer:
                     )
 
             initial_source = self._open_stream_source(
-                source_spec, prefetched_bytes
+                source_spec, prefetched_bytes,
+                self._url_refresher(track_id, quality),
             )
             decoder = Decoder(initial_source)
             t_decoder = time.monotonic()
@@ -966,6 +972,7 @@ class PCMPlayer:
             else:
                 self._source_urls = list(source_spec)
                 self._source_path = None
+            self._source_quality = quality
             t_before_stream = time.monotonic()
             self._open_output_stream(
                 decoder.sample_rate, decoder.channels, decoder.sounddevice_dtype
@@ -1348,6 +1355,7 @@ class PCMPlayer:
         self,
         source_spec: Union[str, list[str]],
         prefetched: Optional[dict[int, bytes]],
+        refresh_urls: Optional[Callable[[], list[str]]] = None,
     ) -> Union[str, SegmentReader]:
         """Source for the local decoder.
 
@@ -1393,7 +1401,36 @@ class PCMPlayer:
                 "[pcm] cast: no bounded file for this source; using URL source",
                 flush=True,
             )
-        return _build_source(source_spec, prefetched=prefetched)
+        return _build_source(
+            source_spec, prefetched=prefetched, refresh_urls=refresh_urls,
+        )
+
+    def _url_refresher(
+        self, track_id: Optional[str], quality: Optional[str],
+    ) -> Optional[Callable[[], list[str]]]:
+        """A SegmentReader `refresh_urls` for `track_id` at `quality`:
+        resolves the track again past the manifest cache and returns
+        the new segment URLs. None when there's no track to resolve."""
+        if track_id is None:
+            return None
+
+        def _refresh() -> list[str]:
+            spec, _dur, _info, _pre, _meta = self._resolve_source(
+                track_id, quality, set_current_meta=False, fresh=True,
+            )
+            if not isinstance(spec, list):
+                # The track resolved to a local file since the stream
+                # was opened; there are no links to swap in.
+                raise RuntimeError(
+                    f"track {track_id} no longer resolves to a stream"
+                )
+            print(
+                f"[pcm] refreshed stream links for track {track_id}",
+                flush=True,
+            )
+            return spec
+
+        return _refresh
 
     def _build_source_at(
         self, target_s: float
@@ -1406,8 +1443,11 @@ class PCMPlayer:
             urls = self._source_urls
             num_media = len(urls) - 1
             duration_s = (self._current_duration_ms or 1000) / 1000.0
+            refresh = self._url_refresher(
+                self._current_track_id, self._source_quality,
+            )
             if target_s <= 0 or num_media == 0:
-                return SegmentReader(urls), 0.0
+                return SegmentReader(urls, refresh_urls=refresh), 0.0
             idx = max(
                 0,
                 min(num_media - 1, int(target_s / duration_s * num_media)),
@@ -1415,7 +1455,10 @@ class PCMPlayer:
             approx_start_s = (idx / num_media) * duration_s
             # init segment + remaining media segments from idx
             sliced = [urls[0]] + list(urls[1 + idx:])
-            return SegmentReader(sliced), approx_start_s
+            return (
+                SegmentReader(sliced, refresh_urls=refresh, media_offset=idx),
+                approx_start_s,
+            )
         if self._source_path is not None:
             return self._source_path, None
         raise RuntimeError("no source to seek within")
@@ -1533,7 +1576,11 @@ class PCMPlayer:
             return {"ok": True, "cached": False, "cast": True}
 
         try:
-            source = _build_source(source_spec, prefetched=prefetched_bytes)
+            source = _build_source(
+                source_spec,
+                prefetched=prefetched_bytes,
+                refresh_urls=self._url_refresher(track_id, quality),
+            )
             decoder = Decoder(source)
         except Exception as exc:
             log.exception("preload resolve failed for %s", track_id)
@@ -1697,7 +1744,10 @@ class PCMPlayer:
                     flush=True,
                 )
 
-        source = self._open_stream_source(source_spec, prefetched_bytes)
+        source = self._open_stream_source(
+            source_spec, prefetched_bytes,
+            self._url_refresher(track_id, quality),
+        )
         decoder = Decoder(source)
 
         # Match the active stream's rate so the adopt path can take
@@ -2470,6 +2520,7 @@ class PCMPlayer:
             self._stream_sample_rate = None
             self._source_urls = None
             self._source_path = None
+            self._source_quality = None
             self._current_track_meta = None
             self._paused = False
             self._seeking = False
@@ -2519,6 +2570,7 @@ class PCMPlayer:
         quality: Optional[str],
         *,
         set_current_meta: bool = True,
+        fresh: bool = False,
     ) -> tuple[Union[str, list[str]], Optional[float], StreamInfo, dict[int, bytes], Optional[dict]]:
         """Resolve a track id to a source spec.
 
@@ -2565,6 +2617,11 @@ class PCMPlayer:
                 pass
 
         cache_key = (track_id, quality)
+        if fresh:
+            # The caller's cached URLs just failed on the CDN; the
+            # cache's TTL can't know that, so drop the entry rather
+            # than hand the same links back.
+            self._manifest_cache.invalidate(cache_key)
         t0 = time.monotonic()
         joined = False
         while True:
@@ -3897,6 +3954,7 @@ class PCMPlayer:
                 self._current_track_meta = pre.track_meta
             self._source_urls = pre.source_urls
             self._source_path = pre.source_path
+            self._source_quality = pre.quality
             self._preload = None
             self._state = "playing"
             self._last_error = None
@@ -4912,6 +4970,7 @@ class PCMPlayer:
                 self._current_track_meta = pre.track_meta
             self._source_urls = pre.source_urls
             self._source_path = pre.source_path
+            self._source_quality = pre.quality
             self._stream_sample_rate = pre.sample_rate
             self._stream_sd_dtype = pre.sd_dtype
             self._stream_channels = pre.channels
@@ -5038,14 +5097,18 @@ def _source_quality_key(info: Optional[StreamInfo]) -> Optional[str]:
 def _build_source(
     spec: Union[str, list[str]],
     prefetched: Optional[dict[int, bytes]] = None,
+    refresh_urls: Optional[Callable[[], list[str]]] = None,
 ) -> Union[str, SegmentReader]:
     """Materialize a source spec into something Decoder can open.
     If the caller already fetched the first few segments via the
     byte-level prefetch path, hand them to SegmentReader so it
-    skips the corresponding network fetches."""
+    skips the corresponding network fetches. `refresh_urls` lets the
+    reader recover a segment that fails mid-track (see SegmentReader)."""
     if isinstance(spec, str):
         return spec
-    return SegmentReader(spec, prefetched=prefetched)
+    return SegmentReader(
+        spec, prefetched=prefetched, refresh_urls=refresh_urls,
+    )
 
 
 def _probe_local_stream_info(

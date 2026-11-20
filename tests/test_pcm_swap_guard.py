@@ -60,6 +60,7 @@ def test_swap_holds_guard_across_replaygain_then_clears():
         stop_flag=threading.Event(),
         done=threading.Event(),
         track_id="new-track",
+        quality=None,
         duration_ms=1000,
         stream_info=SimpleNamespace(
             track_replay_gain_db=-3.0, album_replay_gain_db=-2.0

@@ -142,7 +142,7 @@ def test_load_pipeline_matches_a_float_shared_stream(monkeypatch):
     monkeypatch.setattr(
         p, "_resolve_source", lambda tid, q: ("track.flac", 1.0, None, None, None)
     )
-    monkeypatch.setattr(p, "_open_stream_source", lambda spec, pre: spec)
+    monkeypatch.setattr(p, "_open_stream_source", lambda spec, pre, refresh=None: spec)
     monkeypatch.setattr(player, "Decoder", lambda source: dec)
     pipeline = p._build_load_pipeline("t1", None, match_rate=44100)
     pipeline.stop_flag.set()

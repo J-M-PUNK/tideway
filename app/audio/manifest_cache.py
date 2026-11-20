@@ -124,6 +124,15 @@ class ManifestCache:
             self._filling[key] = threading.Event()
             return None
 
+    def invalidate(self, key: tuple[str, Optional[str]]) -> None:
+        """Drop `key` so the next lookup misses. For a caller that knows
+        the cached URLs stopped working (a segment download failed on
+        them) and needs the next resolve to ask TIDAL again."""
+        with self._lock:
+            entry = self._entries.pop(key, None)
+            if entry is not None:
+                self._bytes -= sum(len(v) for v in entry[4].values())
+
     def end_fill(self, key: tuple[str, Optional[str]]) -> None:
         """Release a claim taken with begin_fill and wake its waiters."""
         with self._lock:
