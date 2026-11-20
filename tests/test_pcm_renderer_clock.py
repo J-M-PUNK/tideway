@@ -19,7 +19,7 @@ import threading
 from unittest.mock import MagicMock
 
 from app.audio import player as player_mod
-from app.audio.player import PCMPlayer, _Preload
+from app.audio.player import PCMPlayer, _DecodeDone, _Preload
 
 
 class _FakeUpnp:
@@ -114,7 +114,7 @@ def _prime_eof(p: PCMPlayer, stream, preload) -> None:
     p._state = "playing"
     p._replacing_stream = False
     p._pcm_queue = queue.Queue()
-    p._decoder_done = threading.Event()
+    p._decoder_done = _DecodeDone()
     p._decoder_done.set()
 
 

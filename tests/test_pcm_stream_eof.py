@@ -20,7 +20,7 @@ from __future__ import annotations
 import queue
 import threading
 
-from app.audio.player import PCMPlayer
+from app.audio.player import PCMPlayer, _DecodeDone
 
 
 def _player() -> PCMPlayer:
@@ -43,7 +43,7 @@ def test_natural_eof_closes_and_nulls_stream():
     p._replacing_stream = False
     p._preload = None
     p._pcm_queue = queue.Queue()
-    p._decoder_done = threading.Event()
+    p._decoder_done = _DecodeDone()
     p._decoder_done.set()
 
     p._on_stream_finished()
@@ -72,7 +72,7 @@ def test_eof_close_swallows_close_errors():
     p._replacing_stream = False
     p._preload = None
     p._pcm_queue = queue.Queue()
-    p._decoder_done = threading.Event()
+    p._decoder_done = _DecodeDone()
     p._decoder_done.set()
 
     p._on_stream_finished()
@@ -93,7 +93,7 @@ def test_device_loss_path_does_not_null_stream():
     p._replacing_stream = False
     p._preload = None
     p._pcm_queue = queue.Queue()
-    p._decoder_done = threading.Event()
+    p._decoder_done = _DecodeDone()
     # decoder NOT done -> device-loss heuristic should fire and
     # spawn the recovery thread, leaving self._stream alone.
 

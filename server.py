@@ -5929,6 +5929,7 @@ def _snapshot_dict(snap) -> dict:
         "volume": snap.volume,
         "muted": snap.muted,
         "error": snap.error,
+        "error_scope": getattr(snap, "error_scope", None),
         "seq": snap.seq,
         "stream_info": stream_info,
         "force_volume": getattr(snap, "force_volume", False),

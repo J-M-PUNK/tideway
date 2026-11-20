@@ -192,6 +192,21 @@ class StreamInfo:
     album_peak: Optional[float] = None
 
 
+class _DecodeDone(threading.Event):
+    """Set when a decode pipeline's producer thread exits.
+
+    `error` says why when it exited on a failure rather than at the end
+    of the track. Everything downstream of a drained queue (the gapless
+    splice, the stream-finished handler) reads it, because a pipeline
+    that died mid-track looks exactly like one that finished: the
+    queue is empty and the producer is gone. Treating the two the same
+    is what made a dropped stream advance the queue."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.error: Optional[str] = None
+
+
 @dataclass
 class _Preload:
     """A pre-decoded next track. Created by `preload()` while the
@@ -211,7 +226,7 @@ class _Preload:
     queue: "Optional[queue.Queue[Optional[np.ndarray]]]" = None
     thread: Optional[threading.Thread] = None
     stop_flag: Optional[threading.Event] = None
-    done: Optional[threading.Event] = None
+    done: Optional[_DecodeDone] = None
     sample_rate: int = 0
     channels: int = 0
     sd_dtype: str = ""
@@ -238,6 +253,9 @@ class PlayerSnapshot:
     error: Optional[str] = None
     seq: int = 0
     stream_info: Optional[StreamInfo] = None
+    # "session" for a connection failure (don't skip the track), else
+    # None. Mirrors the field the Tidal Connect snapshot already sends.
+    error_scope: Optional[str] = None
     # Force Volume: when true the volume slider in the UI should
     # render disabled (value pinned at 100) because the backend
     # rejects changes while it's on.
@@ -291,6 +309,11 @@ class PCMPlayer:
         self._current_duration_ms: int = 0
         self._current_stream_info: Optional[StreamInfo] = None
         self._last_error: Optional[str] = None
+        # "session" when _last_error is a connection failure rather than
+        # an unplayable track; the frontend's Continue Playing skips
+        # past track errors but not session ones. Written only through
+        # _set_error, so a stale scope can't outlive its message.
+        self._last_error_scope: Optional[str] = None
         self._seq = 0
         self._listeners: list[Callable[[PlayerSnapshot], None]] = []
 
@@ -302,7 +325,7 @@ class PCMPlayer:
         )
         self._decoder_thread: Optional[threading.Thread] = None
         self._stop_flag = threading.Event()
-        self._decoder_done = threading.Event()
+        self._decoder_done = _DecodeDone()
         self._callback_carry: Optional[np.ndarray] = None
         self._samples_emitted = 0
 
@@ -794,7 +817,7 @@ class PCMPlayer:
                     "failed to build pipeline for gapless swap on %s", track_id
                 )
                 with self._lock:
-                    self._last_error = str(exc)
+                    self._set_error(str(exc))
                     self._transition("error")
                 self._emit()
                 return self.snapshot()
@@ -860,7 +883,7 @@ class PCMPlayer:
                     self._source_quality = synthetic.quality
                     self._paused = False
                     self._seeking = False
-                    self._last_error = None
+                    self._set_error(None)
                     if outgoing_stream is not None:
                         # After the swap: _open_output_stream configures
                         # whichever decoder is current. The new
@@ -952,7 +975,7 @@ class PCMPlayer:
         except Exception as exc:
             log.exception("failed to resolve/open source for %s", track_id)
             with self._lock:
-                self._last_error = str(exc)
+                self._set_error(str(exc))
                 self._transition("error")
             self._emit()
             return self.snapshot()
@@ -990,9 +1013,9 @@ class PCMPlayer:
             # toggle back to "not set," so we hand the new run a
             # clean set of objects.
             self._stop_flag = threading.Event()
-            self._decoder_done = threading.Event()
+            self._decoder_done = _DecodeDone()
             self._pcm_queue = queue.Queue(maxsize=_PCM_QUEUE_MAX)
-            self._last_error = None
+            self._set_error(None)
             # Transition out of "loading" now that the decoder is up
             # and the output stream is open. We land in "paused"
             # because nothing has called .play() yet — this is the
@@ -1067,6 +1090,19 @@ class PCMPlayer:
 
     def play(self) -> PlayerSnapshot:
         with self._lock:
+            interrupted = (
+                self._stream is None
+                and self._state == "error"
+                and self._last_error_scope == "session"
+                and self._current_track_id is not None
+            )
+            if interrupted:
+                track_id = self._current_track_id
+                quality = self._source_quality
+                duration_ms = self._current_duration_ms
+        if interrupted:
+            return self._resume_interrupted(track_id, quality, duration_ms)
+        with self._lock:
             stream = self._stream
             if stream is None:
                 # Bounded-DLNA renderer-clock mode: the muted local stream
@@ -1086,13 +1122,37 @@ class PCMPlayer:
                         self._start_stream(stream)
                 except Exception as exc:
                     log.exception("stream.start failed")
-                    self._last_error = str(exc)
+                    self._set_error(str(exc))
                     self._transition("error")
                     self._emit()
                     return self.snapshot()
                 self._transition("playing")
         self._emit()
         return self.snapshot()
+
+    def _resume_interrupted(
+        self, track_id: str, quality: Optional[str], duration_ms: int,
+    ) -> PlayerSnapshot:
+        """Play after a mid-track stream failure (see _DecodeDone).
+
+        The failure closed the output stream, so there is nothing to
+        start: reopen the same track and seek back to where it stopped.
+        The seek is segment-granular on a stream (a few seconds early at
+        most), the same as any scrub."""
+        position_ms = self.snapshot().position_ms
+        print(
+            f"[pcm] resuming track {track_id} at {position_ms / 1000:.1f}s "
+            "after a stream interruption",
+            flush=True,
+        )
+        self.load(track_id, quality)
+        with self._lock:
+            loaded = self._state != "error"
+        if not loaded:
+            return self.snapshot()
+        if position_ms > 0 and duration_ms > 0:
+            self.seek(position_ms / duration_ms)
+        return self.play()
 
     def pause(self) -> PlayerSnapshot:
         with self._lock:
@@ -1122,7 +1182,7 @@ class PCMPlayer:
         with self._pipeline_lock:
             self._teardown()
             with self._lock:
-                self._last_error = None
+                self._set_error(None)
             self._emit()
             return self.snapshot()
 
@@ -1318,7 +1378,7 @@ class PCMPlayer:
             self._callback_carry = None
             # Fresh events + queue — see comment in _load_locked().
             self._stop_flag = threading.Event()
-            self._decoder_done = threading.Event()
+            self._decoder_done = _DecodeDone()
             self._pcm_queue = queue.Queue(maxsize=_PCM_QUEUE_MAX)
 
         self._start_decoder_thread()
@@ -1613,7 +1673,7 @@ class PCMPlayer:
                 maxsize=_PCM_QUEUE_MAX
             )
             stop_flag = threading.Event()
-            done = threading.Event()
+            done = _DecodeDone()
 
             thread = threading.Thread(
                 target=PCMPlayer._decoder_loop,
@@ -1764,7 +1824,7 @@ class PCMPlayer:
             maxsize=_PCM_QUEUE_MAX
         )
         stop_flag = threading.Event()
-        done = threading.Event()
+        done = _DecodeDone()
 
         thread = threading.Thread(
             target=PCMPlayer._decoder_loop,
@@ -2356,6 +2416,7 @@ class PCMPlayer:
                 volume=self._volume,
                 muted=self._muted,
                 error=self._last_error,
+                error_scope=self._last_error_scope,
                 seq=self._seq,
                 stream_info=self._current_stream_info,
                 force_volume=self._force_volume,
@@ -3307,7 +3368,7 @@ class PCMPlayer:
         decoder: Optional[Decoder],
         pcm_queue: "queue.Queue[Optional[np.ndarray]]",
         stop_flag: threading.Event,
-        done_event: threading.Event,
+        done_event: _DecodeDone,
     ) -> None:
         if decoder is None:
             done_event.set()
@@ -3323,8 +3384,18 @@ class PCMPlayer:
                         break
                     except queue.Full:
                         continue
-        except Exception:
-            log.exception("decoder thread crashed")
+        except Exception as exc:
+            # A stop (seek, track change, teardown) aborts the source
+            # under the decoder, which surfaces here as an error; that
+            # is the intended exit, not a failure. Anything else ended
+            # the track early, after SegmentReader's link refresh had
+            # its chance, and must not pass for the end of the track.
+            if not stop_flag.is_set():
+                done_event.error = (
+                    f"Stream interrupted ({exc.__class__.__name__}: {exc})"
+                )
+                print(f"[pcm] {done_event.error}", flush=True)
+                audio_log.info("decoder failed mid-track: %r", exc)
         finally:
             done_event.set()
             # Push the sentinel onto the thread's OWN queue, not
@@ -3590,7 +3661,7 @@ class PCMPlayer:
             if self._state != "loading":
                 return
             self._state = "error"
-            self._last_error = "Track load timed out"
+            self._set_error("Track load timed out")
             self._seq += 1
         finally:
             self._lock.release()
@@ -3699,8 +3770,13 @@ class PCMPlayer:
                         # preload is waiting, splice it into the
                         # SAME OutputStream — that's the gapless
                         # moment. Re-enter the loop with the new
-                        # queue.
-                        if self._try_gapless_swap():
+                        # queue. Not after a failure: the track didn't
+                        # finish, and splicing the next one in is the
+                        # skip. _on_stream_finished reports it instead.
+                        if (
+                            self._decoder_done.error is None
+                            and self._try_gapless_swap()
+                        ):
                             continue
                         outdata[written:] = 0
                         raise sd.CallbackStop
@@ -3957,7 +4033,7 @@ class PCMPlayer:
             self._source_quality = pre.quality
             self._preload = None
             self._state = "playing"
-            self._last_error = None
+            self._set_error(None)
             self._seq += 1
             # Promote the pre-staged bounded file to the current source
             # and re-arm the renderer watchdog for the new track. The
@@ -4030,7 +4106,7 @@ class PCMPlayer:
                 )
         self._preload = None
         self._state = "playing"
-        self._last_error = None
+        self._set_error(None)
         self._seq += 1
 
         # The old pipeline is detached; release it without holding the
@@ -4057,7 +4133,7 @@ class PCMPlayer:
                 self._start_stream(self._stream)
             except Exception as exc:
                 log.exception("adopt_preload: stream.start failed")
-                self._last_error = str(exc)
+                self._set_error(str(exc))
                 self._state = "error"
                 self._seq += 1
 
@@ -4496,6 +4572,28 @@ class PCMPlayer:
         # thread's use of it. We "own" the preload for the duration
         # of the bridge attempt; if the bridge fails, it's
         # responsible for disposing of the decoder itself.
+        failure = self._decoder_done.error
+        if failure is not None:
+            # The track's stream died mid-track and couldn't be
+            # recovered (see _DecodeDone). Report it as an error the
+            # frontend won't skip past: the connection failed, not the
+            # track, so the queue should stay on it. The stream is in
+            # PortAudio's terminal state either way; drop it so the
+            # next load reopens (same as natural EOF below).
+            with self._lock:
+                if self._state in ("idle", "error") or self._replacing_stream:
+                    return
+                failed_stream = self._stream
+                self._stream = None
+                self._set_error(failure, scope="session")
+                self._transition("error")
+            if failed_stream is not None:
+                try:
+                    failed_stream.close()
+                except Exception:
+                    pass
+            self._emit()
+            return
         with self._lock:
             if self._state in ("idle", "error"):
                 return
@@ -4892,7 +4990,7 @@ class PCMPlayer:
             except Exception:
                 log.exception("bridge: stream.start failed")
                 with self._lock:
-                    self._last_error = "stream reopen failed"
+                    self._set_error("stream reopen failed")
                     self._transition("error")
                 self._emit()
                 return
@@ -4904,6 +5002,13 @@ class PCMPlayer:
                 self._pcm_queue.get_nowait()
             except queue.Empty:
                 break
+
+    def _set_error(self, message: Optional[str], scope: Optional[str] = None) -> None:
+        """Set (or clear, with None) the error the snapshot reports,
+        together with its scope. Callers hold `_lock` where they did for
+        the bare assignment this replaces."""
+        self._last_error = message
+        self._last_error_scope = scope if message is not None else None
 
     def _transition(self, state: str, track_id: Optional[str] = None) -> None:
         self._state = state
