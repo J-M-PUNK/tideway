@@ -1589,6 +1589,9 @@ class TestFormatCeiling:
         """Switching to a Sonos mid-track: the player resolved the
         current track at hi-res before the session existed. The bounded
         file the renderer gets must be built from the capped stream."""
+        # Test Changelog:
+        # - 2026-11-20 Will Pratt: Gave the stub track source the start_s
+        #   property the real TrackFileSource has.
         tree = self._sonos_tree()
         mgr = UpnpManager()
         device = _device_record()
@@ -1610,6 +1613,7 @@ class TestFormatCeiling:
                 self.failed = False
                 self.path = __file__
                 self.track_id = k.get("track_id", 0)
+                self.start_s = k.get("start_s", 0.0)
                 self.source_released = threading.Event()
                 self.source_released.set()
 
