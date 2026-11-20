@@ -484,3 +484,74 @@ def test_arm_renderer_watch_preserves_sticky_consumed_track_id():
     assert session.renderer_consumed_track_id == "tid-n1"
     assert session.renderer_next_track_id is None
 
+
+
+# ---------------------------------------------------------------------
+# Trimmed bounded files
+# ---------------------------------------------------------------------
+
+
+def test_renderer_position_ms_adds_trim_offset():
+    # Test Changelog:
+    # - 2026-11-20 Will Pratt: Added. The player bar used to restart at 0:00
+    #   after a mid-track connect or seek because the trim was dropped.
+    session = _session(_FakeAV())
+    session.renderer_position_s = 12.5
+    session.renderer_duration_s = 130.0
+    session.renderer_position_at = time.monotonic()
+    session.renderer_start_s = 62.5
+    mgr = _manager(session)
+    mgr._renderer_clock_active = True
+    assert mgr.renderer_position_ms() == 75000
+
+
+def test_renderer_progress_s_stays_on_served_file_timeline():
+    # Test Changelog:
+    # - 2026-11-20 Will Pratt: Added. Remaining time must still come from
+    #   the trimmed file so the next track is staged at the real end.
+    session = _session(_FakeAV())
+    session.renderer_position_s = 12.5
+    session.renderer_duration_s = 130.0
+    session.renderer_position_at = time.monotonic()
+    session.renderer_start_s = 62.5
+    mgr = _manager(session)
+    mgr._renderer_clock_active = True
+    assert mgr.renderer_progress_s() == (12.5, 130.0, 62.5)
+
+
+def test_arm_renderer_watch_records_trim_offset():
+    # Test Changelog:
+    # - 2026-11-20 Will Pratt: Added. Each new track resets the trim, so a
+    #   track after a trimmed one reports from 0.
+    session = _session(_FakeAV())
+    mgr = _manager(session)
+    mgr._renderer_watch = lambda *args: None
+
+    mgr._arm_renderer_watch(session, MagicMock(), {"duration_s": 200}, 62.5)
+    assert session.renderer_start_s == 62.5
+
+    mgr._arm_renderer_watch(session, MagicMock(), {"duration_s": 200})
+    assert session.renderer_start_s == 0.0
+
+
+def test_announce_track_sends_trimmed_duration():
+    # Test Changelog:
+    # - 2026-11-20 Will Pratt: Added. The renderer used to be told the whole
+    #   track's length for a file that starts partway in.
+    session = _session(_FakeAV())
+    mgr = _manager(session)
+    sent = []
+    mgr._notify_track_change = (
+        lambda metadata, session, track_ts=None: sent.append(metadata)
+    )
+    track_source = MagicMock()
+    track_source.start_s = 62.5
+    track_source.ready.is_set.return_value = True
+    metadata = {"title": "T", "duration_s": 192}
+
+    mgr._announce_track(
+        session, track_source, metadata, 1, wait_for_ready=False,
+    )
+
+    assert sent[0]["duration_s"] == 129
+    assert metadata["duration_s"] == 192

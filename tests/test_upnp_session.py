@@ -531,6 +531,9 @@ class TestConnect:
         `session.gapless` is set, the initial track is served from a
         bounded TrackFileSource, and the live ring-buffer encoder is not
         built."""
+        # Test Changelog:
+        # - 2026-11-20 Will Pratt: Gave the stub track source the start_s property
+        #   that the announce path now reads.
         mgr = UpnpManager()
         device = _device_record()
         mgr._devices = {device.id: device}
@@ -565,6 +568,7 @@ class TestConnect:
                 self.failed = False
                 self.path = __file__
                 self.track_id = k.get("track_id", 0)
+                self.start_s = k.get("start_s", 0.0)
                 self.source_released = threading.Event()
                 self.source_released.set()
 
@@ -612,6 +616,9 @@ class TestConnect:
     ):
         """Without the gapless opt-in there is no SetNext pre-stage at
         connect: the boundary advances with a plain SetAVTransportURI."""
+        # Test Changelog:
+        # - 2026-11-20 Will Pratt: Gave the stub track source the start_s property
+        #   that the announce path now reads.
         mgr = UpnpManager()
         device = _device_record()
         mgr._devices = {device.id: device}
@@ -627,6 +634,7 @@ class TestConnect:
                 self.failed = False
                 self.path = __file__
                 self.track_id = k.get("track_id", 0)
+                self.start_s = k.get("start_s", 0.0)
                 self.source_released = threading.Event()
                 self.source_released.set()
 
@@ -1013,6 +1021,9 @@ def test_start_passthrough_restart_bypasses_same_source_guard(
     """A DLNA seek re-announces the same source from a new offset, so
     start_passthrough(restart=True) must rebuild + re-announce rather
     than short-circuit on the already-running guard."""
+    # Test Changelog:
+    # - 2026-11-20 Will Pratt: Gave the stub track source the start_s property
+    #   that the announce path now reads.
     mgr = UpnpManager()
     device = _device_record()
     mgr._devices = {device.id: device}
@@ -1030,6 +1041,7 @@ def test_start_passthrough_restart_bypasses_same_source_guard(
             self.failed = False
             self.path = __file__
             self.track_id = k.get("track_id", 0)
+            self.start_s = k.get("start_s", 0.0)
             self.source_released = threading.Event()
             self.source_released.set()
             built.append(self)

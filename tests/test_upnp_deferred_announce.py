@@ -33,7 +33,7 @@ from app.audio.upnp import UpnpManager, _SessionState
 
 class _FakeTrackSource:
     """Stands in for TrackFileSource: the only surface _announce_track
-    and _notify_when_ready touch is ready / failed / path."""
+    and _notify_when_ready touch is ready / failed / path / start_s."""
 
     def __init__(
         self,
@@ -49,6 +49,7 @@ class _FakeTrackSource:
         self.failed = failed
         self.path = path
         self.track_id = track_id
+        self.start_s = 0.0
 
 
 class _FakeHTTPServer:
