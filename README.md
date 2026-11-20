@@ -127,9 +127,9 @@ Bluetooth sink, and builtin option the OS exposes, plus Chromecast
 targets, Tidal Connect renderers, and UPnP/DLNA and OpenHome devices
 discovered on the LAN. You can switch between any of them mid
 playback. Albums play gaplessly on Tidal Connect receivers, which are
-handed the whole queue. The DLNA path covers WiiM, newer Bluesound,
-Cambridge, NAD, most network AVRs, and a long tail of cheaper Hi-Fi
-network bridges. See [docs/dlna-renderer.md](docs/dlna-renderer.md)
+handed the whole queue. The DLNA path covers Sonos (listed by room
+and group), WiiM, newer Bluesound, Cambridge, NAD, most network AVRs,
+and a long tail of cheaper Hi-Fi network bridges. See [docs/dlna-renderer.md](docs/dlna-renderer.md)
 for the DLNA-side details. Global media keys for play, pause, next, and previous
 work even when the window is minimized. There is an opt-in desktop
 notification on every track change. On Linux, Tideway registers as

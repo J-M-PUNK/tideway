@@ -450,6 +450,8 @@ def test_rebind_repoints_session_when_device_moved(monkeypatch):
     mgr.refresh = lambda timeout=4.0: [moved]
 
     fresh = MagicMock(name="fresh")
+    renderer = MagicMock(name="renderer")
+    fresh.find_device_with_service.return_value = renderer
     monkeypatch.setattr(upnp_mod, "fetch_device", lambda loc: fresh)
     new_av = MagicMock(name="new_av")
     monkeypatch.setattr(
@@ -462,7 +464,9 @@ def test_rebind_repoints_session_when_device_moved(monkeypatch):
 
     assert mgr._rebind_session_renderer(session) is True
     assert session.device is moved
-    assert session.openhome_device is fresh
+    # The session keeps the device that carries AVTransport, which
+    # on Sonos is an embedded MediaRenderer rather than the root.
+    assert session.openhome_device is renderer
     assert session.av is new_av
     assert session.rc is new_rc
 

@@ -2,7 +2,7 @@
 
 DLNA's `MediaRenderer` profile is the universal target for "play
 this audio on a network device" across every consumer streamer
-that doesn't speak Tidal Connect natively: WiiM, most Bluesound,
+that doesn't speak Tidal Connect natively: Sonos, WiiM, most Bluesound,
 Cambridge, Yamaha, Denon AVRs, NAD streamers, LG / Samsung TVs,
 and a long tail of cheaper Hi-Fi network bridges. This module
 ships a sender for that protocol so those devices appear in the
@@ -81,21 +81,23 @@ from app.audio.openhome import (
     build_didl_lite,
     fetch_device,
 )
+from app.audio.sonos_topology import (
+    ZoneGroup,
+    fetch_zone_groups,
+    group_of,
+    udn_to_uuid,
+)
 
 log = logging.getLogger(__name__)
 
-# async-upnp-client is the SSDP discovery library. Optional dep:
-# rest of the app boots if it's missing, just no DLNA in the picker.
-try:
-    from async_upnp_client.aiohttp import AiohttpRequester
-    from async_upnp_client.client_factory import UpnpFactory
-
-    _UPNP_AVAILABLE = True
-except Exception as _exc:  # pragma: no cover - environment dependent
-    log.warning("async-upnp-client unavailable: %s", _exc)
-    AiohttpRequester = None  # type: ignore
-    UpnpFactory = None  # type: ignore
-    _UPNP_AVAILABLE = False
+# Per-descriptor HTTP timeout during discovery. Every LOCATION from the
+# SSDP window is fetched concurrently, so this bounds the whole fetch
+# phase. It and the Sonos topology query that follows it have to fit,
+# together, in refresh()'s 5s of slack past the SSDP window: if they
+# overran, refresh() would time out and drop every device, including
+# the ones that had already answered.
+_DESCRIPTOR_FETCH_TIMEOUT_S = 3.0
+_TOPOLOGY_TIMEOUT_S = 1.5
 
 
 # SSDP discovery uses our own sockets rather than async-upnp-client's
@@ -484,6 +486,9 @@ class _SessionState:
     encoder: Optional[FlacStreamEncoder] = None
     encoder_lock: threading.Lock = field(default_factory=threading.Lock)
     encoder_rate: int = 0
+    # What the renderer can decode, when it is narrower than anything
+    # TIDAL might serve. None = no limit. Set once at connect.
+    format_ceiling: Optional[_FormatCeiling] = None
     encoder_channels: int = 0
     encoder_dtype: str = ""
     bytes_encoded: int = 0
@@ -579,6 +584,94 @@ class _SessionState:
     passthrough_lock: threading.Lock = field(default_factory=threading.Lock)
 
 
+@dataclass(frozen=True)
+class _FormatCeiling:
+    """The most a renderer can decode, and the TIDAL tier that fits
+    under it. `tidal_quality` is a tidalapi.Quality member name."""
+
+    max_sample_rate_hz: int
+    max_bit_depth: int
+    tidal_quality: str
+
+
+# Sonos decodes FLAC up to 48 kHz on every player, at 24-bit on S2
+# firmware and 16-bit on S1. The description doesn't say which
+# generation a player runs, and a Sonos refuses a stream outside its
+# range rather than resampling it, so the ceiling is the one both
+# generations meet: 16-bit / 48 kHz. TIDAL's Lossless tier (16/44.1)
+# is the tier that is guaranteed to fit under it.
+#
+# Keyed on the root device type, which UPnP defines as the device's
+# kind. ConnectionManager's sink protocolInfo, the standard place a
+# renderer lists what it accepts, names FLAC on Sonos without any rate
+# or depth limit, so it can't carry this.
+_ZONEPLAYER_DEVICE_TYPE_PREFIX = "urn:schemas-upnp-org:device:ZonePlayer:"
+_SONOS_CEILING = _FormatCeiling(
+    max_sample_rate_hz=48000, max_bit_depth=16, tidal_quality="high_lossless",
+)
+
+
+def _is_zoneplayer(tree: OpenHomeDevice) -> bool:
+    return tree.device_type.startswith(_ZONEPLAYER_DEVICE_TYPE_PREFIX)
+
+
+def _format_ceiling(tree: OpenHomeDevice) -> Optional[_FormatCeiling]:
+    """Ceiling for the renderer whose description is `tree`, or None
+    when it takes whatever TIDAL serves."""
+    if _is_zoneplayer(tree):
+        return _SONOS_CEILING
+    return None
+
+
+def _exceeds_ceiling(
+    ceiling: _FormatCeiling, quality: Optional[str],
+) -> bool:
+    """Whether a stream with signature `quality` (the player's
+    `codec|bit_depth|sample_rate_hz|audio_quality`) may be out of the
+    renderer's range. An unknown signature, or one missing depth or
+    rate, counts as exceeding: the capped re-resolve is a manifest-cache
+    hit in the common case, while sending a stream the renderer rejects
+    stops playback."""
+    if not quality:
+        return True
+    parts = quality.split("|")
+    if len(parts) < 3:
+        return True
+    try:
+        bit_depth = int(parts[1])
+        rate = int(parts[2])
+    except ValueError:
+        return True
+    return bit_depth > ceiling.max_bit_depth or rate > ceiling.max_sample_rate_hz
+
+
+def _renderer_controllers(
+    tree: OpenHomeDevice,
+) -> Tuple[
+    Optional[OpenHomeDevice],
+    Optional[AVTransportController],
+    Optional[RenderingControlController],
+]:
+    """Locate the device in `tree` that carries AVTransport and build
+    the controllers against it.
+
+    The renderer is often not the root: Sonos roots its description on
+    a `ZonePlayer` and hangs AVTransport off an embedded
+    `MediaRenderer`. RenderingControl is taken from the same device as
+    AVTransport so volume lands on the renderer that is playing, not on
+    some other embedded device that happens to expose the service too.
+    Returns (None, None, None) when nothing in the tree has AVTransport.
+    """
+    renderer = tree.find_device_with_service(_AVTRANSPORT_PREFIX)
+    if renderer is None:
+        return None, None, None
+    return (
+        renderer,
+        AVTransportController.from_device(renderer),
+        RenderingControlController.from_device(renderer),
+    )
+
+
 def _filter_dlna_renderer(service_types: tuple[str, ...]) -> bool:
     """True iff the service-type list contains AVTransport. SSDP
     responses include every OpenHome / vendor service in addition to
@@ -667,7 +760,17 @@ class UpnpManager:
         # already exists when the DLNA session starts gets staged on the
         # renderer (otherwise it has no `next` and stops at track end).
         self._next_source_provider: Optional[
-            Callable[[], Optional[tuple[list[str], Optional[dict]]]]
+            Callable[
+                [], Optional[tuple[list[str], Optional[dict], Optional[str]]]
+            ]
+        ] = None
+
+        # Capped-source resolver: `(track_id, tidal_quality)` ->
+        # `(segment_urls, stream_signature)` or None. Consulted when the
+        # session has a format ceiling and the stream the player handed
+        # us is outside it.
+        self._capped_source_resolver: Optional[
+            Callable[[str, str], Optional[tuple[list[str], Optional[str]]]]
         ] = None
 
         # Renderer-ended callback: invoked when the renderer-clock
@@ -686,22 +789,22 @@ class UpnpManager:
         # the local clock in charge.
         self._renderer_clock_active: bool = False
 
-        if _UPNP_AVAILABLE:
-            self._start_loop_thread()
+        self._start_loop_thread()
 
     # ---- availability + state surface ------------------------------
 
     def is_available(self) -> bool:
-        """False when async-upnp-client failed to import. The picker
-        hides the DLNA section in that case."""
-        return _UPNP_AVAILABLE
+        """Always True: discovery and control need only the stdlib and
+        `requests`. Kept so the picker can treat every output manager
+        the same way."""
+        return True
 
     def status(self) -> dict[str, object]:
         """Diagnostic snapshot. Used by /api/dlna/devices for the
         picker UI and as a quick health probe in support traces."""
         with self._lock:
             disc: dict[str, object] = {
-                "available": _UPNP_AVAILABLE,
+                "available": True,
                 "device_count": len(self._devices),
                 "last_scan_age_s": (
                     None if self._last_scan_at == 0.0
@@ -874,17 +977,80 @@ class UpnpManager:
     def set_next_source_provider(
         self,
         callback: Optional[
-            Callable[[], Optional[tuple[list[str], Optional[dict]]]]
+            Callable[
+                [], Optional[tuple[list[str], Optional[dict], Optional[str]]]
+            ]
         ],
     ) -> None:
         """Register a callback returning the preloaded next track's
-        `(segment_urls, metadata)` or None.
+        `(segment_urls, metadata, track_id)` or None.
 
         Consulted once per `connect()` so a preload that already exists
         when the DLNA session starts is staged on the renderer via
         SetNextAVTransportURI. Without it the renderer finishes the
         current track with no next and stops."""
         self._next_source_provider = callback
+
+    def set_capped_source_resolver(
+        self,
+        callback: Optional[
+            Callable[[str, str], Optional[tuple[list[str], Optional[str]]]]
+        ],
+    ) -> None:
+        """Register `(track_id, tidal_quality) -> (urls, signature)`.
+
+        Renderers with a format ceiling (Sonos) refuse streams above it,
+        and the player resolves at the user's chosen tier without
+        knowing where the audio is going. Every source this manager is
+        handed passes through `_fit_source`, which uses this to swap an
+        out-of-range stream for the same track at a tier that fits."""
+        self._capped_source_resolver = callback
+
+    def _fit_source(
+        self,
+        session: "_SessionState",
+        source,
+        prefetched,
+        track_id: Optional[str],
+        quality: Optional[str],
+    ):
+        """Return `(source, prefetched, quality)` the session's renderer
+        can play. Unchanged when the renderer has no ceiling, the stream
+        is inside it, or the source isn't a TIDAL URL list. Otherwise the
+        track is re-resolved at the ceiling's tier; prefetched bytes
+        belong to the original URLs, so they are dropped.
+
+        Without a track id or a resolver there is nothing to re-resolve
+        with, and the source passes through unchanged; the print says
+        so, because the renderer is then likely to refuse it."""
+        ceiling = session.format_ceiling
+        if (
+            ceiling is None
+            or not isinstance(source, (list, tuple))
+            or not _exceeds_ceiling(ceiling, quality)
+        ):
+            return source, prefetched, quality
+        if track_id is None or self._capped_source_resolver is None:
+            print(
+                f"[upnp] stream {quality!r} may exceed the renderer's "
+                f"{ceiling.max_bit_depth}-bit/{ceiling.max_sample_rate_hz} Hz "
+                "limit and can't be re-resolved (no track id)",
+                flush=True,
+            )
+            return source, prefetched, quality
+        capped = self._capped_source_resolver(
+            str(track_id), ceiling.tidal_quality,
+        )
+        if capped is None:
+            return source, prefetched, quality
+        urls, capped_quality = capped
+        if capped_quality != quality:
+            print(
+                f"[upnp] renderer limit: track {track_id} {quality!r} -> "
+                f"{capped_quality!r}",
+                flush=True,
+            )
+        return urls, None, capped_quality
 
     def set_renderer_ended_callback(
         self, callback: Optional[Callable[[], None]]
@@ -1006,10 +1172,9 @@ class UpnpManager:
     def refresh(self, timeout: float = 5.0) -> List[UpnpDevice]:
         """Run an SSDP scan and replace the device cache. Blocks the
         caller for at most `timeout` seconds. Returns the new device
-        list. No-op when the dep isn't available; the picker will
-        just see an empty list, which is the right UX for "no UPnP."
+        list.
         """
-        if not _UPNP_AVAILABLE or self._loop is None:
+        if self._loop is None:
             return []
         future = asyncio.run_coroutine_threadsafe(
             self._discover_async(timeout), self._loop
@@ -1017,7 +1182,10 @@ class UpnpManager:
         try:
             devices = future.result(timeout=timeout + 5.0)
         except Exception as exc:
-            log.warning("upnp discover failed: %s", exc)
+            # The fetch phase is bounded by _DESCRIPTOR_FETCH_TIMEOUT_S,
+            # so landing here is a real fault, not a slow LAN. Print it:
+            # an empty picker with no console line is undiagnosable.
+            print(f"[upnp] discover failed: {exc!r}", flush=True)
             return []
         with self._lock:
             self._devices = {d.id: d for d in devices}
@@ -1068,6 +1236,9 @@ class UpnpManager:
         if session is None:
             print("[upnp] passthrough: no active session", flush=True)
             return
+        source, prefetched, quality = self._fit_source(
+            session, source, prefetched, track_id, quality,
+        )
 
         http_server = getattr(session, "http_server", None)
 
@@ -1956,6 +2127,12 @@ class UpnpManager:
         if not isinstance(source, (list, tuple)) or not source:
             print("[upnp] set_next_track: no source urls", flush=True)
             return False
+        # The caller doesn't know the next stream's signature, so under
+        # a ceiling this always takes the capped resolve (a cache hit
+        # once the track has been resolved at that tier).
+        source, prefetched, _quality = self._fit_source(
+            session, source, prefetched, track_id, None,
+        )
         # Build (or refresh) the next track's bounded file. Pass the
         # TIDAL track id so promotion at the boundary can match on it
         # (signed segment URLs differ per resolve).
@@ -2134,6 +2311,55 @@ class UpnpManager:
             flush=True,
         )
 
+    def _sonos_coordinator(
+        self, device: UpnpDevice, tree: OpenHomeDevice,
+    ) -> Tuple[UpnpDevice, OpenHomeDevice]:
+        """Return the record and description of the player that
+        coordinates `device`'s Sonos group, or the inputs unchanged when
+        it is its own coordinator or the topology can't be read.
+
+        The picker already lists coordinators, but grouping can change
+        in the Sonos app between the scan and the click; a member that
+        has since joined another group would fault on SetAVTransportURI.
+        """
+        groups = _household_groups(tree)
+        if groups is None:
+            return device, tree
+        uuid = udn_to_uuid(tree.udn)
+        group = group_of(groups, uuid)
+        coordinator = group.coordinator if group is not None else None
+        if (
+            coordinator is None
+            or coordinator.uuid == uuid
+            or not coordinator.location
+        ):
+            return device, tree
+        try:
+            coordinator_tree = fetch_device(coordinator.location)
+        except RuntimeError as exc:
+            raise RuntimeError(
+                f"{device.name} is grouped under another Sonos player, "
+                f"and its description at {coordinator.location} "
+                f"could not be fetched: {exc}"
+            ) from exc
+        print(
+            f"[upnp] {device.name}: sending to group coordinator "
+            f"{coordinator.zone_name or coordinator.uuid}",
+            flush=True,
+        )
+        return (
+            UpnpDevice(
+                id=f"uuid:{coordinator.uuid}",
+                name=device.name,
+                manufacturer=device.manufacturer,
+                model=device.model,
+                location=coordinator.location,
+                service_types=device.service_types,
+                has_avtransport=True,
+            ),
+            coordinator_tree,
+        )
+
     def _rebind_session_renderer(self, session: "_SessionState") -> bool:
         """Re-point the session's controllers after the renderer's control
         endpoint has gone away.
@@ -2166,15 +2392,14 @@ class UpnpManager:
             except Exception as exc:
                 log.debug("upnp: re-bind fetch failed: %r", exc)
                 return False
-            av = AVTransportController.from_device(fresh)
-            if av is None:
+            renderer, av, rc = _renderer_controllers(fresh)
+            if renderer is None or av is None:
                 return False
-            rc = RenderingControlController.from_device(fresh)
             with self._session_lock:
                 if self._session is not session:
                     return False
                 session.device = match
-                session.openhome_device = fresh
+                session.openhome_device = renderer
                 session.av = av
                 session.rc = rc
             print(
@@ -2507,8 +2732,6 @@ class UpnpManager:
         latency on the LAN is a few hundred ms. We cap at 10s on the
         SOAP requests via `invoke()`'s default.
         """
-        if not _UPNP_AVAILABLE:
-            raise RuntimeError("async-upnp-client not available")
         device = self.get_device(device_id)
         if device is None:
             raise ValueError(f"unknown DLNA device: {device_id}")
@@ -2530,15 +2753,19 @@ class UpnpManager:
                 f"{device.location}: {exc}"
             ) from exc
 
-        av = AVTransportController.from_device(openhome_device)
-        if av is None:
+        if _is_zoneplayer(openhome_device):
+            device, openhome_device = self._sonos_coordinator(
+                device, openhome_device,
+            )
+
+        renderer, av, rc = _renderer_controllers(openhome_device)
+        if renderer is None or av is None:
             # Discovery filter should have caught this, but the
             # device may have rebooted between scan and connect.
             raise RuntimeError(
                 f"{device.name} does not expose AVTransport. "
                 "Device description may have changed since discovery."
             )
-        rc = RenderingControlController.from_device(openhome_device)
 
         # DLNA-native gapless hinges on the renderer advertising
         # SetNextAVTransportURI. Probe once per connect so the answer is
@@ -2560,10 +2787,11 @@ class UpnpManager:
         # the URL as unreachable.
         session = _SessionState(
             device=device,
-            openhome_device=openhome_device,
+            openhome_device=renderer,
             av=av,
             rc=rc,
             gapless=gapless,
+            format_ceiling=_format_ceiling(openhome_device),
         )
         try:
             session.http_server = start_stream_http_server(
@@ -2676,9 +2904,11 @@ class UpnpManager:
                 preloaded_next = None
                 log.debug("upnp: next-source provider raised: %r", exc)
             if preloaded_next:
-                next_urls, next_meta = preloaded_next
+                next_urls, next_meta, next_track_id = preloaded_next
                 try:
-                    self.set_next_track(next_urls, metadata=next_meta)
+                    self.set_next_track(
+                        next_urls, metadata=next_meta, track_id=next_track_id,
+                    )
                 except Exception as exc:
                     print(
                         f"[upnp] connect: stage preloaded next failed: {exc!r}",
@@ -3000,48 +3230,57 @@ class UpnpManager:
 
         The M-SEARCH/listen step runs on a worker thread (an ephemeral
         search socket plus a best-effort :1900 listener — see
-        _collect_ssdp_locations for why); the descriptor fetch + parse
-        stays on the asyncio loop so it can reuse async-upnp-client's
-        UpnpFactory.
+        _collect_ssdp_locations for why). Each LOCATION's description
+        is then fetched concurrently, and only the description: the
+        filter needs service types, not SCPDs. A Sonos alone has a
+        dozen-plus services spread across embedded devices, so fetching
+        every SCPD of every device on the LAN one after another could
+        run past refresh()'s deadline and lose the whole scan. connect()
+        fetches the SCPDs for the one device the user picks.
         """
-        devices: dict[str, UpnpDevice] = {}
-        requester = AiohttpRequester()
-        factory = UpnpFactory(requester)
-
         loop = asyncio.get_event_loop()
         lan_ip = primary_lan_ip()
         locations, _bound_1900 = await loop.run_in_executor(
             None, _collect_ssdp_locations, timeout, lan_ip
         )
 
-        for location in locations:
-            try:
-                device = await factory.async_create_device(location)
-            except Exception as exc:
-                log.debug("upnp: parse %s failed: %s", location, exc)
+        ordered = sorted(locations)
+        results = await asyncio.gather(
+            *(
+                loop.run_in_executor(None, _fetch_description, loc)
+                for loc in ordered
+            ),
+            return_exceptions=True,
+        )
+
+        renderers: list[tuple[str, OpenHomeDevice]] = []
+        failed = 0
+        for location, result in zip(ordered, results):
+            if isinstance(result, BaseException):
+                # Most LOCATIONs on a LAN are not renderers (routers,
+                # NAS boxes, TVs' other services); an unreachable or
+                # malformed one is ordinary, so count it for the
+                # summary line and keep the detail at debug.
+                failed += 1
+                log.debug("upnp: descriptor %s failed: %r", location, result)
                 continue
-            service_types = tuple(
-                sorted({s.service_type for s in device.all_services})
-            )
-            if not _filter_dlna_renderer(service_types):
-                # OpenHome-only or otherwise non-DLNA. Skip; the
-                # tidal_connect module's discovery handles those.
-                continue
-            entry = UpnpDevice(
-                id=device.udn or location,
-                name=(
-                    device.friendly_name
-                    or device.model_name
-                    or "DLNA renderer"
-                ),
-                manufacturer=device.manufacturer or "",
-                model=device.model_name or "",
-                location=location,
-                service_types=service_types,
-                has_avtransport=True,
-            )
+            if _filter_dlna_renderer(result.all_service_types()):
+                renderers.append((location, result))
+
+        sonos = [tree for _loc, tree in renderers if _is_zoneplayer(tree)]
+        groups = (
+            await loop.run_in_executor(None, _household_groups, sonos[0])
+            if sonos else None
+        )
+        devices: dict[str, UpnpDevice] = {}
+        for entry in _picker_entries(renderers, groups):
             devices[entry.id] = entry
 
+        print(
+            f"[upnp] scan: {len(ordered)} descriptor(s), "
+            f"{len(devices)} renderer(s), {failed} unreadable",
+            flush=True,
+        )
         for d in devices.values():
             print(
                 f"[upnp] discovered: {d.name} "
@@ -3050,6 +3289,113 @@ class UpnpManager:
                 flush=True,
             )
         return list(devices.values())
+
+
+def _fetch_description(location: str) -> OpenHomeDevice:
+    """Blocking description fetch for discovery: the device tree with
+    service types and URLs, no SCPDs."""
+    return fetch_device(
+        location,
+        timeout=_DESCRIPTOR_FETCH_TIMEOUT_S,
+        fetch_scpds=False,
+    )
+
+
+def _renderer_entry(
+    tree: OpenHomeDevice, location: str, *, name: Optional[str] = None,
+) -> Optional[UpnpDevice]:
+    """Picker record for a parsed description, or None when nothing in
+    the device tree exposes AVTransport (OpenHome-only devices are
+    tidal_connect's to list).
+
+    A Sonos's friendlyName is "<ip> - <model> - RINCON_..."; the room
+    the user named it lives in `<roomName>`, so that wins when present.
+    """
+    service_types = tree.all_service_types()
+    if not _filter_dlna_renderer(service_types):
+        return None
+    return UpnpDevice(
+        id=tree.udn or location,
+        name=(
+            name
+            or tree.room_name
+            or tree.friendly_name
+            or tree.model_name
+            or "DLNA renderer"
+        ),
+        manufacturer=tree.manufacturer,
+        model=tree.model_name,
+        location=location,
+        service_types=service_types,
+        has_avtransport=True,
+    )
+
+
+def _household_groups(
+    tree: OpenHomeDevice,
+) -> Optional[tuple[ZoneGroup, ...]]:
+    """Sonos topology via the player described by `tree`, or None when
+    the query fails. Without it the picker lists each visible Sonos
+    player on its own (group members included, which then refuse
+    playback with a SOAP fault), so the failure is printed."""
+    try:
+        return fetch_zone_groups(tree, timeout=_TOPOLOGY_TIMEOUT_S)
+    except (RuntimeError, OpenHomeSOAPError, ValueError) as exc:
+        print(f"[upnp] sonos topology unavailable: {exc}", flush=True)
+        return None
+
+
+def _picker_entries(
+    renderers: list[tuple[str, OpenHomeDevice]],
+    groups: Optional[tuple[ZoneGroup, ...]],
+) -> List[UpnpDevice]:
+    """Picker records for the discovered renderers.
+
+    Non-Sonos renderers map one to one. With the Sonos topology known,
+    Sonos players collapse to one record per zone group, addressed to
+    the group's coordinator (the only player that accepts transport
+    commands) and named after its rooms. Group members and the hidden
+    halves of stereo pairs / home-theatre sets drop out. A group whose
+    coordinator didn't answer SSDP is still listed when one of its
+    members did, using the coordinator's Location from the topology.
+    """
+    entries: List[UpnpDevice] = []
+    listed_groups: set[str] = set()
+    for location, tree in renderers:
+        if not _is_zoneplayer(tree) or groups is None:
+            entry = _renderer_entry(tree, location)
+            if entry is not None:
+                entries.append(entry)
+            continue
+        group = group_of(groups, udn_to_uuid(tree.udn))
+        if group is None:
+            entry = _renderer_entry(tree, location)
+            if entry is not None:
+                entries.append(entry)
+            continue
+        if group.coordinator_uuid in listed_groups:
+            continue
+        coordinator = group.coordinator
+        if coordinator is None or not coordinator.location:
+            continue
+        listed_groups.add(group.coordinator_uuid)
+        entry = _renderer_entry(
+            tree, location, name=group.display_name() or None,
+        )
+        if entry is None:
+            continue
+        if coordinator.uuid != udn_to_uuid(tree.udn):
+            entry = UpnpDevice(
+                id=f"uuid:{coordinator.uuid}",
+                name=entry.name,
+                manufacturer=entry.manufacturer,
+                model=entry.model,
+                location=coordinator.location,
+                service_types=entry.service_types,
+                has_avtransport=True,
+            )
+        entries.append(entry)
+    return entries
 
 
 # Module-level singleton, eagerly constructed at first import. Same

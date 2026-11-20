@@ -211,6 +211,191 @@ class TestFilterDlnaRenderer:
         assert _filter_dlna_renderer(()) is False
 
 
+class TestDiscoveryScan:
+    """The scan end to end with SSDP and HTTP stubbed: which LOCATIONs
+    become picker entries, and what gets fetched to decide."""
+
+    FLAT_LOCATION = "http://192.168.1.70:49152/description.xml"
+    DEAD_LOCATION = "http://192.168.1.80:5000/rootDesc.xml"
+    FLAT_XML = """<?xml version="1.0"?>
+    <root xmlns="urn:schemas-upnp-org:device-1-0">
+      <device>
+        <deviceType>urn:schemas-upnp-org:device:MediaRenderer:1</deviceType>
+        <friendlyName>Kitchen WiiM</friendlyName>
+        <manufacturer>Linkplay</manufacturer>
+        <modelName>WiiM Pro</modelName>
+        <UDN>uuid:wiim-1</UDN>
+        <serviceList>
+          <service>
+            <serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType>
+            <serviceId>urn:upnp-org:serviceId:AVTransport</serviceId>
+            <controlURL>/upnp/control/rendertransport1</controlURL>
+            <eventSubURL>/upnp/event/rendertransport1</eventSubURL>
+            <SCPDURL>/upnp/rendertransportSCPD.xml</SCPDURL>
+          </service>
+        </serviceList>
+      </device>
+    </root>"""
+
+    def _scan(self, monkeypatch, locations, *, extra=None, topology=None):
+        """Run a scan over `locations`. `extra` maps further LOCATIONs to
+        description bodies; `topology` is the ZoneGroupState document
+        any Sonos answers with (None = the query is refused)."""
+        from tests.sonos_fixtures import (
+            SONOS_DEVICE_XML, SONOS_LOCATION, soap_response,
+        )
+
+        bodies = {
+            SONOS_LOCATION: SONOS_DEVICE_XML,
+            self.FLAT_LOCATION: self.FLAT_XML,
+            **(extra or {}),
+        }
+        fetched: list[tuple[str, float]] = []
+
+        class _Resp:
+            def __init__(self, body, status_code=200):
+                self.text = body
+                self.status_code = status_code
+
+            def raise_for_status(self):
+                pass
+
+        def _fake_get(url, timeout=10.0):
+            fetched.append((url, timeout))
+            if url not in bodies:
+                raise requests.ConnectionError(f"refused: {url}")
+            return _Resp(bodies[url])
+
+        def _fake_post(url, data=None, headers=None, timeout=10.0):
+            if topology is None or not url.endswith("/ZoneGroupTopology/Control"):
+                raise requests.ConnectionError(f"refused: {url}")
+            return _Resp(soap_response(
+                "GetZoneGroupState", {"ZoneGroupState": topology},
+            ))
+
+        monkeypatch.setattr(requests, "get", _fake_get)
+        monkeypatch.setattr(requests, "post", _fake_post)
+        monkeypatch.setattr(
+            upnp, "_collect_ssdp_locations",
+            lambda timeout, lan_ip: (set(locations), True),
+        )
+        mgr = UpnpManager()
+        return mgr.refresh(timeout=1.0), fetched
+
+    def test_sonos_listed_from_embedded_renderer(self, monkeypatch):
+        from tests.sonos_fixtures import SONOS_LOCATION, SONOS_UDN
+
+        devices, _ = self._scan(monkeypatch, [SONOS_LOCATION])
+        assert [d.id for d in devices] == [SONOS_UDN]
+        assert devices[0].location == SONOS_LOCATION
+        assert devices[0].has_avtransport is True
+
+    def test_unreachable_location_does_not_sink_the_scan(self, monkeypatch):
+        from tests.sonos_fixtures import SONOS_LOCATION
+
+        devices, _ = self._scan(
+            monkeypatch,
+            [SONOS_LOCATION, self.FLAT_LOCATION, self.DEAD_LOCATION],
+        )
+        assert sorted(d.id for d in devices) == sorted([
+            "uuid:wiim-1", "uuid:RINCON_000E58AABBCC01400",
+        ])
+
+    def test_only_descriptions_are_fetched(self, monkeypatch):
+        """No SCPD round trips during discovery: the filter needs only
+        service types, and per-service fetches across a LAN full of
+        devices are what used to blow the scan deadline."""
+        from tests.sonos_fixtures import SONOS_LOCATION
+
+        _, fetched = self._scan(
+            monkeypatch, [SONOS_LOCATION, self.FLAT_LOCATION],
+        )
+        assert sorted(url for url, _ in fetched) == sorted([
+            SONOS_LOCATION, self.FLAT_LOCATION,
+        ])
+        assert all(
+            t == upnp._DESCRIPTOR_FETCH_TIMEOUT_S for _, t in fetched
+        )
+
+    def test_fetch_timeout_fits_inside_refresh_slack(self):
+        """refresh() waits the SSDP window plus 5s. The concurrent
+        fetch phase and the topology query after it must finish inside
+        that slack or the whole scan is discarded."""
+        assert (
+            upnp._DESCRIPTOR_FETCH_TIMEOUT_S + upnp._TOPOLOGY_TIMEOUT_S
+        ) < 5.0
+
+    def _household(self):
+        from tests.sonos_fixtures import (
+            sonos_device_xml, sonos_location, zone_group_state,
+        )
+
+        extra = {
+            sonos_location("192.168.1.61"): sonos_device_xml(
+                "uuid:RINCON_K", "Kitchen", "192.168.1.61",
+            ),
+            sonos_location("192.168.1.62"): sonos_device_xml(
+                "uuid:RINCON_LR_R", "Living Room", "192.168.1.62",
+            ),
+            sonos_location("192.168.1.63"): sonos_device_xml(
+                "uuid:RINCON_O", "Office", "192.168.1.63",
+            ),
+        }
+        topology = zone_group_state([
+            ("RINCON_000E58AABBCC01400", [
+                ("RINCON_000E58AABBCC01400", "192.168.1.60", "Living Room", False),
+                ("RINCON_LR_R", "192.168.1.62", "Living Room", True),
+                ("RINCON_K", "192.168.1.61", "Kitchen", False),
+            ]),
+            ("RINCON_O", [("RINCON_O", "192.168.1.63", "Office", False)]),
+        ])
+        return extra, topology
+
+    def test_sonos_groups_collapse_to_coordinators(self, monkeypatch):
+        """Living Room (coordinator) + Kitchen + the hidden right half of
+        the Living Room pair are one group; Office is its own. The picker
+        gets one entry per group, addressed to the coordinator."""
+        from tests.sonos_fixtures import SONOS_LOCATION, sonos_location
+
+        extra, topology = self._household()
+        devices, _ = self._scan(
+            monkeypatch, [SONOS_LOCATION, *extra], extra=extra, topology=topology,
+        )
+        by_name = {d.name: d for d in devices}
+        assert sorted(by_name) == ["Living Room + Kitchen", "Office"]
+        assert by_name["Living Room + Kitchen"].location == SONOS_LOCATION
+        assert by_name["Living Room + Kitchen"].id == (
+            "uuid:RINCON_000E58AABBCC01400"
+        )
+        assert by_name["Office"].location == sonos_location("192.168.1.63")
+
+    def test_group_listed_when_only_a_member_answered(self, monkeypatch):
+        from tests.sonos_fixtures import SONOS_LOCATION, sonos_location
+
+        extra, topology = self._household()
+        kitchen = sonos_location("192.168.1.61")
+        devices, _ = self._scan(
+            monkeypatch, [kitchen], extra=extra, topology=topology,
+        )
+        assert [(d.name, d.location, d.id) for d in devices] == [(
+            "Living Room + Kitchen",
+            SONOS_LOCATION,
+            "uuid:RINCON_000E58AABBCC01400",
+        )]
+
+    def test_topology_failure_lists_players_by_room(self, monkeypatch):
+        """Degraded but honest: without the topology every visible
+        player is listed under its room name."""
+        from tests.sonos_fixtures import SONOS_LOCATION, sonos_location
+
+        extra, _ = self._household()
+        office = sonos_location("192.168.1.63")
+        devices, _ = self._scan(
+            monkeypatch, [SONOS_LOCATION, office], extra=extra, topology=None,
+        )
+        assert sorted(d.name for d in devices) == ["Living Room", "Office"]
+
+
 # ---------------------------------------------------------------------
 # SSDP wire helpers (the UAPP single-socket fix)
 # ---------------------------------------------------------------------
@@ -348,6 +533,40 @@ class TestConnect:
         )
         assert "/dlna/stream" in body, (
             f"stream path missing from URI; sent body: {body[:300]}"
+        )
+
+    def test_connect_drives_embedded_renderer(
+        self, mock_soap, mock_http_server, monkeypatch,
+    ):
+        """Sonos carries AVTransport on an embedded MediaRenderer, not
+        on its ZonePlayer root. Connect must find it there and send the
+        handshake to the embedded device's control URL."""
+        from tests.sonos_fixtures import SONOS_DEVICE_XML
+        from app.audio.openhome import parse_device_description
+
+        tree = parse_device_description(
+            SONOS_DEVICE_XML,
+            "http://192.168.1.50:8080/xml/device_description.xml",
+        )
+        mgr = UpnpManager()
+        device = _device_record()
+        mgr._devices = {device.id: device}
+        monkeypatch.setattr(
+            "app.audio.upnp.fetch_device",
+            lambda location, **_kw: tree,
+        )
+
+        mgr.connect(device.id)
+
+        # Connect also asks the root for the group topology; the
+        # transport handshake is what has to reach the embedded device.
+        transport = [
+            c for c in mock_soap if c["action"] != "GetZoneGroupState"
+        ]
+        assert [c["action"] for c in transport] == ["SetAVTransportURI", "Play"]
+        assert all(
+            c["url"].endswith("/MediaRenderer/AVTransport/Control")
+            for c in transport
         )
 
     def test_connect_rejects_device_without_avtransport(
@@ -593,7 +812,7 @@ class TestConnect:
         mgr.set_source_provider(lambda: ["http://192.168.1.9/seg0"])
         mgr.set_metadata_provider(lambda: {"title": "T", "artist": "A"})
         mgr.set_next_source_provider(
-            lambda: (["http://192.168.1.9/next"], {"title": "N"})
+            lambda: (["http://192.168.1.9/next"], {"title": "N"}, "202")
         )
         staged = []
         monkeypatch.setattr(
@@ -656,7 +875,7 @@ class TestConnect:
         mgr.set_source_provider(lambda: ["http://192.168.1.9/seg0"])
         mgr.set_metadata_provider(lambda: {"title": "T", "artist": "A"})
         mgr.set_next_source_provider(
-            lambda: (["http://192.168.1.9/next"], {"title": "N"})
+            lambda: (["http://192.168.1.9/next"], {"title": "N"}, "202")
         )
         staged = []
         monkeypatch.setattr(
@@ -1281,3 +1500,222 @@ def test_start_passthrough_reuses_ready_bounded_file(
     # file's ?ts= and announce under the new one.
     assert first.track_id != old_ts
     assert announced[0][3] == first.track_id
+
+
+# ---------------------------------------------------------------------
+# Renderer format ceiling (Sonos: 16-bit / 48 kHz)
+# ---------------------------------------------------------------------
+
+
+class TestFormatCeiling:
+    HI_RES = "FLAC|24|96000|HI_RES_LOSSLESS"
+    CD = "FLAC|16|44100|LOSSLESS"
+    CAPPED_URLS = ["http://192.168.1.9/capped-init", "http://192.168.1.9/capped-1"]
+
+    def _sonos_tree(self):
+        from tests.sonos_fixtures import SONOS_DEVICE_XML
+        from app.audio.openhome import parse_device_description
+
+        return parse_device_description(
+            SONOS_DEVICE_XML,
+            "http://192.168.1.50:8080/xml/device_description.xml",
+        )
+
+    def _session(self, ceiling):
+        return upnp._SessionState(
+            device=_device_record(),
+            openhome_device=_openhome_device(),
+            av=MagicMock(),
+            rc=None,
+            format_ceiling=ceiling,
+        )
+
+    def test_sonos_gets_ceiling_flat_renderer_does_not(self):
+        assert upnp._format_ceiling(self._sonos_tree()) is upnp._SONOS_CEILING
+        assert upnp._format_ceiling(_openhome_device()) is None
+
+    @pytest.mark.parametrize("sig, expected", [
+        ("FLAC|16|44100|LOSSLESS", False),
+        ("FLAC|16|48000|LOSSLESS", False),
+        ("FLAC|24|44100|HI_RES_LOSSLESS", True),   # S1 can't do 24-bit
+        ("FLAC|24|96000|HI_RES_LOSSLESS", True),
+        ("FLAC|16|96000|", True),
+        (None, True),                               # unknown: re-resolve
+        ("FLAC|||LOSSLESS", True),
+    ])
+    def test_exceeds_ceiling(self, sig, expected):
+        assert upnp._exceeds_ceiling(upnp._SONOS_CEILING, sig) is expected
+
+    def test_fit_source_reresolves_out_of_range_stream(self):
+        mgr = UpnpManager()
+        calls = []
+
+        def _resolver(track_id, quality):
+            calls.append((track_id, quality))
+            return self.CAPPED_URLS, self.CD
+
+        mgr.set_capped_source_resolver(_resolver)
+        source, prefetched, quality = mgr._fit_source(
+            self._session(upnp._SONOS_CEILING),
+            ["http://192.168.1.9/hires-init"], {0: b"x"}, "101", self.HI_RES,
+        )
+        assert calls == [("101", "high_lossless")]
+        assert source == self.CAPPED_URLS
+        assert prefetched is None, "prefetched bytes belong to the old URLs"
+        assert quality == self.CD
+
+    def test_fit_source_leaves_in_range_stream_alone(self):
+        mgr = UpnpManager()
+        mgr.set_capped_source_resolver(
+            lambda *a: pytest.fail("in-range stream must not re-resolve")
+        )
+        src = ["http://192.168.1.9/cd-init"]
+        out = mgr._fit_source(
+            self._session(upnp._SONOS_CEILING), src, {0: b"x"}, "101", self.CD,
+        )
+        assert out == (src, {0: b"x"}, self.CD)
+
+    def test_fit_source_noop_without_ceiling(self):
+        mgr = UpnpManager()
+        mgr.set_capped_source_resolver(
+            lambda *a: pytest.fail("no ceiling, no re-resolve")
+        )
+        src = ["http://192.168.1.9/hires-init"]
+        out = mgr._fit_source(self._session(None), src, None, "101", self.HI_RES)
+        assert out == (src, None, self.HI_RES)
+
+    def test_fit_source_without_track_id_passes_through(self):
+        mgr = UpnpManager()
+        mgr.set_capped_source_resolver(
+            lambda *a: pytest.fail("nothing to resolve without a track id")
+        )
+        src = ["http://192.168.1.9/hires-init"]
+        out = mgr._fit_source(
+            self._session(upnp._SONOS_CEILING), src, None, None, self.HI_RES,
+        )
+        assert out == (src, None, self.HI_RES)
+
+    def test_connect_to_sonos_serves_capped_stream(
+        self, mock_soap, mock_http_server, monkeypatch,
+    ):
+        """Switching to a Sonos mid-track: the player resolved the
+        current track at hi-res before the session existed. The bounded
+        file the renderer gets must be built from the capped stream."""
+        # Test Changelog:
+        # - 2026-11-20 Will Pratt: Gave the stub track source the start_s
+        #   property the real TrackFileSource has.
+        tree = self._sonos_tree()
+        mgr = UpnpManager()
+        device = _device_record()
+        mgr._devices = {device.id: device}
+        monkeypatch.setattr(
+            "app.audio.upnp.fetch_device", lambda location, **_kw: tree,
+        )
+
+        readers = []
+
+        class _StubReader:
+            def __init__(self, urls, *a, **k):
+                readers.append(list(urls))
+
+        class _StubTrackSource:
+            def __init__(self, *a, **k):
+                self.ready = threading.Event()
+                self.ready.set()
+                self.failed = False
+                self.path = __file__
+                self.track_id = k.get("track_id", 0)
+                self.start_s = k.get("start_s", 0.0)
+                self.source_released = threading.Event()
+                self.source_released.set()
+
+            def start(self):
+                pass
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr("app.audio.upnp.TrackFileSource", _StubTrackSource)
+        monkeypatch.setattr(mgr, "_arm_renderer_watch", lambda *a, **k: None)
+        monkeypatch.setattr(
+            "app.audio.segment_reader.SegmentReader", _StubReader,
+        )
+        mgr.set_source_provider(lambda: ["http://192.168.1.9/hires-init"])
+        mgr.set_metadata_provider(lambda: {"title": "T", "artist": "A"})
+        mgr.set_track_identity_provider(lambda: ("101", self.HI_RES))
+        mgr.set_capped_source_resolver(
+            lambda track_id, quality: (self.CAPPED_URLS, self.CD)
+        )
+
+        mgr.connect(device.id, gapless=True)
+
+        assert mgr._session.format_ceiling is upnp._SONOS_CEILING
+        assert mgr._session._passthrough_source_urls == tuple(self.CAPPED_URLS)
+        assert readers and all(r == self.CAPPED_URLS for r in readers)
+
+
+class TestSonosGroupConnect:
+    def test_connect_to_group_member_drives_coordinator(
+        self, mock_http_server, monkeypatch,
+    ):
+        """The Kitchen player was picked, but it is now grouped under the
+        Living Room. Only the coordinator accepts transport commands, so
+        the handshake must go to the Living Room player."""
+        from tests.sonos_fixtures import (
+            SONOS_LOCATION, soap_response, sonos_device_xml, sonos_location,
+            zone_group_state,
+        )
+        from app.audio.openhome import parse_device_description
+
+        kitchen_loc = sonos_location("192.168.1.61")
+        trees = {
+            kitchen_loc: parse_device_description(
+                sonos_device_xml("uuid:RINCON_K", "Kitchen", "192.168.1.61"),
+                kitchen_loc,
+            ),
+            SONOS_LOCATION: parse_device_description(
+                sonos_device_xml(), SONOS_LOCATION,
+            ),
+        }
+        monkeypatch.setattr(
+            "app.audio.upnp.fetch_device",
+            lambda location, **_kw: trees[location],
+        )
+        topology = zone_group_state([
+            ("RINCON_000E58AABBCC01400", [
+                ("RINCON_000E58AABBCC01400", "192.168.1.60", "Living Room", False),
+                ("RINCON_K", "192.168.1.61", "Kitchen", False),
+            ]),
+        ])
+        posted: list[tuple[str, str]] = []
+
+        class _Resp:
+            def __init__(self, body):
+                self.text = body
+                self.status_code = 200
+
+        def _fake_post(url, data=None, headers=None, timeout=10.0):
+            action = (headers or {}).get("SOAPAction", "").strip('"').split("#")[-1]
+            posted.append((url, action))
+            out = {"ZoneGroupState": topology} if action == "GetZoneGroupState" else {}
+            return _Resp(soap_response(action, out))
+
+        monkeypatch.setattr(requests, "post", _fake_post)
+
+        mgr = UpnpManager()
+        kitchen = UpnpDevice(
+            id="uuid:RINCON_K", name="Kitchen", manufacturer="Sonos, Inc.",
+            model="Sonos One", location=kitchen_loc,
+            service_types=trees[kitchen_loc].all_service_types(),
+            has_avtransport=True,
+        )
+        mgr._devices = {kitchen.id: kitchen}
+
+        mgr.connect(kitchen.id)
+
+        transport = [(u, a) for u, a in posted if a != "GetZoneGroupState"]
+        assert [a for _u, a in transport] == ["SetAVTransportURI", "Play"]
+        assert all(u.startswith("http://192.168.1.60:1400/") for u, _a in transport)
+        assert mgr._session.device.id == "uuid:RINCON_000E58AABBCC01400"
+        assert mgr._session.device.name == "Kitchen"
+        mgr.disconnect()

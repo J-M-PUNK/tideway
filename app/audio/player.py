@@ -1624,6 +1624,7 @@ class PCMPlayer:
                             pre.source_urls,
                             prefetched_bytes,
                             metadata=pre.track_meta,
+                            track_id=pre.track_id,
                         )
                     except Exception as exc:
                         print(
@@ -1817,9 +1818,9 @@ class PCMPlayer:
 
     def get_preloaded_source(
         self,
-    ) -> Optional[tuple[list[str], Optional[dict]]]:
-        """Return the preloaded NEXT track's segment URLs and metadata,
-        or None when no URL-backed preload is buffering.
+    ) -> Optional[tuple[list[str], Optional[dict], Optional[str]]]:
+        """Return the preloaded NEXT track's segment URLs, metadata and
+        TIDAL track id, or None when no URL-backed preload is buffering.
 
         Used by the DLNA manager when a session connects: switching
         output to a renderer mid-track can land after the next track was
@@ -1830,7 +1831,31 @@ class PCMPlayer:
             pre = self._preload
             if pre is None or pre.source_urls is None:
                 return None
-            return list(pre.source_urls), getattr(pre, "track_meta", None)
+            return (
+                list(pre.source_urls),
+                getattr(pre, "track_meta", None),
+                getattr(pre, "track_id", None),
+            )
+
+    def resolve_stream_urls(
+        self, track_id: str, quality: str,
+    ) -> Optional[tuple[list[str], Optional[str]]]:
+        """Resolve `track_id` at `quality` without touching what is
+        loaded: `(segment URLs, stream signature)`, or None for a track
+        served from a local file.
+
+        Used by the DLNA manager when the connected renderer can't play
+        the stream the player resolved (a Sonos and a 24/96 master): it
+        asks for the same track at a tier the renderer accepts. Goes
+        through the manifest cache and the subscription clamp like any
+        other resolve, and passes set_current_meta=False so the
+        now-playing metadata isn't disturbed."""
+        spec, _duration, info, _prefetched, _meta = self._resolve_source(
+            track_id, quality, set_current_meta=False,
+        )
+        if not isinstance(spec, list):
+            return None
+        return spec, _source_quality_key(info)
 
     def get_current_position_s(self) -> Optional[float]:
         """Current playback position in seconds, or None when unknown.

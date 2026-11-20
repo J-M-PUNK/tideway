@@ -1110,6 +1110,12 @@ async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         _upnp_manager.set_next_source_provider(
             _native_player().get_preloaded_source
         )
+        # Renderers with a format ceiling (Sonos: 48 kHz) refuse streams
+        # above it. The manager re-resolves an out-of-range track at a
+        # tier that fits through this.
+        _upnp_manager.set_capped_source_resolver(
+            _native_player().resolve_stream_urls
+        )
         # The renderer is the DLNA playback clock. When its watchdog sees
         # the current bounded track reach the real end, the player emits
         # `ended` so the frontend advances its queue at the renderer's
