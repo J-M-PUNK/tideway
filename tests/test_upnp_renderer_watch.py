@@ -555,3 +555,24 @@ def test_announce_track_sends_trimmed_duration():
 
     assert sent[0]["duration_s"] == 129
     assert metadata["duration_s"] == 192
+
+
+def test_consumed_next_clears_trim_offset():
+    # Test Changelog:
+    # - 2026-11-20 Will Pratt: Added. After the renderer moved on to the
+    #   staged next track, the previous track's trim was still added, so
+    #   the new track briefly showed at the old track's offset.
+    session = _session(_FakeAV())
+    session.renderer_watch_gen = 3
+    session.renderer_next_uri = "http://x/dlna/stream?ts=9"
+    session.renderer_next_track_id = "tid-n1"
+    session.renderer_start_s = 144.0
+    session.renderer_position_s = 1.0
+    session.renderer_duration_s = 149.0
+    session.renderer_position_at = time.monotonic()
+    mgr = _manager(session)
+
+    mgr._fire_renderer_ended(session, 3, "test", consumed=True)
+
+    assert session.renderer_start_s == 0.0
+    assert mgr.renderer_position_ms() == 1000

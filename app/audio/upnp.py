@@ -1648,6 +1648,9 @@ class UpnpManager:
                 session.renderer_consumed_track_id = (
                     session.renderer_next_track_id
                 )
+                # The renderer is now reading the staged next file, which
+                # always starts at the beginning of its track.
+                session.renderer_start_s = 0.0
             else:
                 # No consumption evidence for THIS generation's end.
                 # Any sticky id still set belongs to the previous
