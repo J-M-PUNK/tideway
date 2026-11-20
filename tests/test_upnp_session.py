@@ -211,6 +211,104 @@ class TestFilterDlnaRenderer:
         assert _filter_dlna_renderer(()) is False
 
 
+class TestDiscoveryScan:
+    """The scan end to end with SSDP and HTTP stubbed: which LOCATIONs
+    become picker entries, and what gets fetched to decide."""
+
+    FLAT_LOCATION = "http://192.168.1.70:49152/description.xml"
+    DEAD_LOCATION = "http://192.168.1.80:5000/rootDesc.xml"
+    FLAT_XML = """<?xml version="1.0"?>
+    <root xmlns="urn:schemas-upnp-org:device-1-0">
+      <device>
+        <deviceType>urn:schemas-upnp-org:device:MediaRenderer:1</deviceType>
+        <friendlyName>Kitchen WiiM</friendlyName>
+        <manufacturer>Linkplay</manufacturer>
+        <modelName>WiiM Pro</modelName>
+        <UDN>uuid:wiim-1</UDN>
+        <serviceList>
+          <service>
+            <serviceType>urn:schemas-upnp-org:service:AVTransport:1</serviceType>
+            <serviceId>urn:upnp-org:serviceId:AVTransport</serviceId>
+            <controlURL>/upnp/control/rendertransport1</controlURL>
+            <eventSubURL>/upnp/event/rendertransport1</eventSubURL>
+            <SCPDURL>/upnp/rendertransportSCPD.xml</SCPDURL>
+          </service>
+        </serviceList>
+      </device>
+    </root>"""
+
+    def _scan(self, monkeypatch, locations):
+        from tests.sonos_fixtures import SONOS_DEVICE_XML, SONOS_LOCATION
+
+        bodies = {
+            SONOS_LOCATION: SONOS_DEVICE_XML,
+            self.FLAT_LOCATION: self.FLAT_XML,
+        }
+        fetched: list[tuple[str, float]] = []
+
+        class _Resp:
+            def __init__(self, body):
+                self.text = body
+
+            def raise_for_status(self):
+                pass
+
+        def _fake_get(url, timeout=10.0):
+            fetched.append((url, timeout))
+            if url not in bodies:
+                raise requests.ConnectionError(f"refused: {url}")
+            return _Resp(bodies[url])
+
+        monkeypatch.setattr(requests, "get", _fake_get)
+        monkeypatch.setattr(
+            upnp, "_collect_ssdp_locations",
+            lambda timeout, lan_ip: (set(locations), True),
+        )
+        mgr = UpnpManager()
+        return mgr.refresh(timeout=1.0), fetched
+
+    def test_sonos_listed_from_embedded_renderer(self, monkeypatch):
+        from tests.sonos_fixtures import SONOS_LOCATION, SONOS_UDN
+
+        devices, _ = self._scan(monkeypatch, [SONOS_LOCATION])
+        assert [d.id for d in devices] == [SONOS_UDN]
+        assert devices[0].location == SONOS_LOCATION
+        assert devices[0].has_avtransport is True
+
+    def test_unreachable_location_does_not_sink_the_scan(self, monkeypatch):
+        from tests.sonos_fixtures import SONOS_LOCATION
+
+        devices, _ = self._scan(
+            monkeypatch,
+            [SONOS_LOCATION, self.FLAT_LOCATION, self.DEAD_LOCATION],
+        )
+        assert sorted(d.id for d in devices) == sorted([
+            "uuid:wiim-1", "uuid:RINCON_000E58AABBCC01400",
+        ])
+
+    def test_only_descriptions_are_fetched(self, monkeypatch):
+        """No SCPD round trips during discovery: the filter needs only
+        service types, and per-service fetches across a LAN full of
+        devices are what used to blow the scan deadline."""
+        from tests.sonos_fixtures import SONOS_LOCATION
+
+        _, fetched = self._scan(
+            monkeypatch, [SONOS_LOCATION, self.FLAT_LOCATION],
+        )
+        assert sorted(url for url, _ in fetched) == sorted([
+            SONOS_LOCATION, self.FLAT_LOCATION,
+        ])
+        assert all(
+            t == upnp._DESCRIPTOR_FETCH_TIMEOUT_S for _, t in fetched
+        )
+
+    def test_fetch_timeout_fits_inside_refresh_slack(self):
+        """refresh() waits the SSDP window plus 5s. The concurrent
+        fetch phase must finish inside that slack or the whole scan is
+        discarded."""
+        assert upnp._DESCRIPTOR_FETCH_TIMEOUT_S < 5.0
+
+
 # ---------------------------------------------------------------------
 # SSDP wire helpers (the UAPP single-socket fix)
 # ---------------------------------------------------------------------

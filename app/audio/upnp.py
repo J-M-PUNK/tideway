@@ -84,18 +84,12 @@ from app.audio.openhome import (
 
 log = logging.getLogger(__name__)
 
-# async-upnp-client is the SSDP discovery library. Optional dep:
-# rest of the app boots if it's missing, just no DLNA in the picker.
-try:
-    from async_upnp_client.aiohttp import AiohttpRequester
-    from async_upnp_client.client_factory import UpnpFactory
-
-    _UPNP_AVAILABLE = True
-except Exception as _exc:  # pragma: no cover - environment dependent
-    log.warning("async-upnp-client unavailable: %s", _exc)
-    AiohttpRequester = None  # type: ignore
-    UpnpFactory = None  # type: ignore
-    _UPNP_AVAILABLE = False
+# Per-descriptor HTTP timeout during discovery. Every LOCATION from the
+# SSDP window is fetched concurrently, so this bounds the whole fetch
+# phase, and it has to stay under refresh()'s 5s of slack past the SSDP
+# window: if the phase overran, refresh() would time out and drop every
+# device, including the ones that had already answered.
+_DESCRIPTOR_FETCH_TIMEOUT_S = 3.0
 
 
 # SSDP discovery uses our own sockets rather than async-upnp-client's
@@ -709,22 +703,22 @@ class UpnpManager:
         # the local clock in charge.
         self._renderer_clock_active: bool = False
 
-        if _UPNP_AVAILABLE:
-            self._start_loop_thread()
+        self._start_loop_thread()
 
     # ---- availability + state surface ------------------------------
 
     def is_available(self) -> bool:
-        """False when async-upnp-client failed to import. The picker
-        hides the DLNA section in that case."""
-        return _UPNP_AVAILABLE
+        """Always True: discovery and control need only the stdlib and
+        `requests`. Kept so the picker can treat every output manager
+        the same way."""
+        return True
 
     def status(self) -> dict[str, object]:
         """Diagnostic snapshot. Used by /api/dlna/devices for the
         picker UI and as a quick health probe in support traces."""
         with self._lock:
             disc: dict[str, object] = {
-                "available": _UPNP_AVAILABLE,
+                "available": True,
                 "device_count": len(self._devices),
                 "last_scan_age_s": (
                     None if self._last_scan_at == 0.0
@@ -1025,10 +1019,9 @@ class UpnpManager:
     def refresh(self, timeout: float = 5.0) -> List[UpnpDevice]:
         """Run an SSDP scan and replace the device cache. Blocks the
         caller for at most `timeout` seconds. Returns the new device
-        list. No-op when the dep isn't available; the picker will
-        just see an empty list, which is the right UX for "no UPnP."
+        list.
         """
-        if not _UPNP_AVAILABLE or self._loop is None:
+        if self._loop is None:
             return []
         future = asyncio.run_coroutine_threadsafe(
             self._discover_async(timeout), self._loop
@@ -1036,7 +1029,10 @@ class UpnpManager:
         try:
             devices = future.result(timeout=timeout + 5.0)
         except Exception as exc:
-            log.warning("upnp discover failed: %s", exc)
+            # The fetch phase is bounded by _DESCRIPTOR_FETCH_TIMEOUT_S,
+            # so landing here is a real fault, not a slow LAN. Print it:
+            # an empty picker with no console line is undiagnosable.
+            print(f"[upnp] discover failed: {exc!r}", flush=True)
             return []
         with self._lock:
             self._devices = {d.id: d for d in devices}
@@ -2513,8 +2509,6 @@ class UpnpManager:
         latency on the LAN is a few hundred ms. We cap at 10s on the
         SOAP requests via `invoke()`'s default.
         """
-        if not _UPNP_AVAILABLE:
-            raise RuntimeError("async-upnp-client not available")
         device = self.get_device(device_id)
         if device is None:
             raise ValueError(f"unknown DLNA device: {device_id}")
@@ -3005,48 +2999,49 @@ class UpnpManager:
 
         The M-SEARCH/listen step runs on a worker thread (an ephemeral
         search socket plus a best-effort :1900 listener — see
-        _collect_ssdp_locations for why); the descriptor fetch + parse
-        stays on the asyncio loop so it can reuse async-upnp-client's
-        UpnpFactory.
+        _collect_ssdp_locations for why). Each LOCATION's description
+        is then fetched concurrently, and only the description: the
+        filter needs service types, not SCPDs. A Sonos alone has a
+        dozen-plus services spread across embedded devices, so fetching
+        every SCPD of every device on the LAN one after another could
+        run past refresh()'s deadline and lose the whole scan. connect()
+        fetches the SCPDs for the one device the user picks.
         """
-        devices: dict[str, UpnpDevice] = {}
-        requester = AiohttpRequester()
-        factory = UpnpFactory(requester)
-
         loop = asyncio.get_event_loop()
         lan_ip = primary_lan_ip()
         locations, _bound_1900 = await loop.run_in_executor(
             None, _collect_ssdp_locations, timeout, lan_ip
         )
 
-        for location in locations:
-            try:
-                device = await factory.async_create_device(location)
-            except Exception as exc:
-                log.debug("upnp: parse %s failed: %s", location, exc)
-                continue
-            service_types = tuple(
-                sorted({s.service_type for s in device.all_services})
-            )
-            if not _filter_dlna_renderer(service_types):
-                # OpenHome-only or otherwise non-DLNA. Skip; the
-                # tidal_connect module's discovery handles those.
-                continue
-            entry = UpnpDevice(
-                id=device.udn or location,
-                name=(
-                    device.friendly_name
-                    or device.model_name
-                    or "DLNA renderer"
-                ),
-                manufacturer=device.manufacturer or "",
-                model=device.model_name or "",
-                location=location,
-                service_types=service_types,
-                has_avtransport=True,
-            )
-            devices[entry.id] = entry
+        ordered = sorted(locations)
+        results = await asyncio.gather(
+            *(
+                loop.run_in_executor(None, _fetch_description, loc)
+                for loc in ordered
+            ),
+            return_exceptions=True,
+        )
 
+        devices: dict[str, UpnpDevice] = {}
+        failed = 0
+        for location, result in zip(ordered, results):
+            if isinstance(result, BaseException):
+                # Most LOCATIONs on a LAN are not renderers (routers,
+                # NAS boxes, TVs' other services); an unreachable or
+                # malformed one is ordinary, so count it for the
+                # summary line and keep the detail at debug.
+                failed += 1
+                log.debug("upnp: descriptor %s failed: %r", location, result)
+                continue
+            entry = _renderer_entry(result, location)
+            if entry is not None:
+                devices[entry.id] = entry
+
+        print(
+            f"[upnp] scan: {len(ordered)} descriptor(s), "
+            f"{len(devices)} renderer(s), {failed} unreadable",
+            flush=True,
+        )
         for d in devices.values():
             print(
                 f"[upnp] discovered: {d.name} "
@@ -3055,6 +3050,36 @@ class UpnpManager:
                 flush=True,
             )
         return list(devices.values())
+
+
+def _fetch_description(location: str) -> OpenHomeDevice:
+    """Blocking description fetch for discovery: the device tree with
+    service types and URLs, no SCPDs."""
+    return fetch_device(
+        location,
+        timeout=_DESCRIPTOR_FETCH_TIMEOUT_S,
+        fetch_scpds=False,
+    )
+
+
+def _renderer_entry(
+    tree: OpenHomeDevice, location: str,
+) -> Optional[UpnpDevice]:
+    """Picker record for a parsed description, or None when nothing in
+    the device tree exposes AVTransport (OpenHome-only devices are
+    tidal_connect's to list)."""
+    service_types = tree.all_service_types()
+    if not _filter_dlna_renderer(service_types):
+        return None
+    return UpnpDevice(
+        id=tree.udn or location,
+        name=tree.friendly_name or tree.model_name or "DLNA renderer",
+        manufacturer=tree.manufacturer,
+        model=tree.model_name,
+        location=location,
+        service_types=service_types,
+        has_avtransport=True,
+    )
 
 
 # Module-level singleton, eagerly constructed at first import. Same
