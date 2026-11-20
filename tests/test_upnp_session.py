@@ -718,7 +718,7 @@ class TestConnect:
         mgr.set_source_provider(lambda: ["http://192.168.1.9/seg0"])
         mgr.set_metadata_provider(lambda: {"title": "T", "artist": "A"})
         mgr.set_next_source_provider(
-            lambda: (["http://192.168.1.9/next"], {"title": "N"})
+            lambda: (["http://192.168.1.9/next"], {"title": "N"}, "202")
         )
         staged = []
         monkeypatch.setattr(
@@ -777,7 +777,7 @@ class TestConnect:
         mgr.set_source_provider(lambda: ["http://192.168.1.9/seg0"])
         mgr.set_metadata_provider(lambda: {"title": "T", "artist": "A"})
         mgr.set_next_source_provider(
-            lambda: (["http://192.168.1.9/next"], {"title": "N"})
+            lambda: (["http://192.168.1.9/next"], {"title": "N"}, "202")
         )
         staged = []
         monkeypatch.setattr(
@@ -1398,3 +1398,151 @@ def test_start_passthrough_reuses_ready_bounded_file(
     # file's ?ts= and announce under the new one.
     assert first.track_id != old_ts
     assert announced[0][3] == first.track_id
+
+
+# ---------------------------------------------------------------------
+# Renderer format ceiling (Sonos: 16-bit / 48 kHz)
+# ---------------------------------------------------------------------
+
+
+class TestFormatCeiling:
+    HI_RES = "FLAC|24|96000|HI_RES_LOSSLESS"
+    CD = "FLAC|16|44100|LOSSLESS"
+    CAPPED_URLS = ["http://192.168.1.9/capped-init", "http://192.168.1.9/capped-1"]
+
+    def _sonos_tree(self):
+        from tests.sonos_fixtures import SONOS_DEVICE_XML
+        from app.audio.openhome import parse_device_description
+
+        return parse_device_description(
+            SONOS_DEVICE_XML,
+            "http://192.168.1.50:8080/xml/device_description.xml",
+        )
+
+    def _session(self, ceiling):
+        return upnp._SessionState(
+            device=_device_record(),
+            openhome_device=_openhome_device(),
+            av=MagicMock(),
+            rc=None,
+            format_ceiling=ceiling,
+        )
+
+    def test_sonos_gets_ceiling_flat_renderer_does_not(self):
+        assert upnp._format_ceiling(self._sonos_tree()) is upnp._SONOS_CEILING
+        assert upnp._format_ceiling(_openhome_device()) is None
+
+    @pytest.mark.parametrize("sig, expected", [
+        ("FLAC|16|44100|LOSSLESS", False),
+        ("FLAC|16|48000|LOSSLESS", False),
+        ("FLAC|24|44100|HI_RES_LOSSLESS", True),   # S1 can't do 24-bit
+        ("FLAC|24|96000|HI_RES_LOSSLESS", True),
+        ("FLAC|16|96000|", True),
+        (None, True),                               # unknown: re-resolve
+        ("FLAC|||LOSSLESS", True),
+    ])
+    def test_exceeds_ceiling(self, sig, expected):
+        assert upnp._exceeds_ceiling(upnp._SONOS_CEILING, sig) is expected
+
+    def test_fit_source_reresolves_out_of_range_stream(self):
+        mgr = UpnpManager()
+        calls = []
+
+        def _resolver(track_id, quality):
+            calls.append((track_id, quality))
+            return self.CAPPED_URLS, self.CD
+
+        mgr.set_capped_source_resolver(_resolver)
+        source, prefetched, quality = mgr._fit_source(
+            self._session(upnp._SONOS_CEILING),
+            ["http://192.168.1.9/hires-init"], {0: b"x"}, "101", self.HI_RES,
+        )
+        assert calls == [("101", "high_lossless")]
+        assert source == self.CAPPED_URLS
+        assert prefetched is None, "prefetched bytes belong to the old URLs"
+        assert quality == self.CD
+
+    def test_fit_source_leaves_in_range_stream_alone(self):
+        mgr = UpnpManager()
+        mgr.set_capped_source_resolver(
+            lambda *a: pytest.fail("in-range stream must not re-resolve")
+        )
+        src = ["http://192.168.1.9/cd-init"]
+        out = mgr._fit_source(
+            self._session(upnp._SONOS_CEILING), src, {0: b"x"}, "101", self.CD,
+        )
+        assert out == (src, {0: b"x"}, self.CD)
+
+    def test_fit_source_noop_without_ceiling(self):
+        mgr = UpnpManager()
+        mgr.set_capped_source_resolver(
+            lambda *a: pytest.fail("no ceiling, no re-resolve")
+        )
+        src = ["http://192.168.1.9/hires-init"]
+        out = mgr._fit_source(self._session(None), src, None, "101", self.HI_RES)
+        assert out == (src, None, self.HI_RES)
+
+    def test_fit_source_without_track_id_passes_through(self):
+        mgr = UpnpManager()
+        mgr.set_capped_source_resolver(
+            lambda *a: pytest.fail("nothing to resolve without a track id")
+        )
+        src = ["http://192.168.1.9/hires-init"]
+        out = mgr._fit_source(
+            self._session(upnp._SONOS_CEILING), src, None, None, self.HI_RES,
+        )
+        assert out == (src, None, self.HI_RES)
+
+    def test_connect_to_sonos_serves_capped_stream(
+        self, mock_soap, mock_http_server, monkeypatch,
+    ):
+        """Switching to a Sonos mid-track: the player resolved the
+        current track at hi-res before the session existed. The bounded
+        file the renderer gets must be built from the capped stream."""
+        tree = self._sonos_tree()
+        mgr = UpnpManager()
+        device = _device_record()
+        mgr._devices = {device.id: device}
+        monkeypatch.setattr(
+            "app.audio.upnp.fetch_device", lambda location, **_kw: tree,
+        )
+
+        readers = []
+
+        class _StubReader:
+            def __init__(self, urls, *a, **k):
+                readers.append(list(urls))
+
+        class _StubTrackSource:
+            def __init__(self, *a, **k):
+                self.ready = threading.Event()
+                self.ready.set()
+                self.failed = False
+                self.path = __file__
+                self.track_id = k.get("track_id", 0)
+                self.source_released = threading.Event()
+                self.source_released.set()
+
+            def start(self):
+                pass
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr("app.audio.upnp.TrackFileSource", _StubTrackSource)
+        monkeypatch.setattr(mgr, "_arm_renderer_watch", lambda *a, **k: None)
+        monkeypatch.setattr(
+            "app.audio.segment_reader.SegmentReader", _StubReader,
+        )
+        mgr.set_source_provider(lambda: ["http://192.168.1.9/hires-init"])
+        mgr.set_metadata_provider(lambda: {"title": "T", "artist": "A"})
+        mgr.set_track_identity_provider(lambda: ("101", self.HI_RES))
+        mgr.set_capped_source_resolver(
+            lambda track_id, quality: (self.CAPPED_URLS, self.CD)
+        )
+
+        mgr.connect(device.id, gapless=True)
+
+        assert mgr._session.format_ceiling is upnp._SONOS_CEILING
+        assert mgr._session._passthrough_source_urls == tuple(self.CAPPED_URLS)
+        assert readers and all(r == self.CAPPED_URLS for r in readers)

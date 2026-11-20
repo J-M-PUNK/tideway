@@ -478,6 +478,9 @@ class _SessionState:
     encoder: Optional[FlacStreamEncoder] = None
     encoder_lock: threading.Lock = field(default_factory=threading.Lock)
     encoder_rate: int = 0
+    # What the renderer can decode, when it is narrower than anything
+    # TIDAL might serve. None = no limit. Set once at connect.
+    format_ceiling: Optional[_FormatCeiling] = None
     encoder_channels: int = 0
     encoder_dtype: str = ""
     bytes_encoded: int = 0
@@ -567,6 +570,63 @@ class _SessionState:
     # Never held across encoder close() or reader build I/O so the audio
     # callback can't stall.
     passthrough_lock: threading.Lock = field(default_factory=threading.Lock)
+
+
+@dataclass(frozen=True)
+class _FormatCeiling:
+    """The most a renderer can decode, and the TIDAL tier that fits
+    under it. `tidal_quality` is a tidalapi.Quality member name."""
+
+    max_sample_rate_hz: int
+    max_bit_depth: int
+    tidal_quality: str
+
+
+# Sonos decodes FLAC up to 48 kHz on every player, at 24-bit on S2
+# firmware and 16-bit on S1. The description doesn't say which
+# generation a player runs, and a Sonos refuses a stream outside its
+# range rather than resampling it, so the ceiling is the one both
+# generations meet: 16-bit / 48 kHz. TIDAL's Lossless tier (16/44.1)
+# is the tier that is guaranteed to fit under it.
+#
+# Keyed on the root device type, which UPnP defines as the device's
+# kind. ConnectionManager's sink protocolInfo, the standard place a
+# renderer lists what it accepts, names FLAC on Sonos without any rate
+# or depth limit, so it can't carry this.
+_ZONEPLAYER_DEVICE_TYPE_PREFIX = "urn:schemas-upnp-org:device:ZonePlayer:"
+_SONOS_CEILING = _FormatCeiling(
+    max_sample_rate_hz=48000, max_bit_depth=16, tidal_quality="high_lossless",
+)
+
+
+def _format_ceiling(tree: OpenHomeDevice) -> Optional[_FormatCeiling]:
+    """Ceiling for the renderer whose description is `tree`, or None
+    when it takes whatever TIDAL serves."""
+    if tree.device_type.startswith(_ZONEPLAYER_DEVICE_TYPE_PREFIX):
+        return _SONOS_CEILING
+    return None
+
+
+def _exceeds_ceiling(
+    ceiling: _FormatCeiling, quality: Optional[str],
+) -> bool:
+    """Whether a stream with signature `quality` (the player's
+    `codec|bit_depth|sample_rate_hz|audio_quality`) may be out of the
+    renderer's range. An unknown signature, or one missing depth or
+    rate, counts as exceeding: the capped re-resolve is a manifest-cache
+    hit in the common case, while sending a stream the renderer rejects
+    stops playback."""
+    if not quality:
+        return True
+    parts = quality.split("|")
+    if len(parts) < 3:
+        return True
+    try:
+        bit_depth = int(parts[1])
+        rate = int(parts[2])
+    except ValueError:
+        return True
+    return bit_depth > ceiling.max_bit_depth or rate > ceiling.max_sample_rate_hz
 
 
 def _renderer_controllers(
@@ -684,7 +744,17 @@ class UpnpManager:
         # already exists when the DLNA session starts gets staged on the
         # renderer (otherwise it has no `next` and stops at track end).
         self._next_source_provider: Optional[
-            Callable[[], Optional[tuple[list[str], Optional[dict]]]]
+            Callable[
+                [], Optional[tuple[list[str], Optional[dict], Optional[str]]]
+            ]
+        ] = None
+
+        # Capped-source resolver: `(track_id, tidal_quality)` ->
+        # `(segment_urls, stream_signature)` or None. Consulted when the
+        # session has a format ceiling and the stream the player handed
+        # us is outside it.
+        self._capped_source_resolver: Optional[
+            Callable[[str, str], Optional[tuple[list[str], Optional[str]]]]
         ] = None
 
         # Renderer-ended callback: invoked when the renderer-clock
@@ -891,17 +961,80 @@ class UpnpManager:
     def set_next_source_provider(
         self,
         callback: Optional[
-            Callable[[], Optional[tuple[list[str], Optional[dict]]]]
+            Callable[
+                [], Optional[tuple[list[str], Optional[dict], Optional[str]]]
+            ]
         ],
     ) -> None:
         """Register a callback returning the preloaded next track's
-        `(segment_urls, metadata)` or None.
+        `(segment_urls, metadata, track_id)` or None.
 
         Consulted once per `connect()` so a preload that already exists
         when the DLNA session starts is staged on the renderer via
         SetNextAVTransportURI. Without it the renderer finishes the
         current track with no next and stops."""
         self._next_source_provider = callback
+
+    def set_capped_source_resolver(
+        self,
+        callback: Optional[
+            Callable[[str, str], Optional[tuple[list[str], Optional[str]]]]
+        ],
+    ) -> None:
+        """Register `(track_id, tidal_quality) -> (urls, signature)`.
+
+        Renderers with a format ceiling (Sonos) refuse streams above it,
+        and the player resolves at the user's chosen tier without
+        knowing where the audio is going. Every source this manager is
+        handed passes through `_fit_source`, which uses this to swap an
+        out-of-range stream for the same track at a tier that fits."""
+        self._capped_source_resolver = callback
+
+    def _fit_source(
+        self,
+        session: "_SessionState",
+        source,
+        prefetched,
+        track_id: Optional[str],
+        quality: Optional[str],
+    ):
+        """Return `(source, prefetched, quality)` the session's renderer
+        can play. Unchanged when the renderer has no ceiling, the stream
+        is inside it, or the source isn't a TIDAL URL list. Otherwise the
+        track is re-resolved at the ceiling's tier; prefetched bytes
+        belong to the original URLs, so they are dropped.
+
+        Without a track id or a resolver there is nothing to re-resolve
+        with, and the source passes through unchanged; the print says
+        so, because the renderer is then likely to refuse it."""
+        ceiling = session.format_ceiling
+        if (
+            ceiling is None
+            or not isinstance(source, (list, tuple))
+            or not _exceeds_ceiling(ceiling, quality)
+        ):
+            return source, prefetched, quality
+        if track_id is None or self._capped_source_resolver is None:
+            print(
+                f"[upnp] stream {quality!r} may exceed the renderer's "
+                f"{ceiling.max_bit_depth}-bit/{ceiling.max_sample_rate_hz} Hz "
+                "limit and can't be re-resolved (no track id)",
+                flush=True,
+            )
+            return source, prefetched, quality
+        capped = self._capped_source_resolver(
+            str(track_id), ceiling.tidal_quality,
+        )
+        if capped is None:
+            return source, prefetched, quality
+        urls, capped_quality = capped
+        if capped_quality != quality:
+            print(
+                f"[upnp] renderer limit: track {track_id} {quality!r} -> "
+                f"{capped_quality!r}",
+                flush=True,
+            )
+        return urls, None, capped_quality
 
     def set_renderer_ended_callback(
         self, callback: Optional[Callable[[], None]]
@@ -1083,6 +1216,9 @@ class UpnpManager:
         if session is None:
             print("[upnp] passthrough: no active session", flush=True)
             return
+        source, prefetched, quality = self._fit_source(
+            session, source, prefetched, track_id, quality,
+        )
 
         http_server = getattr(session, "http_server", None)
 
@@ -1959,6 +2095,12 @@ class UpnpManager:
         if not isinstance(source, (list, tuple)) or not source:
             print("[upnp] set_next_track: no source urls", flush=True)
             return False
+        # The caller doesn't know the next stream's signature, so under
+        # a ceiling this always takes the capped resolve (a cache hit
+        # once the track has been resolved at that tier).
+        source, prefetched, _quality = self._fit_source(
+            session, source, prefetched, track_id, None,
+        )
         # Build (or refresh) the next track's bounded file. Pass the
         # TIDAL track id so promotion at the boundary can match on it
         # (signed segment URLs differ per resolve).
@@ -2563,6 +2705,7 @@ class UpnpManager:
             av=av,
             rc=rc,
             gapless=gapless,
+            format_ceiling=_format_ceiling(openhome_device),
         )
         try:
             session.http_server = start_stream_http_server(
@@ -2675,9 +2818,11 @@ class UpnpManager:
                 preloaded_next = None
                 log.debug("upnp: next-source provider raised: %r", exc)
             if preloaded_next:
-                next_urls, next_meta = preloaded_next
+                next_urls, next_meta, next_track_id = preloaded_next
                 try:
-                    self.set_next_track(next_urls, metadata=next_meta)
+                    self.set_next_track(
+                        next_urls, metadata=next_meta, track_id=next_track_id,
+                    )
                 except Exception as exc:
                     print(
                         f"[upnp] connect: stage preloaded next failed: {exc!r}",
