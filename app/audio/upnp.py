@@ -2,7 +2,7 @@
 
 DLNA's `MediaRenderer` profile is the universal target for "play
 this audio on a network device" across every consumer streamer
-that doesn't speak Tidal Connect natively: WiiM, most Bluesound,
+that doesn't speak Tidal Connect natively: Sonos, WiiM, most Bluesound,
 Cambridge, Yamaha, Denon AVRs, NAD streamers, LG / Samsung TVs,
 and a long tail of cheaper Hi-Fi network bridges. This module
 ships a sender for that protocol so those devices appear in the

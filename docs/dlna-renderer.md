@@ -12,6 +12,7 @@ isn't a certified Tidal Connect device or a Chromecast speaks
 this protocol. That includes:
 
 - **WiiM** (Pro, Pro Plus, Ultra, Mini, Amp)
+- **Sonos** (S1 and S2 players; see [Sonos](#sonos) below)
 - **Bluesound** (newer Node and Pulse models that haven't been
   pulled into Tidal Connect)
 - **Cambridge Audio** streamers and CXN-class units
@@ -118,21 +119,52 @@ The position poll only times the advance. A pause pressed on the
 device's own remote is still not reflected in the Tideway UI (see
 below).
 
+## Sonos
+
+Sonos players don't offer Tidal Connect, so DLNA is how Tideway
+reaches them. They need three things the generic path doesn't do on
+its own, and Tideway handles all three:
+
+- **Nested renderer.** A Sonos describes itself as a `ZonePlayer` and
+  puts its playback services on an embedded `MediaRenderer` device.
+  Discovery and connect look through the whole device tree for
+  AVTransport rather than only the top level.
+- **Groups.** Only a group's coordinator accepts playback commands.
+  The picker lists one entry per Sonos group, named after its rooms
+  the way the Sonos app does ("Living Room + Kitchen"), and sends
+  everything to the coordinator. The hidden halves of stereo pairs
+  and home-theatre sets don't appear. Connect re-reads the grouping,
+  so a change made in the Sonos app after the picker opened still
+  lands on the right player. If the grouping can't be read, each
+  player is listed under its room name and the console prints why.
+- **Format range.** Sonos plays FLAC up to 48 kHz, at 24-bit on S2
+  and 16-bit on S1, and refuses anything outside that instead of
+  resampling. Tideway can't tell S1 from S2 over UPnP, so any track
+  that resolves above 16-bit / 48 kHz is fetched again from TIDAL at
+  the Lossless tier (16-bit / 44.1 kHz) before it is sent to a Sonos.
+  This includes the track that was already playing when you switched
+  output. Local playback and other renderers keep your chosen quality.
+
+Synchronised playback across a group is Sonos's own: Tideway sends
+the stream to the coordinator and the coordinator feeds the rest of
+the group.
+
 ## Known limits
 
 - **No hardware verification by the maintainer.** The unit tests
   cover SOAP-arg shapes, response parsing, session lifecycle,
   and audio plumbing, but the maintainer doesn't have a WiiM /
-  Bluesound / Cambridge unit on the bench. Device-side behaviour
+  Bluesound / Cambridge / Sonos unit on the bench. Device-side behaviour
   is unverified. File a GitHub issue if your specific renderer
   misbehaves.
 - **Device-initiated transport changes aren't shown.** Tideway polls
   the renderer's position to time gapless track changes, but it doesn't
   reflect a pause, resume, or stop pressed on the device's own remote
   (or its mobile app) in the Tideway UI. Same gap the Cast path has.
-- **No multi-room.** Some renderers (Bluesound BluOS, Sonos via
-  their DLNA-bridge mode) support synchronised playback across
-  multiple speakers. Tideway sends to one renderer at a time.
+- **No multi-room across renderers.** Tideway sends to one renderer
+  at a time. A Sonos group counts as one renderer (see above);
+  grouping across vendors, or Bluesound BluOS groups, isn't
+  supported.
 - **Codec ceiling.** The encoder ships hi-res FLAC at the
   source's native rate. Some cheaper renderers can't decode
   above 24/96 and will refuse the stream or fall back to a lower
