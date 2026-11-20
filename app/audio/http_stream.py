@@ -656,6 +656,68 @@ class FlacStreamEncoder:
 
 _FLAC_SAMPLE_SIZE_MAP = {0: 16, 1: 8, 2: 12, 3: 16, 4: 16, 5: 20, 6: 24, 7: 32}
 
+# FLAC frame checksums, both starting from zero: CRC-8 over the frame
+# header with x^8+x^2+x+1, and CRC-16 over the whole frame with
+# x^16+x^15+x^2+1.
+_FLAC_CRC8_POLY = 0x07
+_FLAC_CRC16_POLY = 0x8005
+
+
+def _flac_coded_number(value: int) -> bytes:
+    """Encode `value` the way a FLAC frame header stores its frame or
+    sample number. Raises ValueError above the 36 bits FLAC allows."""
+    if value < 0x80:
+        return bytes([value])
+    length = 2
+    while value >= 1 << (5 * length + 1):
+        length += 1
+        if length > 7:
+            raise ValueError(f"FLAC frame number {value} is too large")
+    tail = []
+    for _ in range(length - 1):
+        tail.append(0x80 | (value & 0x3F))
+        value >>= 6
+    lead = ((0xFF00 >> length) & 0xFF) | value
+    return bytes([lead, *reversed(tail)])
+
+
+def _flac_crc(data: bytes, poly: int, bits: int) -> int:
+    """FLAC checksum of `data` for the `bits` wide polynomial `poly`."""
+    top = 1 << (bits - 1)
+    mask = (1 << bits) - 1
+    crc = 0
+    for byte in data:
+        crc ^= byte << (bits - 8)
+        for _ in range(8):
+            crc = ((crc << 1) ^ poly) & mask if crc & top else (crc << 1) & mask
+    return crc
+
+
+def _flac_crc16_after_zeros(crc: int, count: int) -> int:
+    """The CRC-16 state `crc` carried past `count` zero bytes."""
+    # Each zero byte multiplies the state by x^8 modulo the polynomial, so
+    # `count` of them is one multiply by x^(8 * count), built by squaring.
+    factor = 0x100
+    while count:
+        if count & 1:
+            crc = _flac_crc16_multiply(crc, factor)
+        factor = _flac_crc16_multiply(factor, factor)
+        count >>= 1
+    return crc
+
+
+def _flac_crc16_multiply(a: int, b: int) -> int:
+    """Product of two 16 bit polynomials modulo the FLAC CRC-16 polynomial."""
+    product = 0
+    while b:
+        if b & 1:
+            product ^= a
+        b >>= 1
+        a <<= 1
+        if a & 0x10000:
+            a ^= 0x10000 | _FLAC_CRC16_POLY
+    return product
+
 
 def _parse_flac_frame_bps(frame_bytes: bytes) -> int:
     """Read bits_per_sample from the first FLAC frame header.
@@ -668,6 +730,63 @@ def _parse_flac_frame_bps(frame_bytes: bytes) -> int:
         return 16
     code = (frame_bytes[3] >> 1) & 0x07
     return _FLAC_SAMPLE_SIZE_MAP.get(code, 16)
+
+
+def _parse_flac_frame_header(frame: bytes) -> tuple[int, int, int]:
+    """Read a FLAC frame header.
+
+    Returns the frame's number, the byte length of that number, and the
+    header length up to its CRC-8. The number is a frame number, or a
+    sample number in a variable block size stream. Raises ValueError when
+    `frame` does not start with a FLAC frame header.
+    """
+    if len(frame) < 6 or frame[0] != 0xFF or frame[1] not in (0xF8, 0xF9):
+        raise ValueError("not a FLAC frame")
+    lead = frame[4]
+    length = 0
+    while length < 8 and lead & (0x80 >> length):
+        length += 1
+    if length == 1 or length > 7:
+        raise ValueError("bad FLAC frame number")
+    if length == 0:
+        number, length = lead, 1
+    else:
+        number = lead & (0x7F >> length)
+        for byte in frame[5 : 4 + length]:
+            number = (number << 6) | (byte & 0x3F)
+    header_length = 4 + length
+    block_size_code = frame[2] >> 4
+    sample_rate_code = frame[2] & 0x0F
+    header_length += {6: 1, 7: 2}.get(block_size_code, 0)
+    header_length += {12: 1, 13: 2, 14: 2}.get(sample_rate_code, 0)
+    if len(frame) < header_length + 3:
+        raise ValueError("truncated FLAC frame")
+    return number, length, header_length
+
+
+def _renumber_flac_frame(frame: bytes, number: int) -> bytes:
+    """Return `frame` with its frame or sample number set to `number` and
+    both checksums updated. Raises ValueError when `frame` is not a FLAC
+    frame."""
+    _old_number, number_length, header_length = _parse_flac_frame_header(frame)
+    old_header = frame[: header_length + 1]
+    new_header = bytearray(frame[:4])
+    new_header += _flac_coded_number(number)
+    new_header += frame[4 + number_length : header_length]
+    new_header.append(_flac_crc(new_header, _FLAC_CRC8_POLY, 8))
+    body = frame[header_length + 1 : -2]
+    # CRC-16 is linear and only the header changed, so swap the two
+    # headers' contributions, each carried past the unchanged body. A
+    # plain recompute costs about 0.1 s per MB in Python, which a high
+    # resolution track would add to every seek and every connect partway
+    # through a track.
+    header_change = _flac_crc(old_header, _FLAC_CRC16_POLY, 16) ^ _flac_crc(
+        bytes(new_header), _FLAC_CRC16_POLY, 16
+    )
+    crc = int.from_bytes(frame[-2:], "big") ^ _flac_crc16_after_zeros(
+        header_change, len(body)
+    )
+    return bytes(new_header) + body + crc.to_bytes(2, "big")
 
 
 def _streaminfo_total_samples(raw_streaminfo: bytes) -> int:
@@ -1092,7 +1211,8 @@ class TrackFileSource:
         # DLNA resume: the renderer starts at byte 0 of this file, so
         # byte 0 must be the position the desktop decoder is already at.
         # Native FLAC can't be trimmed by rewriting a header alone, so
-        # _run drops the leading frames and rewrites total_samples.
+        # _run drops the leading frames, numbers the rest from zero and
+        # rewrites total_samples.
         self._start_s = max(0.0, float(start_s))
 
     @property
@@ -1195,6 +1315,7 @@ class TrackFileSource:
             self._path = tf.name
             total = 0
             header_written = False
+            first_number: Optional[int] = None
             with tf:
                 for packet in demux_iter:
                     raw = bytes(packet)
@@ -1252,6 +1373,15 @@ class TrackFileSource:
                         tf.write(header)
                         total += len(header)
                         header_written = True
+                    if self._start_s > 0.0:
+                        # Frames carry their position in the track. A
+                        # renderer such as Sonos stops when the first
+                        # frame's position lies past the trimmed
+                        # total_samples, so count from zero again.
+                        number = _parse_flac_frame_header(raw)[0]
+                        if first_number is None:
+                            first_number = number
+                        raw = _renumber_flac_frame(raw, number - first_number)
                     tf.write(raw)
                     total += len(raw)
                 if not header_written:
