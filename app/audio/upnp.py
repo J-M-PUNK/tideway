@@ -551,6 +551,10 @@ class _SessionState:
     # elapsed since the track started — a track cannot be further in
     # than it has actually been playing.
     renderer_started_at: float = 0.0
+    # Where the current track's served file starts within the track, in
+    # seconds. The renderer's position counts from this point, so it is
+    # added back before the position is reported as track time.
+    renderer_start_s: float = 0.0
     # Set when the watchdog ends a track that had a pre-staged next URI.
     # The renderer advances into it on its own at the natural end, so the
     # promotion skips the redundant re-announce without needing
@@ -920,15 +924,18 @@ class UpnpManager:
         progress = self.renderer_progress_s()
         if progress is None:
             return None
-        return int(max(0.0, progress[0]) * 1000)
+        position_s, _duration_s, start_s = progress
+        # The renderer counts from the start of the trimmed file, so add
+        # the trim to get the position within the whole track.
+        return int((max(0.0, position_s) + start_s) * 1000)
 
-    def renderer_progress_s(self) -> Optional[tuple[float, float]]:
-        """The renderer's `(position_s, duration_s)` for the current
-        bounded track, or None when the clock is inactive or the reading
-        is stale. `duration_s` is the served file's length, so the two
-        are on the same timeline and `duration_s - position_s` is the
-        true remaining time — the basis for deciding when to pre-stage
-        the next URI without relying on the local decode clock."""
+    def renderer_progress_s(self) -> Optional[tuple[float, float, float]]:
+        """The renderer's `(position_s, duration_s, start_s)` for the
+        current bounded track, or None when the clock is inactive or the
+        reading is stale. `position_s` and `duration_s` are on the served
+        file's timeline, so `duration_s - position_s` is the true
+        remaining time. `start_s` is where that file starts within the
+        track, nonzero after a mid-track connect or a seek."""
         if not self._renderer_clock_active:
             return None
         session = self._session
@@ -939,6 +946,7 @@ class UpnpManager:
             duration_s = session.renderer_duration_s
             at = session.renderer_position_at
             started_at = session.renderer_started_at
+            start_s = session.renderer_start_s
         if position_s is None or duration_s is None or duration_s <= 0:
             return None
         now = time.monotonic()
@@ -950,7 +958,7 @@ class UpnpManager:
         # track, which would fire an early end-of-stream.
         if started_at > 0:
             position_s = min(float(position_s), max(0.0, now - started_at))
-        return float(position_s), float(duration_s)
+        return float(position_s), float(duration_s), float(start_s)
 
     def _resume_offset_s(self) -> float:
         """Current desktop position as a trim offset, 0.0 when unknown
@@ -1421,6 +1429,7 @@ class UpnpManager:
             # poll and fire `ended` immediately — a premature advance.
             session.renderer_next_uri = None
             session.renderer_started_at = time.monotonic()
+            session.renderer_start_s = max(0.0, float(start_s))
         self._set_renderer_clock_active(False)
         print(
             f"[upnp] renderer watch armed gen={gen} "
@@ -1639,6 +1648,9 @@ class UpnpManager:
                 session.renderer_consumed_track_id = (
                     session.renderer_next_track_id
                 )
+                # The renderer is now reading the staged next file, which
+                # always starts at the beginning of its track.
+                session.renderer_start_s = 0.0
             else:
                 # No consumption evidence for THIS generation's end.
                 # Any sticky id still set belongs to the previous
@@ -1743,6 +1755,14 @@ class UpnpManager:
         best-effort on a watcher thread, matching
         ``_notify_track_change``'s documented policy.
         """
+        if track_source is not None and track_source.start_s > 0:
+            # The renderer reads the duration of the file it is handed,
+            # which starts at start_s, not the whole track.
+            full_s = metadata.get("duration_s") or 0
+            metadata = {
+                **metadata,
+                "duration_s": max(0, int(full_s - track_source.start_s)),
+            }
         if track_source is None or track_source.ready.is_set():
             self._notify_track_change(metadata, session, track_ts=track_ts)
             return
@@ -2178,7 +2198,7 @@ class UpnpManager:
         True (stage immediately) when neither is usable."""
         progress = self.renderer_progress_s()
         if progress is not None:
-            position_s, duration_s = progress
+            position_s, duration_s, _start_s = progress
             return (duration_s - position_s) <= _NEXT_URI_LEAD_S
         provider = getattr(self, "_position_provider", None)
         meta_provider = getattr(self, "_metadata_provider", None)
