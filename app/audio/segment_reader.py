@@ -13,6 +13,20 @@ segment on demand as libav asks for bytes, caches what it's
 fetched so backward seeks inside the header region work, and
 returns empty bytes at the end. It never loads the whole track
 into memory unless libav reads to the end.
+
+## Mid-track download failures
+
+The segment URLs are signed and time-limited, and a segment can fail
+for ordinary network reasons (a dropped connection, a timeout). Left
+alone, the failure propagates out of libav into the decoder thread,
+which ends the track early. Given a `refresh_urls` callable, the
+reader instead asks for a fresh URL list for the same track and
+quality and downloads the failed segment once more from it. The same
+track at the same quality is the same file on TIDAL's CDN, so the
+segment layout is identical and the bytes continue exactly where the
+failed download left off: libav never sees the gap. One retry per
+failed segment, on new links: a second failure is a real outage and
+propagates.
 """
 from __future__ import annotations
 
@@ -21,7 +35,7 @@ import sys
 import threading
 import time
 from concurrent.futures import Future, ThreadPoolExecutor
-from typing import Optional
+from typing import Callable, Optional
 
 import requests
 
@@ -47,10 +61,25 @@ class SegmentReader(io.RawIOBase):
         urls: list[str],
         prefetched: Optional[dict[int, bytes]] = None,
         read_ahead_depth: int = 1,
+        *,
+        refresh_urls: Optional[Callable[[], list[str]]] = None,
+        media_offset: int = 0,
     ):
+        """`refresh_urls` returns a fresh, full URL list for the same
+        track and quality (init segment first). `media_offset` is how
+        many media segments of that full list this reader skips: a seek
+        reader is built from `[init] + urls[1 + offset:]`, so its
+        segment i >= 1 is the full list's segment i + offset."""
         if not urls:
             raise ValueError("SegmentReader: empty url list")
         self._urls = list(urls)
+        self._refresh_urls = refresh_urls
+        self._media_offset = int(media_offset)
+        # Bumped whenever `_urls` is replaced by a refresh. A download
+        # started on an older generation failed on links that are
+        # already gone, so it is retried on the current ones without
+        # asking TIDAL again.
+        self._url_gen = 0
         # How many segments past the one being consumed to fetch ahead.
         # One is right for playback (hide a single round-trip, keep at
         # most two requests in flight for the track). Bulk consumers
@@ -85,7 +114,7 @@ class SegmentReader(io.RawIOBase):
         # index -> future of its bytes (or None if the reader closed
         # mid-download). With the default depth this holds at most one
         # entry; bulk fillers keep a deeper window.
-        self._ahead: dict[int, Future] = {}
+        self._ahead: dict[int, tuple[Future, int]] = {}
         # Byte-level prefetch fast path: if the caller hands us
         # pre-downloaded bytes for segment 0, 1, ..., N in order,
         # seed the buffer with them and advance _next_segment_idx
@@ -264,15 +293,20 @@ class SegmentReader(io.RawIOBase):
             return
         idx = self._next_segment_idx
         ahead = self._ahead.pop(idx, None)
-        if ahead is not None:
-            # Already downloading (or done) on the read-ahead pool. A
-            # failed download re-raises here, exactly as an inline
-            # fetch would have.
-            data = ahead.result()
-        else:
-            # The init segment, fetched while the read-ahead holds the
-            # first media segment — leave that one running.
-            data = self._download(idx)
+        try:
+            if ahead is not None:
+                # Already downloading (or done) on the read-ahead pool.
+                # A failed download re-raises here, exactly as an
+                # inline fetch would have.
+                future, gen = ahead
+                data = future.result()
+            else:
+                # The init segment, fetched while the read-ahead holds
+                # the first media segment — leave that one running.
+                gen = self._url_gen
+                data = self._download(idx)
+        except requests.RequestException as exc:
+            data = self._recover_segment(idx, gen, exc)
         if data is None:
             # Closed mid-download. _next_segment_idx is left short of
             # the end so a subsequent read() would re-attempt — but in
@@ -282,6 +316,48 @@ class SegmentReader(io.RawIOBase):
         self._buf.extend(data)
         self._next_segment_idx += 1
         self._fill_read_ahead()
+
+    def _recover_segment(
+        self, idx: int, gen: int, exc: requests.RequestException,
+    ) -> Optional[bytes]:
+        """Download segment `idx` again after `exc`, on fresh links.
+
+        Re-raises `exc` when there is nothing to recover with (no
+        refresher) or the reader is closing: close() aborts downloads by
+        closing their responses, which surfaces as exactly this kind of
+        error, and that must stay an exit, not become a retry."""
+        if self._closed or self._refresh_urls is None:
+            raise exc
+        if gen == self._url_gen:
+            self._replace_urls(exc)
+        print(
+            f"[stream] segment {idx} failed ({exc.__class__.__name__}: "
+            f"{exc}); retrying on fresh links",
+            file=sys.stderr,
+            flush=True,
+        )
+        return self._download(idx)
+
+    def _replace_urls(self, cause: requests.RequestException) -> None:
+        """Swap in a freshly resolved URL list for the same track.
+
+        Raises when the new list doesn't line up with this reader's
+        segments: a different layout means a different file, and
+        splicing its bytes onto ours would corrupt the stream."""
+        full = list(self._refresh_urls())  # type: ignore[misc]
+        fresh = full[:1] + full[1 + self._media_offset:]
+        if len(fresh) != len(self._urls):
+            raise RuntimeError(
+                f"refreshed stream has {len(fresh)} segments for this "
+                f"reader, expected {len(self._urls)}"
+            ) from cause
+        self._urls = fresh
+        self._url_gen += 1
+        # Read-ahead downloads in flight were issued on the old links.
+        # Drop them; _fill_read_ahead re-issues the window on the new
+        # ones. The abandoned futures finish (or fail) on the pool and
+        # close their own responses.
+        self._ahead.clear()
 
     def _fill_read_ahead(self) -> None:
         """Keep up to `_read_ahead_depth` upcoming segments in flight.
@@ -311,7 +387,10 @@ class SegmentReader(io.RawIOBase):
             or idx >= len(self._urls)
         ):
             return
-        self._ahead[idx] = _READ_AHEAD_POOL.submit(self._download, idx)
+        self._ahead[idx] = (
+            _READ_AHEAD_POOL.submit(self._download, idx),
+            self._url_gen,
+        )
 
     def _download(self, idx: int) -> Optional[bytes]:
         """GET segment `idx`. Returns None if close() lands first.

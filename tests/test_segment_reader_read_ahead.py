@@ -139,7 +139,7 @@ def test_close_aborts_a_read_ahead_in_flight(server):
     reader.read(SEGMENT_BYTES)  # init only; seg1 is downloading ahead
     ahead = reader._ahead  # type: ignore[attr-defined]
     assert 1 in ahead
-    seg1 = ahead[1]
+    seg1, _gen = ahead[1]
 
     t0 = time.monotonic()
     reader.close()
