@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import logging
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Optional
 from urllib.parse import urljoin
 
@@ -105,12 +105,24 @@ class OpenHomeService:
 
 @dataclass(frozen=True)
 class OpenHomeDevice:
-    """Parsed root device description.
+    """Parsed device description.
 
     `services` is the list of services we found, with their SCPD
     actions populated when fetched. Slice 2 caches devices and
     indexes services by `short_name` for quick `get_service('Playlist')`
     lookups.
+
+    `embedded_devices` holds the description's `<deviceList>`
+    children, parsed the same way. UPnP lets a root device carry its
+    renderer services on an embedded device instead of on itself:
+    Sonos publishes a `ZonePlayer` root whose own services are
+    AlarmClock, ZoneGroupTopology and the like, with AVTransport and
+    RenderingControl on an embedded `MediaRenderer`. Callers that
+    need a particular service should use `find_device_with_service`
+    rather than reading the root's `services` directly.
+
+    `room_name` is Sonos's `<roomName>` element, the user-facing name
+    of the speaker. Empty on every other vendor.
     """
 
     udn: str
@@ -119,6 +131,31 @@ class OpenHomeDevice:
     model_name: str
     model_number: str
     services: tuple[OpenHomeService, ...]
+    device_type: str = ""
+    room_name: str = ""
+    embedded_devices: tuple["OpenHomeDevice", ...] = ()
+
+    def find_device_with_service(
+        self, prefix: str,
+    ) -> Optional["OpenHomeDevice"]:
+        """Return this device or the first embedded device (depth-
+        first, document order) that exposes a service whose type
+        starts with `prefix`. None when nothing in the tree does."""
+        if any(s.service_type.startswith(prefix) for s in self.services):
+            return self
+        for child in self.embedded_devices:
+            found = child.find_device_with_service(prefix)
+            if found is not None:
+                return found
+        return None
+
+    def all_service_types(self) -> tuple[str, ...]:
+        """Sorted service types across this device and every embedded
+        device. What discovery filters on."""
+        types = {s.service_type for s in self.services}
+        for child in self.embedded_devices:
+            types.update(child.all_service_types())
+        return tuple(sorted(types))
 
     def get_service(self, short_name: str) -> Optional[OpenHomeService]:
         """Look up a service by its short name (case-insensitive).
@@ -162,7 +199,15 @@ def parse_device_description(
     device_el = _find(root, "device")
     if device_el is None:
         raise ValueError("device description: no <device> element")
+    return _parse_device_element(device_el, base_url)
 
+
+def _parse_device_element(
+    device_el: ET.Element, base_url: str,
+) -> OpenHomeDevice:
+    """Parse one `<device>` element and, recursively, the devices in
+    its `<deviceList>`. Relative service URLs in embedded devices
+    resolve against the same description URL as the root's."""
     services: list[OpenHomeService] = []
     service_list = _find(device_el, "serviceList")
     if service_list is not None:
@@ -171,6 +216,12 @@ def parse_device_description(
             if svc is not None:
                 services.append(svc)
 
+    embedded: list[OpenHomeDevice] = []
+    device_list = _find(device_el, "deviceList")
+    if device_list is not None:
+        for child_el in _findall(device_list, "device"):
+            embedded.append(_parse_device_element(child_el, base_url))
+
     return OpenHomeDevice(
         udn=_text(_find(device_el, "UDN")),
         friendly_name=_text(_find(device_el, "friendlyName")),
@@ -178,6 +229,9 @@ def parse_device_description(
         model_name=_text(_find(device_el, "modelName")),
         model_number=_text(_find(device_el, "modelNumber")),
         services=tuple(services),
+        device_type=_text(_find(device_el, "deviceType")),
+        room_name=_text(_find(device_el, "roomName")),
+        embedded_devices=tuple(embedded),
     )
 
 
@@ -258,6 +312,12 @@ def fetch_device(
     if not fetch_scpds:
         return device
 
+    return _with_scpds(device, timeout, requests)
+
+
+def _with_scpds(device: OpenHomeDevice, timeout: float, requests) -> OpenHomeDevice:
+    """Return `device` (and its embedded devices) with every
+    service's SCPD actions populated."""
     enriched_services: list[OpenHomeService] = []
     for svc in device.services:
         try:
@@ -277,24 +337,14 @@ def fetch_device(
                 exc,
             )
             actions = ()
-        enriched_services.append(
-            OpenHomeService(
-                service_type=svc.service_type,
-                service_id=svc.service_id,
-                short_name=svc.short_name,
-                control_url=svc.control_url,
-                event_sub_url=svc.event_sub_url,
-                scpd_url=svc.scpd_url,
-                actions=actions,
-            )
-        )
-    return OpenHomeDevice(
-        udn=device.udn,
-        friendly_name=device.friendly_name,
-        manufacturer=device.manufacturer,
-        model_name=device.model_name,
-        model_number=device.model_number,
+        enriched_services.append(replace(svc, actions=actions))
+    return replace(
+        device,
         services=tuple(enriched_services),
+        embedded_devices=tuple(
+            _with_scpds(child, timeout, requests)
+            for child in device.embedded_devices
+        ),
     )
 
 

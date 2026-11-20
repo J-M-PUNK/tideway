@@ -399,3 +399,114 @@ class TestFetchDevice:
         assert dev.friendly_name == "Living Room Streamer"
         for svc in dev.services:
             assert svc.actions == ()
+
+
+# ---------------------------------------------------------------------
+# Embedded devices (Sonos-shaped descriptions)
+# ---------------------------------------------------------------------
+
+
+class TestEmbeddedDevices:
+    """Sonos roots its description on a ZonePlayer and puts the
+    renderer services on an embedded MediaRenderer. Reading only the
+    root's <serviceList> made every Sonos look like it had no
+    AVTransport."""
+
+    def _sonos(self):
+        from tests.sonos_fixtures import SONOS_DEVICE_XML, SONOS_LOCATION
+        return parse_device_description(SONOS_DEVICE_XML, SONOS_LOCATION)
+
+    def test_root_services_exclude_renderer(self):
+        dev = self._sonos()
+        assert [s.short_name for s in dev.services] == [
+            "AlarmClock", "DeviceProperties", "ZoneGroupTopology",
+        ]
+        assert dev.device_type == "urn:schemas-upnp-org:device:ZonePlayer:1"
+
+    def test_embedded_devices_parsed(self):
+        dev = self._sonos()
+        types = [d.device_type for d in dev.embedded_devices]
+        assert types == [
+            "urn:schemas-upnp-org:device:MediaServer:1",
+            "urn:schemas-upnp-org:device:MediaRenderer:1",
+        ]
+
+    def test_find_device_with_service_returns_embedded_renderer(self):
+        dev = self._sonos()
+        renderer = dev.find_device_with_service(
+            "urn:schemas-upnp-org:service:AVTransport:"
+        )
+        assert renderer is not None
+        assert renderer.device_type.endswith("MediaRenderer:1")
+        av = renderer.get_service("AVTransport")
+        assert av is not None
+        assert av.control_url == (
+            "http://192.168.1.60:1400/MediaRenderer/AVTransport/Control"
+        )
+
+    def test_find_device_with_service_prefers_root(self):
+        """A device that carries the service itself wins over its
+        children, so flat renderers (WiiM, Bluesound) are unaffected."""
+        dev = parse_device_description(DEVICE_XML, "http://x/desc.xml")
+        assert dev.find_device_with_service(
+            "urn:av-openhome-org:service:Playlist:"
+        ) is dev
+
+    def test_find_device_with_service_none_when_absent(self):
+        dev = self._sonos()
+        assert dev.find_device_with_service(
+            "urn:schemas-upnp-org:service:Nope:"
+        ) is None
+
+    def test_all_service_types_spans_tree(self):
+        types = self._sonos().all_service_types()
+        assert "urn:schemas-upnp-org:service:AVTransport:1" in types
+        assert "urn:schemas-upnp-org:service:AlarmClock:1" in types
+        assert list(types) == sorted(types)
+
+    def test_room_name(self):
+        assert self._sonos().room_name == "Living Room"
+        plain = parse_device_description(DEVICE_XML, "http://x/desc.xml")
+        assert plain.room_name == ""
+
+    def test_fetch_device_enriches_embedded_scpds(self, monkeypatch):
+        from tests.sonos_fixtures import SONOS_DEVICE_XML, SONOS_LOCATION
+
+        av_scpd = """<?xml version='1.0'?>
+        <scpd xmlns='urn:schemas-upnp-org:service-1-0'>
+          <actionList>
+            <action><name>SetAVTransportURI</name></action>
+            <action><name>SetNextAVTransportURI</name></action>
+          </actionList>
+        </scpd>"""
+        empty_scpd = """<?xml version='1.0'?>
+        <scpd xmlns='urn:schemas-upnp-org:service-1-0'>
+          <actionList></actionList>
+        </scpd>"""
+
+        class _Resp:
+            def __init__(self, body):
+                self.text = body
+
+            def raise_for_status(self):
+                pass
+
+        def _fake_get(url, timeout=10.0):
+            if url == SONOS_LOCATION:
+                return _Resp(SONOS_DEVICE_XML)
+            if url.endswith("/xml/AVTransport1.xml"):
+                return _Resp(av_scpd)
+            return _Resp(empty_scpd)
+
+        import requests
+        monkeypatch.setattr(requests, "get", _fake_get)
+
+        dev = fetch_device(SONOS_LOCATION)
+        renderer = dev.find_device_with_service(
+            "urn:schemas-upnp-org:service:AVTransport:"
+        )
+        assert renderer is not None
+        av = renderer.get_service("AVTransport")
+        assert [a.name for a in av.actions] == [
+            "SetAVTransportURI", "SetNextAVTransportURI",
+        ]

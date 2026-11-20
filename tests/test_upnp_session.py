@@ -350,6 +350,37 @@ class TestConnect:
             f"stream path missing from URI; sent body: {body[:300]}"
         )
 
+    def test_connect_drives_embedded_renderer(
+        self, mock_soap, mock_http_server, monkeypatch,
+    ):
+        """Sonos carries AVTransport on an embedded MediaRenderer, not
+        on its ZonePlayer root. Connect must find it there and send the
+        handshake to the embedded device's control URL."""
+        from tests.sonos_fixtures import SONOS_DEVICE_XML
+        from app.audio.openhome import parse_device_description
+
+        tree = parse_device_description(
+            SONOS_DEVICE_XML,
+            "http://192.168.1.50:8080/xml/device_description.xml",
+        )
+        mgr = UpnpManager()
+        device = _device_record()
+        mgr._devices = {device.id: device}
+        monkeypatch.setattr(
+            "app.audio.upnp.fetch_device",
+            lambda location, **_kw: tree,
+        )
+
+        mgr.connect(device.id)
+
+        assert [c["action"] for c in mock_soap] == [
+            "SetAVTransportURI", "Play",
+        ]
+        assert all(
+            c["url"].endswith("/MediaRenderer/AVTransport/Control")
+            for c in mock_soap
+        )
+
     def test_connect_rejects_device_without_avtransport(
         self, mock_soap, mock_http_server, monkeypatch,
     ):

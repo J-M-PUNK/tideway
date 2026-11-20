@@ -575,6 +575,33 @@ class _SessionState:
     passthrough_lock: threading.Lock = field(default_factory=threading.Lock)
 
 
+def _renderer_controllers(
+    tree: OpenHomeDevice,
+) -> Tuple[
+    Optional[OpenHomeDevice],
+    Optional[AVTransportController],
+    Optional[RenderingControlController],
+]:
+    """Locate the device in `tree` that carries AVTransport and build
+    the controllers against it.
+
+    The renderer is often not the root: Sonos roots its description on
+    a `ZonePlayer` and hangs AVTransport off an embedded
+    `MediaRenderer`. RenderingControl is taken from the same device as
+    AVTransport so volume lands on the renderer that is playing, not on
+    some other embedded device that happens to expose the service too.
+    Returns (None, None, None) when nothing in the tree has AVTransport.
+    """
+    renderer = tree.find_device_with_service(_AVTRANSPORT_PREFIX)
+    if renderer is None:
+        return None, None, None
+    return (
+        renderer,
+        AVTransportController.from_device(renderer),
+        RenderingControlController.from_device(renderer),
+    )
+
+
 def _filter_dlna_renderer(service_types: tuple[str, ...]) -> bool:
     """True iff the service-type list contains AVTransport. SSDP
     responses include every OpenHome / vendor service in addition to
@@ -2146,15 +2173,14 @@ class UpnpManager:
             except Exception as exc:
                 log.debug("upnp: re-bind fetch failed: %r", exc)
                 return False
-            av = AVTransportController.from_device(fresh)
-            if av is None:
+            renderer, av, rc = _renderer_controllers(fresh)
+            if renderer is None or av is None:
                 return False
-            rc = RenderingControlController.from_device(fresh)
             with self._session_lock:
                 if self._session is not session:
                     return False
                 session.device = match
-                session.openhome_device = fresh
+                session.openhome_device = renderer
                 session.av = av
                 session.rc = rc
             print(
@@ -2510,15 +2536,14 @@ class UpnpManager:
                 f"{device.location}: {exc}"
             ) from exc
 
-        av = AVTransportController.from_device(openhome_device)
-        if av is None:
+        renderer, av, rc = _renderer_controllers(openhome_device)
+        if renderer is None or av is None:
             # Discovery filter should have caught this, but the
             # device may have rebooted between scan and connect.
             raise RuntimeError(
                 f"{device.name} does not expose AVTransport. "
                 "Device description may have changed since discovery."
             )
-        rc = RenderingControlController.from_device(openhome_device)
 
         # DLNA-native gapless hinges on the renderer advertising
         # SetNextAVTransportURI. Probe once per connect so the answer is
@@ -2540,7 +2565,7 @@ class UpnpManager:
         # the URL as unreachable.
         session = _SessionState(
             device=device,
-            openhome_device=openhome_device,
+            openhome_device=renderer,
             av=av,
             rc=rc,
             gapless=gapless,
