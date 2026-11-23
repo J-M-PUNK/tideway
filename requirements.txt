@@ -92,7 +92,7 @@ pynput>=1.8.2
 # built on 1.x internals (BaseClient, spotapi.http.data.Response, the
 # tls_client transport hook). Moving to 2.x means porting those, not
 # lifting this cap.
-spotapi>=1.2.8,<2
+spotapi>=2.1.0,<3
 # HTML parsing for the Album of the Year scraper (app/aoty.py). It used
 # to arrive only as a spotapi 1.x dependency, so declare it directly:
 # when spotapi 2.0 dropped it, fresh installs could not import server.
