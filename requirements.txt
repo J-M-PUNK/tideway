@@ -34,7 +34,7 @@ orjson>=3.13.0
 # clearance cookie through this transport (app/aoty_clearance.py), so a
 # bump here wants a live AOTY check, not just the test suite.
 curl-cffi>=0.16.3,<0.17
-pillow>=12.3.0
+pillow>=13.0.0
 fastapi>=0.162.7
 uvicorn[standard]>=0.52.4
 sse-starlette>=3.6.0
